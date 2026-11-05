@@ -187,7 +187,7 @@ uint32_t arbitrate_lock(uint32_t owner_handle, uint64_t addr, uint32_t tag);
 uint32_t arbitrate_unlock(uint64_t addr);
 uint32_t wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64_t timeout_ns);
 uint32_t signal_process_wide_key(uint64_t key, int32_t count);
-uint32_t wait_for_address(uint64_t addr, uint32_t arb_type, int32_t value, int64_t timeout_ns);     // 0 less, 1 dec+less, 2 equal
+uint32_t wait_for_address(uint64_t addr, uint32_t arb_type, int64_t value, int64_t timeout_ns);     // 0 less, 1 dec+less, 2 equal, 3 equal (64-bit)
 uint32_t signal_to_address(uint64_t addr, uint32_t signal_type, int32_t value, int32_t count);     // 0 signal, 1 +1 if equal, 2 modify by waiting
 uint32_t wait_synchronization(const uint32_t* handles, int32_t count, int64_t timeout_ns, int32_t* index_out);
 uint32_t cancel_synchronization(uint32_t thread_handle);

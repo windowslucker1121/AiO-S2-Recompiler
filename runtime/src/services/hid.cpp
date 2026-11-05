@@ -1137,6 +1137,9 @@ void setup_hid(ipc::Service& svc) {
     ignore_cmd(svc, 3142, "RestrictNmousePointer");
     // 3143 (vtable slot 0x5B8): aruid @0, u64 @8; no nn::hid::detail caller in the SDK, name unknown. Accepted.
     ignore_cmd(svc, 3143, "Cmd3143");
+    // 3150 (SDK 22, Ocarina of Time): sent by nn::hid::InitializeMouse() (thunk sdk 0x75006f0900): u32 @0, aruid @8, sends PID; no
+    // output. The SDK aborts on any error. The mouse state reaches the game through the shared memory as before: accepted.
+    ignore_cmd(svc, 3150, "InitializeMouse");
 }
 
 void hid_stop_sampler(HidState& s) {

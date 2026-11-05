@@ -1,0 +1,3 @@
+[submodule "refs/ryubing"]
+	path = refs/ryubing
+	url = https://git.ryujinx.app/ryubing/ryujinx.git

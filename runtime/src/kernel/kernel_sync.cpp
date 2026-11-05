@@ -218,13 +218,19 @@ uint32_t signal_process_wide_key(uint64_t key, int32_t count) {
     return kOk;
 }
 
-uint32_t wait_for_address(uint64_t addr, uint32_t type, int32_t value, int64_t timeout_ns) {
-    if (addr & 3) return kInvalidAddress;
-    if (type > 2) return kInvalidEnum;
+// value is the whole x2: types 0-2 compare its low 32 bits with the word at addr; type 3 (WaitIfEqual64, SDK 22: nn::os::WaitForAddress(long
+// const*, long) behind std::atomic_wait, Ocarina of Time) compares all 64 bits with the 8-byte aligned doubleword there.
+uint32_t wait_for_address(uint64_t addr, uint32_t type, int64_t value64, int64_t timeout_ns) {
+    if (addr & (type == 3 ? 7 : 3)) return kInvalidAddress;
+    if (type > 3) return kInvalidEnum;
     Guard g;
     KThread& me = self();
-    int32_t cur = static_cast<int32_t>(load32(addr));
+    const int32_t value = static_cast<int32_t>(value64);
+    int32_t cur = type == 3 ? 0 : static_cast<int32_t>(load32(addr));
     switch (type) {
+        case 3:  // WaitIfEqual64
+            if (__atomic_load_n(reinterpret_cast<int64_t*>(addr), __ATOMIC_SEQ_CST) != value64) return kInvalidState;
+            break;
         case 0:  // WaitIfLessThan
             if (!(cur < value)) return kInvalidState;
             break;

@@ -101,7 +101,7 @@ void nvnDeviceGetInteger(const NVNdevice* device, NVNdeviceInfo info, int* out) 
         // NVN2 (Switch 2 SDK 20.5, docs/nvn2_abi.md section 1): the values that differ from NVN1; the rest keep NVN1's numbering.
         switch (static_cast<int>(info)) {
             case 0x00: *out = 231; return;          // API_MAJOR_VERSION
-            case 0x01: *out = 30; return;           // API_MINOR_VERSION
+            case 0x01: *out = 40; return;           // API_MINOR_VERSION: Ocarina of Time (SDK 22) needs >= 40, Pokopia (20.5) >= 30
             case 0x06: *out = 32; return;           // VERTEX_BUFFER_BINDINGS
             case 0x0E: *out = 32; return;           // VERTEX_ATTRIBUTES
             case 0x1A: *out = 0x4000; return;       // SHADER_SCRATCH_MEMORY_GRANULARITY

@@ -44,6 +44,8 @@ class NeonOps:
             n = n * bits // 8
             bits = 8
         kind = "f" if fp else ("s" if signed else "u")
+        if kind == "f" and bits == 16:
+            raise Unhandled("fp16 lanes")              # FEAT_FP16 arithmetic: V128 has no f16 view (fp.py f16_sign)
         d = self.regop(i, ops[0])
         srcs = [f"A[{k}]" for k in range(len(ops) - 1)]
         pre = []
@@ -68,6 +70,8 @@ class NeonOps:
             n = n * bits // 8
             bits = 8
         kind = "f" if fp or fp_from_int else ("s" if signed else "u")
+        if kind == "f" and bits == 16:
+            raise Unhandled("fp16 lanes")              # FEAT_FP16 arithmetic: V128 has no f16 view (fp.py f16_sign)
         skind = fp_from_int or kind
         d, m = self.regop(i, ops[0]), self.regop(i, ops[1])
         ty = {("f", 32): "float", ("f", 64): "double"}.get((kind, bits), f"{'int' if kind == 's' else 'uint'}{bits}_t")

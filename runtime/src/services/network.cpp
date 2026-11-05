@@ -11,6 +11,8 @@
 //
 // Each command that is answered logs once at Info with tag "net" (the first use per command). Process-wide state (client ids, the ldn
 // state, the ssl context count, the pki ids) lives in st(); network_reset() puts it back to the start-up value.
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <functional>
 #include <initializer_list>
@@ -18,6 +20,9 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include <vector>
 
 #include "nxrt/config.h"
@@ -337,6 +342,26 @@ std::shared_ptr<ipc::Service> make_nifm_static() {
 // success pair where the command is a control call. bsdcfg has an empty command table (ScarletNX bsd.swipc).
 // =============================================================================================================================================
 
+// The bsd descriptor table (the Socket / EventFd / Poll commands below). One per process, like the console's bsd service.
+struct BsdFds {
+    std::mutex mu;
+    std::condition_variable cv;                                          // a Write to an eventfd wakes the Polls
+    std::unordered_map<int32_t, std::pair<uint64_t, uint32_t>> eventfds;  // fd -> (counter, EventFd flags)
+    std::unordered_set<int32_t> sockets;
+    int32_t next = 3;
+};
+BsdFds& bsd_fds() {
+    static BsdFds t;
+    return t;
+}
+void bsd_ret(ipc::Response& rsp, int32_t ret, uint32_t err) {   // the (i32 ret, u32 errno) pair every bsd command answers with
+    rsp.push(ret);
+    rsp.push(err);
+}
+constexpr uint32_t kBsdEbadf = 9, kBsdEagain = 11, kBsdEinval = 22;   // Linux errno numbers, as kBsdNetDown
+constexpr int16_t kPollIn = 0x1, kPollOut = 0x4, kPollNval = 0x20;
+constexpr uint32_t kEfdSemaphore = 1;
+
 std::shared_ptr<ipc::Service> make_bsd() {
     return make_iface("nn::socket::sf::IClient", [](ipc::Service& s) {
         cmd(s, "bsd", 0, "RegisterClient", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
@@ -346,11 +371,9 @@ std::shared_ptr<ipc::Service> make_bsd() {
         });
         rows(s, "bsd", {
             {1, "StartMonitoring", K::Ok},
-            {2, "Socket", K::Errno},
             {3, "SocketExempt", K::Errno},
             {4, "Open", K::Errno},
             {5, "Select", K::Errno},
-            {6, "Poll", K::Errno},
             {7, "Sysctl", K::Errno, 0, 1},
             {8, "Recv", K::Errno},
             {9, "RecvFrom", K::Errno, 0, 1},
@@ -364,18 +387,13 @@ std::shared_ptr<ipc::Service> make_bsd() {
             {17, "GetSockOpt", K::Errno, 0, 1},
             {18, "Listen", K::Errno},
             {19, "Ioctl", K::Errno},
-            {20, "Fcntl", K::Errno},
             {21, "SetSockOpt", K::Errno},
             {22, "Shutdown", K::Errno},
             {23, "ShutdownAllSockets", K::Errno},
-            {24, "Write", K::Errno},
-            {25, "Read", K::Errno},
-            {26, "Close", K::ErrnoOk},          // no socket is ever open, so there is nothing to fail on
             {27, "DuplicateSocket", K::Errno},
             {28, "GetResourceStatistics", K::Zeros, 0, 8},
             {29, "RecvMMsg", K::Errno},
             {30, "SendMMsg", K::Errno},
-            {31, "EventFd", K::Errno},
             {32, "RegisterResourceStatisticsName", K::U32, 0},
             {33, "RegisterClientShared", K::U32, 0},
             {34, "GetSocketStatistics", K::Errno},
@@ -391,6 +409,103 @@ std::shared_ptr<ipc::Service> make_bsd() {
             {44, "Cmd44", K::Errno},
             {200, "SetThreadCoreMask", K::Ok},
             {201, "GetThreadCoreMask", K::U32, 0},
+        });
+        // Descriptors (Ocarina of Time: gRPC probes IPv6 with a UDP socket, then makes its poll engine's wakeup an EventFd, and aborts when
+        // it cannot). Sockets exist and do nothing (no network: their other commands keep failing with ENETDOWN, Poll never reports them
+        // ready). An eventfd is Linux's: Write adds the 8-byte value, Read returns the counter and clears it (EFD_SEMAPHORE: 1, minus 1),
+        // and an empty one answers EAGAIN (gRPC reads only after Poll said POLLIN). Poll waits up to its timeout for a Write.
+        cmd(s, "bsd", 2, "Socket", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            BsdFds& t = bsd_fds();
+            std::lock_guard lk(t.mu);
+            const int32_t fd = t.next++;
+            t.sockets.insert(fd);
+            bsd_ret(rsp, fd, 0);
+            return 0;
+        });
+        cmd(s, "bsd", 31, "EventFd", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            BsdFds& t = bsd_fds();
+            std::lock_guard lk(t.mu);
+            const int32_t fd = t.next++;
+            t.eventfds[fd] = {req.arg<uint64_t>(0), req.arg<uint32_t>(8)};
+            bsd_ret(rsp, fd, 0);
+            return 0;
+        });
+        cmd(s, "bsd", 26, "Close", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            BsdFds& t = bsd_fds();
+            std::lock_guard lk(t.mu);
+            const int32_t fd = req.arg<int32_t>(0);
+            const bool known = t.eventfds.erase(fd) + t.sockets.erase(fd) > 0;
+            bsd_ret(rsp, known ? 0 : -1, known ? 0 : kBsdEbadf);
+            return 0;
+        });
+        cmd(s, "bsd", 25, "Read", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            BsdFds& t = bsd_fds();
+            std::lock_guard lk(t.mu);
+            auto it = t.eventfds.find(req.arg<int32_t>(0));
+            const ipc::Buffer out = req.out_buf(0);
+            if (it == t.eventfds.end()) { bsd_ret(rsp, -1, kBsdNetDown); return 0; }
+            if (it->second.first == 0) { bsd_ret(rsp, -1, kBsdEagain); return 0; }
+            if (out.size < 8) { bsd_ret(rsp, -1, kBsdEinval); return 0; }
+            const uint64_t v = (it->second.second & kEfdSemaphore) ? 1 : it->second.first;
+            it->second.first -= v;
+            std::memcpy(reinterpret_cast<void*>(out.addr), &v, 8);
+            bsd_ret(rsp, 8, 0);
+            return 0;
+        });
+        cmd(s, "bsd", 24, "Write", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            BsdFds& t = bsd_fds();
+            std::lock_guard lk(t.mu);
+            auto it = t.eventfds.find(req.arg<int32_t>(0));
+            const ipc::Buffer in = req.in_buf(0);
+            if (it == t.eventfds.end()) { bsd_ret(rsp, -1, kBsdNetDown); return 0; }
+            if (in.size < 8) { bsd_ret(rsp, -1, kBsdEinval); return 0; }
+            uint64_t v;
+            std::memcpy(&v, reinterpret_cast<const void*>(in.addr), 8);
+            it->second.first += v;
+            t.cv.notify_all();
+            bsd_ret(rsp, 8, 0);
+            return 0;
+        });
+        cmd(s, "bsd", 20, "Fcntl", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            BsdFds& t = bsd_fds();
+            std::lock_guard lk(t.mu);
+            const int32_t fd = req.arg<int32_t>(0);
+            const bool known = t.eventfds.count(fd) || t.sockets.count(fd);
+            // F_GETFL (3) reports O_NONBLOCK (4): nothing here ever blocks except Poll; F_SETFL and the rest are accepted
+            bsd_ret(rsp, known ? (req.arg<int32_t>(4) == 3 ? 4 : 0) : -1, known ? 0 : kBsdEbadf);
+            return 0;
+        });
+        cmd(s, "bsd", 6, "Poll", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const uint32_t n = req.arg<uint32_t>(0);
+            const int32_t timeout_ms = req.arg<int32_t>(4);
+            const ipc::Buffer in = req.in_buf(0), out = req.out_buf(0);
+            if (n > 4096 || in.size < n * 8ull) { bsd_ret(rsp, -1, kBsdEinval); return 0; }
+            std::vector<uint8_t> fds(n * 8);
+            if (n) std::memcpy(fds.data(), reinterpret_cast<const void*>(in.addr), fds.size());
+            BsdFds& t = bsd_fds();
+            std::unique_lock lk(t.mu);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 0);
+            int32_t ready = 0;
+            for (;;) {
+                ready = 0;
+                for (uint32_t i = 0; i < n; i++) {
+                    int32_t fd;
+                    int16_t events, revents = 0;
+                    std::memcpy(&fd, &fds[i * 8], 4);
+                    std::memcpy(&events, &fds[i * 8 + 4], 2);
+                    auto it = t.eventfds.find(fd);
+                    if (it != t.eventfds.end()) revents = static_cast<int16_t>(((events & kPollIn) && it->second.first ? kPollIn : 0) | (events & kPollOut));
+                    else if (fd >= 0 && !t.sockets.count(fd)) revents = kPollNval;
+                    std::memcpy(&fds[i * 8 + 6], &revents, 2);
+                    ready += revents != 0;
+                }
+                if (ready || timeout_ms == 0) break;
+                if (timeout_ms < 0) t.cv.wait(lk);
+                else if (t.cv.wait_until(lk, deadline) == std::cv_status::timeout) break;
+            }
+            if (out.addr && out.size >= fds.size() && n) std::memcpy(reinterpret_cast<void*>(out.addr), fds.data(), fds.size());
+            bsd_ret(rsp, ready, 0);
+            return 0;
         });
     });
 }

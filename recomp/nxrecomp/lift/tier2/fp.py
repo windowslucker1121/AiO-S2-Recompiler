@@ -114,11 +114,21 @@ class FpOps:
         d, n = self.regop(i, ops[0]), self.regop(i, ops[1])
         return self.fw(d, subst(expr, a=f"({self.fr(n)})"))
 
+    def f16_sign(self, i, ops, op):
+        """FNEG / FABS on half-precision lanes (FEAT_FP16, Switch 2): a sign-bit operation, exact under any FPCR. None when the
+        operands are not FP16 vectors. Other FP16 vector arithmetic is refused in v_un / v_bin (V128 has no f16 view)."""
+        if not self.is_vec(i, ops[0]) or self.vinfo(ops[0])[0] != 16:
+            return None
+        n = self.vinfo(ops[0])[1]
+        d, m = self.regop(i, ops[0]), self.regop(i, ops[1])
+        return (f"{{ V128 S = c->v[{m.n}]; V128 r = nx::vzero(); for (int k = 0; k < {n}; k++) "
+                f"r.u16[k] = uint16_t(S.u16[k] {op}); c->v[{d.n}] = r; }}")
+
     def i_fneg(self, f, i, ops):
-        return self.fun(i, ops, "-a")
+        return self.f16_sign(i, ops, "^ 0x8000") or self.fun(i, ops, "-a")
 
     def i_fabs(self, f, i, ops):
-        return self.fun(i, ops, "std::fabs(a)")
+        return self.f16_sign(i, ops, "& 0x7fff") or self.fun(i, ops, "std::fabs(a)")
 
     def i_fsqrt(self, f, i, ops):
         return self.fun(i, ops, "std::sqrt(a)")

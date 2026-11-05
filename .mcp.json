@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "game": {
+      "type": "stdio",
+      "command": "tools/.venv/Scripts/python.exe",
+      "args": ["tools/ai/mcp_server.py"],
+      "env": {
+        "NXRT_AI_GAME": "oot"
+      }
+    }
+  }
+}

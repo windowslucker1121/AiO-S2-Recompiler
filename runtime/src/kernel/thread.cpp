@@ -120,6 +120,10 @@ uint32_t thread_create(const ThreadParams& p) {
         NXLOG_E("thread", "handle table full");
         return 0;
     }
+    // SDK 22 (Ocarina of Time) names the owner of an nn::os mutex by the 32-bit value the kernel keeps at TLS +0x110
+    // (SdkMutexType::IsLockedByCurrentThread compares the mutex word with it). Left at 0, every unlocked mutex looked like the caller's and
+    // pthread_mutex_lock aborted at boot. The handle is unique, non-zero and free of the waiters bit; older SDKs do not read the slot.
+    *reinterpret_cast<uint32_t*>(t->tls + 0x110) = t->handle;
     AcquireSRWLockExclusive(&g_list_lock);
     // Thread objects of threads that have exited and that nothing else refers to (the game closed the handle, the host thread dropped its
     // own reference) leave the list. Without this the list grew by every thread the game ever made (S34 soak: 60 an hour).

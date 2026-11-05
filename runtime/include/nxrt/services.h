@@ -102,6 +102,7 @@ struct TitleProfile {
     uint64_t account_save_journal = 0;                     // [title] account_save_journal (UserAccountSaveDataJournalSize)
     uint64_t device_save_size = 0, device_save_journal = 0;   // none
     uint64_t cache_save_size = 0, cache_save_journal = 0;     // none
+    uint64_t temporary_storage_size = 0;                   // [title] temporary_storage_size (control.nacp TemporaryStorageSize)
     uint64_t main_thread_stack = 0x100000;                 // main.npdm default stack size
     int main_thread_priority = 44, main_thread_core = 0;   // main.npdm
     uint64_t system_resource_size = 0;                     // main.npdm META SystemResourceSize ([title] system_resource_size): GetInfo 16.

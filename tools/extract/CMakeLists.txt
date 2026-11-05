@@ -15,6 +15,18 @@ set(SETUP ${CMAKE_CURRENT_SOURCE_DIR}/../setup)
 set(RT ${CMAKE_CURRENT_SOURCE_DIR}/../../runtime)
 set(SS ${SETUP}/src)
 
+# nx_plain_nso: --plain-nso alone (ZBIC NSO -> plain NSO), needs only the runtime's ZBIC decoder
+add_executable(nx_plain_nso cli/plain_nso.cpp ${RT}/src/loader/zbic.cpp)
+target_include_directories(nx_plain_nso PRIVATE ${RT}/src/loader)
+target_compile_definitions(nx_plain_nso PRIVATE UNICODE _UNICODE NOMINMAX)
+target_link_libraries(nx_plain_nso PRIVATE bcrypt)
+
+# the rest reuses tools/setup, which this repository does not carry
+if(NOT EXISTS ${SS}/util.cpp)
+    message(STATUS "tools/setup not found: building nx_plain_nso only")
+    return()
+endif()
+
 add_library(nxx_core STATIC
     ${SS}/util.cpp ${SS}/storage.cpp ${SS}/log.cpp ${SS}/crypto.cpp ${SS}/fileio.cpp ${SS}/pfs.cpp ${SS}/romfs.cpp
     ${SS}/keys.cpp ${SS}/bktr.cpp ${SS}/nca.cpp ${SS}/container.cpp ${SS}/nso.cpp ${SS}/ncz.cpp

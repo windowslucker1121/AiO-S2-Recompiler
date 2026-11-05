@@ -10,6 +10,7 @@ bc7_cache/
 *.nca
 *.nsp
 *.xci
+*.nup
 *.keys
 exefs/
 romfs/
@@ -27,3 +28,5 @@ obj/
 .vs/
 .venv/
 __pycache__/
+/tools/llvm/
+/tools/sccache/

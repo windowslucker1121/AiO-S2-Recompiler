@@ -175,6 +175,13 @@ void install_switch2_hle() {
         {"_ZN2nn2vi12DestroyLayerEPNS0_5LayerE", vi_ok},
         {"_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", vi_get_native_window},
         {"_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", vi_ok},
+        // Ocarina of Time (SDK 22). The SDK's layer calls work on the layer's internals, which the host stand-in does not have (an indirect
+        // call through null); its display calls answer a display that is not its own with an error, so the queries stay with the SDK.
+        {"_ZN2nn2vi36SetDisplay120HzRefreshRateCapabilityEPNS0_7DisplayEb", vi_ok},
+        {"_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", vi_ok},
+        {"_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE", vi_ok},
+        {"_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE", vi_ok},
+        {"_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE", vi_ok},
         {"_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE", vi_get_display_vsync_event},
         {"_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", vi_layer_extended_luminance},
         {"_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", vi_layer_standard_luminance},

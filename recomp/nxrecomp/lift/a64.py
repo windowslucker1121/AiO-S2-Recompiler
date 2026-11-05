@@ -540,6 +540,10 @@ class Fn:
                         return SET(rd, sf, '(%s)%s >> %s' % ('int64_t' if sf else 'int32_t', a, amt))
                     return SET(rd, sf, 'ror%d(%s, %s)' % (size, a, amt))
                 raise Unimpl('dp2')
+            if bits(w, 20, 16) or bits(w, 29, 29):
+                # opcode2 != 0 is pointer authentication (PACIA/PACIB/... AUT*, XPAC*: tier 2, x_pac.py). Only opcode2 == 0 is
+                # RBIT/REV/CLZ/CLS: PACIB x30, sp (Switch 2 setjmp) was lifted as REV16 of xzr.
+                raise Unimpl('dp1 opcode2')
             a = R(rn, sf)
             if opcode == 0:
                 return SET(rd, sf, 'rbit%d(%s)' % (size, a))

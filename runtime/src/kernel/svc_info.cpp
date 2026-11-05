@@ -28,7 +28,6 @@ constexpr uint64_t kAslrRegionAddress = 0x0008000000ull;       // chosen value (
 constexpr uint64_t kAslrRegionSize = 0x7FF8000000ull;           // chosen value (Switchbrew: no value given)
 constexpr uint64_t kTotalMemorySwitch2 = 0x2A0000000ull;        // Switch 2 application: 10.5 GiB (nxrt choice; Pokopia alone pools ~8 GiB)
 constexpr uint64_t kTotalMemoryAvailable = 0xCD500000ull;       // chosen value: ~3.2 GiB, like an application ([memory] app_memory_mb overrides)
-constexpr uint64_t kUsedMemoryOverhead = 0x4000000ull;          // chosen value: 64 MiB added to the heap size for "used"
 constexpr uint64_t kEntropyDefaultSeed = 0x1234567890ABCDEFull; // chosen value
 constexpr uint64_t kGoldenRatio64 = 0x9E3779B97F4A7C15ull;      // used to separate the four RandomEntropy subtypes
 constexpr uint64_t kDefaultProcessId = 0x51;                    // chosen value (config [process] pid)
@@ -48,7 +47,9 @@ namespace {
 uint64_t used_memory() {
     uint64_t images = 0;
     for (Module* m : modules()) images += m->size();          // the kernel counts the mapped code/data of the process as used
-    return svc_current_heap_size() + kUsedMemoryOverhead + images;
+    // plus the main thread's stack, which the kernel takes from the process's memory (main.npdm). This was an invented 64 MiB: Ocarina of
+    // Time checks its HeapDef "Program" budget (137 MiB) against nn::os::QueryMemoryInfo's used size before the heap and aborted.
+    return svc_current_heap_size() + services::profile().main_thread_stack + images;
 }
 
 // UserExceptionContextAddress: one committed kernel page, made on first use and again only if it has been unmapped.

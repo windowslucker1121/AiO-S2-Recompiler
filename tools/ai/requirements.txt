@@ -1,0 +1,4 @@
+# tools/ai (and tools/test's wincap.py / imgdiff.py, which it reuses). The MCP protocol is stdlib (mcp_server.py), no SDK.
+#   tools\.venv\Scripts\python -m pip install -r tools\ai\requirements.txt
+pillow>=10
+numpy>=1.26

@@ -221,7 +221,7 @@ void svc_arbitrate_unlock(::Ctx* c) { svc_ret(c, arbitrate_unlock(X(c, 0))); }
 void svc_wait_pwk(::Ctx* c) { svc_ret(c, wait_process_wide_key(X(c, 0), X(c, 1), static_cast<uint32_t>(X(c, 2)), static_cast<int64_t>(X(c, 3)))); }
 void svc_signal_pwk(::Ctx* c) { signal_process_wide_key(X(c, 0), static_cast<int32_t>(X(c, 1))); }   // returns void on Horizon: x0 untouched
 void svc_get_system_tick(::Ctx* c) { X(c, 0) = system_tick(); }
-void svc_wait_for_address(::Ctx* c) { svc_ret(c, wait_for_address(X(c, 0), static_cast<uint32_t>(X(c, 1)), static_cast<int32_t>(X(c, 2)), static_cast<int64_t>(X(c, 3)))); }
+void svc_wait_for_address(::Ctx* c) { svc_ret(c, wait_for_address(X(c, 0), static_cast<uint32_t>(X(c, 1)), static_cast<int64_t>(X(c, 2)), static_cast<int64_t>(X(c, 3)))); }
 void svc_signal_to_address(::Ctx* c) { svc_ret(c, signal_to_address(X(c, 0), static_cast<uint32_t>(X(c, 1)), static_cast<int32_t>(X(c, 2)), static_cast<int32_t>(X(c, 3)))); }
 void svc_nop_ok(::Ctx* c) { svc_ret(c, kOk); }
 void svc_nop_void(::Ctx*) {}

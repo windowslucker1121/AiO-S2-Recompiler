@@ -294,6 +294,7 @@ TitleProfile load_profile() {
     p.device_save_journal = static_cast<uint64_t>(config_get_int("title", "device_save_journal", static_cast<int64_t>(p.device_save_journal)));
     p.cache_save_size = static_cast<uint64_t>(config_get_int("title", "cache_save_size", static_cast<int64_t>(p.cache_save_size)));
     p.cache_save_journal = static_cast<uint64_t>(config_get_int("title", "cache_save_journal", static_cast<int64_t>(p.cache_save_journal)));
+    p.temporary_storage_size = static_cast<uint64_t>(config_get_int("title", "temporary_storage_size", static_cast<int64_t>(p.temporary_storage_size)));
     p.main_thread_stack = static_cast<uint64_t>(config_get_int("title", "main_thread_stack", static_cast<int64_t>(p.main_thread_stack)));
     p.main_thread_priority = static_cast<int>(config_get_int("title", "main_thread_priority", p.main_thread_priority));
     p.main_thread_core = static_cast<int>(config_get_int("title", "main_thread_core", p.main_thread_core));

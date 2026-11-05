@@ -565,6 +565,17 @@ uint32_t open_save(uint8_t space, const SaveAttr& a, bool read_only, std::shared
             fsapi::ensure_account_save(hi, lo, nullptr);
         }
     }
+    // And the temporary storage (type 4), which the system makes at launch from control.nacp's TemporaryStorageSize: Ocarina of Time calls
+    // nn::fs::MountTemporaryStorage on a loader thread and aborts on TargetNotFound.
+    if (a.type == 4 && (a.application_id == p.program_id || a.application_id == 0) && p.temporary_storage_size > 0 && !save_exists(key)) {
+        SaveAttr t;
+        t.application_id = p.program_id;
+        t.type = 4;
+        std::memcpy(t.raw, &t.application_id, 8);
+        t.raw[32] = 4;
+        NXLOG_I("fs", "OpenSaveDataFileSystem %s: creating the temporary storage", key.c_str());
+        create_save(t, static_cast<int64_t>(p.temporary_storage_size), 0, p.save_data_owner_id);
+    }
     if (!save_exists(key)) {
         NXLOG_I("fs", "OpenSaveDataFileSystem %s: no such save data", key.c_str());
         return fs::rc::kTargetNotFound;

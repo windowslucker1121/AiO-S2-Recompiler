@@ -1,3 +1,6 @@
 * text=auto eol=lf
 *.sha256 text eol=lf
 SHA256SUMS text eol=lf
+# cmd.exe misparses LF-only batch files (it resumes mid-line after a long command, which also hid build failures)
+*.cmd text eol=crlf
+*.bat text eol=crlf

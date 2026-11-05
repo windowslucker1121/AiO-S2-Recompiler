@@ -386,7 +386,18 @@ void map_memory(::Ctx* c) {
     // own static data (MapAliasStack of a static buffer), which the console allows.
     const mem::VmInfo sv = mem::vm_query(src);
     const bool src_code_data = sv.state == mem::kMemCodeData && src >= sv.addr && src + size <= sv.addr + sv.size;
-    if (!in_stack(dst, size) || !(in_heap(src, size, heap_now()) || src_code_data) || !mem::is_mapped(src, size)) {
+    // Or pages of MapPhysicalMemory (state Alias here, Normal memory on the console like the heap): nn::os's virtual address memory manager
+    // hands those out, and Ocarina of Time's thread stacks come from it. The vm map keeps those pages in one block per 64 KiB granule, so
+    // every block across the range is checked.
+    bool src_physical = sv.state == mem::kMemAlias;
+    for (uint64_t p = src; src_physical && p < src + size;) {
+        const mem::VmInfo v = mem::vm_query(p);
+        src_physical = v.state == mem::kMemAlias && v.size && p >= v.addr;
+        p = v.addr + v.size;
+    }
+    if (!in_stack(dst, size) || !(in_heap(src, size, heap_now()) || src_code_data || src_physical) || !mem::is_mapped(src, size)) {
+        NXLOG_W(kTag, "MapMemory: destination in the stack region %d, source block %llx+%llx state 0x%x perm %u, mapped %d", in_stack(dst, size) ? 1 : 0,
+                U(sv.addr), U(sv.size), static_cast<unsigned>(sv.state), static_cast<unsigned>(sv.perm), mem::is_mapped(src, size) ? 1 : 0);
         fail(c, "MapMemory (range)", kernel::kInvalidMemoryState, dst, src, size);
         return;
     }

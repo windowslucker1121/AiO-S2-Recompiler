@@ -37,7 +37,10 @@ def analyse(img):
     words = img.words()
     exact = {}                                        # start -> {'E': end, 'S': end}
     for f in eh.all_fdes(img)[0]:
-        exact.setdefault(f.start, {})['E'] = f.end
+        # a zero-length FDE says nothing about the extent (Ocarina of Time 2.0.0 main has three, on called code): the start
+        # then comes from its callers and the end from the next start
+        if f.end > f.start:
+            exact.setdefault(f.start, {})['E'] = f.end
     names = collections.defaultdict(list)
     for name, typ, bind, shndx, value, size in img.symbols():
         v = img.sym_value(value)
@@ -74,6 +77,18 @@ def analyse(img):
             f = containing(pc)
             if f is not None and ts <= t < te and not (f <= t < ends[f]):
                 tail.add(t)
+    # ADR targets: a static function whose address is taken with one ADR (a callback next to its user: Ocarina of Time's printf-style
+    # formatter gets its output function so) is named by nothing else. LLVM also points ADR at the base label of a jump table, which
+    # follows the dispatching BR inside the function: so a target counts only outside exact functions and right after RET/RETAA/RETAB/B.
+    adr = set()
+    for i, w in enumerate(words):
+        if (w & 0x9f000000) == 0x10000000:
+            imm = (((w >> 5) & 0x7ffff) << 2) | ((w >> 29) & 3)
+            t = ts + 4 * i + (imm - (1 << 21) if imm & (1 << 20) else imm)
+            if ts < t < te and t % 4 == 0 and words[(t - ts) // 4] and containing(t) is None:
+                p = words[(t - ts) // 4 - 1]
+                if (p & 0xfffffc1f) == 0xd65f0000 or p in (0xd65f0bff, 0xd65f0fff) or (p & 0xfc000000) == 0x14000000:
+                    adr.add(t)
     # a heuristic start strictly inside an exact function is not a function of its own: in compiled code nothing
     # calls into the middle of a function; in hand-written assembly `bl next; .word x` reads a PC-relative word
     # (nn::os::detail::UserExceptionHandler in sdk). Such addresses are kept as secondary entries, not functions.
@@ -81,17 +96,21 @@ def analyse(img):
     # the NSO header: word 0 is either `b <entry>` (rtld) or 0, word 1 the MOD0 offset; when word 0 is not a branch the
     # bytes up to the end of the MOD0 record (7 words) are data, and a relocated pointer to the module base (R at 0)
     # is not a function. Only for an NSO (img.mod0 != 0).
+    # Word 1 is the MOD0 offset and the record is data wherever it is: right after the two words, the header runs to its end; SDK 22
+    # modules (Ocarina of Time) put it after .text, and "up to the end of MOD0" then covered all of .text and dropped every start that
+    # only a BL, a relocation or a tail call names (and every gap function).
     nso = img.mod0 != 0
+    mod0 = img.u32(4) if nso else 0
+    hdr_end = (mod0 + 0x1c if mod0 <= 0x10 else 8) if nso else 0
     header = []
     if nso and (img.u32(0) & 0xfc000000) != 0x14000000:
-        hdr_end = img.u32(4) + 0x1c
-        header = sorted(a for a in (bl | rel | tail) if a < hdr_end and a not in exact)
-    allstarts = (set(starts) | bl | rel | tail) - set(secondary) - set(header)
+        header = sorted(a for a in (bl | rel | tail) if (a < hdr_end or mod0 <= a < mod0 + 0x1c) and a not in exact)
+    allstarts = (set(starts) | bl | rel | tail | adr) - set(secondary) - set(header)
     order = sorted(allstarts)
     rows = []
     for k, s in enumerate(order):
         src = ''.join(c for c, st in (('E', s in exact and 'E' in exact[s]), ('S', s in exact and 'S' in exact[s]),
-                                      ('B', s in bl), ('R', s in rel), ('T', s in tail)) if st)
+                                      ('B', s in bl), ('R', s in rel), ('T', s in tail), ('A', s in adr)) if st)
         nxt = order[k + 1] if k + 1 < len(order) else te
         if nso and s == 0 and (img.u32(0) & 0xfc000000) == 0x14000000:
             end, how = 4, 'nso-entry'             # `b start` followed by the MOD0 header words (data)
@@ -104,7 +123,6 @@ def analyse(img):
     # code that no function covers (no FDE, no sized symbol, never the target of a BL): hand-written SDK stubs. Each run of
     # code between two functions is cut after every ret / br / unconditional b and becomes a function of its own (src G)
     # unless it is only padding (zero words and nops). The NSO header (up to the end of the MOD0 record) is data.
-    hdr_end = (img.u32(4) + 0x1c) if nso else 0
     gap_rows = []
     prev_end = ts
     for r in rows + [{'start': te, 'end': te}]:
@@ -116,7 +134,7 @@ def analyse(img):
             while b < hi:
                 w = words[(b - ts) // 4]
                 b += 4
-                if (w & 0xfffffc1f) in (0xd65f0000, 0xd61f0000) or (w & 0xfc000000) == 0x14000000:
+                if (w & 0xfffffc1f) in (0xd65f0000, 0xd61f0000) or w in (0xd65f0bff, 0xd65f0fff) or (w & 0xfc000000) == 0x14000000:
                     break
             seg = [words[(x - ts) // 4] for x in range(a, b, 4)]
             while seg and seg[0] in (0, 0xd503201f):
