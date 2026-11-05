@@ -1339,7 +1339,7 @@ bool ShaderCache::start_translator() {
     if (corpus.empty()) corpus = (std::filesystem::path(dir_).parent_path() / "corpus").string();
     if (std::filesystem::is_regular_file(std::filesystem::path(corpus) / "unique_all.tsv", ec) ||
         std::filesystem::is_regular_file(std::filesystem::path(corpus) / "unique.tsv", ec))
-        opt.corpus_dir = corpus;
+        opt.corpus_dir = corpus_ = corpus;
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     const int64_t def_jobs = std::clamp<int64_t>(hw / 2, 2, 8);
     opt.jobs = static_cast<int>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "shader_translate_jobs", def_jobs), 1, 64));
@@ -1381,6 +1381,11 @@ size_t ShaderCache::missing() const {
 bool ShaderCache::is_open() const {
     std::lock_guard lk(lock_);
     return open_;
+}
+
+bool ShaderCache::has_record(const std::string& hash) const {
+    std::lock_guard lk(lock_);
+    return lines_.count(hash) != 0;
 }
 
 const std::string& ShaderCache::dir() const { return dir_; }

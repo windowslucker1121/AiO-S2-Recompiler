@@ -64,6 +64,7 @@ file = "sdk"
 base = 0x7500000000
 index = 1
 units = 50
+sites = "sdk.sites"
 [[module]]
 name = "subsdk0"
 file = "subsdk0"

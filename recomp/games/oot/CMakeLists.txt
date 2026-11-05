@@ -33,8 +33,9 @@ foreach(_i RANGE ${_last})
     set(${_G}_SHARDS_${_M} ${GM_module_${_i}_units} CACHE STRING "translation units of ${_m}")
     set(_sites "")
     if(DEFINED GM_module_${_i}_sites)
-        set(${_G}_SITES "${CMAKE_CURRENT_LIST_DIR}/${GM_module_${_i}_sites}" CACHE FILEPATH "hook sites of ${_m}")
-        set(_sites SITES "${${_G}_SITES}")
+        # one cache entry per module: a shared one keeps the first module's file for all of them
+        set(${_G}_SITES_${_M} "${CMAKE_CURRENT_LIST_DIR}/${GM_module_${_i}_sites}" CACHE FILEPATH "hook sites of ${_m}")
+        set(_sites SITES "${${_G}_SITES_${_M}}")
     endif()
     nxrecomp_add_module(${GM_ID}_${_m} INPUT "${${_G}_EXEFS}/${GM_module_${_i}_file}" NAME ${_m} INDEX ${GM_module_${_i}_index}
                         BASE ${GM_module_${_i}_base} GAME ${GM_ID} SHARDS ${${_G}_SHARDS_${_M}}

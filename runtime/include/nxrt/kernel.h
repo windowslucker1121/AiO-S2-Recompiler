@@ -133,6 +133,9 @@ uint32_t thread_start(uint32_t handle);                    // result code
 // Turns the calling host thread into the main guest thread (stack allocated in the kernel region). Returns its handle.
 uint32_t main_thread_adopt(uint64_t stack_size, const char* name = "main");
 void main_thread_release();                                // the adopted main thread is done: unregisters it from diag and marks it exited
+// nn::os fibers on host fibers (src/kernel/fiber.cpp): an entry hook on the sdk's nn::os::detail::DispatchFiberContext. Call after
+// the modules are registered; the lifted sdk needs an `entryhook` site at that function (the game's sdk.sites).
+void fibers_install();
 KThread* current_thread();                                 // nullptr on a host thread that is not a guest thread
 ::Ctx* current_ctx();                                      // current_thread()->ctx or nullptr
 std::vector<std::shared_ptr<KThread>> threads();           // every thread ever created and not yet destroyed

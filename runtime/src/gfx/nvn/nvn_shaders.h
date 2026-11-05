@@ -300,6 +300,11 @@ public:
     }
     size_t translator_pending() const { return worker_ ? worker_->pending() : 0; }
     uint64_t translator_done() const { return worker_ ? worker_->done() : 0; }
+    // Shader setup (nvn_setup.cpp): the corpus the translator reads (empty: none), whether results.tsv has a row for a block, and a
+    // corpus block queued for translation by its hash.
+    const std::string& corpus_dir() const { return corpus_; }
+    bool has_record(const std::string& hash) const;
+    bool translate_corpus_block(const std::string& hash) { return worker_ && worker_->submit_corpus(hash); }
     size_t loaded() const;   // ShaderInfos built so far
     size_t missing() const;  // hashes asked for that have no usable .spv (or do not reflect)
     bool is_open() const;
@@ -343,6 +348,7 @@ private:
 
     void add_record(const std::string& hash, const std::string& row);   // a row the translator appended to results.tsv
     std::unique_ptr<ShaderTranslatorClient> worker_;
+    std::string corpus_;                                                    // the translator's corpus (start_translator)
 
     mutable std::mutex lock_;
     std::string dir_;

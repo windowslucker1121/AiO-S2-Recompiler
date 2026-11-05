@@ -133,6 +133,18 @@ bool ShaderTranslatorClient::submit(const std::string& hash, const uint8_t* code
     return true;
 }
 
+bool ShaderTranslatorClient::submit_corpus(const std::string& hash) {
+    if (!running()) return false;
+    {
+        std::lock_guard lk(mu_);
+        if (!states_.emplace(hash, State::Pending).second) return false;
+        ++pending_;
+        out_.push_back("C " + hash + "\n");
+    }
+    cv_.notify_one();
+    return true;
+}
+
 ShaderTranslatorClient::State ShaderTranslatorClient::state(const std::string& hash) const {
     std::lock_guard lk(mu_);
     auto it = states_.find(hash);

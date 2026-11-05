@@ -44,6 +44,8 @@ public:
     bool start(const Options& opt, RowFn on_row, LogFn log, std::string* error = nullptr);
     // Queues a block. False when it was asked for before or the harness is not running. Never blocks on the pipe.
     bool submit(const std::string& hash, const uint8_t* code, size_t code_size, const uint8_t* ctrl, size_t ctrl_size);
+    // Queues a block of the corpus by hash (the harness reads its files): the shader setup's way to translate the whole corpus.
+    bool submit_corpus(const std::string& hash);
     State state(const std::string& hash) const;
     uint64_t generation() const { return generation_.load(std::memory_order_acquire); }   // +1 per finished block
     bool running() const { return running_.load(std::memory_order_acquire); }

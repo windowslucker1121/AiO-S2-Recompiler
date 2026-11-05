@@ -233,16 +233,25 @@ DWORD WINAPI deadline_thread(LPVOID p) {
 // setup tool listed (shader_cache/programs.bin), so the driver has them in its cache before the first start. Progress goes to stdout as
 // "prepare: <done> <total>" lines (the launcher reads them), the end as "prepare: done ..." / "prepare: ready" (already up to date).
 // Exit code: 0 done or ready, 1 could not run, 3 cancelled.
-int prepare_shaders_main(bool if_needed, int threads, const std::string& programs) {
-    std::string err;
+// The shader preparation on a headless device of its own: --prepare-shaders and the shader setup before the start (shader_setup_before_start).
+// False: it could not run (err) or prepare_shaders failed (pr->error).
+bool run_shader_prepare(const nxrt::nvn::ShaderPrepareOptions& po, nxrt::nvn::ShaderPrepareResult* pr, std::string* err) {
     nxrt::gfx::DeviceDesc dd;
     dd.headless = 1;
-    auto dev = nxrt::gfx::Device::create(dd, &err);
-    if (!dev) { std::printf("prepare: error graphics device: %s\n", err.c_str()); return 1; }
+    auto dev = nxrt::gfx::Device::create(dd, err);
+    if (!dev) { *err = "graphics device: " + *err; return false; }
     nxrt::nvn::BackendDesc bd;
     bd.device = dev.get();
     bd.register_entry_points = false;
-    if (!nxrt::nvn::install_backend(bd)) { std::printf("prepare: error the graphics back end did not start\n"); return 1; }
+    if (!nxrt::nvn::install_backend(bd)) { *err = "the graphics back end did not start"; return false; }
+    const bool ok = nxrt::nvn::prepare_shaders(po, pr);
+    if (!ok) *err = pr->error;
+    nxrt::nvn::shutdown_backend();
+    dev.reset();
+    return ok;
+}
+
+int prepare_shaders_main(bool if_needed, int threads, const std::string& programs) {
     nxrt::nvn::ShaderPrepareOptions po;
     po.only_if_needed = if_needed;
     po.programs_file = programs;
@@ -257,17 +266,16 @@ int prepare_shaders_main(bool if_needed, int threads, const std::string& program
         return true;
     };
     nxrt::nvn::ShaderPrepareResult pr;
-    const bool ok = nxrt::nvn::prepare_shaders(po, &pr);
+    std::string err;
+    const bool ok = run_shader_prepare(po, &pr, &err);
     int rc = 0;
-    if (!ok) { std::printf("prepare: error %s\n", pr.error.c_str()); rc = 1; }
+    if (!ok) { std::printf("prepare: error %s\n", err.c_str()); rc = 1; }
     else if (pr.already_ready) std::printf("prepare: ready\n");
     else std::printf("prepare: done programs=%llu prepared=%llu missing=%llu failed=%llu parts=%llu fast=%llu seconds=%.1f%s\n", static_cast<unsigned long long>(pr.programs),
                      static_cast<unsigned long long>(pr.prepared), static_cast<unsigned long long>(pr.missing_shaders), static_cast<unsigned long long>(pr.failed),
                      static_cast<unsigned long long>(pr.parts), static_cast<unsigned long long>(pr.fast_parts), pr.seconds, pr.cancelled ? " cancelled" : "");
     std::fflush(stdout);
     if (ok && pr.cancelled) rc = 3;
-    nxrt::nvn::shutdown_backend();
-    dev.reset();
     nxrt::shutdown();
     return rc;
 }
@@ -374,6 +382,23 @@ int main(int argc, char** argv) {
         if (gfxmode != "none") {
             const bool headless = gfxmode != "window";
             nxrt::play::DisplayConfig disp;
+            // First start (or after a cancelled one): the "Preparing shaders" window translates and compiles every shader before the game runs.
+            if (!headless) {
+                const bool go = nxrt::nvn::shader_setup_before_start(nxrt::game::info().title, [](const std::function<bool(uint64_t, uint64_t)>& progress) {
+                    nxrt::nvn::ShaderPrepareOptions po;
+                    po.only_if_needed = true;
+                    po.progress = progress;
+                    nxrt::nvn::ShaderPrepareResult pr;
+                    std::string err;
+                    const bool ok = run_shader_prepare(po, &pr, &err);
+                    if (!ok) NXLOG_W("setup", "shader preparation: %s", err.c_str());
+                    else NXLOG_I("setup", "shader preparation: %llu programs, %llu prepared, %llu missing shaders, %llu failed, %.1f s",
+                                 static_cast<unsigned long long>(pr.programs), static_cast<unsigned long long>(pr.prepared),
+                                 static_cast<unsigned long long>(pr.missing_shaders), static_cast<unsigned long long>(pr.failed), pr.seconds);
+                    return ok;
+                });
+                if (!go) { nxrt::shutdown(); return 3; }
+            }
             if (!headless) {
                 disp = nxrt::play::display();       // controls.ini: window size, present mode, frame cap
                 nxrt::platform::init();
@@ -434,6 +459,8 @@ int main(int argc, char** argv) {
         const nxrt::RegResult r = nxrt::nxmodule_register(m, g.nx, *g.abi);
         if (!r.ok()) die("lifted module %s refused: %s", g.file, r.message.c_str());
     }
+
+    nxrt::kernel::fibers_install();   // nn::os fibers on host fibers (when the lifted sdk has the entryhook site)
 
     // The game reaches NVN only through `nvnBootstrapLoader` (an import of main that the sdk defines: Nintendo's driver). The lifted PLT
     // stub of main calls host_import(), not the GOT that rtld fills, so the symbol is forced to the runtime's NVN front end here; the

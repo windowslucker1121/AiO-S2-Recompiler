@@ -320,6 +320,16 @@ std::shared_ptr<ipc::Service> make_general() {
             {55, "GetDefaultNetworkEmulationProfileId", K::U32, 0},
             {56, "GetNetworkEmulationProfile", K::Fail, kNifmNoConnection},
             {57, "SetWowlTcpKeepAliveTimeout", K::Ok},
+            // SDK 22 (Switch 2) versions with larger structures, read from the sdk proxy's vtable (thunk sizes in brackets):
+            // 100 = 7 [entries 0xac], 101/102/103/104 = 5/8/9/14 [profile 0x1b4], 127/128 = 27/28 [0xf8], 132 = 32 [0x68c].
+            {100, "EnumerateNetworkProfiles", K::S32, 0},
+            {101, "GetCurrentNetworkProfile", K::Fail, kNifmNoConnection},
+            {102, "GetNetworkProfile", K::Fail, kNifmNoConnection},
+            {103, "SetNetworkProfile", K::Zeros, 0, 16},
+            {104, "CreateTemporaryNetworkProfile", K::Fail, kNifmNoConnection},
+            {127, "GetDefaultIpSetting", K::BufZero, 0, 0xf8},
+            {128, "SetDefaultIpSetting", K::Ok},
+            {132, "GetTelemetryInfo", K::BufZero, 0, 0x68c},
         });
     });
 }

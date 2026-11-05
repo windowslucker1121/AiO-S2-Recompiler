@@ -7,13 +7,23 @@ Repository basics are in `README.md`, the recompiler in `recomp/README.md`, the 
 
 Porting **The Legend of Zelda: Ocarina of Time** (Switch 2, program `0400486024DEC000`, update 2.0.0 / `131072`) next to the
 existing Pokopia port. Game id `oot`: `recomp/games/oot/` (manifest `game.toml`, `config.py`, `CMakeLists.txt`, `main.sites`).
+The dump is `The Legend of Zelda Ocarina of Time [0400486024DEC000][v131072].nup` in the repo root (25.6 GB, git-ignored).
+
+The user's goal is a port that is **actually playable** on this PC. Milestones in the user's order: (1) boot into the **main menu
+without artifacts**; (2) **basic gamepad** (XInput / SDL gamepad drives the game, menus included); (3) last, **FPS**: measure first
+(`[gfx] log_fps = 1`, hitch log, `[diag] soak_csv`), reach **30 fps in the main menu**, then in game **30 fps**.
+Standing instructions: keep going until blocked, then report; install tools only into git-ignored repo folders from official
+releases with checksum checks; never change system or security settings (give the user the command); when the permission check
+blocks fetching an external repository, give the user the exact PowerShell commands; one build or one `oot.exe` at a time; never
+commit without asking.
 
 Done: NUP extraction, ZBIC -> plain NSO, manifest, lift of all four modules (0 untranslated instructions), and all four module
 libraries compile with clang-cl (`work\build\oot\oot_{main,sdk,subsdk0,rtld}.lib`, main 427 MB). First build 25 min cold on 18
 cores; the FP16 fix afterwards rebuilt one shard in 113 s (most of it the re-lift, which every lifter change triggers).
-Runtime side: `runtime/games/oot` exists as a bring-up module (identity from the manifest, title facts from `main.npdm`, firmware
-22.0.0 as a lower bound since ZBIC needs it; no hooks, probes or play mode). The runtime copes without play hooks
-(`play.cpp`: `if (gp && gp->frame_update)`).
+Runtime side: `runtime/games/oot` exists as a bring-up module (identity from the manifest, title facts from `main.npdm`: priority 44,
+core 0, stack 0x100000, system resource 0x3000000; firmware 22.0.0 as a lower bound since ZBIC needs it; uid "OOTRecmp"; no hooks,
+probes or play mode). The runtime copes without play hooks (`play.cpp`: `if (gp && gp->frame_update)`).
+Placeholders (no control.nacp in the dump): languages 0x1ffff, display version "2.0.0", save sizes and temporary storage 64 MiB.
 Not started: hook sites, shader cache, NUP support in the launcher.
 
 Shader toolchain: `refs/ryubing` is a git submodule (Ryubing's Ryujinx, `https://git.ryujinx.app/ryubing/ryujinx.git`, pinned to
@@ -35,14 +45,16 @@ Requirement from the user: a **shader compilation screen before the first boot**
 pieces exist (`oot.exe --prepare-shaders`, the launcher's setup step that builds the cache, `tools/shaders`); they need OoT's shader
 extraction (`[shaders] extractor = "generic"` in game.toml) and the translator (`tools/shaders/harness`, .NET 8) working first.
 
-Hardware of this machine: Intel Core Ultra 5 125H, integrated Intel Arc graphics (Vulkan 1.3), 16 GB RAM shared with the GPU.
-Expect GPU-bound performance; the README's minimum is a Vulkan 1.3 GPU and 16 GB.
+Hardware of this machine: Intel Core Ultra 5 125H, integrated Intel Arc graphics (driver Vulkan 1.4.325, 8.8 GiB shared), 16 GB
+RAM shared with the GPU. Expect GPU-bound performance; the README's minimum is a Vulkan 1.3 GPU and 16 GB.
 
 ## Boot progress (`oot.exe --game game\oot\updates\131072 --log work\run\bootN\oot.log --max-seconds 60`)
 
-Each fix below moved the boot further; all are in the branch. Crash reports land next to the exe (`game-build\build\release\oot_crash.txt`);
+Each fix below moved the boot further; all are in the branch. Crash reports land next to the exe (`game-build\build\release\oot_crash.txt`,
+`oot_freeze.txt` from the watchdog after 10 s without a presented frame, `oot_fatal.txt`);
 `tools\.venv\Scripts\python tools\ai\symbolize.py <crash.txt | addr...>` names guest frames from the modules' exported symbols (main exports
-little: trust `main+off`, not the name next to it).
+little: trust `main+off`, not the name next to it; sdk exports ~28,700 symbols, so sdk frames are named well). Logs of earlier boots:
+`work\run\boot1` ... `bootN`. Use absolute paths for `--game` and `--log`.
 
 1. SDK 22 mutex owner at TLS +0x110 (kernel-written thread handle): `runtime/src/kernel/thread.cpp` writes the handle there.
 2. Used memory reported 64 MiB too high (HeapDef `Program` budget 137 MiB checked against `nn::os::QueryMemoryInfo`): `svc_info.cpp` adds
@@ -66,34 +78,83 @@ little: trust `main+off`, not the name next to it).
     with every bsd command failing it aborted ("no event engine"). `network.cpp` now has a descriptor table: sockets that exist and do
     nothing, Linux-style eventfds (Read/Write/Close/Fcntl) and a Poll that waits for a Write or the timeout.
 
-**Where it stops now (boot 20, about 8 s in):** `nn::nifm::detail::IGeneralService cmd 101 not implemented (in 0 bytes)`, new in SDK 22;
-find its SDK caller (`nn::nifm` symbols in sdk), answer it like the other offline nifm commands in `network.cpp`. Right after, the guest
-faulted and the runtime's crash handler faulted too ("second exception inside the crash handler"), so no crash report was written:
-worth making the handler robust (several threads crashing at once?).
+15. nifm `IGeneralService` SDK 22 commands 100-104, 127, 128, 132 (`network.cpp`): newer versions of 7/5/8/9/14/27/28/32 with larger
+    structures (GetCurrentNetworkProfile 101 = profile of 0x1b4 bytes instead of 0x17c). Read from the sdk proxy vtable (see Techniques).
+16. Crash handler (`runtime/src/diag/crash.cpp`): one process-wide "in handler" flag made a second thread that faulted while the first
+    wrote its report terminate the process with no report. Now other threads wait (the first report terminates anyway; 15 s cap), and a
+    fault inside the handler on the same thread writes the report built so far plus both exception codes (no allocation).
+17. **Fibers** (boot 21, ~8.6 s: `nn::async::Await` faulting with every register 0): OoT runs `nn::async` tasks on `nn::os` fibers. The
+    SDK's `nn::os::detail::DispatchFiberContext` swaps guest stacks and returns into the other fiber, which a static recompiler cannot
+    follow (host frames). `runtime/src/kernel/fiber.cpp` replaces it through an entry hook (site in `recomp/games/oot/sdk.sites`,
+    registered by symbol in `fibers_install()`, called from `game_main.cpp`): one host fiber (own host stack) and one Ctx per guest fiber;
+    TPIDR/TPIDRRO come from the resuming thread. Known limits: host thread_locals that a function caches across a fiber switch (HLE
+    thunk name, catch_call frames, diag ctx) see the wrong thread if a fiber migrates; a finished fiber's host stack is freed only when
+    its FiberType is reused.
+
+**Manifest bug (fixed for OoT, still in pkp):** the game CMakeLists cached the sites file in one variable for every module, so a second
+module with `sites =` silently got main's file. OoT now uses `OOT_SITES_<MODULE>`.
+
+What the game does by boot 20: rtld -> sdk init -> nnMain; RomFS mounted (186,808 files); account save created; 12 GiB heap; NV/vi
+graphics on the host (60 Hz vsync); NVN back end up on the Arc GPU; ~67 shader programs set; loader threads read event settings, sound
+banks, actor and effect packs; hid, account, nifm, prepo, ssl, nsd, bsd used; audio renderer running.
 
 Not done yet: shader translation (draws are skipped: "no translated shader"), no frame is presented, the game names no frame-update hook.
 
+Open points besides the milestones:
+- **NVN gaps**: unknown procs get logging stubs (nvnDeviceGetFlags, nvnQueueGetTotalRayTracingMemoryUsed,
+  nvnQueueBuilder{Set,Get}RayTracingMemorySize, nvnQueueBuilderGetPrimaryQueue, nvnWindow(Builder){Set,Get}AcquireTimeout,
+  nvnProgramBuilder*RayTracing*, nvnTexturePool/SamplerPoolWriteDescriptorTableData, nvnMultisampleState*CoverageTruncation*,
+  *GetSampleLocations, nvnCommandBufferSetComputeWorkloadPriority; ~140 lines per boot); "GPU-side WaitEvent not implemented".
+  Implement what OoT depends on (NVN 231.31-231.40 additions).
+- **auddmg** session answers only ListVirtualDeviceNames; microphone capture (the remake's voice/ocarina features) later.
+- **nn::vi queries** (QueryDisplayHdrStatus/VrrSupported/HdrPaperWhite/CurrentRefreshRate) return the SDK's 0x272 for the stand-in display.
+- **Movies** need libvpx (vcpkg `libvpx:x64-windows-static`, `NXRT_LIBVPX_ROOT`); not installed.
+- **Launcher** accepts NSP/XCI/folder only; `.nup` would go through `nup_extract.py`.
+- **Pokopia regression risk** (no Pokopia dump here): shared changes in funcs.py (header/MOD0, ADR starts, RETAA/RETAB, zero FDEs), a64.py
+  (PAC decode), tier2 FP16, used-memory accounting, NVN minor 40, TLS +0x110, MapMemory Alias sources, WaitIfEqual64, bsd descriptors.
+  Oracles, from `recomp\`: `..\tools\.venv\Scripts\python oracle/difftest/difftest.py all`, `oracle/e2e/run_e2e.py`,
+  `oracle/hooks/test_hooks.py`; runtime tests `runtime\scripts\build.ps1 -Test`.
+
+## Techniques that worked
+
+- Name an import of main: lifted stub `void f_<plt>(Ctx*) { host_import(c, NX_IMPORT_ID(0, N)); }` -> N is the index into main's
+  `img.symbols()` (`nxrecomp.program.open_image`); demangle with `tools\llvm\bin\llvm-cxxfilt.exe` (absolute path).
+- Read one lifted function: grep `void f_<addr>(` in `work\lift\oot\<module>\c_NNN.cpp`.
+- Find who writes a global: globals are reached through the GOT; find relocations whose addend is the global (`img.relocs()`), then code
+  loading that GOT slot (`adrp page` + `ldr [page + off]`) and storing through it.
+- Commands of an sf interface: find the proxy vtable through the relocation whose addend is one thunk (`img.relocs()`), then read each
+  slot's lifted thunk: it loads the command id and calls a shape helper with buffer/raw sizes (e.g. `x2 = 0x1b4, x3 = 0x65,
+  f_75000ea990` = cmd 101 with a 0x1b4-byte out buffer). The vtable starts with 5 non-command slots.
+- IPC request layout: SDK sf clients build CMIF with magic `SFCI` (0x49434653); command id, then fields at +16.. in the raw data; a set
+  top bit in the header means "sends PID". Replies with a moved handle are session objects (runtime: `rsp.push_object`).
+- svcBreak with Result 0 = an `NN_ABORT_UNLESS`-style check: read the caller just before `AbortImpl` in the lifted code.
+- Discovery can be inspected with `nxrecomp.funcs.analyse(img)` (rows with src E/S/B/R/T/A/G and end_from). When the game calls an
+  address that is "not a known function", check discovery for that address first (boot fixes 12/13).
+
 ## AI tools for the running game (`tools/ai/`)
 
-MCP server `game` (registered in `.mcp.json`; the user approves it once in `/mcp`, then the tools are `mcp__game__*`), also a CLI:
+MCP server `game` (registered in `.mcp.json`, enabled by `"enabledMcpjsonServers": ["game"]` in the local, git-ignored
+`.claude/settings.local.json`; loads only in sessions started after that; tools `mcp__game__*`), also a CLI:
 `tools\.venv\Scripts\python tools\ai\mcp_server.py help`. Tools: `status`, `launch` / `restart` / `kill`, `screenshot` (PrintWindow,
 works when covered), `send_input` (posted messages in the background, or SendInput with the game window in front), `wait_for`,
 `compare` (SSIM against a reference), `log`, `reports` (crash / freeze / fatal). Details and limits: `tools/ai/README.md`; check:
 `tools\.venv\Scripts\python tools\ai\tests\test_gamectl.py`. Names come from `game.toml` (`NXRT_AI_GAME`, default `oot`).
 Verified only against a stand-in window: whether PrintWindow sees the Vulkan swapchain and whether the SDL window takes posted
-input while unfocused is known only once `oot.exe` runs.
+input while unfocused is known only once `oot.exe` runs. `launch` sets `test.frame_source=tick` for scripts (OoT has no frame hook).
 
 ## Machine setup (this checkout, Windows 11)
 
 | Tool | Where | Notes |
 |---|---|---|
 | Visual Studio 2022 (MSVC 14.44, CMake, Ninja) | found with `vswhere` | `recomp\scripts\nx_env.cmd` sets up the environment |
-| LLVM / clang-cl 23.1.5 | `tools\llvm\` (git-ignored) | official release archive; `recomp/cmake/clang-cl.cmake` prefers it over `C:\Program Files\LLVM` |
+| LLVM / clang-cl 23.1.5 | `tools\llvm\` (git-ignored) | official release `clang+llvm-23.1.5-x86_64-pc-windows-msvc.tar.zst` (SHA-256 checked; unpacking needs zstd window 2^31: `compression.zstd.ZstdFile(..., options={DecompressionParameter.window_log_max: 31})`); `recomp/cmake/clang-cl.cmake` prefers it over `C:\Program Files\LLVM` |
+| .NET SDKs 9.0.301, 9.0.319, 10.0.403 | system | shader harness builds for net10.0 |
+| not installed on purpose | | pwsh (Windows PowerShell 5.1 runs the .ps1 files), Vulkan SDK (spirv-val), libvpx, `tools/setup` |
 | sccache 0.19.0 | `tools\sccache\` (git-ignored) | picked up by the toolchain file at configure time; cache in `work\build\sccache` |
 | Python 3.13 venv | `tools\.venv\` (git-ignored) | `recomp/requirements.txt` and `tools/ai/requirements.txt` (Pillow, numpy) installed. Python 3.14 is also installed system-wide (has `compression.zstd`) |
 | `nx_plain_nso.exe` | `tools\extract\build\msvc\bin\` | built with MSVC from a VS x64 prompt: `cmake -S tools\extract -B tools\extract\build\msvc -G Ninja -DCMAKE_BUILD_TYPE=Release` then `cmake --build tools\extract\build\msvc` |
 
-Disk is tight: C: had about 38 GB free after the lift. The full RomFS is about 26 GB; extract it only when needed.
+Disk: C: had 59 GB free with the whole game extracted (`game\oot`, 26.3 GB RomFS) and `work\` (~1.1 GB lift, builds, shader corpus).
 
 ## OoT pipeline
 
@@ -114,6 +175,10 @@ recomp\scripts\nx_env.cmd cmake -S tools\textures -B tools\textures\build\releas
 recomp\scripts\nx_env.cmd cmake --build tools\textures\build\release
 rem 6. runtime + oot.exe (two manifests exist, so -Manifest is required; Windows PowerShell 5.1 runs it, pwsh is not installed)
 powershell -ExecutionPolicy Bypass -File game-build\scripts\build.ps1 -Manifest %CD%\recomp\games\oot\game.toml
+rem    first time 211 s; incremental (~20 s):
+runtime\scripts\env.cmd && cmake --build game-build\build\release --target game_exe
+rem 7. run (the window opens on the user's desktop; --max-seconds ends it)
+game-build\build\release\oot.exe --game %CD%\game\oot\updates\131072 --log %CD%\work\run\bootN\oot.log --max-seconds 60
 ```
 
 `runtime\scripts\env.cmd` now just calls `recomp\scripts\nx_env.cmd`; `game-build/scripts/build.ps1` used the upstream layout
@@ -138,7 +203,9 @@ functions of its module) and `nxrecomp/cxx.h`.
 
 sccache makes repeats of the same content cheap (toggling debug sites on and off). Turning sccache on changes the compile command,
 so the first build with it recompiles everything once: when only a few shards changed, build with `set NX_NO_SCCACHE=1` and let
-the next build that is full anyway (header change, new game version) switch it on. The first OoT build ran without sccache.
+the next build that is full anyway (header change, new game version) switch it on. The first OoT build ran without sccache; with
+sccache on, a function-list change of main (20 shards with new content) rebuilt in 5 min. Any lifter source change re-lifts all
+modules first (~3 min).
 
 ## Findings
 
@@ -172,7 +239,7 @@ the next build that is full anyway (header change, new game version) switch it o
 
 ## Rules
 
-- Do not run two builds in `work\build\oot` at the same time.
+- Do not run two builds in `work\build\oot` at the same time, nor two copies of `oot.exe`. Background jobs die with the session.
 - Changing Windows Defender exclusions (for `work\`, `tools\llvm\`) would likely speed builds, but it is a security setting: only the
   user changes it.
 - Keep `recomp/nxrecomp` changes game independent; game knowledge goes in `recomp/games/<id>/` and `runtime/games/<id>/`.

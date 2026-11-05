@@ -1,0 +1,3 @@
+# Hook sites of OoT's sdk module (nxrecomp/program.py load_sites).
+# nn::os::detail::DispatchFiberContext: nn::os fibers run on host fibers (runtime/src/kernel/fiber.cpp)
+entryhook 0x750016d214

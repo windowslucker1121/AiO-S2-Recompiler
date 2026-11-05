@@ -63,6 +63,14 @@ struct ShaderPrepareResult {
 };
 bool prepare_shaders(const ShaderPrepareOptions& o, ShaderPrepareResult* r);
 
+// Shader setup before the game starts, with a "Preparing shaders" window while there is work (src/gfx/nvn/nvn_setup.cpp): translates every
+// corpus block the shader cache has no record of (needs the on-demand translator and the corpus, [nvn] shader_translator / shader_corpus),
+// then calls `prepare` when <cache>/../programs.bin exists and prepare.state does not say it finished. `prepare` runs the shader
+// preparation (it needs a graphics device, so the caller makes one) and reports through the progress function it is given; it returns
+// false when it failed. Returns false only when the player closed the window: the game must not start. [nvn] setup_on_start = false skips it.
+using ShaderSetupPrepare = std::function<bool(const std::function<bool(uint64_t done, uint64_t total)>& progress)>;
+bool shader_setup_before_start(const char* title, const ShaderSetupPrepare& prepare);
+
 struct BackendStats {
     uint64_t submits = 0, lists_replayed = 0, draws = 0, draws_skipped = 0, dispatches = 0, clears = 0, copies = 0, presents = 0;
     uint64_t passes = 0, pass_breaks = 0, pipelines_created = 0, pipeline_cache_hits = 0, descriptor_sets = 0;

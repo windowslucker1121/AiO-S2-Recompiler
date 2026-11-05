@@ -31,6 +31,7 @@ constexpr DWORD kGuestBreakCode = 0xE0000003u;   // svcBreak / svcReturnFromExce
 constexpr size_t kMaxHostFrames = 32;
 constexpr int kMaxGuestFrames = 24;
 constexpr DWORD kOverflowWaitMs = 30000;
+constexpr DWORD kOtherReportWaitMs = 15000;   // another thread's report: a handler stuck longer than this is given up on
 
 std::mutex g_install_mu;
 bool g_installed = false;
@@ -45,7 +46,14 @@ uint32_t g_exit_code = 4;
 void (*g_on_report)(const char*, void*) = nullptr;
 void* g_user = nullptr;
 
-std::atomic<bool> g_in_handler{false};          // set while the handler runs: a second exception terminates
+std::string g_report_file;                      // resolved at install time: the handlers must not depend on more than they need
+
+// The thread whose report is being built (0: none). Several guest threads often fault at once: the others wait for the first
+// report (which terminates the process). The same thread again means the handler itself faulted.
+std::atomic<DWORD> g_owner{0};
+std::string g_partial;                          // the report the handler is building, written as it is when the handler faults
+DWORD g_first_code = 0;                         // the exception the handler is reporting
+uint64_t g_first_addr = 0;
 std::atomic<bool> g_overflow_reported{false};   // the vectored handler already reported this stack overflow
 std::atomic<uint32_t> g_reports{0};
 
@@ -117,10 +125,10 @@ bool write_file(const std::string& path, const std::string& text) {
     return ok && done == text.size();
 }
 
-// Builds the whole report text for an exception raised on thread `tid`.
-std::string build_report(const EXCEPTION_RECORD* rec, const CONTEXT* cx, DWORD tid) {
+// Builds the whole report text for an exception raised on thread `tid` into out (cleared first).
+void build_report(std::string& out, const EXCEPTION_RECORD* rec, const CONTEXT* cx, DWORD tid) {
     g_reports.fetch_add(1, std::memory_order_relaxed);
-    std::string out;
+    out.clear();
     const uint64_t rip = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rec->ExceptionAddress));
     const std::vector<ThreadRecord> threads = diag_threads();
 
@@ -237,7 +245,6 @@ std::string build_report(const EXCEPTION_RECORD* rec, const CONTEXT* cx, DWORD t
 
     // The last 30 s of frame times: what the game was doing before it went wrong.
     out += frame_times_summary(30.0);
-    return out;
 }
 
 // Log block, report file, stderr, then the on_report callback. Terminating is the caller's decision.
@@ -249,37 +256,77 @@ void emit(const std::string& text) {
         pos = eol + 1;
     }
     log_flush();
-    const std::string path = g_path_given ? g_path : default_report_path();
-    if (!path.empty()) write_file(path, text);
+    if (!g_report_file.empty()) write_file(g_report_file, text);
     std::fwrite(text.data(), 1, text.size(), stderr);
     std::fflush(stderr);
     if (g_on_report) g_on_report(text.c_str(), g_user);
 }
 
-[[noreturn]] void second_exception() {
-    std::fputs("nxrt: second exception inside the crash handler, terminating\n", stderr);
-    std::fflush(stderr);
+// Last resort, with no allocation: the report built so far plus one line on both exceptions, to the report file and stderr.
+[[noreturn]] void emergency_report(const EXCEPTION_RECORD* rec, const char* why) {
+    char line[320];
+    const int n = std::snprintf(line, sizeof line,
+                                "\nnxrt: %s (exception 0x%08lX at 0x%llx) while reporting HOST EXCEPTION 0x%08lX at host address "
+                                "0x%llx; report above is cut short\n",
+                                why, rec ? static_cast<unsigned long>(rec->ExceptionCode) : 0ul,
+                                rec ? static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(rec->ExceptionAddress)) : 0ull,
+                                static_cast<unsigned long>(g_first_code), static_cast<unsigned long long>(g_first_addr));
+    const DWORD len = n > 0 ? static_cast<DWORD>(n < static_cast<int>(sizeof line) ? n : sizeof line - 1) : 0;
+    DWORD done = 0;
+    if (!g_report_file.empty()) {
+        HANDLE h = CreateFileA(g_report_file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            WriteFile(h, g_partial.data(), static_cast<DWORD>(g_partial.size()), &done, nullptr);
+            WriteFile(h, line, len, &done, nullptr);
+            CloseHandle(h);
+        }
+    }
+    HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    if (err && err != INVALID_HANDLE_VALUE) {
+        WriteFile(err, g_partial.data(), static_cast<DWORD>(g_partial.size()), &done, nullptr);
+        WriteFile(err, line, len, &done, nullptr);
+    }
     TerminateProcess(GetCurrentProcess(), g_exit_code);
     for (;;) Sleep(1000);
+}
+
+// Makes this thread the one that reports. Returns false when it already is (the handler faulted). Another thread's report is
+// waited for; one that is stuck (a lock held by a crashed thread) is given up on with an emergency report.
+bool enter_handler(const EXCEPTION_RECORD* rec) {
+    const DWORD me = GetCurrentThreadId();
+    for (DWORD waited = 0;; waited += 10) {
+        DWORD owner = 0;
+        if (g_owner.compare_exchange_strong(owner, me)) break;
+        if (owner == me) return false;
+        if (waited >= kOtherReportWaitMs) emergency_report(rec, "crash handler of another thread did not finish");
+        Sleep(10);
+    }
+    g_first_code = rec ? rec->ExceptionCode : 0;
+    g_first_addr = rec ? static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rec->ExceptionAddress)) : 0;
+    g_partial.clear();
+    return true;
 }
 
 LONG WINAPI crash_filter(EXCEPTION_POINTERS* ep) {
     if (ep && ep->ExceptionRecord && ep->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW &&
         g_overflow_reported.exchange(false))
         return EXCEPTION_CONTINUE_SEARCH;  // the vectored handler already wrote this report
-    if (g_in_handler.exchange(true)) second_exception();
+    const EXCEPTION_RECORD* rec = ep ? ep->ExceptionRecord : nullptr;
+    if (!enter_handler(rec)) emergency_report(rec, "second exception inside the crash handler");
     if (!ep || !ep->ExceptionRecord || !ep->ContextRecord) {
-        g_in_handler = false;
+        g_owner = 0;
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    emit(build_report(ep->ExceptionRecord, ep->ContextRecord, GetCurrentThreadId()));
+    build_report(g_partial, ep->ExceptionRecord, ep->ContextRecord, GetCurrentThreadId());
+    emit(g_partial);
     if (g_terminate) TerminateProcess(GetCurrentProcess(), g_exit_code);
-    g_in_handler = false;
+    g_owner = 0;
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
 DWORD WINAPI overflow_thread(LPVOID) {
-    emit(build_report(&g_ov_rec, &g_ov_ctx, g_ov_tid));
+    build_report(g_partial, &g_ov_rec, &g_ov_ctx, g_ov_tid);
+    emit(g_partial);
     if (g_terminate) TerminateProcess(GetCurrentProcess(), g_exit_code);
     return 0;
 }
@@ -287,7 +334,7 @@ DWORD WINAPI overflow_thread(LPVOID) {
 LONG WINAPI crash_vectored(EXCEPTION_POINTERS* ep) {
     if (!ep || !ep->ExceptionRecord || !ep->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_STACK_OVERFLOW) return EXCEPTION_CONTINUE_SEARCH;
-    if (g_in_handler.exchange(true)) second_exception();
+    if (!enter_handler(ep->ExceptionRecord)) emergency_report(ep->ExceptionRecord, "second exception inside the crash handler");
     g_ov_rec = *ep->ExceptionRecord;
     g_ov_ctx = *ep->ContextRecord;
     g_ov_tid = GetCurrentThreadId();
@@ -297,7 +344,7 @@ LONG WINAPI crash_vectored(EXCEPTION_POINTERS* ep) {
         CloseHandle(th);
         g_overflow_reported = true;
     }
-    g_in_handler = false;
+    g_owner = 0;
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -311,6 +358,7 @@ void crash_install(const CrashOptions& opt) {
     g_exit_code = opt.exit_code;
     g_on_report = opt.on_report;
     g_user = opt.user;
+    g_report_file = g_path_given ? g_path : default_report_path();
     if (g_installed) return;
     g_prev_filter = SetUnhandledExceptionFilter(crash_filter);
     ULONG guarantee = 64 * 1024;  // stack reserved for the handlers if the thread overflows
@@ -331,7 +379,9 @@ void crash_uninstall() {
 std::string crash_build_report(void* exception_pointers) {
     auto* ep = static_cast<EXCEPTION_POINTERS*>(exception_pointers);
     if (!ep || !ep->ExceptionRecord || !ep->ContextRecord) return "HOST EXCEPTION: no exception information\n";
-    return build_report(ep->ExceptionRecord, ep->ContextRecord, GetCurrentThreadId());
+    std::string out;
+    build_report(out, ep->ExceptionRecord, ep->ContextRecord, GetCurrentThreadId());
+    return out;
 }
 
 std::string crash_report_path() { return g_path_given ? g_path : default_report_path(); }
