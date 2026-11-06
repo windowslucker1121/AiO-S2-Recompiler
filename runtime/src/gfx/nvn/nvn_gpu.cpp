@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -28,6 +29,7 @@
 #include "nvn_pipeline.h"
 #include "nvn_present_pass.h"
 #include "extras/output_pass.h"
+#include "play/play_selftest.h"
 
 namespace nxrt::nvn::be::gpu {
 namespace {
@@ -216,6 +218,7 @@ void wait_serial_blocking(uint64_t serial) {
     wi.pValues = &serial;
     VkResult r = vkWaitSemaphores(g->dev->device(), &wi, UINT64_MAX);
     if (r != VK_SUCCESS) NXLOG_E(kTag, "vkWaitSemaphores failed (%d)", static_cast<int>(r));
+    if (r == VK_ERROR_DEVICE_LOST) device_lost("waiting for the GPU");
     read_completed();
 }
 
@@ -410,6 +413,50 @@ void gpass_stamp(Frame& f, const char* label, uint32_t arg) {
     s.gp_n++;
 }
 
+// ---- device-loss checkpoints ([gfx] device_diagnostics, VK_NV_device_diagnostic_checkpoints) ----------------------------------------
+namespace {
+// The latest checkpoint descriptions: the render thread writes them, the device-loss report reads them back by marker.
+struct CpRec {
+    std::atomic<uint64_t> id{0};
+    char text[160];
+};
+constexpr uint64_t kCpRing = 1u << 16;
+CpRec* g_cp = nullptr;
+std::atomic<uint64_t> g_cp_next{0};
+std::atomic<bool> g_lost_exit{false};
+
+std::string describe_checkpoint(uint64_t id) {
+    if (!g_cp || !id) return "(no record)";
+    const CpRec& r = g_cp[id & (kCpRing - 1)];
+    if (r.id.load(std::memory_order_acquire) != id) return "(record overwritten)";
+    return std::string(r.text) + "  [newest recorded: " + std::to_string(g_cp_next.load()) + "]";
+}
+}  // namespace
+
+bool checkpoints_on() { return g_cp != nullptr; }
+
+void checkpoint(Frame& f, const char* text) {
+    if (!g_cp || f.cb == VK_NULL_HANDLE) return;
+    const uint64_t id = g_cp_next.fetch_add(1) + 1;
+    CpRec& r = g_cp[id & (kCpRing - 1)];
+    std::snprintf(r.text, sizeof r.text, "serial %llu present %llu: %s", static_cast<unsigned long long>(f.serial),
+                  static_cast<unsigned long long>(counters().presents.load()), text);
+    r.id.store(id, std::memory_order_release);
+    vkCmdSetCheckpointNV(f.cb, reinterpret_cast<const void*>(static_cast<uintptr_t>(id)));
+}
+
+// A submission or a wait failed with the device lost: the driver's report once (Device::report_device_lost), then the process ends
+// ([gfx] exit_on_device_lost, default on): every later submission fails and the window would stand still. The exit runs on a thread of
+// its own, so the render thread (often the caller) can go on answering the waits of the game threads meanwhile.
+void device_lost(const char* where) {
+    if (!g) return;
+    g->dev->report_device_lost(where);
+    if (g_lost_exit.exchange(true) || !config_get_bool("gfx", "exit_on_device_lost", true)) return;
+    std::thread([w = std::string(where)] {
+        nxrt::play::exit_process(4, "device lost", "the GPU device was lost (" + w + "): the game cannot go on. The driver's report is in the log above.");
+    }).detach();
+}
+
 namespace {
 // [nvn] pass_barriers = tracked (S38): a layout change waits only for the stages that can have used the image in its old layout and blocks
 // only the stages that use it in the new one. The layout says how the image was used: the replay keeps every image in the layout of its
@@ -537,7 +584,9 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         s.timed = true;
         s.cpu_t0 = ft::now_ns();
     }
+    checkpoint(f, "submission start");
     record(f);
+    checkpoint(f, "submission end");
     if (g->gpool) gpass_stamp(f, "tail", 0);
     if (g->qpool) vkCmdWriteTimestamp(s.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->qpool, qi + 1);
     vkEndCommandBuffer(s.cb);
@@ -568,6 +617,7 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
     }
     if (r != VK_SUCCESS) {
         NXLOG_E(kTag, "vkQueueSubmit2 failed (%d): the device is lost or out of memory", static_cast<int>(r));
+        if (r == VK_ERROR_DEVICE_LOST) device_lost("NVN submission");
         // keep the timeline moving so waiters do not hang: signal from the host
         VkSemaphoreSignalInfo ssi = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
         ssi.semaphore = g->timeline;
@@ -621,6 +671,7 @@ bool frame_split(Frame& f) {
         wait_serial_blocking(g->submitted);   // earlier submissions too: the data the caller reads may come from any of them
     } else {
         NXLOG_E(kTag, "frame split: vkQueueSubmit2 failed (%d)", static_cast<int>(r));
+        if (r == VK_ERROR_DEVICE_LOST) device_lost("NVN frame split");
     }
     vkDestroyFence(dev, fence, nullptr);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -876,6 +927,11 @@ bool bring_up(gfx::Device& dev, gfx::Renderer* rend, FrameLimiter* limiter, bool
     gp->limiter = limiter;
     gp->keep_aspect = keep_aspect;
     g = gp;
+    if (dev.features().diagnostic_checkpoints && !g_cp) {
+        g_cp = new CpRec[kCpRing];
+        dev.set_checkpoint_describer(describe_checkpoint);
+        NXLOG_I(kTag, "device-loss checkpoints on: a marker before every draw and dispatch ([gfx] device_diagnostics)");
+    }
     if (!dev.features().timeline_semaphore) {
         NXLOG_E(kTag, "the GPU has no timeline semaphores: the NVN back end cannot run");
         g = nullptr;

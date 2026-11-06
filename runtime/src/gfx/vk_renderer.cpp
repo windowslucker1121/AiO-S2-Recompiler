@@ -791,6 +791,7 @@ void Renderer::end_frame() {
         VkResult r = vkQueueSubmit2(s.dev->queue(), 1, &si, slot.fence);
         if (r != VK_SUCCESS) NXLOG_E(kTag, "vkQueueSubmit2 failed (%d)", static_cast<int>(r));
         else if (probe_value) s.probe_published.store(probe_value);
+        if (r == VK_ERROR_DEVICE_LOST) s.dev->report_device_lost("present submission");   // the NVN back end ends the process
         if (!s.headless) {
             VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
             pi.waitSemaphoreCount = 1;

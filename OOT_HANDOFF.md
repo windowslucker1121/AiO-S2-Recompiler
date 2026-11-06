@@ -20,7 +20,8 @@ techniques, rules) and `DEVELOPMENT_SETUP.md` (what a development machine needs)
 Symptom: after "New Game" and the intro, the first scene presents one to three frames (the first takes 9-112 s to replay because of
 first-use texture uploads), then `vkQueueSubmit2 failed (-4): the device is lost or out of memory` in `oot.log` and the process ends.
 
-Reproduce (about 3.5 minutes):
+Reproduce (about 3.5 minutes; on the second machine 70 s to the loss once the texture cache is warm). A development `oot.exe` without
+`--game` now finds the game and the shader data of this checkout by itself, so the `NXRT_NVN_SHADER_*` lines below are optional:
 
 ```bat
 set NXRT_NVN_SHADER_CACHE=%CD%\work\shaders\oot\spirv
@@ -59,7 +60,16 @@ scene's frame (13,072 draws) replayed in 55.7 s, was presented at ~141 s, and th
 NVIDIA the process does not end: every later submit fails until `--max-seconds`. NVIDIA adds two cheap ways in, before the per-draw
 submit-and-wait mode below: `VK_NV_device_diagnostic_checkpoints` (a checkpoint per draw or pass; after the loss
 `vkGetQueueCheckpointDataNV` names the last one the GPU reached) and `VK_EXT_device_fault` (fault type and address, which can be
-matched against the runtime's buffer and image allocations). The runtime uses neither yet (`runtime/src/gfx/`).
+matched against the runtime's buffer and image allocations). Both are in the runtime now (`[gfx] device_diagnostics = 1`, `[gfx]
+device_fault`), and a device loss ends the process with exit code 4 after the report (`[gfx] exit_on_device_lost`).
+
+**Narrowed down (2026-11-06, runs `work\run\a8_nv2`..`a8_nv5`)**: the GPU dies inside one draw near the end of the first scene frame,
+vs `f16b4a89c5478c05` + fs `dcfaa938040cb593`; skipping that fs moves it to vs `43f6c7bfb202dfdf` + fs `8ba27a98e540767c` (same kind of
+material shader). No faulting memory address, only warps at shader instruction pointers in one ~4.4 KB window, and the NVIDIA driver
+logs System event 153 each time: most likely a shader that never finishes (driver timeout). The light loop is bounded (cap 1000, one
+iteration on this frame). Suspect: the loops the translator builds around the shader's jump-table `switch` (BRX through the constant
+data in c1). Details and the GLSL route: `AGENTS.md`, artifact A8. Next: cap loop iterations in the translator's output to confirm an
+endless loop, then fix the BRX translation.
 
 Next steps for A8, cheapest first:
 1. `[nvn] pass_barriers = full` (a full barrier after every pass). If the loss goes away, it is a synchronization hazard in the

@@ -19,12 +19,16 @@
 // resolved against the game folder: [fs] exefs (default ./exefs), [fs] romfs (default ./romfs), [nvn] shader_cache (default
 // ./shader_cache/spirv). --exefs / <ID>_EXEFS and the NXRT_* variables win over the ini. Without it (development runs from game-build or
 // work/run) nothing changes, except that [fs] exefs in the ini named by --ini / NXRT_INI replaces the built-in ExeFS default.
+// Development builds (not GAME_RELEASE) started with neither --game nor --exefs take the checkout's extracted game
+// (game\<id>\updates\<newest>) as the game folder, and [nvn] shader_cache / shader_corpus / shader_translator default to the
+// checkout's work\shaders\<id> and tools\shaders build: a plain `oot.exe` runs the game.
 #include <windows.h>
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <cwctype>
 #include <memory>
 #include <string>
@@ -147,6 +151,38 @@ std::string absolute_utf8(const std::string& p) {
     buf.resize(n);
     return narrow_utf8(buf);
 }
+
+#ifdef GAME_DEV_ROOT
+// Development builds (GAME_DEV_ROOT = the checkout, see CMakeLists.txt): the game extracted in this checkout (DEVELOPMENT_SETUP.md
+// section 5), so a plain start of the exe (double click, no arguments) runs it as --game would: the newest
+// game\<id>\updates\<version>\ with an ExeFS, else game\<id>\ itself. Empty when neither has exefs\main.
+std::string dev_game_folder() {
+    const std::wstring root = widen_utf8(GAME_DEV_ROOT "/game/" GAME_ID);
+    std::wstring best;
+    unsigned long best_version = 0;
+    WIN32_FIND_DATAW fd;
+    const HANDLE h = FindFirstFileW((root + L"\\updates\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !std::iswdigit(fd.cFileName[0])) continue;
+            const unsigned long v = std::wcstoul(fd.cFileName, nullptr, 10);
+            const std::wstring dir = root + L"\\updates\\" + fd.cFileName;
+            if ((best.empty() || v > best_version) && file_exists(dir + L"\\exefs\\main")) {
+                best = dir;
+                best_version = v;
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    if (best.empty() && file_exists(root + L"\\exefs\\main")) best = root;
+    return narrow_utf8(best);
+}
+// A [section] key the ini and the NXRT_* variables leave unset gets this checkout's file or folder, when it exists.
+void dev_default(const char* section, const char* key, const char* path) {
+    if (nxrt::config_has(section, key) || GetFileAttributesW(widen_utf8(path).c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    nxrt::config_set(section, key, path);
+}
+#endif
 
 // [boot] press = "A@12,A@20:500,PLUS@30,A#1500": scripted controller presses on player 1 (button@seconds-after-start[:hold ms, default 300]).
 // "A#1500:300" is keyed to the NVN back end's presented-frame count instead of seconds: a loaded machine plays the same sequence.
@@ -329,6 +365,14 @@ int main(int argc, char** argv) {
         else { std::fprintf(stderr, GAME_ID ": unknown argument %s\n", argv[i]); return 2; }
     }
 
+#ifdef GAME_DEV_ROOT
+    // A development build started without a game folder or ExeFS, and not from an installed folder: the checkout's game.
+    if (game.empty() && !exefs_given && !file_exists(exe_dir() + L"\\exefs\\main")) {
+        const char* gi = nxrt::game::info().game_ini;
+        if (!(*gi && file_exists(exe_dir() + L"\\" + widen_utf8(gi)))) game = dev_game_folder();
+    }
+#endif
+
     // Installed layout: work from the game folder (see the file comment).
     std::string ini_abs, log_abs;
     bool installed = false;
@@ -368,6 +412,12 @@ int main(int argc, char** argv) {
     if (!exefs_given) exefs = nxrt::config_get_str("fs", "exefs", installed ? "exefs" : exefs.c_str());
     nxrt::config_set("fs", "exefs", exefs.c_str());     // the one in use, for the About page
     nxrt::config_set("process", "program_id", "0x" GAME_TITLE_ID);     // GetInfo(ProgramId); an ini value or the environment still wins
+#ifdef GAME_DEV_ROOT
+    // Development build: the shader data this checkout prepared (DEVELOPMENT_SETUP.md section 7), unless the ini or NXRT_NVN_* name other.
+    dev_default("nvn", "shader_cache", GAME_DEV_ROOT "/work/shaders/" GAME_ID "/spirv");
+    dev_default("nvn", "shader_corpus", GAME_DEV_ROOT "/work/shaders/" GAME_ID "/corpus");
+    dev_default("nvn", "shader_translator", GAME_DEV_ROOT "/tools/shaders/build/bin/Release/net10.0/spirv_harness.exe");
+#endif
     NXLOG_I("boot", GAME_ID " %s (%s PC port)", GAME_RELEASE_VERSION, GAME_TITLE);
     NXLOG_I("boot", "%s %s: exefs '%s'", GAME_TITLE, nxrt::game::info().version, exefs.c_str());
 

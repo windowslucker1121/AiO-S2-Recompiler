@@ -551,6 +551,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkPhysicalDeviceIndexTypeUint8FeaturesEXT au8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT};
     VkPhysicalDevicePresentIdFeaturesKHR apid = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
     VkPhysicalDeviceAntiLagFeaturesAMD aal = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ANTI_LAG_FEATURES_AMD};
+    VkPhysicalDeviceFaultFeaturesEXT afault = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
     std::vector<const char*> dev_exts;
     void* chain = nullptr;
     auto add_ext = [&](const char* name, void* feat_struct) {
@@ -587,6 +588,11 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     const bool x_ll2 = x_pid && has_dext(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
     if (x_ll2) dev_exts.push_back(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
     const bool x_aal = !headless && add_ext(VK_AMD_ANTI_LAG_EXTENSION_NAME, &aal);
+    // device-loss diagnostics (report_device_lost): the driver's fault report costs nothing until a fault; checkpoints put a marker
+    // before every draw and dispatch (NVN back end), so they are on only when [gfx] device_diagnostics asks for them
+    const bool x_fault = config_get_bool("gfx", "device_fault", true) && add_ext(VK_EXT_DEVICE_FAULT_EXTENSION_NAME, &afault);
+    const bool x_cp = config_get_bool("gfx", "device_diagnostics", false) && has_dext(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    if (x_cp) dev_exts.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
     features_.external_memory_host = has_dext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     if (features_.external_memory_host) dev_exts.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     if (has_dext(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) { dev_exts.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME); features_.push_descriptor = true; }
@@ -667,6 +673,13 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     features_.present_id = x_pid && apid.presentId;
     features_.low_latency2 = x_ll2 && features_.present_id;
     features_.anti_lag = x_aal && aal.antiLag;
+    features_.device_fault = x_fault && afault.deviceFault;
+    features_.device_fault_vendor_binary = features_.device_fault && afault.deviceFaultVendorBinary;
+    features_.diagnostic_checkpoints = x_cp;
+    if (config_get_bool("gfx", "device_diagnostics", false) && !x_cp)
+        NXLOG_W(kTag, "[gfx] device_diagnostics: this GPU has no VK_NV_device_diagnostic_checkpoints (NVIDIA only): no checkpoints");
+    NXLOG_I(kTag, "device-loss diagnostics: fault report %s%s, checkpoints %s", features_.device_fault ? "on" : "off",
+            features_.device_fault_vendor_binary ? " (with vendor binary)" : "", features_.diagnostic_checkpoints ? "on" : "off");
     NXLOG_I(kTag, "texture compression on this GPU: BC %s, ASTC-LDR %s, ETC2 %s", features_.bc ? "yes" : "no",
             features_.astc_ldr ? "yes" : "no", features_.etc2 ? "yes" : "no");
     NXLOG_I(kTag, "features: geometry %d float64 %d int64 %d dualSrc %d logicOp %d multiViewport %d drawParams %d descIndexing %d interlock %d depthClipControl %d customBorder %d hostMemImport %d pushDesc %d",
@@ -795,6 +808,94 @@ void Device::set_name(VkObjectType type, uint64_t handle, const char* name) {
     ni.objectHandle = handle;
     ni.pObjectName = name;
     vkSetDebugUtilsObjectNameEXT(device_, &ni);
+}
+
+// ---- device loss ------------------------------------------------------------------------------------------------------
+namespace {
+
+const char* fault_address_type(VkDeviceFaultAddressTypeEXT t) {
+    switch (t) {
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_NONE_EXT: return "none";
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT: return "invalid read";
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT: return "invalid write";
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT: return "invalid execute";
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT: return "instruction pointer (unknown)";
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT: return "instruction pointer (invalid)";
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT: return "instruction pointer (fault)";
+    default: return "?";
+    }
+}
+
+std::string stage_name(VkPipelineStageFlags s) {
+    switch (s) {
+    case VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: return "top of pipe (last begun)";
+    case VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: return "bottom of pipe (last finished)";
+    default: { char b[32]; std::snprintf(b, sizeof b, "stage 0x%x", static_cast<unsigned>(s)); return b; }
+    }
+}
+
+}  // namespace
+
+bool Device::report_device_lost(const char* where) {
+    if (lost_reported_.exchange(true)) return false;
+    NXLOG_E(kTag, "the GPU device was lost (%s): %s", where ? where : "?", gpus_.empty() ? "?" : gpu().name.c_str());
+    // The caller may hold the queue mutex (a failed submit): take it only when free, the queue is dead either way.
+    std::unique_lock<std::mutex> qlk(queue_mutex_, std::try_to_lock);
+    if (features_.device_fault && vkGetDeviceFaultInfoEXT) {
+        VkDeviceFaultCountsEXT counts = {VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+        VkResult r = vkGetDeviceFaultInfoEXT(device_, &counts, nullptr);
+        if (r == VK_SUCCESS || r == VK_INCOMPLETE) {
+            std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
+            std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
+            std::vector<uint8_t> blob(features_.device_fault_vendor_binary ? static_cast<size_t>(counts.vendorBinarySize) : 0);
+            counts.vendorBinarySize = blob.size();
+            VkDeviceFaultInfoEXT info = {VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
+            info.pAddressInfos = addrs.empty() ? nullptr : addrs.data();
+            info.pVendorInfos = vendors.empty() ? nullptr : vendors.data();
+            info.pVendorBinaryData = blob.empty() ? nullptr : blob.data();
+            r = vkGetDeviceFaultInfoEXT(device_, &counts, &info);
+            NXLOG_E(kTag, "device fault report (%d): \"%s\", %u address(es), %u vendor record(s), vendor binary %llu bytes", static_cast<int>(r),
+                    info.description, counts.addressInfoCount, counts.vendorInfoCount, static_cast<unsigned long long>(counts.vendorBinarySize));
+            for (uint32_t i = 0; i < counts.addressInfoCount && i < addrs.size(); ++i) {
+                const VkDeviceFaultAddressInfoEXT& a = addrs[i];
+                const uint64_t p = a.addressPrecision ? a.addressPrecision : 1;
+                const uint64_t lo = a.reportedAddress & ~(p - 1);
+                NXLOG_E(kTag, "  fault address %u: %s at 0x%llx (precision %llu: 0x%llx..0x%llx)", i, fault_address_type(a.addressType),
+                        static_cast<unsigned long long>(a.reportedAddress), static_cast<unsigned long long>(p), static_cast<unsigned long long>(lo),
+                        static_cast<unsigned long long>(lo + p));
+            }
+            for (uint32_t i = 0; i < counts.vendorInfoCount && i < vendors.size(); ++i)
+                NXLOG_E(kTag, "  vendor record %u: \"%s\" code 0x%llx data 0x%llx", i, vendors[i].description,
+                        static_cast<unsigned long long>(vendors[i].vendorFaultCode), static_cast<unsigned long long>(vendors[i].vendorFaultData));
+            if (!blob.empty() && counts.vendorBinarySize) {   // NVIDIA: readable with Nsight Aftermath tools
+                if (std::FILE* f = std::fopen("gpu_fault_vendor.bin", "wb")) {
+                    std::fwrite(blob.data(), 1, static_cast<size_t>(counts.vendorBinarySize), f);
+                    std::fclose(f);
+                    NXLOG_E(kTag, "  vendor binary written to gpu_fault_vendor.bin (working directory)");
+                }
+            }
+        } else {
+            NXLOG_E(kTag, "vkGetDeviceFaultInfoEXT failed (%d)", static_cast<int>(r));
+        }
+    } else {
+        NXLOG_E(kTag, "no device fault report: VK_EXT_device_fault is %s", features_.device_fault ? "not loaded" : "not available or [gfx] device_fault is off");
+    }
+    if (features_.diagnostic_checkpoints && vkGetQueueCheckpointDataNV) {
+        uint32_t n = 0;
+        vkGetQueueCheckpointDataNV(queue_, &n, nullptr);
+        std::vector<VkCheckpointDataNV> cps(n, {VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV});
+        if (n) vkGetQueueCheckpointDataNV(queue_, &n, cps.data());
+        NXLOG_E(kTag, "checkpoints the GPU reached: %u", n);
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint64_t m = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(cps[i].pCheckpointMarker));
+            const std::string what = checkpoint_describer_ ? checkpoint_describer_(m) : std::string();
+            NXLOG_E(kTag, "  %s: checkpoint %llu %s", stage_name(cps[i].stage).c_str(), static_cast<unsigned long long>(m), what.c_str());
+        }
+    } else if (!features_.diagnostic_checkpoints) {
+        NXLOG_E(kTag, "no checkpoints: set [gfx] device_diagnostics = 1 (NVIDIA GPUs) to learn which draw the GPU was at");
+    }
+    log_flush();
+    return true;
 }
 
 // ---- images -----------------------------------------------------------------------------------------------------------

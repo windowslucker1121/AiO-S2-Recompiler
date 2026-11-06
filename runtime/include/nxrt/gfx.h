@@ -10,6 +10,7 @@
 #pragma once
 #include <volk.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -131,6 +132,9 @@ struct DeviceFeatures {
     bool present_id = false;              // VK_KHR_present_id (feature presentId)
     bool low_latency2 = false;            // VK_NV_low_latency2 (NVIDIA Reflex)
     bool anti_lag = false;                // VK_AMD_anti_lag (AMD Anti-Lag 2)
+    // Device-loss diagnostics: what the driver says after VK_ERROR_DEVICE_LOST (Device::report_device_lost).
+    bool device_fault = false, device_fault_vendor_binary = false;   // VK_EXT_device_fault ([gfx] device_fault, default on)
+    bool diagnostic_checkpoints = false;  // VK_NV_device_diagnostic_checkpoints ([gfx] device_diagnostics, default off: a marker per draw)
 };
 
 struct DeviceLimitsExt {
@@ -193,6 +197,14 @@ public:
 
     void set_name(VkObjectType type, uint64_t handle, const char* name);     // VK_EXT_debug_utils, no-op without it
 
+    // After VK_ERROR_DEVICE_LOST: logs what the driver knows (VK_EXT_device_fault: fault description, faulting addresses, vendor codes;
+    // VK_NV_device_diagnostic_checkpoints: the last checkpoint each pipeline stage reached, described by the checkpoint describer).
+    // Only the first call reports and returns true; later ones (every submission fails from then on) return false at once.
+    bool report_device_lost(const char* where);
+    bool device_lost() const { return lost_reported_.load(); }
+    // Turns a checkpoint marker (vkCmdSetCheckpointNV) back into text: set by the code that records the checkpoints.
+    void set_checkpoint_describer(std::function<std::string(uint64_t)> fn) { checkpoint_describer_ = std::move(fn); }
+
     // Live allocation counters of the allocator (for leak checks).
     struct MemoryStats { uint64_t allocations = 0, blocks = 0, bytes = 0; };
     MemoryStats memory_stats();
@@ -212,6 +224,8 @@ private:
     uint32_t queue_family_ = 0;
     uint32_t timestamp_valid_bits_ = 0;
     std::mutex queue_mutex_;
+    std::atomic<bool> lost_reported_{false};
+    std::function<std::string(uint64_t)> checkpoint_describer_;
     VmaAllocator vma_ = nullptr;
     VkPhysicalDeviceProperties props_ = {};
     DeviceFeatures features_;

@@ -2248,6 +2248,18 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (!S.render_enable) return false;
     ++g_draw_idx;
     if (S.stage[kFragment] && skip_fs_draw(S.stage[kFragment]->hash)) return false;
+    {   // [nvn] trace_fs_draws = PREFIX (NXRT_NVN_TRACE_FS_DRAWS): trace the draws with this fragment shader where they happen, in any frame, at
+        // most [nvn] trace_fs_draws_max (default 8): the bindings and uniform words of a draw that takes the GPU down in the frame it first appears in.
+        static const std::string trace_fs = nxrt::config_get_str("nvn", "trace_fs_draws", "");
+        static int64_t trace_fs_left = nxrt::config_get_int("nvn", "trace_fs_draws_max", 8);
+        static bool traced_here = false;
+        if (traced_here) { g_trace = false; traced_here = false; }
+        if (!trace_fs.empty() && !g_trace && trace_fs_left > 0 && S.stage[kFragment] && S.stage[kFragment]->hash.compare(0, trace_fs.size(), trace_fs) == 0) {
+            g_trace = traced_here = true;
+            --trace_fs_left;
+            NXLOG_I("nvn.trace", "---- draw %d of present %llu (trace_fs_draws) ----", g_draw_idx, static_cast<unsigned long long>(counters().presents.load()));
+        }
+    }
     // Tessellation: Vulkan runs it only with both shaders and a patch list. NVN also allows an evaluation shader alone (fixed levels from
     // SetInner/OuterTessellationLevels): those draws get a generated pass-through control shader (passthrough_tcs_for).
     if (S.stage[kTessCtl] || S.stage[kTessEval] || mode == NVN_DRAW_PRIMITIVE_PATCHES) {
@@ -2341,11 +2353,32 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             if (!ub.addr) continue;
             BufRef ur = resolve_buffer(ub.addr, std::min<uint64_t>(ub.size, ubo_bytes));
             std::string words;
-            if (ur.ok) {
-                const uint32_t* w = reinterpret_cast<const uint32_t*>(ub.addr);
-                for (uint32_t i = 0; i * 4 < ubo_bytes && i * 4 < ub.size; ++i) { char t[16]; std::snprintf(t, sizeof t, " %08x", w[i]); words += t; }
+            uint32_t first = 0;
+            const uint32_t nwords = ur.ok ? static_cast<uint32_t>(std::min<uint64_t>(ubo_bytes, ub.size) / 4) : 0;
+            const uint32_t* w = reinterpret_cast<const uint32_t*>(ub.addr);
+            for (uint32_t i = 0; i < nwords; ++i) {   // lines of 128 words (log lines end at 2047 characters): "+<first word>:" after the first
+                char t[16];
+                std::snprintf(t, sizeof t, " %08x", w[i]);
+                words += t;
+                if ((i + 1) % 128 == 0 && i + 1 < nwords) {
+                    TRACE("    %s ubo%u %llx/%llu +%u:%s", stg == kVertex ? "vs" : "fs", slot, static_cast<unsigned long long>(ub.addr), static_cast<unsigned long long>(ub.size), first, words.c_str());
+                    words.clear();
+                    first = i + 1;
+                }
             }
-            TRACE("    %s ubo%u %llx/%llu%s:%s", stg == kVertex ? "vs" : "fs", slot, static_cast<unsigned long long>(ub.addr), static_cast<unsigned long long>(ub.size), ur.ok ? "" : " (outside every pool)", words.c_str());
+            TRACE("    %s ubo%u %llx/%llu%s +%u:%s", stg == kVertex ? "vs" : "fs", slot, static_cast<unsigned long long>(ub.addr), static_cast<unsigned long long>(ub.size), ur.ok ? "" : " (outside every pool)", first, words.c_str());
+        }
+        for (int stg = kVertex; stg <= kFragment; ++stg)
+        for (uint32_t slot = 0; slot < 16; ++slot) {    // the storage buffers bound to the vertex and the fragment stage, and their first words
+            const GState::Bind& sb = S.ssbo[stg][slot];
+            if (!sb.addr) continue;
+            BufRef sr = resolve_buffer(sb.addr, std::min<uint64_t>(sb.size, 256));
+            std::string words;
+            if (sr.ok) {
+                const uint32_t* w = reinterpret_cast<const uint32_t*>(sb.addr);
+                for (uint32_t i = 0; i < 64 && i * 4 < sb.size; ++i) { char t[16]; std::snprintf(t, sizeof t, " %08x", w[i]); words += t; }
+            }
+            TRACE("    %s ssbo%u %llx/%llu%s:%s", stg == kVertex ? "vs" : "fs", slot, static_cast<unsigned long long>(sb.addr), static_cast<unsigned long long>(sb.size), sr.ok ? "" : " (outside every pool)", words.c_str());
         }
         TRACE("    viewport %u: %g %g %g %g depth %g..%g scissor %u: %d %d %d %d", S.nvp, S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0][0], S.dr[0][1], S.nsc,
               S.sc[0][0], S.sc[0][1], S.sc[0][2], S.sc[0][3]);
@@ -2491,6 +2524,12 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     g_dirty = g_mirror_stale ? (kVb | kDesc) : 0;     // a storage buffer of this draw made copied pages stale: the next draw binds again
     g_mirror_stale = false;
     *topo_out = topo;
+    if (checkpoints_on()) {   // [gfx] device_diagnostics: which draw the GPU was at when the device was lost
+        char t[128];
+        std::snprintf(t, sizeof t, "draw %d mode %d%s vs %s fs %s", g_draw_idx, mode, indexed ? " indexed" : "", vs->hash.c_str(),
+                      S.stage[kFragment] ? S.stage[kFragment]->hash.c_str() : "-");
+        checkpoint(*F, t);
+    }
     return true;
 }
 
@@ -2907,6 +2946,11 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     if (g_sh_copied) {
         memory_barrier(F->cb);     // the copies into the shadows before the dispatch reads them
         gstamp("shadow in");
+    }
+    if (checkpoints_on()) {
+        char t[128];
+        std::snprintf(t, sizeof t, "dispatch cs %s %ux%ux%u%s", cs->hash.c_str(), x, y, z, indirect ? " indirect" : "");
+        checkpoint(*F, t);
     }
     if (indirect) {
         vkCmdDispatchIndirect(F->cb, ind.buffer, ind.offset);
