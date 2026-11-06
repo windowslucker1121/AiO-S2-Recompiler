@@ -256,6 +256,15 @@ so states made right after an autosave are exact. Bug bundles: the player presse
 checkout the exe was built in; `load_state(bug=<id>)` starts from one. Every exe now logs `boot: built from commit <sha>` (gen/build_id.h,
 rewritten at each build only when the commit or the dirty state changes). `launch` refuses while another copy of `oot.exe` (another
 worktree's) runs and `kill` only ends processes of the same exe path (before, a CLI `kill`/`launch` ended every `oot.exe` on the machine).
+Seen on the real game (RTX 4080): posted keys reach the covered, unfocused window (Enter = A on the title, F9); **PrintWindow/BitBlt
+give black for the Vulkan swapchain**, so `screenshot` asks the runtime for its next presented frame (`<exe dir>\screenshot.<pid>`)
+and never falls back to the screen by itself. `load_state("first_scene")` took 57 s (A taken at 27 s, 13,049 draws at 51 s). After
+that the intro's timeline (German subtitles, voices) runs on over a black picture for minutes even though its video ended, and in
+eight minutes the game wrote no slot (only the 320-byte slot index `account.sav`); `+` showed no menu. So a state past a real save,
+and the `continue` route, are still unchecked: first get the scene to show (rendering, A8) and the game to save. Checked end to end
+through the MCP protocol: `load_state("first_scene")` -> `save_state("after_intro")` -> `capture_bug` -> `kill` -> `load_state("after_intro")`
+(29 s) -> `load_state(bug=...)` (24 s). Pitfall: a Git Bash `tail -f` on the run log (also one left behind by a stopped monitor) blocks
+the log rotation of the next `launch`.
 
 ## Machine setup (this checkout, Windows 11)
 

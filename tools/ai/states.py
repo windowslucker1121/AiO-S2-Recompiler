@@ -301,6 +301,9 @@ class StateTools:
         else:
             st = self._state(name)
         ai = self._game_ai().get('defaults') or {}
+        if others := self.others_running():
+            raise RuntimeError(f'another copy of the game runs ({others}): one at a time on this machine; wait for it')
+        self.kill()                                                 # a previous run of this exe may still have the save folder open
         save = self.run_dir / 'save'
         if save.exists():
             shutil.rmtree(save)                                     # this server's own copy from the previous load_state

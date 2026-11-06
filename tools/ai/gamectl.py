@@ -384,8 +384,15 @@ class Game(states.StateTools):
         else:
             log = rd / self.log_name
             args = ['--log', str(log)] + args
-        if log.exists():
-            os.replace(log, log.with_name(log.name + '.prev'))
+        for _ in range(100):                                    # a killed game's helpers can hold the old log for a few seconds
+            try:
+                if log.exists():
+                    os.replace(log, log.with_name(log.name + '.prev'))
+                break
+            except PermissionError:
+                time.sleep(0.2)
+        else:
+            raise RuntimeError(f'{log} is still open in another process (a game that has not ended yet?)')
         if headless:
             args.append('--headless')
         e = dict(os.environ, SDL_WINDOW_ACTIVATE_WHEN_SHOWN='0', NXRT_TEST_OUT=str(out), NXRT_TEST_FRAME_SOURCE='tick',

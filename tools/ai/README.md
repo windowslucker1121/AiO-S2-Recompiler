@@ -139,5 +139,9 @@ files): `runtime\build\release\nxrt_tests.exe bugcapture`.
   `<exe dir>/screenshot.<pid>`, answered by the runtime's bug-capture poller); bundles and states never keep a black or screen picture.
 - `load_state("first_scene")`: boot to the title movie 17 s, A taken on the second press at 27 s (the title movie's decoder finalized
   after 26 pictures), the first frame with 13,049 draws at 51 s; 57 s in all.
+- Through the MCP protocol: `load_state("first_scene")` 30 s with warm caches, `save_state("after_intro")`, `capture_bug` (answered by
+  the game), `kill`, `load_state("after_intro")` in a new process 29 s, `bugs`, `load_state(bug=...)` 24 s.
+- A Git Bash `tail -f` on the run's log keeps it from being renamed (`launch` keeps the previous log as `<log>.prev`): `launch` waits
+  20 s and then says the log is still open. A `tail` started by a stopped Claude Code monitor can survive it; end that `tail.exe`.
 - Still open: raw mouse look with `rel`, scripted runs on the real exe (`frame_source=tick`, `result.json`, `@peek`/`@poke`), and Ocarina
   of Time probes (`runtime/games/oot` has no `tt::GameProbes`, so the trace has only frame, hash and time).
