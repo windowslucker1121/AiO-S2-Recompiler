@@ -1856,8 +1856,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
             foreach (string m in i.Mods)
             {
                 if (m == "B" && bindless) continue;
-                if (m is not ("SCR" or "LZ" or "LL" or "LB" or "DC" or "AOFFI" or "NODEP" or "MS" or "NDV" or "EF" or "EL" or "LU" or "EU" or "NA")) throw Unsup($"modifier {m}");
+                if (m is not ("SCR" or "LZ" or "LL" or "LB" or "DC" or "AOFFI" or "NODEP" or "MS" or "NDV" or "EF" or "EL" or "LU" or "EU" or "NA" or "F16" or "RN" or "F16.RN")) throw Unsup($"modifier {m}");
             }
+            // .F16(.RN): the components come back as FP16, two per register: Rd = (c0, c1), Rd2 = (c2, c3), the first component in the low
+            // half, missing ones 0 (Ryujinx's TEXS.F16 rule). Seen in OoT's compute upscaler fea98fe7 ("TEX.SCR.F16.RN.LZ R19, R0, R13, R67,
+            // 0x0, 0x30, 2D, 0x7": R0 is read as a half2 and R19 only through R19.H0_H0; the luminance weight 0.2126 goes with R0.H0, red).
+            bool f16 = Has(i, "F16") || Has(i, "F16.RN");
             bool scr = Has(i, "SCR");
             (SamplerType type, bool array) = DimOf(dim);
             bool lz = Has(i, "LZ"), ll = Has(i, "LL"), bias = Has(i, "LB"), dc = Has(i, "DC"), aoffi = Has(i, "AOFFI"), ms = Has(i, "MS");
@@ -1937,14 +1941,24 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (ms) { sources.Add(p["ms"]); type |= SamplerType.Multisample; }
             if (Has(i, "NDV") && !fetch) { /* no derivatives across the quad: plain sample on the host */ }
 
+            IrOperand[] dests = f16 ? new IrOperand[BitOperations.PopCount((uint)mask)] : TexDests(rd, rd2, mask);
+            if (f16) for (int k = 0; k < dests.Length; k++) dests[k] = Local();
             if (bindlessHandle != null)
             {
                 sources.Insert(0, bindlessHandle);
-                ctx.TextureSample(type, flags | TextureFlags.Bindless, default, mask, TexDests(rd, rd2, mask), sources.ToArray());
-                return;
+                ctx.TextureSample(type, flags | TextureFlags.Bindless, default, mask, dests, sources.ToArray());
             }
-            SetBindingPair binding = ctx.ResourceManager.GetTextureOrImageBinding(Instruction.TextureSample, type, TextureFormat.Unknown, flags, CbufSlotOf(ctx, bank), handle);
-            ctx.TextureSample(type, flags, binding, mask, TexDests(rd, rd2, mask), sources.ToArray());
+            else
+            {
+                SetBindingPair binding = ctx.ResourceManager.GetTextureOrImageBinding(Instruction.TextureSample, type, TextureFormat.Unknown, flags, CbufSlotOf(ctx, bank), handle);
+                ctx.TextureSample(type, flags, binding, mask, dests, sources.ToArray());
+            }
+            if (f16)
+            {
+                IrOperand C(int k) => k < dests.Length ? dests[k] : ConstF(0);
+                if (rd.Reg < 255) ctx.Copy(Gpr(rd.Reg), ctx.PackHalf2x16(C(0), C(1)));
+                if (rd2.Reg < 255 && dests.Length > 2) ctx.Copy(Gpr(rd2.Reg), ctx.PackHalf2x16(C(2), C(3)));
+            }
         }
 
         static void EmitTxdAmpere(EmitterContext ctx, SassInst i)
@@ -2046,14 +2060,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             (Op rd2, Op rd, Op ra, Op rb, int bank, int handle, string dim, int mask) = TexOperands(i);
             if (rd.Reg >= 255 && rd2.Reg >= 255) return;
-            bool dc = Has(i, "DC"), aoffi = Has(i, "AOFFI"), scr = Has(i, "SCR");
+            bool dc = Has(i, "DC"), aoffi = Has(i, "AOFFI"), scr = Has(i, "SCR"), ptp = Has(i, "PTP");
             foreach (string m in i.Mods)
             {
-                if (m is not ("SCR" or "R" or "G" or "B" or "A" or "DC" or "AOFFI" or "NODEP" or "EF" or "EL" or "LU" or "EU" or "NA")) throw Unsup($"modifier {m}");
+                if (m is not ("SCR" or "R" or "G" or "B" or "A" or "DC" or "AOFFI" or "PTP" or "NODEP" or "EF" or "EL" or "LU" or "EU" or "NA")) throw Unsup($"modifier {m}");
             }
             int comp = Has(i, "G") ? 1 : Has(i, "B") ? 2 : Has(i, "A") ? 3 : 0;
             (SamplerType type, bool array) = DimOf(dim ?? "2D");
             if ((type & SamplerType.Mask) != SamplerType.Texture2D || array && (!scr || dc)) throw Unsup("gather shape");
+            // .PTP: one offset per gathered texel (textureGatherOffsets), as Maxwell TLD4.PTP (Ryujinx EmitTld4): two Rb registers with
+            // eight signed 6-bit fields in 8-bit lanes, x0 y0 x1 y1 | x2 y2 x3 y3. With .SCR the four parameters split as Ra = [x, y],
+            // Rb = [offsets 0-1, offsets 2-3] (OoT's compute block 54ecc4b4: "MOV R18, 0xfe00ff; MOV R19, 0xfc00fd; TLD4.SCR.R.PTP R20, R26,
+            // R6, R18, 0x0, 0x7c, 2D": taps (-1,0) (-2,0) (-3,0) (-4,0)). Only that shape: no depth compare, no array, no AOFFI with it.
+            if (ptp && (dc || array || aoffi)) throw Unsup("TLD4.PTP with DC, array or AOFFI");
             IrOperand Ra(int k) => ra.Reg >= 255 ? Const(0) : ctx.Copy(Gpr(ra.Reg + k));
             IrOperand Rb(int k) => rb == null || rb.Reg >= 255 ? Const(0) : ctx.Copy(Gpr(rb.Reg + k));
             List<IrOperand> sources = new();
@@ -2068,7 +2087,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 sources.Add(ctx.BitwiseAnd(arr, Const(0xffff)));
                 type |= SamplerType.Array;
             }
-            else if (scr && !dc && !aoffi) { sources.Add(Ra(0)); sources.Add(Rb(rbk++)); }
+            else if (scr && !dc && !aoffi && !ptp) { sources.Add(Ra(0)); sources.Add(Rb(rbk++)); }
             else { sources.Add(Ra(0)); sources.Add(Ra(1)); }
             int dcIndex = sources.Count;
             IrOperand dcv = null;
@@ -2077,6 +2096,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 IrOperand packed = Rb(rbk++);
                 for (int c = 0; c < 2; c++) sources.Add(ctx.BitfieldExtractS32(packed, Const(c * 8), Const(6)));
                 flags |= TextureFlags.Offset;
+            }
+            if (ptp)
+            {
+                IrOperand[] packed = [Rb(rbk++), Rb(rbk++)];
+                for (int k = 0; k < 8; k++) sources.Add(ctx.BitfieldExtractS32(packed[k >> 2], Const((k & 3) * 8), Const(6)));
+                flags |= TextureFlags.Offsets;
             }
             if (dc) { dcv = Rb(rbk++); sources.Insert(dcIndex, dcv); type |= SamplerType.Shadow; }
             else sources.Add(Const(comp));

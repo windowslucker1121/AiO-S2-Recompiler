@@ -184,6 +184,28 @@ void dev_default(const char* section, const char* key, const char* path) {
 }
 #endif
 
+// game::Info::config_defaults: "[section]" lines and "key = value" lines (# or ; starts a comment). A key the ini or an NXRT_* variable sets keeps
+// that value.
+void apply_game_config_defaults(const char* text) {
+    std::string section;
+    for (const char* p = text; p && *p;) {
+        const char* e = std::strchr(p, '\n');
+        std::string line(p, e ? static_cast<size_t>(e - p) : std::strlen(p));
+        p = e ? e + 1 : nullptr;
+        auto trim = [](std::string s) {
+            const size_t a = s.find_first_not_of(" \t\r"), b = s.find_last_not_of(" \t\r");
+            return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+        };
+        line = trim(line);
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+        if (line.front() == '[' && line.back() == ']') { section = trim(line.substr(1, line.size() - 2)); continue; }
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos || section.empty()) continue;
+        const std::string key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
+        if (!key.empty() && !nxrt::config_has(section.c_str(), key.c_str())) nxrt::config_set(section.c_str(), key.c_str(), value.c_str());
+    }
+}
+
 // [boot] press = "A@12,A@20:500,PLUS@30,A#1500": scripted controller presses on player 1 (button@seconds-after-start[:hold ms, default 300]).
 // "A#1500:300" is keyed to the NVN back end's presented-frame count instead of seconds: a loaded machine plays the same sequence.
 struct ScriptedPress { uint64_t bit; double at; int hold_ms; bool by_frame = false; };
@@ -412,6 +434,7 @@ int main(int argc, char** argv) {
     if (!exefs_given) exefs = nxrt::config_get_str("fs", "exefs", installed ? "exefs" : exefs.c_str());
     nxrt::config_set("fs", "exefs", exefs.c_str());     // the one in use, for the About page
     nxrt::config_set("process", "program_id", "0x" GAME_TITLE_ID);     // GetInfo(ProgramId); an ini value or the environment still wins
+    apply_game_config_defaults(nxrt::game::info().config_defaults);   // the title's own setting defaults (runtime/games/<id>)
 #ifdef GAME_DEV_ROOT
     // Development build: the shader data this checkout prepared (DEVELOPMENT_SETUP.md section 7), unless the ini or NXRT_NVN_* name other.
     dev_default("nvn", "shader_cache", GAME_DEV_ROOT "/work/shaders/" GAME_ID "/spirv");
