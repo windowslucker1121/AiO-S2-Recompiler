@@ -1732,21 +1732,54 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 Dst(ctx, o[0], r);
                 return;
             }
-            if (Has(i, "CAS") || Has(i, "64")) throw Unsup();
-            AtomSize size = Has(i, "S32") ? AtomSize.S32 : AtomSize.U32;
+            if (Has(i, "CAS")) throw Unsup();
+            string type = AtomType(i);
+            if (type == "F32") { Dst(ctx, o[0], EmitFloatAtomicAdd(ctx, i, StorageKind.SharedMemory, Const(ctx.ResourceManager.SharedMemoryId), offset, Src(ctx, o[2]))); return; }
+            if (type != null && type != "S32") throw Unsup($"shared atomic of type {type}");
+            AtomSize size = type == "S32" ? AtomSize.S32 : AtomSize.U32;
             IrOperand res = EmitAtomicOp(ctx, StorageKind.SharedMemory, AtomOpOf(i), size, Const(ctx.ResourceManager.SharedMemoryId), offset, Src(ctx, o[2]));
             Dst(ctx, o[0], res);
+        }
+
+        /// The data type of an atomic as the decoder names it (AtomTypeG / AtomTypeS: "S32", "64", "F32.FTZ.RN", "F16x2.RN", "S64", "F64.RN"),
+        /// up to the first dot; null for the default unsigned 32-bit type. Matching the whole modifier ("F32") missed the decorated forms, so
+        /// RED.E.ADD.F32.FTZ.RN was translated as an integer add of the float bits (OoT's sky lighting compute 16a42858: garbage sums such as
+        /// 1.8e29 in the spherical harmonics every material reads, NaN in the scene, the white frames of A12).
+        static string AtomType(SassInst i)
+        {
+            foreach (string m in i.Mods)
+                foreach (string t in new[] { "S32", "64", "F32", "F16x2", "S64", "F64" })
+                    if (m == t || m.StartsWith(t + ".", StringComparison.Ordinal)) return t;
+            return null;
+        }
+
+        /// A 32-bit float atomic add (RED/ATOM/ATOMS .ADD.F32.FTZ.RN) as a compare-and-swap loop on the word: SPIR-V's float atomics need an
+        /// extension the IR has no instruction for. Returns the value before the add (ATOM's Rd).
+        static IrOperand EmitFloatAtomicAdd(EmitterContext ctx, SassInst i, StorageKind kind, IrOperand e0, IrOperand e1, IrOperand value)
+        {
+            if (AtomOpOf(i) != AtomOp.Add) throw Unsup("float atomic other than add");
+            // The word is loaded again in every round: IR locals are single-assignment values, so a value carried around the back edge
+            // (the CAS result as the next round's expected value) stays the first round's and the loop never ends (device lost).
+            IrOperand loop = Label();
+            ctx.MarkLabel(loop);
+            IrOperand before = ctx.Load(kind, e0, e1);
+            IrOperand sum = ctx.FPAdd(before, value);
+            IrOperand seen = ctx.AtomicCompareAndSwap(kind, e0, e1, before, sum);
+            ctx.BranchIfTrue(loop, ctx.ICompareNotEqual(seen, before));
+            return before;
         }
 
         static void EmitAtomgAmpere(EmitterContext ctx, SassInst i)
         {
             // ATOMG.E.op[.size].STRONG.GPU Pd, Rd, [addr], Rb
-            if (Has(i, "CAS") || Has(i, "64") || Has(i, "F32") || Has(i, "F16x2")) throw Unsup();
+            string type = AtomType(i);
+            if (Has(i, "CAS") || (type != null && type != "S32" && type != "F32")) throw Unsup($"global atomic of type {type}");
             IReadOnlyList<Op> o = i.Operands;
             int k = IsPredKind(o[0]) ? 1 : 0;
             (IrOperand lo, IrOperand hi) = GlobalAddress(ctx, i, o[k + 1]);
-            AtomSize size = Has(i, "S32") ? AtomSize.S32 : AtomSize.U32;
-            IrOperand res = EmitAtomicOp(ctx, StorageKind.GlobalMemory, AtomOpOf(i), size, lo, hi, Src(ctx, o[k + 2]));
+            AtomSize size = type == "S32" ? AtomSize.S32 : AtomSize.U32;
+            IrOperand res = type == "F32" ? EmitFloatAtomicAdd(ctx, i, StorageKind.GlobalMemory, lo, hi, Src(ctx, o[k + 2]))
+                                          : EmitAtomicOp(ctx, StorageKind.GlobalMemory, AtomOpOf(i), size, lo, hi, Src(ctx, o[k + 2]));
             Dst(ctx, o[k], res);
             if (k == 1) Dst(ctx, o[0], Const(IrConsts.True));
         }
@@ -1754,10 +1787,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
         static void EmitRedAmpere(EmitterContext ctx, SassInst i)
         {
             // RED.E.op[.size].STRONG.GPU [addr], Rb: a global atomic whose result is not returned
-            if (Has(i, "CAS") || Has(i, "64") || Has(i, "F32") || Has(i, "F16x2")) throw Unsup();
+            string type = AtomType(i);
+            if (Has(i, "CAS") || (type != null && type != "S32" && type != "F32")) throw Unsup($"global reduction of type {type}");
             IReadOnlyList<Op> o = i.Operands;
             (IrOperand lo, IrOperand hi) = GlobalAddress(ctx, i, o[0]);
-            AtomSize size = Has(i, "S32") ? AtomSize.S32 : AtomSize.U32;
+            if (type == "F32") { EmitFloatAtomicAdd(ctx, i, StorageKind.GlobalMemory, lo, hi, Src(ctx, o[1])); return; }
+            AtomSize size = type == "S32" ? AtomSize.S32 : AtomSize.U32;
             EmitAtomicOp(ctx, StorageKind.GlobalMemory, AtomOpOf(i), size, lo, hi, Src(ctx, o[1]));
         }
 
@@ -2195,7 +2230,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             };
             SuatomOp op = Has(i, "ADD") ? SuatomOp.Add : Has(i, "MIN") ? SuatomOp.Min : Has(i, "MAX") ? SuatomOp.Max : Has(i, "INC") ? SuatomOp.Inc
                 : Has(i, "DEC") ? SuatomOp.Dec : Has(i, "AND") ? SuatomOp.And : Has(i, "OR") ? SuatomOp.Or : Has(i, "XOR") ? SuatomOp.Xor : throw Unsup("op");
-            SuatomSize size = Has(i, "S32") ? SuatomSize.S32 : Has(i, "U64") ? SuatomSize.U64 : Has(i, "F32") ? SuatomSize.F32FtzRn : Has(i, "F16x2") ? SuatomSize.F16x2FtzRn
+            SuatomSize size = Has(i, "S32") ? SuatomSize.S32 : Has(i, "U64") ? SuatomSize.U64 : Has(i, "F32.FTZ.RN") ? SuatomSize.F32FtzRn : Has(i, "F16x2.RN") ? SuatomSize.F16x2FtzRn
                 : Has(i, "S64") ? SuatomSize.S64 : Has(i, "SD32") ? SuatomSize.Sd32 : Has(i, "SD64") ? SuatomSize.Sd64 : SuatomSize.U32;
             int ra = o[0].Reg;
             if (ra >= 255 || o[0].IndexReg >= 0 || o[0].Offset != 0) throw Unsup("address");
