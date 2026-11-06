@@ -1489,6 +1489,39 @@ bool tsr_jitter(uint32_t* words, size_t n_words) {
     return extras::temporal_jitter_block(words, n_words, e.width, e.height, g_tsr_frame);
 }
 
+// c[0] of an NVN2 compute program, as the driver lays it out per dispatch (apply_nvn2_compute_table): a 0x10-byte header (zero: no shader
+// reads it), the push constant area (ShaderControl::c0_push bytes of SmallState::push_cs), the uniform block and storage buffer descriptors
+// {address, size} of the bound compute slots, then their texture and image handles. The shader reaches the descriptors and handles through
+// its bindings (the translator maps them); the copy keeps any plain read of those words right. Only programs with push constants need it:
+// the others read nothing from c[0] but descriptor bases and keep the shared driver-constant buffer. False: not such a program, or no room.
+constexpr VkDeviceSize kComputeC0Bytes = 0x1000;
+bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n) {
+    if (!c.nvn2 || c.stage != 5 || !c.c0_push || c.c0_table > n) return false;
+    std::memset(p, 0, n);
+    std::memcpy(p + 0x10, S.small.push_cs, std::min<uint32_t>(c.c0_push, kPushAreaBytes));
+    size_t off = 0x10 + c.c0_push;
+    auto put64 = [&](uint64_t v) { std::memcpy(p + off, &v, 8); };
+    auto desc = [&](const GState::Bind* b) {
+        put64(b ? b->addr : 0);
+        const uint32_t size = b ? static_cast<uint32_t>(std::min<uint64_t>(b->size, 0xffffffffu)) : 0;
+        std::memcpy(p + off + 8, &size, 4);
+        off += 0x10;
+    };
+    for (int i = 0; i < c.c0_ubos; ++i) desc(i < 16 ? &S.ubo[kCompute][i] : nullptr);
+    for (int i = 0; i < c.c0_ssbos; ++i) desc(i < 16 ? &S.ssbo[kCompute][i] : nullptr);
+    for (int i = 0; i < c.c0_textures; ++i, off += 8) put64(i < 64 ? S.tex[kCompute][i] : 0);
+    for (int i = 0; i < c.c0_images; ++i, off += 8) put64(i < 16 ? S.img[kCompute][i] : 0);
+    return true;
+}
+bool compute_c0(const ShaderInfo& s, VkDescriptorBufferInfo& bi) {
+    if (!s.control.nvn2 || s.control.stage != 5 || !s.control.c0_push) return false;
+    const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
+    UploadAlloc u = F->upload(kComputeC0Bytes, std::max<VkDeviceSize>(align, 256));
+    if (!u || !fill_compute_c0(s.control, u.ptr, static_cast<size_t>(kComputeC0Bytes))) return false;
+    bi = {u.buffer, u.offset, kComputeC0Bytes};
+    return true;
+}
+
 VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
     std::vector<VkWriteDescriptorSet> writes;
     std::vector<VkDescriptorBufferInfo> binfo;
@@ -1516,6 +1549,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                                         : VkDescriptorBufferInfo{g_support.buffer, g_support.offset, sizeof(SupportBuffer)};
                     break;
                 case NvnSource::DriverConstants: {
+                    if (d.nvn_stage == kCompute && compute_c0(*d.shader, bi)) break;   // a compute table with push constants: built for this dispatch
                     VkDeviceSize range = 0;
                     VkBuffer buf = driver_constants_buffer(&range);
                     if (buf) bi = {buf, 0, range};
@@ -2913,6 +2947,12 @@ const UpscalerOverride& upscaler_override() {
     static const UpscalerOverride u = [] {
         UpscalerOverride o;
         o.replace = nxrt::config_get_str("nvn", "upscaler_replace", "");
+        // "off" (or none / 0) turns a game module's default off: an empty environment variable does not exist on Windows
+        if (o.replace == "off" || o.replace == "none" || o.replace == "0") {
+            NXLOG_I(kTag, "upscaler override: off ([nvn] upscaler_replace = %s)", o.replace.c_str());
+            o.replace.clear();
+            return o;
+        }
         std::string list = nxrt::config_get_str("nvn", "upscaler_skip", "");
         for (size_t at = 0; at < list.size();) {
             size_t end = list.find_first_of(", ", at);
@@ -3012,6 +3052,13 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
             if (S.ssbo[kCompute][k].addr) TRACE("    cs bound ssbo%d %llx/%llu", k, static_cast<unsigned long long>(S.ssbo[kCompute][k].addr), static_cast<unsigned long long>(S.ssbo[kCompute][k].size));
         for (int k = 0; k < 16; ++k)
             if (S.ubo[kCompute][k].addr) TRACE("    cs bound ubo%d %llx/%llu", k, static_cast<unsigned long long>(S.ubo[kCompute][k].addr), static_cast<unsigned long long>(S.ubo[kCompute][k].size));
+        if (cs && cs->control.nvn2) {   // the program's c[0] table (apply_nvn2_compute_table) and the compute push area it reads
+            const ShaderControl& c = cs->control;
+            std::string words;
+            for (uint32_t i = 0; i * 4 < c.c0_push; ++i) { char t[12]; uint32_t w; std::memcpy(&w, S.small.push_cs + 4 * i, 4); std::snprintf(t, sizeof t, " %08x", w); words += t; }
+            TRACE("    cs c0 table 0x%x: push 0x%x (%u words read, last compute push stage %u) ubos %u ssbos %u textures %u images %u%s%s", c.c0_table, c.c0_push, c.c0_push_words,
+                  S.small.push_cs_stage, c.c0_ubos, c.c0_ssbos, c.c0_textures, c.c0_images, words.empty() ? "" : "; push words:", words.c_str());
+        }
     }
     if (upscaler_dispatch(cs ? cs->hash : g_cs_missing)) return;   // [nvn] upscaler_replace: the game's upscaler, replaced
     if (g_cs_pending) { note_pending_skip(true); return; }
@@ -3022,16 +3069,17 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     const ProgLayout* pl = prog_layout(stages);
     if (!pl) return;
     // A storage buffer whose c[0] descriptor maps to no NVN binding would be the shared 64 KiB dummy, which the shader may write (it also
-    // holds the default vertex attributes) or index out of range: OoT's compute shaders keep theirs at c[0] offsets the table of
-    // set_c0_offset does not know (0xC0, 0x100, 0x150 ...), and running them hung the GPU (VK_ERROR_DEVICE_LOST after the first scene).
-    // [nvn] skip_unmapped_dispatch (default on) leaves such dispatches out.
+    // holds the default vertex attributes) or index out of range. NVN2 compute programs find theirs through the program's c[0] table
+    // (apply_nvn2_compute_table: header, push constants, uniform block and storage buffer descriptors); a descriptor outside it is a layout
+    // not understood yet. [nvn] skip_unmapped_dispatch (default on) leaves such dispatches out as a fallback.
     static const bool skip_unmapped = config_get_bool("nvn", "skip_unmapped_dispatch", true);
     if (skip_unmapped)
         for (const BindingDesc& d : pl->bindings)
             if (d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && d.shader->refl.bindings[d.index].nvn.source == NvnSource::Unknown) {
                 if (first_time_key("unmapped-dispatch " + cs->hash))
-                    NXLOG_W(kTag, "compute shader %s: storage buffer %s (c0 offset 0x%x) maps to no NVN binding: its dispatches are left out", cs->hash.c_str(),
-                            d.shader->refl.bindings[d.index].name.c_str(), d.shader->refl.bindings[d.index].nvn.c0_offset);
+                    NXLOG_W(kTag, "compute shader %s: storage buffer %s (c0 offset 0x%x) maps to no NVN binding (c[0] table 0x%x: push 0x%x, %u ubos, %u ssbos): "
+                            "its dispatches are left out", cs->hash.c_str(), d.shader->refl.bindings[d.index].name.c_str(), d.shader->refl.bindings[d.index].nvn.c0_offset,
+                            cs->control.c0_table, cs->control.c0_push, cs->control.c0_ubos, cs->control.c0_ssbos);
                 note_unsupported("dispatch with an unmapped storage buffer");
                 return;
             }
@@ -3826,6 +3874,14 @@ void run_list(const CmdList& list, int depth) {
             case Op::Small: {
                 const auto& p = r.payload<P_Small>();
                 const uint32_t blob_bytes = r.size() - static_cast<uint32_t>(sizeof(RecHeader)) - static_cast<uint32_t>((sizeof(P_Small) + 7u) & ~7u);
+                if (g_trace && (p.kind == static_cast<uint32_t>(SmallKind::PushConstants) || p.kind == static_cast<uint32_t>(SmallKind::PushConstantsDeferred))) {
+                    const bool deferred = p.kind == static_cast<uint32_t>(SmallKind::PushConstantsDeferred);
+                    const uint8_t* src = deferred ? (resolve_buffer(p.addr, 4).ok ? host_ptr(p.addr) : nullptr) : r.blob<P_Small>();
+                    std::string words;
+                    for (uint32_t i = 0; src && i * 4 < p.c && i < 64; ++i) { char t[12]; uint32_t w; std::memcpy(&w, src + 4 * i, 4); std::snprintf(t, sizeof t, " %08x", w); words += t; }
+                    TRACE("push %s%s stage %u offset 0x%x size 0x%x:%s", (p.a & kPushCompute) ? "compute" : "graphics", deferred ? " deferred" : "", p.a & ~kPushCompute, p.b, p.c,
+                          words.c_str());
+                }
                 small_apply(S.small, p.kind, p.a, p.b, p.c, p.addr, r.blob<P_Small>(), blob_bytes);
                 g_dirty |= kDynRaster | kDynVp;
                 break;

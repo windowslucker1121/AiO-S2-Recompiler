@@ -1785,7 +1785,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         /// allowHandles: also the forms without a bound handle, bank and handle -1 then: .B (the handle is the first register of Rb) and
         /// the handle in a uniform register (0xf60, "URn, 0x0": ur = URn).
-        static (Op rd2, Op rd, Op ra, Op rb, int bank, int handle, string dim, int mask) TexOperands(SassInst i, out Op pred, bool allowPred, out Op ur, bool allowHandles)
+        /// gatherComponent (TLD4): .B names the blue component when a bound handle follows ("TLD4.SCR.B.F16.RN.PTP R33, R32, R10, R0, 0x0,
+        /// 0x30, 2D" in OoT's compute upscaler f90d726d, next to .R and .G gathers of the same texture), not the bindless form.
+        static (Op rd2, Op rd, Op ra, Op rb, int bank, int handle, string dim, int mask) TexOperands(SassInst i, out Op pred, bool allowPred, out Op ur, bool allowHandles,
+                                                                                                      bool gatherComponent = false)
         {
             IReadOnlyList<Op> o = i.Operands;
             int k = 0;
@@ -1806,13 +1809,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             List<Op> imms = rest.Where(x => x.Kind == OperandKind.Imm).ToList();
             string dim = rest.FirstOrDefault(x => x.Kind == OperandKind.Other)?.Text;
             ur = rest.FirstOrDefault(x => x.Kind == OperandKind.UReg);
-            if ((ur != null || Has(i, "B")) && !allowHandles) throw Unsup("bindless or unknown handle form");
+            bool bindlessB = Has(i, "B") && !(gatherComponent && ur == null && imms.Count >= 2);
+            if ((ur != null || bindlessB) && !allowHandles) throw Unsup("bindless or unknown handle form");
             if (ur != null)
             {
                 if (imms.Count < 1 || imms[0].ImmBits != 0) throw Unsup("uniform handle with an immediate");
                 return (regs[0], regs[1], regs[2], regs.Count > 3 ? regs[3] : null, -1, -1, dim, imms.Count > 1 ? (int)imms[1].ImmBits & 0xf : 0xf);
             }
-            if (Has(i, "B"))
+            if (bindlessB)
                 return (regs[0], regs[1], regs[2], regs.Count > 3 ? regs[3] : null, -1, -1, dim, imms.Count > 0 ? (int)imms[0].ImmBits & 0xf : 0xf);
             if (imms.Count < 2) throw Unsup("bindless or unknown handle form");
             int mask = imms.Count > 2 ? (int)imms[2].ImmBits & 0xf : 0xf;
@@ -2058,13 +2062,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         static void EmitTld4Ampere(EmitterContext ctx, SassInst i)
         {
-            (Op rd2, Op rd, Op ra, Op rb, int bank, int handle, string dim, int mask) = TexOperands(i);
+            (Op rd2, Op rd, Op ra, Op rb, int bank, int handle, string dim, int mask) = TexOperands(i, out _, false, out _, false, gatherComponent: true);
             if (rd.Reg >= 255 && rd2.Reg >= 255) return;
             bool dc = Has(i, "DC"), aoffi = Has(i, "AOFFI"), scr = Has(i, "SCR"), ptp = Has(i, "PTP");
             foreach (string m in i.Mods)
             {
-                if (m is not ("SCR" or "R" or "G" or "B" or "A" or "DC" or "AOFFI" or "PTP" or "NODEP" or "EF" or "EL" or "LU" or "EU" or "NA")) throw Unsup($"modifier {m}");
+                if (m is not ("SCR" or "R" or "G" or "B" or "A" or "DC" or "AOFFI" or "PTP" or "NODEP" or "EF" or "EL" or "LU" or "EU" or "NA" or "F16" or "RN" or "F16.RN"))
+                    throw Unsup($"modifier {m}");
             }
+            // .F16(.RN): the four gathered texels come back as FP16 pairs, as TEX.F16: Rd = (t0, t1), Rd2 = (t2, t3) (f90d726d: "TLD4.SCR.R.F16.RN.PTP
+            // R13, R12, R10, R0, 0x0, 0x30, 2D", the R, G and B gathers of one position into three register pairs).
+            bool f16 = Has(i, "F16") || Has(i, "F16.RN");
             int comp = Has(i, "G") ? 1 : Has(i, "B") ? 2 : Has(i, "A") ? 3 : 0;
             (SamplerType type, bool array) = DimOf(dim ?? "2D");
             if ((type & SamplerType.Mask) != SamplerType.Texture2D || array && (!scr || dc)) throw Unsup("gather shape");
@@ -2106,7 +2114,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (dc) { dcv = Rb(rbk++); sources.Insert(dcIndex, dcv); type |= SamplerType.Shadow; }
             else sources.Add(Const(comp));
             SetBindingPair binding = ctx.ResourceManager.GetTextureOrImageBinding(Instruction.TextureSample, type, TextureFormat.Unknown, flags, CbufSlotOf(ctx, bank), handle);
-            ctx.TextureSample(type, flags, binding, mask, TexDests(rd, rd2, mask), sources.ToArray());
+            if (!f16)
+            {
+                ctx.TextureSample(type, flags, binding, mask, TexDests(rd, rd2, mask), sources.ToArray());
+                return;
+            }
+            IrOperand[] dests = new IrOperand[BitOperations.PopCount((uint)mask)];
+            for (int k = 0; k < dests.Length; k++) dests[k] = Local();
+            ctx.TextureSample(type, flags, binding, mask, dests, sources.ToArray());
+            IrOperand C(int k) => k < dests.Length ? dests[k] : ConstF(0);
+            if (rd.Reg < 255) ctx.Copy(Gpr(rd.Reg), ctx.PackHalf2x16(C(0), C(1)));
+            if (rd2.Reg < 255 && dests.Length > 2) ctx.Copy(Gpr(rd2.Reg), ctx.PackHalf2x16(C(2), C(3)));
         }
 
         static void EmitTxqAmpere(EmitterContext ctx, SassInst i)

@@ -59,14 +59,17 @@ void log_once(std::atomic<bool>& flag, const char* msg) {
 // bytes does nothing; the graphics method keeps the stage in 3 bits (a2 & 7) and the offset as a byte (a3 is `unsigned __int8`), the compute one
 // puts stage << 6 words + offset >> 2 into a register address. The Deferred forms (0x5F8740 / 0x5F8E10) record the same fields with the data's
 // GPU address instead of the data (the queue reads it at submit), so the replay reads it then.
-// The hardware sends the words to a constant area per stage that the shaders read; no translated shader reads one yet (the translator maps
-// c[0..3+n] only), so the replay keeps the 256-byte area per stage (SmallState::push) and nothing consumes it on the GPU. See report.
+// The hardware sends the words to a constant area per stage that the shaders read. Compute programs that push constants read them from
+// their c[0] table, after its 0x10-byte header (ShaderControl::c0_push; the replay builds that c[0] per dispatch from SmallState::push_cs).
+// Graphics push areas are kept per stage (SmallState::push) but no translated graphics shader reads one yet. Compute records carry
+// kPushCompute in the stage word.
 void push_inline(NVNcommandBuffer* c, uint32_t stage, int offset, int size, const void* data) {
     if (!data || size < 4) return;
     const uint32_t n = std::min<uint32_t>(static_cast<uint32_t>(size), kPushAreaBytes) & ~3u;
     emit_small(c, SmallKind::PushConstants, stage, static_cast<uint32_t>(offset), n, 0, data, n);
-    static std::atomic<bool> seen{false};
-    log_once(seen, "NVN2 push constants recorded: kept per stage in the replay state, no translated shader reads them yet");
+    static std::atomic<bool> seen_gfx{false}, seen_cs{false};
+    if (stage & kPushCompute) log_once(seen_cs, "NVN2 compute push constants recorded: compute programs read them from their c[0] table");
+    else log_once(seen_gfx, "NVN2 graphics push constants recorded: kept per stage in the replay state, no translated graphics shader reads them yet");
 }
 void push_deferred(NVNcommandBuffer* c, uint32_t stage, int offset, int size, uint64_t address) {
     if (!address || size < 4) return;
@@ -79,10 +82,10 @@ void nvnCommandBufferPushGraphicsConstantsDeferred(NVNcommandBuffer* c, int stag
     push_deferred(c, static_cast<uint32_t>(stage) & 7u, offset, size, address);
 }
 void nvnCommandBufferPushComputeConstants(NVNcommandBuffer* c, int stage, int offset, int size, const void* data) {
-    push_inline(c, static_cast<uint32_t>(stage), offset, size, data);
+    push_inline(c, (static_cast<uint32_t>(stage) & 0xFFu) | kPushCompute, offset, size, data);
 }
 void nvnCommandBufferPushComputeConstantsDeferred(NVNcommandBuffer* c, int stage, int offset, int size, NVNbufferAddress address) {
-    push_deferred(c, static_cast<uint32_t>(stage), offset, size, address);
+    push_deferred(c, (static_cast<uint32_t>(stage) & 0xFFu) | kPushCompute, offset, size, address);
 }
 
 // ---- variable rate shading ----------------------------------------------------------------------------------------------------------

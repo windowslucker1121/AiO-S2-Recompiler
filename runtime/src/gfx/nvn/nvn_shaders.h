@@ -67,6 +67,11 @@ struct ShaderControl {
     // NVN2 compute only: the slot counts of the program's c[0] resource table (bytes +0xb1 uniform blocks, +0xb2 storage
     // buffers, +0xb3 textures, +0xb6 images). See apply_nvn2_compute_table.
     uint8_t c0_ubos = 0, c0_ssbos = 0, c0_textures = 0, c0_images = 0;
+    // The table's size in bytes (u16 +0xba) and the push constant area it holds after the 0x10-byte header: table size minus
+    // header and slots, 0 for programs without push constants (all of the bfsha/vsetb corpus; OoT's post-process chain built into
+    // main has 0x80, the NDVE network 0x40). Byte +0xa9 is the number of push words the program reads.
+    uint16_t c0_table = 0, c0_push = 0;
+    uint8_t c0_push_words = 0;
 };
 
 ShaderControl read_control(const uint8_t* control);
