@@ -16,7 +16,8 @@ without artifacts**; (2) **basic gamepad** (XInput / SDL gamepad drives the game
 (`[gfx] log_fps = 1`, hitch log, `[diag] soak_csv`), reach **30 fps in the main menu**, then in game **30 fps**.
 Standing instructions: keep going until blocked, then report; install tools only into git-ignored repo folders from official
 releases with checksum checks; never change system or security settings (give the user the command); when the permission check
-blocks fetching an external repository, give the user the exact PowerShell commands; one build or one `oot.exe` at a time; commit at milestones.
+blocks fetching an external repository, give the user the exact PowerShell commands; one build at a time; a second `oot.exe` only as a
+named instance and only by the rules of "Several runs at once" below; commit at milestones.
 
 Done: NUP extraction, ZBIC -> plain NSO, manifest, lift of all four modules (0 untranslated instructions), and all four module
 libraries compile with clang-cl (`work\build\oot\oot_{main,sdk,subsdk0,rtld}.lib`, main 427 MB). First build 25 min cold on 18
@@ -91,7 +92,7 @@ translation 2 min 49 s, shader preparation ~80 programs/s (was 34).
 ## Boot progress (`oot.exe --game game\oot\updates\131072 --log work\run\bootN\oot.log --max-seconds 60`)
 
 Each fix below moved the boot further; all are in the branch. Crash reports land next to the exe (`game-build\build\release\oot_crash.txt`,
-`oot_freeze.txt` from the watchdog after 10 s without a presented frame, `oot_fatal.txt`);
+`oot_freeze.txt` from the watchdog after 10 s without a presented frame, `oot_fatal.txt`; a named instance writes them into its own folder);
 `tools\.venv\Scripts\python tools\ai\symbolize.py <crash.txt | addr...>` names guest frames from the modules' exported symbols (main exports
 little: trust `main+off`, not the name next to it; sdk exports ~28,700 symbols, so sdk frames are named well). Logs of earlier boots:
 `work\run\boot1` ... `bootN`. Use absolute paths for `--game` and `--log`.
@@ -217,7 +218,8 @@ every storage buffer of a dispatch to device-local memory and back (40 GB in 10 
   `settings {"diag.watchdog_seconds": -1}`), then look the thunk address up in a debug log (`nvnDeviceGetProcAddress("...") -> 0x74...`).
 - Trace a frame range: `NXRT_NVN_TRACE_FRAME=1560-1700` (ranges now work; slow: every traced frame writes its targets as PNG into the
   game folder); `NXRT_NVN_TRACE_TEX_EVENTS=2` logs init/upload/render-target events of every sparse texture.
-- Thread dumps of a running game: create the file `game-build\build\release\dump_threads` (the watchdog writes all stacks to the log).
+- Thread dumps of a running game: create the file `game-build\build\release\dump_threads` (the watchdog writes all stacks to the log; a
+  named instance looks in its instance folder; `dump_threads.<pid>` reaches one process only).
 
 - Name an import of main: lifted stub `void f_<plt>(Ctx*) { host_import(c, NX_IMPORT_ID(0, N)); }` -> N is the index into main's
   `img.symbols()` (`nxrecomp.program.open_image`); demangle with `tools\llvm\bin\llvm-cxxfilt.exe` (absolute path).
@@ -243,6 +245,35 @@ works when covered), `send_input` (posted messages in the background, or SendInp
 `tools\.venv\Scripts\python tools\ai\tests\test_gamectl.py`. Names come from `game.toml` (`NXRT_AI_GAME`, default `oot`).
 Verified only against a stand-in window: whether PrintWindow sees the Vulkan swapchain and whether the SDL window takes posted
 input while unfocused is known only once `oot.exe` runs. `launch` sets `test.frame_source=tick` for scripts (OoT has no frame hook).
+Several runs: `launch(instance="<name>")`, then `instance=` or `pid=` on every other tool; `status` lists every running game process,
+other sessions' included (next section).
+
+## Several runs at once (named instances, since 2026-11-06)
+
+Parallel sessions no longer queue for one game window: `oot.exe --instance NAME [--instance-dir DIR]` (or `NXRT_INSTANCE`) is a run of its
+own beside others. It writes everything of its own into its folder (default `<game folder>\instances\NAME`; the MCP server uses
+`work\ai_run\oot\NAME`): log, crash / freeze / fatal reports, `dump_threads`, saves and temporary storage (empty at first), `controls.ini`,
+`pipeline_keys.bin`, `shader_order.txt` (copied from the game folder the first time), `pipeline_cache.bin` (a hard link to the shared prepared
+cache, renewed when that one is newer; the instance's first save writes its own 2-4 GB file), screenshots, test output and the outputs of
+diagnostic keys given as relative paths. Shared: the game files, the shader cache (the translator's writes are atomic) and the BC7 cache
+(temporary name + rename). The full list: `runtime/docs/CONFIG.md`, "Named instances"; code: `runtime/src/core/instance.cpp`.
+The window title ends in ` [NAME]`. One run per game folder without a name (as before), one per instance folder with one.
+
+Rules for agents:
+- With the MCP tools: `launch(instance="<your session's short name>")` whenever another session may run the game; pass the same `instance=`
+  (or `pid=`) to `screenshot`, `send_input`, `wait_for`, `log`, `reports`, `kill`. Check `status` first: it lists every running game process,
+  whose it is, its memory and the free memory. From a shell: `tasklist /FI "IMAGENAME eq oot.exe"`, and start yours with `--instance`.
+- Never end a run you did not start. `kill()` without arguments ends only the MCP server's own runs; another session's needs `force=true`.
+- **Memory: at most two runs on this machine.** A run in the first 3D scene holds 13-16 GB of working set and 18-20 GB of private bytes
+  (measured 2026-11-06); the machine has 32 GB. Beside another run the exe refuses to start (exit code 7) when the free physical memory or
+  commit, minus what the other runs will still grow by, is below `[boot] memory_per_run_gb` (default 13); the MCP `launch` checks the same
+  before starting. A lone run is never refused. On 2026-11-06 a WSL VM (`vmmemWSL`) held 24 GB of commit, which left under 1 GB of commit
+  free beside one run: then even one more build can fail. Ask the user before assuming the machine has room.
+- **Alone, with no other `oot.exe` running:** device-loss tests (A8: a GPU timeout resets the whole adapter and very likely kills the other
+  run's Vulkan device too), fps and frame-time measurements (the other run takes GPU, CPU and memory bandwidth), the shader preparation
+  (`--prepare-shaders` refuses `--instance`; the "Preparing shaders" window is off for instances: it writes the shared shader data), and
+  anything meant to write the shared pipeline cache or the default run's saves.
+- A build beside a running game is fine if memory allows; still only one build in `work\build\oot` at a time.
 
 ## Machine setup (this checkout, Windows 11)
 
@@ -377,7 +408,8 @@ modules first (~3 min).
 
 ## Rules
 
-- Do not run two builds in `work\build\oot` at the same time, nor two copies of `oot.exe`. Background jobs die with the session.
+- Do not run two builds in `work\build\oot` at the same time. Two copies of `oot.exe` only as named instances, by the rules of "Several
+  runs at once" (device-loss tests and fps measurements alone). Background jobs die with the session.
 - Changing Windows Defender exclusions (for `work\`, `tools\llvm\`) would likely speed builds, but it is a security setting: only the
   user changes it.
 - Keep `recomp/nxrecomp` changes game independent; game knowledge goes in `recomp/games/<id>/` and `runtime/games/<id>/`.

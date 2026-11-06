@@ -18,6 +18,7 @@
 #include "nxrt/abi.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/gauge.h"
+#include "nxrt/instance.h"
 #include "nxrt/log.h"
 #include "nxrt/symbols.h"
 #include "stackwalk.h"
@@ -105,16 +106,8 @@ bool readable(uint64_t addr, uint64_t n) {
     return true;
 }
 
-// <exe path without extension>_crash.txt
-std::string default_report_path() {
-    char exe[1024] = {};
-    DWORD n = GetModuleFileNameA(nullptr, exe, sizeof exe);
-    std::string p(exe, n < sizeof exe ? n : sizeof exe - 1);
-    size_t slash = p.find_last_of("\\/");
-    size_t dot = p.find_last_of('.');
-    if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) p.erase(dot);
-    return p + "_crash.txt";
-}
+// <exe path without extension>_crash.txt; a named instance: <instance folder>\<exe stem>_crash.txt (nxrt/instance.h)
+std::string default_report_path() { return instance_report_path("_crash.txt"); }
 
 bool write_file(const std::string& path, const std::string& text) {
     HANDLE h = CreateFileA(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);

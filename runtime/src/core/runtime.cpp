@@ -12,6 +12,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/hooks.h"
+#include "nxrt/instance.h"
 #include "nxrt/ipc.h"
 #include "nxrt/kernel.h"
 #include "nxrt/log.h"
@@ -44,6 +45,7 @@ bool init(const InitOptions& opt) {
     lo.path = opt.log_path;
     log_init(lo);
     NXLOG_I("runtime", "nxrt starting (ABI %s)", abi_source());
+    instance_apply_config();      // a named instance: every output key into its folder, before anything below opens one (nxrt/instance.h)
     if (opt.load_symbols) {
         size_t n = symbols_load_map();
         NXLOG_I("runtime", "host symbols: %zu from the linker map%s%s", n, n ? " " : " (no map next to the exe or in its PDB's folder: host frames show module+offset only)", n ? symbols_map_path().c_str() : "");

@@ -10,7 +10,14 @@
 // Everything after that (nn::init::Start, nninitStartup, nnMain) is the lifted game running on the runtime.
 //
 //   <game> [--game DIR] [--exefs DIR] [--ini FILE] [--log FILE] [--max-seconds N] [--link host|none] [--no-nvn] [--headless|--window]
-// Environment: <ID>_EXEFS, <ID>_GAME (the manifest id uppercased: GAME_ENV below). Keys (section [boot]) are read through the runtime's config, see docs/S6.md.
+//          [--instance NAME [--instance-dir DIR]]
+// Environment: <ID>_EXEFS, <ID>_GAME (the manifest id uppercased: GAME_ENV below), NXRT_INSTANCE, NXRT_INSTANCE_DIR. Keys (section [boot]) are read
+// through the runtime's config, see docs/S6.md.
+//
+// Named instances (--instance NAME): a second run of the game beside the first. Everything the run writes goes to its own folder (DIR, default
+// <game folder>\instances\NAME): the log, crash / freeze / fatal reports, saves, controls.ini, the pipeline cache and key file (nxrt/instance.h).
+// The game files, the shader cache and the BC7 cache stay shared. One run per game folder without an instance, one per instance folder; beside
+// another run the start is refused (exit code 7) when the free memory would not hold one more ([boot] memory_per_run_gb, check_memory below).
 //
 // Installed layout (a release folder after the launcher's setup has run): when exefs\main sits next to the exe, or --game DIR / <ID>_GAME names a
 // folder, that folder becomes the working directory, so everything the runtime reads relative to it (bc7_cache, shader_cache, romfs,
@@ -23,7 +30,11 @@
 // (game\<id>\updates\<newest>) as the game folder, and [nvn] shader_cache / shader_corpus / shader_translator default to the
 // checkout's work\shaders\<id> and tools\shaders build: a plain `oot.exe` runs the game.
 #include <windows.h>
+#include <psapi.h>
+#include <tlhelp32.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -45,6 +56,7 @@
 #include "nxrt/module.h"
 #include "nxrt/gfx.h"
 #include "nxrt/input_source.h"
+#include "nxrt/instance.h"
 #include "nxrt/nvn.h"
 #include "nxrt/nvn_backend.h"
 #include "nxrt/platform.h"
@@ -102,7 +114,8 @@ const GameModule kModules[] = {
 std::unique_ptr<nxrt::gfx::Device> g_gfx_device;
 std::unique_ptr<nxrt::gfx::Renderer> g_gfx_renderer;
 
-[[noreturn]] void die(const char* fmt, const char* a = "", const char* b = "") {
+// Exit code 1: start-up error; 7 (kExitRefused): refused to start beside another run (the same game folder or instance, or too little memory).
+[[noreturn]] void die_code(int code, const char* fmt, const char* a = "", const char* b = "") {
     NXLOG_E("boot", fmt, a, b);
     nxrt::log_flush();
     std::fprintf(stderr, GAME_ID ": ");
@@ -113,9 +126,11 @@ std::unique_ptr<nxrt::gfx::Renderer> g_gfx_renderer;
     std::snprintf(msg, sizeof msg, fmt, a, b);
     MessageBoxA(nullptr, msg, nxrt::game::info().title, MB_OK | MB_ICONERROR);
 #endif
-    TerminateProcess(GetCurrentProcess(), 1);
+    TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
     for (;;) {}
 }
+[[noreturn]] void die(const char* fmt, const char* a = "", const char* b = "") { die_code(1, fmt, a, b); }
+constexpr int kExitRefused = 7;
 
 std::wstring widen_utf8(const std::string& s) {
     if (s.empty()) return {};
@@ -141,6 +156,89 @@ std::wstring exe_dir() {
 bool file_exists(const std::wstring& p) {
     const DWORD a = GetFileAttributesW(p.c_str());
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+std::wstring full_path(const std::wstring& p) {
+    std::wstring full(32768, L'\0');
+    full.resize(GetFullPathNameW(p.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr));
+    while (full.size() > 3 && (full.back() == L'\\' || full.back() == L'/')) full.pop_back();
+    return full;
+}
+// A named mutex held for the life of the process: false when another process holds the one of this name. The name comes from a folder's
+// full path (case-insensitive), so two spellings of one folder meet.
+bool take_folder_mutex(const wchar_t* kind, const std::wstring& folder) {
+    unsigned long long h = 1469598103934665603ull;
+    for (wchar_t ch : full_path(folder)) h = (h ^ static_cast<unsigned long long>(std::towlower(ch))) * 1099511628211ull;
+    const std::wstring name = L"Local\\" + widen_utf8(GAME_SAVE_FOLDER) + kind + std::to_wstring(h);
+    return !(CreateMutexW(nullptr, FALSE, name.c_str()) && GetLastError() == ERROR_ALREADY_EXISTS);
+}
+// An instance name: 1-40 letters, digits, '-', '_' or '.', not starting with '.', and not "default" (what tools call the run without one).
+bool valid_instance_name(const std::string& n) {
+    if (n.empty() || n.size() > 40 || n[0] == '.' || _stricmp(n.c_str(), "default") == 0) return false;
+    for (char c : n)
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.')) return false;
+    return true;
+}
+
+// The other running processes of this game exe (the same file name: builds of other checkouts count too): working set and commit.
+struct OtherRun { DWORD pid; uint64_t working_set, private_bytes; };
+std::vector<OtherRun> other_runs() {
+    std::vector<OtherRun> out;
+    wchar_t self[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, self, MAX_PATH);
+    if (!n || n >= MAX_PATH) return out;
+    const wchar_t* slash = std::wcsrchr(self, L'\\');
+    const wchar_t* name = slash ? slash + 1 : self;
+    const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return out;
+    PROCESSENTRY32W e{};
+    e.dwSize = sizeof e;
+    for (BOOL ok = Process32FirstW(snap, &e); ok; ok = Process32NextW(snap, &e)) {
+        if (e.th32ProcessID == GetCurrentProcessId() || _wcsicmp(e.szExeFile, name) != 0) continue;
+        OtherRun r{e.th32ProcessID, 0, 0};
+        if (const HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, e.th32ProcessID)) {
+            PROCESS_MEMORY_COUNTERS_EX pmc{};
+            if (K32GetProcessMemoryInfo(h, reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc)) {
+                r.working_set = pmc.WorkingSetSize;
+                r.private_bytes = pmc.PrivateUsage;
+            }
+            CloseHandle(h);
+        }
+        out.push_back(r);
+    }
+    CloseHandle(snap);
+    return out;
+}
+
+// Beside other runs of the game the start is refused when the machine's free memory would not hold one more: what is free now, minus
+// what the other runs will still grow by (a run's need minus what it holds now: a run at the title holds a few GB, one in the first 3D
+// scene 13-16 GB of working set), must be at least one run's need, for physical memory (working sets) and for the commit limit (private
+// bytes; RAM plus page file). [boot] memory_per_run_gb (default 13; 0 turns the check off). A lone run is never refused (a 16 GB machine
+// runs the game, paging).
+void check_memory() {
+    const double gb = nxrt::config_get_double("boot", "memory_per_run_gb", 13.0);
+    if (!(gb > 0)) return;
+    const std::vector<OtherRun> others = other_runs();
+    if (others.empty()) return;
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof ms;
+    if (!GlobalMemoryStatusEx(&ms)) return;
+    constexpr double kGB = double(1ull << 30);
+    const double need = gb * kGB, avail = static_cast<double>(ms.ullAvailPhys), commit = static_cast<double>(ms.ullAvailPageFile);
+    double growth = 0, commit_growth = 0;
+    std::string pids;
+    for (const OtherRun& r : others) {
+        growth += (std::max)(0.0, need - static_cast<double>(r.working_set));
+        commit_growth += (std::max)(0.0, need - static_cast<double>(r.private_bytes));
+        pids += (pids.empty() ? "" : ", ") + std::to_string(r.pid) + " at " + std::to_string(r.working_set >> 20) + " MB";
+    }
+    char msg[768];
+    std::snprintf(msg, sizeof msg, "%zu other run%s of the game (pid %s); %.1f of %.1f GB memory free, %.1f GB of it still to be taken by %s; "
+                  "%.1f GB commit free, %.1f GB of it still to be taken; %.0f GB needed by this run ([boot] memory_per_run_gb)",
+                  others.size(), others.size() == 1 ? "" : "s", pids.c_str(), avail / kGB, static_cast<double>(ms.ullTotalPhys) / kGB, growth / kGB,
+                  others.size() == 1 ? "it" : "them", commit / kGB, commit_growth / kGB, gb);
+    if (avail - growth < need || commit - commit_growth < need)
+        die_code(kExitRefused, "Not enough free memory for another run: %s. Close a run of the game first.", msg);
+    NXLOG_I("boot", "memory check: %s: ok", msg);
 }
 // Absolute form of a path given on the command line, resolved against the current directory (before it is changed).
 std::string absolute_utf8(const std::string& p) {
@@ -345,6 +443,8 @@ int main(int argc, char** argv) {
     bool prepare = false, prepare_if_needed = false;      // --prepare-shaders [--if-needed] [--threads N]: compile the game's shaders ahead and exit (no game start)
     int prepare_threads = 0;
     std::string prepare_programs;                         // --programs FILE: another program list (tests)
+    std::string instance = std::getenv("NXRT_INSTANCE") ? std::getenv("NXRT_INSTANCE") : "";              // --instance NAME (nxrt/instance.h)
+    std::string instance_dir = std::getenv("NXRT_INSTANCE_DIR") ? std::getenv("NXRT_INSTANCE_DIR") : "";  // --instance-dir DIR
     std::vector<std::pair<std::string, std::string>> boot_opts;   // [boot] keys from the command line: nxrt::init() reloads the configuration, so they are applied after it
     for (int i = 1; i < argc; i++) {
         auto arg = [&](const char* n) { return !std::strcmp(argv[i], n) && i + 1 < argc; };
@@ -359,11 +459,23 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--if-needed")) prepare_if_needed = true;
         else if (arg("--threads")) prepare_threads = std::atoi(argv[++i]);
         else if (arg("--programs")) prepare_programs = argv[++i];
+        else if (arg("--instance")) instance = argv[++i];
+        else if (arg("--instance-dir")) instance_dir = argv[++i];
         else if (!std::strcmp(argv[i], "--no-nvn")) boot_opts.emplace_back("nvn", "0");
         else if (!std::strcmp(argv[i], "--headless")) boot_opts.emplace_back("gfx", "headless");
         else if (!std::strcmp(argv[i], "--window")) boot_opts.emplace_back("gfx", "window");
         else { std::fprintf(stderr, GAME_ID ": unknown argument %s\n", argv[i]); return 2; }
     }
+    if (!instance.empty() && !valid_instance_name(instance)) {
+        std::fprintf(stderr, GAME_ID ": instance name '%s': use 1-40 letters, digits, '-', '_' or '.' (not \"default\")\n", instance.c_str());
+        return 2;
+    }
+    if (instance.empty() && !instance_dir.empty()) { std::fprintf(stderr, GAME_ID ": --instance-dir needs --instance NAME\n"); return 2; }
+    if (!instance.empty() && prepare) {
+        std::fprintf(stderr, GAME_ID ": --prepare-shaders writes the shared shader data (pipeline cache, prepare.state): run it without --instance\n");
+        return 2;
+    }
+    if (!instance_dir.empty()) instance_dir = absolute_utf8(instance_dir);     // against the folder the exe was started from
 
 #ifdef GAME_DEV_ROOT
     // A development build started without a game folder or ExeFS, and not from an installed folder: the checkout's game.
@@ -386,20 +498,30 @@ int main(int argc, char** argv) {
             if (logp) { log_abs = absolute_utf8(logp); logp = log_abs.c_str(); }
             if (!SetCurrentDirectoryW(base.c_str())) die("cannot use the game folder %s", narrow_utf8(base).c_str());
             // One game (or one shader preparation) per game folder: two would write the same log, pipeline cache and saves. The name comes from
-            // the folder's full path; NXRT_ALLOW_MULTIPLE=1 lifts the check for test rigs.
-            if (!std::getenv("NXRT_ALLOW_MULTIPLE")) {
-                std::wstring full(32768, L'\0');
-                full.resize(GetFullPathNameW(base.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr));
-                unsigned long long h = 1469598103934665603ull;
-                for (wchar_t ch : full) h = (h ^ static_cast<unsigned long long>(std::towlower(ch))) * 1099511628211ull;
-                const std::wstring name = L"Local\\" + widen_utf8(GAME_SAVE_FOLDER) + L"_" + std::to_wstring(h);
-                if (CreateMutexW(nullptr, FALSE, name.c_str()) && GetLastError() == ERROR_ALREADY_EXISTS)
-                    die("The game is already running from this folder (or its shaders are being prepared). Close that one first.");
-            }
-            if (!logp) logp = GAME_LOG;
+            // the folder's full path; NXRT_ALLOW_MULTIPLE=1 lifts the check for test rigs. A named instance writes its own files: it takes the
+            // mutex of its instance folder instead (below), so it runs beside the default run and beside other instances.
+            if (instance.empty() && !std::getenv("NXRT_ALLOW_MULTIPLE") && !take_folder_mutex(L"_", base))
+                die_code(kExitRefused, "The game is already running from this folder (or its shaders are being prepared). Close that one first, "
+                                       "or start another run beside it with --instance NAME.");
+            if (!logp && instance.empty()) logp = GAME_LOG;
             const char* game_ini = nxrt::game::info().game_ini;     // the manifest's ini, written by setup
             if (!ini && !std::getenv("NXRT_INI") && *game_ini && file_exists(std::wstring(game_ini, game_ini + std::strlen(game_ini)))) ini = game_ini;
         }
+    }
+
+    // A named instance: its folder (default <game folder>\instances\<name>), one run per folder, and the log there unless --log names one.
+    std::string instance_log;
+    if (!instance.empty()) {
+        if (instance_dir.empty()) {
+            std::wstring cwd(32768, L'\0');
+            cwd.resize(GetCurrentDirectoryW(static_cast<DWORD>(cwd.size()), cwd.data()));
+            instance_dir = narrow_utf8(cwd) + "\\instances\\" + instance;
+        }
+        if (!std::getenv("NXRT_ALLOW_MULTIPLE") && !take_folder_mutex(L"_instance_", widen_utf8(instance_dir)))
+            die_code(kExitRefused, "Instance '%s' is already running (its folder is %s). Close it first, or choose another --instance name.", instance.c_str(),
+                     instance_dir.c_str());
+        nxrt::instance_set(instance, instance_dir);       // before init: the crash handler and the watchdog take their report files from it
+        if (!logp) logp = (instance_log = nxrt::instance_file(GAME_LOG)).c_str();
     }
 
     nxrt::InitOptions opt;
@@ -418,8 +540,10 @@ int main(int argc, char** argv) {
     dev_default("nvn", "shader_corpus", GAME_DEV_ROOT "/work/shaders/" GAME_ID "/corpus");
     dev_default("nvn", "shader_translator", GAME_DEV_ROOT "/tools/shaders/build/bin/Release/net10.0/spirv_harness.exe");
 #endif
+    nxrt::instance_link_pipeline_cache();     // a named instance: its own pipeline cache file, linked to the shared one (needs [nvn] shader_cache)
     NXLOG_I("boot", GAME_ID " %s (%s PC port)", GAME_RELEASE_VERSION, GAME_TITLE);
     NXLOG_I("boot", "%s %s: exefs '%s'", GAME_TITLE, nxrt::game::info().version, exefs.c_str());
+    if (!prepare) check_memory();             // beside other runs of the game: refuse when the memory would not hold one more
 
     if (prepare) return prepare_shaders_main(prepare_if_needed, prepare_threads, prepare_programs);
 
@@ -453,7 +577,9 @@ int main(int argc, char** argv) {
                 disp = nxrt::play::display();       // controls.ini: window size, present mode, frame cap
                 nxrt::platform::init();
                 nxrt::platform::WindowDesc wd;
-                wd.title = nxrt::game::info().title;
+                const std::string title = nxrt::instance_active() ? std::string(nxrt::game::info().title) + " [" + nxrt::instance_name() + "]"
+                                                                  : std::string(nxrt::game::info().title);
+                wd.title = title.c_str();
                 wd.width = disp.width;
                 wd.height = disp.height;
                 if (!nxrt::platform::create_window(wd)) die("cannot create the game window. The game needs a graphics driver with Vulkan 1.3: update the driver for your graphics card and try again. The reason is in " GAME_LOG ".");
