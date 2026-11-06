@@ -32,3 +32,4 @@ __pycache__/
 /tools/sccache/
 /tools/vcpkg/
 /tools/nvdisasm/
+/tools/uv/

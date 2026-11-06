@@ -5,7 +5,7 @@ the shader translator, translate and prepare shaders, and run the game for testi
 `README.md`). Current status and next steps: `OOT_HANDOFF.md`; running notes for agents: `AGENTS.md`.
 
 Rule for tools: repo-local tools go into git-ignored folders (`tools\llvm`, `tools\sccache`, `tools\vcpkg`, `tools\nvdisasm`,
-`tools\.venv`, `tools\shaders\third_party`) and come from official releases with checksum checks. Game files (`game\`, `*.nup`) and
+`tools\uv`, `tools\.venv`, `tools\shaders\third_party`) and come from official releases with checksum checks. Game files (`game\`, `*.nup`) and
 generated data (`work\`) are git-ignored too: never commit them.
 
 ## 1. Hardware and disk
@@ -24,9 +24,20 @@ generated data (`work\`) are git-ignored too: never commit them.
 | Software | Version used | Why |
 |---|---|---|
 | Git | 2.45 | Repository and the `refs/ryubing` submodule. |
-| Visual Studio 2022 with "Desktop development with C++" | MSVC 14.44 (v143), Windows SDK, "C++ CMake tools for Windows" (CMake, Ninja) | Linker, Windows SDK, CMake and Ninja; found with `vswhere` by `recomp\scripts\nx_env.cmd`. clang-cl itself comes repo-local (below). |
+| Visual Studio 2022 with "Desktop development with C++" | MSVC 14.44 (v143), Windows SDK (10.0.26100), "C++ CMake tools for Windows" (CMake 3.31, Ninja 1.12) | Linker, Windows SDK, CMake and Ninja; found with `vswhere` by `recomp\scripts\nx_env.cmd`. clang-cl itself comes repo-local (below). |
 | .NET SDK 10 | 10.0.403 (9.0.x also installed) | Shader translator harness (`net10.0`) and the SASS decoder tool. |
-| uv | any recent | Creates the Python 3.13 venv (it also fetches Python 3.13 if missing). |
+| uv | any recent | Creates the Python 3.13 venv (it also fetches Python 3.13 if missing). Can be repo-local instead (section 4). |
+
+The C++ workload must be registered with the installer: `nx_env.cmd` takes the newest Visual Studio that `vswhere` reports with
+`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`. A VS 2022 that has `cl.exe` but not that component (as on the second machine:
+only the core editor parts, no `libcmt.lib`, no recent Windows SDK) is skipped, and an older VS such as VS 2019 Build Tools (MSVC
+14.29) would be used. Add the workload from the command line (a system install: the developer runs it):
+
+```bat
+"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\setup.exe" modify --installPath "C:\Program Files\Microsoft Visual Studio\2022\Community" --add Microsoft.VisualStudio.Workload.NativeDesktop --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.VC.CMake.Project --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --passive --norestart
+```
+
+Check: `recomp\scripts\nx_env.cmd` without arguments prints clang-cl, CMake, Ninja and sccache versions.
 | Windows PowerShell 5.1 | built in | Runs the `.ps1` build scripts. PowerShell 7 (`pwsh`) is not needed. |
 | curl | built in (Windows 10+) | Used by `tools\textures\scripts\fetch_third_party.ps1`. |
 
@@ -70,12 +81,27 @@ uv pip install --python tools\.venv -r recomp\requirements.txt -r tools\ai\requi
 `recomp\requirements.txt`: unicorn 2.1.4, capstone 5.0.9, lz4, pyelftools (lifter and oracles). `tools\ai\requirements.txt`: pillow,
 numpy (AI game tools, image diffs). `zstandard` (0.25.0 here) is needed by the shader corpus extraction and is in neither file.
 
+Without a system uv, keep uv and its Python repo-local in the git-ignored `tools\uv\` (second machine: uv 0.13.7, the
+`uv-x86_64-pc-windows-msvc.zip` asset of https://github.com/astral-sh/uv/releases, checked against its `.sha256`; uv checks the
+Python download itself):
+
+```powershell
+$env:UV_PYTHON_INSTALL_DIR = "$PWD\tools\uv\python"; $env:UV_CACHE_DIR = "$PWD\tools\uv\cache"
+tools\uv\uv.exe venv tools\.venv --python 3.13 --managed-python
+tools\uv\uv.exe pip install --python tools\.venv -r recomp\requirements.txt -r tools\ai\requirements.txt zstandard
+```
+
+The venv then points at `tools\uv\python\cpython-3.13.*`: keep that folder.
+
 ### vcpkg with libvpx, dav1d, opus -> `tools\vcpkg\`
 ```bat
-git clone --depth 1 https://github.com/microsoft/vcpkg.git tools\vcpkg
+git clone --filter=blob:none https://github.com/microsoft/vcpkg.git tools\vcpkg
+git -C tools\vcpkg checkout 661e42cd
 tools\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-tools\vcpkg\vcpkg.exe install libvpx:x64-windows-static dav1d:x64-windows-static opus:x64-windows-static --disable-metrics
+recomp\scripts\nx_env.cmd tools\vcpkg\vcpkg.exe install libvpx:x64-windows-static dav1d:x64-windows-static opus:x64-windows-static --disable-metrics
 ```
+The checkout pins the port versions below. vcpkg fetches its own build tools (msys2, nasm, meson, pkgconf) into
+`tools\vcpkg\downloads`; libvpx is the slow one (configure under msys2).
 Static libraries with the static MSVC runtime (VP9/VP8, AV1 for OoT's movies, Opus for `hwopus`); vcpkg checks each source archive's
 SHA-512. Versions here: dav1d 1.5.4, opus 1.6.1, libvpx 1.16.0 (vcpkg checkout `661e42cd`). `runtime\cmake\media_deps.cmake` finds
 them in `tools\vcpkg\installed\x64-windows-static`; after installing, reconfigure (`cmake game-build\build\release`). Without them

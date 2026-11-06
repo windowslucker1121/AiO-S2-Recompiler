@@ -4,11 +4,15 @@ the guest runtime header (tests/lift/guest/rt2.h) defines. The test driver attac
 
     python make_sites.py <prog.elf> <out.sites>
 Stubs: _Unwind_RaiseException, _Unwind_Resume, nx_host_terminate (those present in the ELF)."""
+import glob
 import os
 import subprocess
 import sys
 
-LLVM = os.environ.get('LLVM_BIN', r'C:\Program Files\LLVM\bin')
+# LLVM_BIN, else the repo-local LLVM under tools/llvm/ (as recomp/cmake/clang-cl.cmake), else the installed one
+_local = sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools', 'llvm', '*', 'bin',
+                                       'llvm-nm.exe')))
+LLVM = os.environ.get('LLVM_BIN') or (os.path.dirname(os.path.abspath(_local[0])) if _local else r'C:\Program Files\LLVM\bin')
 STUBS = ('_Unwind_RaiseException', '_Unwind_Resume', 'nx_host_terminate')
 
 

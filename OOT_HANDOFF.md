@@ -10,7 +10,7 @@ techniques, rules) and `DEVELOPMENT_SETUP.md` (what a development machine needs)
 | Boot, title screen | Works. Title movie (AV1 on dav1d), logo, menu text ("New Game", "Options / ZELDA NOTES Setting") without artifacts. |
 | Gamepad | Works (SDL gamepad path, checked with the test tooling's virtual Xbox pad: A starts the game, rumble reaches the pad). Keyboard bindings exist too. |
 | Audio | Opus decodes on libopus (not listened to). Two audio-renderer crashes on entering gameplay are fixed. |
-| Shaders | 46,357 of 47,428 translated (`work\shaders\oot\spirv`). Pre-boot shader preparation done (39,351 of 39,363 programs) into `work\shaders\oot\pipeline_cache.bin`. |
+| Shaders | Second machine: 46,192 of the corpus's 47,203 blocks translated in a fresh batch run (`work\shaders\oot\spirv`; the first machine's cache also had on-demand and re-translated rows: 46,357 of 47,428). Pre-boot shader preparation done (39,327 of 39,363 programs, 36 without a shader) into `work\shaders\oot\pipeline_cache.bin` (2.2 GB on the RTX 4080). |
 | New Game | Title -> 5-minute intro movie (`Dm_Kokiri_0000.webm`, cannot be skipped) -> ~70 s loading -> first 3D scene. |
 | **First 3D scene** | **Blocked: `VK_ERROR_DEVICE_LOST` 1-7 s after its first frame, on every full run (A8, below).** |
 | FPS | Title well above 30 fps. In game unknown (blocked); with 1/16 of the fragment draws enabled the scene ran at 10-15 fps. |
@@ -53,6 +53,13 @@ What was ruled out (one run each, settings as `[section] key`):
 
 So it is not one bad shader. It looks like an interaction (one pass reading what another wrote, a missing barrier, a layout
 problem) or depends on how much is drawn.
+
+**Second machine (RTX 4080, driver 610.88, 2026-11-06): the loss reproduces**, so it is not an Intel Arc driver problem. The first
+scene's frame (13,072 draws) replayed in 55.7 s, was presented at ~141 s, and the device was lost at 143.4 s (`work\run\a8_nv1`). On
+NVIDIA the process does not end: every later submit fails until `--max-seconds`. NVIDIA adds two cheap ways in, before the per-draw
+submit-and-wait mode below: `VK_NV_device_diagnostic_checkpoints` (a checkpoint per draw or pass; after the loss
+`vkGetQueueCheckpointDataNV` names the last one the GPU reached) and `VK_EXT_device_fault` (fault type and address, which can be
+matched against the runtime's buffer and image allocations). The runtime uses neither yet (`runtime/src/gfx/`).
 
 Next steps for A8, cheapest first:
 1. `[nvn] pass_barriers = full` (a full barrier after every pass). If the loss goes away, it is a synchronization hazard in the
@@ -129,7 +136,8 @@ Runtime:
 
 ## Picking up
 
-1. Machine: `DEVELOPMENT_SETUP.md`. Data that already exists on this machine: game in `game\oot`, lift and libraries in `work\lift\oot`
+1. Machine: `DEVELOPMENT_SETUP.md`. Since 2026-11-06 the work runs on a second machine (Ryzen 7 5800X3D, RTX 4080, 32 GB): set
+   up from scratch, everything rebuilt and checked (`AGENTS.md`, "Hardware of this machine"). Data that already exists here: game in `game\oot`, lift and libraries in `work\lift\oot`
    and `work\build\oot`, shader corpus, cache, `programs.bin`, `prepare.state` and `pipeline_cache.bin` in `work\shaders\oot`.
 2. Build after runtime changes (about 20 s incremental):
    `cmd /c "runtime\scripts\env.cmd && cmake --build game-build\build\release --target game_exe"`, then check the log for `FAILED:`.

@@ -38,8 +38,14 @@ option(NXRT_BUILD_GFX "Build the graphics shell (SDL3 + Vulkan + NVN front end, 
 # Game modules (games/<id>/, docs/GAME_BOUNDARY.md): the title-specific code a game exe links. The test executables register one of them, so
 # the tests of the base run against that game's tables (title facts, sites, probes, hooks) as the game exe does.
 option(NXRT_BUILD_GAMES "Build the game modules in games/" ON)
-set(NXRT_GAMES "mpr" CACHE STRING "ids of the game modules to build (games/<id>/), a list")
-set(NXRT_TEST_GAME "mpr" CACHE STRING "id of the game module the test executables register (empty: none)")
+# The upstream default module games/mpr is not in every checkout (this one carries oot and pkp): then oot is the default.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/games/mpr/CMakeLists.txt")
+    set(NXRT_DEFAULT_GAME "mpr")
+else()
+    set(NXRT_DEFAULT_GAME "oot")
+endif()
+set(NXRT_GAMES "${NXRT_DEFAULT_GAME}" CACHE STRING "ids of the game modules to build (games/<id>/), a list")
+set(NXRT_TEST_GAME "${NXRT_DEFAULT_GAME}" CACHE STRING "id of the game module the test executables register (empty: none)")
 if(NOT NXRT_BUILD_GAMES OR NOT NXRT_TEST_GAME IN_LIST NXRT_GAMES)
     set(NXRT_TEST_GAME "")      # the test game must be one of the modules built
 endif()

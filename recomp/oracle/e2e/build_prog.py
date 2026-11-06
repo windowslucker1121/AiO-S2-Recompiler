@@ -6,15 +6,27 @@
 Exit code 0 when it compiled, linked and every `// EXPECT-INSN: <regex>` matched a line of the disassembly.
 The ELF is linked at 0x7100000000 with entry point `test_main`.
 """
+import glob
 import os
 import re
 import shlex
 import subprocess
 import sys
 
-LLVM = os.environ.get('LLVM_BIN', r'C:\Program Files\LLVM\bin')
-BASE = 0x7100000000
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _llvm_bin():
+    """LLVM_BIN, else an LLVM release unpacked under tools/llvm/ in this repository (as recomp/cmake/clang-cl.cmake), else the
+    installed one."""
+    if os.environ.get('LLVM_BIN'):
+        return os.environ['LLVM_BIN']
+    local = sorted(glob.glob(os.path.join(HERE, '..', '..', '..', 'tools', 'llvm', '*', 'bin', 'clang.exe')))
+    return os.path.dirname(os.path.abspath(local[0])) if local else r'C:\Program Files\LLVM\bin'
+
+
+LLVM = _llvm_bin()
+BASE = 0x7100000000
 
 
 def program_flags(src):

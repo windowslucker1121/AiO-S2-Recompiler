@@ -3,7 +3,10 @@
 # (src/gfx/play/play_types.cpp, play_config.cpp; SDL3 is linked only for its key name table), starts the setup tool for the first-time setup
 # and starts the game exe. Included from gfx.cmake (needs the SDL3 target). Its branding and factory settings are those of one game module
 # (NXRT_LAUNCHER_GAME): the data library (names, controls.ini defaults) and its launcher.rc (version info, manifest).
-set(NXRT_LAUNCHER_GAME "mpr" CACHE STRING "id of the game module whose launcher this is (games/<id>/launcher.rc, nxrt_game_<id>_data)")
+if(NOT DEFINED NXRT_DEFAULT_GAME)
+    set(NXRT_DEFAULT_GAME "mpr")
+endif()
+set(NXRT_LAUNCHER_GAME "${NXRT_DEFAULT_GAME}" CACHE STRING "id of the game module whose launcher this is (games/<id>/launcher.rc, nxrt_game_<id>_data)")
 set(NXRT_LAUNCHER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/apps/launcher")
 add_library(mpr_launcher_core STATIC
     "${NXRT_LAUNCHER_DIR}/keymap_win.cpp" "${NXRT_LAUNCHER_DIR}/game_info.cpp" "${NXRT_LAUNCHER_DIR}/bindings_edit.cpp"

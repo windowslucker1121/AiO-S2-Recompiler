@@ -52,6 +52,10 @@ endforeach()
 
 if(NXRT_BUILD_TESTS)
     file(GLOB_RECURSE NXRT_GFX_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/gfx/*.cpp")
+    # the button prompt tests read icons with the Metroid Prime module's pak/txtr readers (games/mpr), not in every checkout
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/games/mpr/CMakeLists.txt")
+        list(FILTER NXRT_GFX_TEST_SOURCES EXCLUDE REGEX "/tests/gfx/test_prompts\\.cpp$")
+    endif()
     # The tests of the registered test game's own code (games/<id>/tests) run in the same executable (docs/GAME_BOUNDARY.md).
     if(NXRT_TEST_GAME)
         file(GLOB NXRT_GAME_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/games/${NXRT_TEST_GAME}/tests/*.cpp")

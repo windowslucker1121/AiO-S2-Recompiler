@@ -81,8 +81,12 @@ threads: black screen and 9-18 fps for minutes (boot 23). The preparation runs a
 programs preparable) make the next start prepare again. Without that, the new shaders flooded the background part builder (350 s of
 worker CPU in two minutes) and starved the game (no frame for 10 s). Headless: `oot.exe --prepare-shaders --if-needed`.
 
-Hardware of this machine: Intel Core Ultra 5 125H, integrated Intel Arc graphics (driver Vulkan 1.4.325, 8.8 GiB shared), 16 GB
-RAM shared with the GPU. Expect GPU-bound performance; the README's minimum is a Vulkan 1.3 GPU and 16 GB.
+Hardware of this machine (since 2026-11-06, the second development machine): AMD Ryzen 7 5800X3D (8 cores, 16 threads), **NVIDIA
+GeForce RTX 4080** (discrete, 15.7 GiB, Vulkan 1.4.341, driver 610.88), 32 GB RAM, Windows 11 Pro 26200. Everything above that names
+timings, the Arc driver or A8 was measured on the first machine: Intel Core Ultra 5 125H, integrated Intel Arc (Vulkan 1.4.325, 8.8 GiB
+shared), 16 GB RAM. **A8 reproduces on the RTX 4080** (run `work\run\a8_nv1`, 2026-11-06): not Arc-specific.
+Times here: lift + build of all four modules 10 min 48 s cold (was 25 min), runtime + exe 1.5 min, corpus extraction 14 min, batch
+translation 2 min 49 s, shader preparation ~80 programs/s (was 34).
 
 ## Boot progress (`oot.exe --game game\oot\updates\131072 --log work\run\bootN\oot.log --max-seconds 60`)
 
@@ -162,7 +166,7 @@ Open points besides the milestones:
 | A5 | setup window | blurry (DPI-virtualised) | fixed in code (per-monitor DPI), not yet seen |
 | A6 | all | Opus audio was silent: `hwopus` decoded silence. Now libopus 1.6.1 (vcpkg `opus:x64-windows-static`, repo-local); the Ex open forms carry {rate, channels} in the raw data (OoT: 48 kHz mono, was read from a buffer: 0/0 and "buffer too small") | fixed (not listened to) |
 | A7 | game (expected) | shadows of clustered (point/spot) lights are missing: 4,336 fragment shaders sample their shadow maps with TEX.SCR.B.DC through a handle read per pixel (light index from a storage loop), which the handle expressions cannot bind; the sample answers 1 (lit). Fix: pool-sized texture + sampler arrays in the runtime (Ryujinx GenerateBindlessAccess, harness QueryHostSupportsSeparateSampler true) | open |
-| A8 | first scene | **VK_ERROR_DEVICE_LOST** 1-7 s after the first gameplay frame, every full run (2026-11-06). Ruled out, one run each: a GPU timeout (no event 4101); compute (`[nvn] debug_skip_compute = 1`: still lost); the handle-expression fragment shaders and the other newly translated fragment shaders (`[nvn] skip_fs_file` lists: still lost); memory pressure (handheld mode + `[nvn] tex_prep_mb = 128` + no pipeline cache: still lost); texture upgrades (`[gfx] astc_quality = fast`: still lost); the allocation count (limit 2,342,492). Skipping every draw with a fragment shader (skip_fs_file with 0..f) avoids it, and so does running any single 1/16 hash slice (8, 90-97, 98-9b, 9c-9d, 9e-9f; gameplay then runs for minutes at 10-15 fps), but 8+9 together faults: not one bad shader, more likely an interaction (a pass reading what another wrote) or an amount. `[gfx] robust_access = 1` would tell out-of-range accesses apart but misses the prepared pipeline cache (30+ min of compiles). Next: a per-draw submit-and-wait debug mode to find the faulting draw, or the Vulkan validation layer with GPU-assisted validation (needs the Vulkan SDK: the user decides) | open |
+| A8 | first scene | **VK_ERROR_DEVICE_LOST** 1-7 s after the first gameplay frame, every full run (2026-11-06). Ruled out, one run each: a GPU timeout (no event 4101); compute (`[nvn] debug_skip_compute = 1`: still lost); the handle-expression fragment shaders and the other newly translated fragment shaders (`[nvn] skip_fs_file` lists: still lost); memory pressure (handheld mode + `[nvn] tex_prep_mb = 128` + no pipeline cache: still lost); texture upgrades (`[gfx] astc_quality = fast`: still lost); the allocation count (limit 2,342,492). Skipping every draw with a fragment shader (skip_fs_file with 0..f) avoids it, and so does running any single 1/16 hash slice (8, 90-97, 98-9b, 9c-9d, 9e-9f; gameplay then runs for minutes at 10-15 fps), but 8+9 together faults: not one bad shader, more likely an interaction (a pass reading what another wrote) or an amount. `[gfx] robust_access = 1` would tell out-of-range accesses apart but misses the prepared pipeline cache (30+ min of compiles). Next: a per-draw submit-and-wait debug mode to find the faulting draw, or the Vulkan validation layer with GPU-assisted validation (needs the Vulkan SDK: the user decides). **Also on the NVIDIA RTX 4080** (driver 610.88): the first scene's frame (13,072 draws) replayed in 55.7 s, was presented at ~141 s, device lost at 143.4 s; on NVIDIA the process then keeps running with every submit failing. NVIDIA offers `VK_NV_device_diagnostic_checkpoints` (last checkpoint the GPU passed) and `VK_EXT_device_fault` (faulting address); the runtime uses neither yet | open |
 | A9 | game | foliage/terrain use **mesh shaders** (`nvnCommandBufferDrawMeshTasks`, unknown proc; the 800 stage 6/7 blocks "without code"): nothing is drawn for them | open |
 | A10 | game | **compute shaders read their resources from c[0] at offsets the runtime does not map**: storage buffers at c0 bytes 0xC0, 0xD0, 0x100, 0x110, 0x120, 0x150, 0x160 (Pokopia: 0x210 uniforms-as-storage, 0x310 storage) and texture/image handles at c0 words 8-142; the same word is a storage descriptor in one shader and an image handle in another, so it is a per-program table (GLSLC reflection was not extracted for the corpus). Dispatches whose storage buffers map to nothing are skipped (`[nvn] skip_unmapped_dispatch`) | open |
 
@@ -183,6 +187,10 @@ scene. Hiding the intro file makes the game wait forever on a black loading scre
 every movie stream after 120 pictures (the title movie then restarts every 4 s).
 
 **Test shortcuts (2026-11-06):** reaching the first scene takes ~3 min per run: `media.video_max_pictures = 120` (movies end early), A pressed at 50, 54 and 58 s on the virtual pad (the title menu is ready around 45 s; earlier presses are lost), then ~70 s of loading. `[nvn] skip_fs_file` (fragment hash prefixes, re-read every 500 ms) bisects draws; `[nvn] trace_frame = 3500-9000` with `trace_targets = 0` traces every draw (700 MB of log). Gameplay with 1/16 of the fragment draws ran at 10-15 fps.
+With `video_max_pictures` the intro's video ends at once (on the 5800X3D dav1d decodes the 120 pictures in 0.5 s, ahead of display),
+while its voice lines (Opus sounds the game starts along the event timeline, not part of the video-only webm) keep coming: they
+overlap about a second apart (heard by the user, 2026-11-06). A test artifact, not an audio bug. Without a pad script, Enter on the
+keyboard is A: `tools\.venv\Scripts\python tools\ai\mcp_server.py send_input steps='["key Return"]'` (posted, works in the background).
 
 **First gameplay frame (2026-11-06):** after the intro the first scene's frame has ~13,100 draws and took 85-112 s to replay: 850 MB of texture uploads with ~100 ASTC->BC7 transcodes on the render thread (first use; stand-ins exist but most waited), 3,000 pipelines linked, 460-650 memory pool imports. Later starts find the BC7 entries on disk. Pipeline parts come from the prepared cache (9,000 parts in 12 s of worker time instead of 350 s).
 
@@ -239,15 +247,25 @@ input while unfocused is known only once `oot.exe` runs. `launch` sets `test.fra
 
 | Tool | Where | Notes |
 |---|---|---|
-| Visual Studio 2022 (MSVC 14.44, CMake, Ninja) | found with `vswhere` | `recomp\scripts\nx_env.cmd` sets up the environment |
+| Visual Studio 2022 Community 17.14 (MSVC 14.44.35207, Windows SDK 10.0.26100, CMake 3.31.6, Ninja 1.12.1) | found with `vswhere` | `recomp\scripts\nx_env.cmd` sets up the environment. The "Desktop development with C++" workload had to be added on this machine (the user ran the installer); VS 2019 Build Tools (MSVC 14.29) are also installed and would win without it |
+| uv 0.13.7 + Python 3.13.18 | `tools\uv\` (git-ignored; Python in `tools\uv\python`, cache in `tools\uv\cache`) | no system uv here; zip from GitHub releases, SHA-256 checked (DEVELOPMENT_SETUP.md section 4). System Python is 3.11 |
 | LLVM / clang-cl 23.1.5 | `tools\llvm\` (git-ignored) | official release `clang+llvm-23.1.5-x86_64-pc-windows-msvc.tar.zst` (SHA-256 checked; unpacking needs zstd window 2^31: `compression.zstd.ZstdFile(..., options={DecompressionParameter.window_log_max: 31})`); `recomp/cmake/clang-cl.cmake` prefers it over `C:\Program Files\LLVM` |
-| .NET SDKs 9.0.301, 9.0.319, 10.0.403 | system | shader harness builds for net10.0 |
-| not installed on purpose | | pwsh (Windows PowerShell 5.1 runs the .ps1 files), Vulkan SDK (spirv-val), libvpx, `tools/setup` |
+| .NET SDKs 6.0.408, 7.0.203, 9.0.304, 10.0.403 | system | shader harness builds for net10.0 |
+| vcpkg (checkout `661e42cd`): libvpx 1.16.0, dav1d 1.5.4, opus 1.6.1 | `tools\vcpkg\` (git-ignored) | static, x64-windows-static; run `vcpkg install` through `nx_env.cmd`. Its binary cache is `%LOCALAPPDATA%\vcpkg\archives` (17 MB) |
+| nvdisasm 13.3.73 | `tools\nvdisasm\` (git-ignored) | CUDA redistributable, SHA-256 checked |
+| not installed on purpose | | pwsh (Windows PowerShell 5.1 runs the .ps1 files), Vulkan SDK (spirv-val, validation layer), `tools/setup` |
 | sccache 0.19.0 | `tools\sccache\` (git-ignored) | picked up by the toolchain file at configure time; cache in `work\build\sccache` |
-| Python 3.13 venv | `tools\.venv\` (git-ignored) | `recomp/requirements.txt` and `tools/ai/requirements.txt` (Pillow, numpy) installed. Python 3.14 is also installed system-wide (has `compression.zstd`) |
+| Python 3.13 venv | `tools\.venv\` (git-ignored) | `recomp/requirements.txt`, `tools/ai/requirements.txt` (Pillow, numpy) and `zstandard` installed with `tools\uv\uv.exe` |
 | `nx_plain_nso.exe` | `tools\extract\build\msvc\bin\` | built with MSVC from a VS x64 prompt: `cmake -S tools\extract -B tools\extract\build\msvc -G Ninja -DCMAKE_BUILD_TYPE=Release` then `cmake --build tools\extract\build\msvc` |
 
-Disk: C: had 59 GB free with the whole game extracted (`game\oot`, 26.3 GB RomFS) and `work\` (~1.1 GB lift, builds, shader corpus).
+Disk: C: had 130 GB free before the setup (the `.nup` already in the repo root); the extracted game takes 26.3 GB, `work\` ~8 GB.
+
+**Runtime tests** (`runtime\scripts\build.ps1 -Test`, 2026-11-06): they configure now (the default game module was `mpr`, which this
+repository does not carry; now `oot` when `games/mpr` is missing, and `tests/gfx/test_prompts.cpp`, which needs mpr's pak/txtr readers,
+is left out), and the lift tests find the repo-local LLVM (`recomp/oracle/e2e/build_prog.py`, `runtime/tests/tools/make_sites.py`).
+Result: 143 of 170 pass. The 27 failing groups were never run on this branch; the ones looked at expect upstream state: the Vulkan
+validation layer (`gfx_nvn_texgpu`: no Vulkan SDK), NVN API version 55 (`gfx_nvn_device`: OoT needs 231.40), mpr's local user
+(`svc_acc`), a Switch 2 core-mask error code (`kernel_threads`). Not yet sorted into stale tests and real regressions.
 
 ## OoT pipeline
 
