@@ -174,6 +174,9 @@ struct ShaderReflection {
     std::vector<uint32_t> builtins_in, builtins_out;  // SPIR-V BuiltIn values (on variables or block members)
     std::vector<uint32_t> builtins_used_in, builtins_used_out;  // built-in block members an access chain reaches (used, not only declared)
     bool uses_support_buffer = false;
+    // The harness's "gmem" token: global memory accesses resolved at run time against the stage's c[0] storage descriptors (A17,
+    // tools/shaders/ampere/frontend/AmpereGlobal.cs): graphics stages then get a c[0] with those descriptors per draw (graphics_c0).
+    bool global_fallback = false;
 
     const DescriptorBinding* find(uint32_t set, uint32_t binding) const;
     // Vertex: the attribute locations the shader reads. Fragment: the render targets it writes.
@@ -194,7 +197,7 @@ bool reflect_spirv(const uint32_t* words, size_t count, ShaderReflection& out, s
 //   img<type>[c<slot>:<word>(x<n>)]=s<set>b<binding>  image, likewise
 
 struct HarnessResource {
-    enum Kind : uint8_t { Uniform, Storage, Texture, Image } kind = Uniform;
+    enum Kind : uint8_t { Uniform, Storage, Texture, Image, GlobalFallback } kind = Uniform;   // GlobalFallback: the "gmem" token
     int set = -1, binding = -1;
     int bank = -1;           // c[bank] as printed (-1 = the default texture bank)
     int word = -1;           // storage: descriptor word in c[bank]; texture/image: handle word

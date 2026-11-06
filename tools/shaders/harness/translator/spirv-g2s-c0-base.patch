@@ -2,9 +2,26 @@ Ryujinx shader translator: when a global address is the sum of two constant-buff
 second one, so "c[1][0x20] + c[0][0x40]" (an offset from the shader's constant data plus the storage descriptor) became a
 storage buffer bound from c[1]. A c[0] (driver reserved) addend is now preferred over one from another bank. The Ryujinx
 code in the context lines is MIT.
---- a/Translation/Optimizations/GlobalToStorage.cs	2026-10-29 05:10:51.674910200 -0500
-+++ b/Translation/Optimizations/GlobalToStorage.cs	2026-10-29 05:10:51.776837200 -0500
-@@ -1046,6 +1046,14 @@
+Also: an access no descriptor can be traced for checks every storage descriptor of the stage at run time (AmpereGlobal.cs; the Lichii emulator's fallback) instead of being dropped.
+
+--- a/Translation/Optimizations/GlobalToStorage.cs
++++ b/Translation/Optimizations/GlobalToStorage.cs
+@@ -652,6 +652,14 @@
+             }
+ 
+             targetCbs.Sort();
++
++            // Not traceable to one descriptor: check every storage descriptor of the stage at run time (AmpereGlobal.cs, as the Lichii emulator does)
++            if (targetCbs.Count == 0 && AmpereGlobal.Candidates is { Length: > 0 } fallback)
++            {
++                foreach (int word in fallback) targetCbs.Add(PackCbSlotAndOffset(0, word));
++                AmpereGlobal.Used = true;
++                gpuAccessor.Log($"Global memory fallback for operation \"{operation.Inst}\": {fallback.Length} storage descriptors checked at run time.");
++            }
+ 
+             if (targetCbs.Count == 0)
+             {
+@@ -1046,6 +1054,14 @@
              // because constant buffer are always encoded as the second operand,
              // so the second operand will always be the one from the last instruction.
  

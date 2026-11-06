@@ -114,6 +114,42 @@ namespace SpirvHarness
             return (pt, sp, order == 0x900);
         }
 
+        /// The c[0] word offsets of every storage descriptor an NVN2 block's stage can have bound: the candidates of the global memory fallback
+        /// (tools/shaders/ampere/frontend/AmpereGlobal.cs). Graphics: 16 slots at 0x110 + 0x100 * hardware stage (vertex 0, tessellation control 1,
+        /// evaluation 2, geometry 3, fragment 4), task 0x650 and mesh 0x750 (measured, nvn_replay.cpp storage_slot_for); compute: the storage entries
+        /// of the program's c[0] table (header, push area, uniform block entries, then storage entries; as apply_nvn2_compute_table). Null: none.
+        public static int[] GlobalFallbackWords(byte[] ctrl)
+        {
+            if (!Program.IsNvn2(ctrl) || ctrl.Length < 0xbc) return null;
+            int stage = BitConverter.ToUInt16(ctrl, 0x56);
+            int baseByte, count = 16;
+            switch (stage)
+            {
+                case 0: baseByte = 0x110; break;
+                case 1: baseByte = 0x510; break;
+                case 2: baseByte = 0x410; break;
+                case 3: baseByte = 0x210; break;
+                case 4: baseByte = 0x310; break;
+                case 6: baseByte = 0x650; break;
+                case 7: baseByte = 0x750; break;
+                case 5:
+                    {
+                        int ubos = ctrl[0xb1], ssbos = ctrl[0xb2], textures = ctrl[0xb3], images = ctrl[0xb6];
+                        int table = ctrl[0xba] | ctrl[0xbb] << 8;
+                        int push = table - (0x10 + 0x10 * (ubos + ssbos) + 8 * (textures + images));
+                        if (push < 0 || push % 0x10 != 0 || push > 0x100) push = 0;
+                        if (ssbos == 0) return null;
+                        baseByte = 0x10 + push + 0x10 * ubos;
+                        count = ssbos;
+                        break;
+                    }
+                default: return null;
+            }
+            int[] words = new int[count];
+            for (int k = 0; k < count; k++) words[k] = (baseByte + 0x10 * k) / 4;
+            return words;
+        }
+
         public void Log(string message)
         {
             // "handle-expr n rpn" from the bindless patch (translator/ampere-bindless-handle-expr.patch): goes to the resource list

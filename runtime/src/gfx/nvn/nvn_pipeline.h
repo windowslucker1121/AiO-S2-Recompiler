@@ -146,6 +146,7 @@ uint32_t xfb_stride(const ShaderInfo* vs);
 // Persistent buffers every draw may bind: the driver constants (c[0]) image and a shader's constant data (c[1]).
 VkBuffer constant_data_buffer(const ShaderInfo* s, VkDeviceSize* range);
 VkBuffer driver_constants_buffer(VkDeviceSize* range);
+const uint8_t* driver_constants_ptr();   // its mapped bytes (null before driver_constants_buffer made it)
 
 // ---- pipeline libraries (nvn_gpl.cpp, VK_EXT_graphics_pipeline_library) ------------------------------------------------------
 // A pipeline is linked from four parts: vertex input, pre-rasterisation shaders (vertex/geometry code + raster state), fragment shader

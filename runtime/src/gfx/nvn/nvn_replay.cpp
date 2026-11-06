@@ -1128,6 +1128,19 @@ VkFormat image_format_vk(uint32_t f) {
     }
 }
 
+int storage_c0_base(int nvn_stage) {   // c[0] byte offset of a graphics stage's storage descriptor slot 0 (see storage_slot_for)
+    switch (nvn_stage) {
+        case kVertex: return 0x110;
+        case kTessCtl: return 0x210;
+        case kTessEval: return 0x310;
+        case kGeometry: return 0x410;
+        case kFragment: return 0x510;
+        case kTask: return 0x650;
+        case kMesh: return 0x750;
+        default: return 0x310;
+    }
+}
+
 int storage_slot_for(int nvn_stage, int c0_offset) {
     // c[0] storage buffer descriptors (byte offsets, as the translator reports them): 0x110 + 0x100 * hardware stage + 0x10 * binding
     // with hardware stage 0 vertex, 3 geometry, 4 fragment; compute: 0x310 + 0x10 * binding. Checked against the translated shaders of the
@@ -1545,6 +1558,33 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n) {
     for (int i = 0; i < c.c0_images; ++i, off += 8) put64(i < 16 ? S.img[kCompute][i] : 0);
     return true;
 }
+// c[0] of a graphics draw whose shader resolves global memory at run time (ShaderReflection::global_fallback, A17): the static driver constants
+// (driver_constants_buffer: the agl point size at 0x610) with the storage descriptors {address, size} of every graphics stage's bound slots,
+// where the NVN driver keeps them (0x110 + 0x100 * hardware stage + 0x10 * slot; task 0x650, mesh 0x750; storage_slot_for). 4 KiB per descriptor
+// set built for such a shader; other draws keep the shared static buffer.
+constexpr VkDeviceSize kGraphicsC0Bytes = 0x1000;
+bool graphics_c0(VkDescriptorBufferInfo& bi) {
+    const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
+    UploadAlloc u = F->upload(kGraphicsC0Bytes, std::max<VkDeviceSize>(align, 256));
+    if (!u) return false;
+    VkDeviceSize range = 0;
+    if (driver_constants_buffer(&range) && driver_constants_ptr()) std::memcpy(u.ptr, driver_constants_ptr(), static_cast<size_t>(kGraphicsC0Bytes));
+    else std::memset(u.ptr, 0, static_cast<size_t>(kGraphicsC0Bytes));
+    static const int kStagesWithStorage[] = {kVertex, kTessCtl, kTessEval, kGeometry, kFragment, kTask, kMesh};
+    for (int st : kStagesWithStorage) {
+        const int base = storage_c0_base(st);
+        for (int k = 0; k < 16; ++k) {
+            const GState::Bind& b = S.ssbo[st][k];
+            const uint64_t addr = b.addr;
+            const uint32_t size = b.addr ? static_cast<uint32_t>(std::min<uint64_t>(b.size, 0xffffffffu)) : 0;
+            std::memcpy(u.ptr + base + 0x10 * k, &addr, 8);
+            std::memcpy(u.ptr + base + 0x10 * k + 8, &size, 4);
+        }
+    }
+    bi = {u.buffer, u.offset, kGraphicsC0Bytes};
+    return true;
+}
+
 bool compute_c0(const ShaderInfo& s, VkDescriptorBufferInfo& bi) {
     if (!s.control.nvn2 || s.control.stage != 5) return false;
     const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
@@ -1583,6 +1623,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                     break;
                 case NvnSource::DriverConstants: {
                     if (d.nvn_stage == kCompute && compute_c0(*d.shader, bi)) break;   // a compute table with push constants: built for this dispatch
+                    if (d.nvn_stage != kCompute && d.shader->refl.global_fallback && graphics_c0(bi)) break;   // storage descriptors for the A17 fallback
                     VkDeviceSize range = 0;
                     VkBuffer buf = driver_constants_buffer(&range);
                     if (buf) bi = {buf, 0, range};

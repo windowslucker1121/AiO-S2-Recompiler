@@ -968,6 +968,8 @@ VkBuffer driver_constants_buffer(VkDeviceSize* range) {
     return g_driver_const.buffer;
 }
 
+const uint8_t* driver_constants_ptr() { return g_driver_const_made ? static_cast<const uint8_t*>(g_driver_const.mapped) : nullptr; }
+
 size_t pipeline_count() { return static_cast<size_t>(g_pipeline_count.get()); }
 
 void module_cache_clear() {

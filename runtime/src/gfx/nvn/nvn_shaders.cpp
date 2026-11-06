@@ -677,6 +677,12 @@ bool parse_harness_resources(std::string_view text, std::vector<HarnessResource>
         std::string_view tok = text.substr(0, sp);
         text = sp == std::string_view::npos ? std::string_view{} : text.substr(sp + 1);
         if (tok.empty()) continue;
+        if (tok == "gmem") {   // no binding of its own: a flag (ShaderReflection::global_fallback)
+            HarnessResource g;
+            g.kind = HarnessResource::GlobalFallback;
+            out.push_back(std::move(g));
+            continue;
+        }
         // "...=s<set>b<binding>"
         size_t eq = tok.rfind('=');
         if (eq == std::string_view::npos || eq + 1 >= tok.size() || tok[eq + 1] != 's') return false;
@@ -814,6 +820,10 @@ bool parse_handle_expr(std::string_view text, std::vector<HandleExprOp>& out) {
 bool apply_harness(ShaderReflection& refl, const std::vector<HarnessResource>& resources) {
     bool ok = true;
     for (const HarnessResource& r : resources) {
+        if (r.kind == HarnessResource::GlobalFallback) {
+            refl.global_fallback = true;
+            continue;
+        }
         DescriptorBinding* b = nullptr;
         for (auto& x : refl.bindings)
             if (int(x.set) == r.set && int(x.binding) == r.binding) b = &x;

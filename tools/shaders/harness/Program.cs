@@ -46,6 +46,8 @@ namespace SpirvHarness
         const uint ComputeMagic = 0x12345679;
         static readonly TimeSpan Timeout = TimeSpan.FromSeconds(60);
         static bool NoRetry;   // --no-retry: report attempt 1 only (the translator as Ryujinx runs it)
+        // --no-global-fallback or NXRT_HARNESS_NO_GLOBAL_FALLBACK=1: untraceable global memory accesses are dropped as before (A17, AmpereGlobal.cs)
+        static bool NoGlobalFallback = Environment.GetEnvironmentVariable("NXRT_HARNESS_NO_GLOBAL_FALLBACK") == "1";
         static bool Debug;     // --debug-mode: DebugMode from attempt 1 (also reports undecodable opcodes)
 
         static readonly Dictionary<string, string> GlslcByHash = new();   // --reflect <corpus>: code hash -> GLSLC output
@@ -56,6 +58,7 @@ namespace SpirvHarness
         static int Main(string[] args)
         {
             NoRetry = args.Contains("--no-retry");
+            NoGlobalFallback |= args.Contains("--no-global-fallback");
             StaticGpuAccessor.DesktopHost = Opt(args, "--host", "desktop") != "moltenvk";
             Debug = args.Contains("--debug-mode");
             try
@@ -276,6 +279,7 @@ namespace SpirvHarness
                 AmpereProgram prog = null;
                 try
                 {
+                    AmpereGlobal.Begin(NoGlobalFallback ? null : StaticGpuAccessor.GlobalFallbackWords(ctrl));   // A17: untraceable global accesses
                     TranslatorContext tctx = AmpereTranslator.CreateContext(gpu, options, insts, out prog, mesh);
                     ShaderProgram sp = tctx.Translate();
                     if (prog.Unsupported.Count == 0)
@@ -286,6 +290,7 @@ namespace SpirvHarness
                         r.SpvBytes = spv?.Length ?? 0;
                         r.Status = spv == null ? "no-output" : attempt == 1 ? "ok" : "ok-retry";
                         r.Resources = DescribeResources(sp.Info, gpu);
+                        if (AmpereGlobal.Used) r.Resources += (r.Resources.Length > 0 ? " " : "") + "gmem";   // the runtime fills this stage's c[0] storage descriptors per draw
                         if (refl != null) lock (gpu.Messages) gpu.Messages.AddRange(refl.Check(nvnStage, sp.Info));
                     }
                 }
