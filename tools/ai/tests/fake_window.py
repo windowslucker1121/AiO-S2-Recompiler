@@ -1,11 +1,13 @@
 """Stand-in for the game exe with a real window, for test_gamectl.py (stdlib + ctypes only).
 
-  fake_window.py [--log FILE] [--pos X,Y] [--size W,H] [--topmost] [--exit-after S] [any other game argument, ignored]
+  fake_window.py [--log FILE] [--pos X,Y] [--size W,H] [--topmost] [--exit-after S] [--instance NAME] [--refuse] [any other game argument, ignored]
 
 Paints its client area one colour (grey; key R / G / B turns it red / green / blue, a click white) and writes what it receives to the log:
 its arguments, the NXRT_* / SDL_* environment, keys (vk, scan code, extended bit), characters, clicks (client x y), wheel deltas.
 --topmost: a magenta always-on-top window (covers the other one). --exit-after S: exit 0 after S seconds; with NXRT_TEST_OUT set it then
 writes result.json and a trace line there, and answers every `@peek IN OUT` line of NXRT_TEST_SCRIPT with 8 bytes, like the runtime.
+--instance NAME: the title ends in " [NAME]", as the game's does. --refuse: exit at once with code 7 and a line on stderr, as the game does
+when it refuses to start beside another run.
 """
 import ctypes
 import ctypes.wintypes as wt
@@ -47,6 +49,9 @@ def arg(name, default=None):
     return sys.argv[sys.argv.index(name) + 1] if name in sys.argv[:-1] else default
 
 
+if '--refuse' in sys.argv:
+    sys.stderr.write('oot: Not enough free memory for another run (fake)\n')
+    sys.exit(7)
 log = open(arg('--log', os.devnull), 'a', encoding='utf-8', buffering=1)
 log.write(f'argv {sys.argv[1:]}\n')
 for k in sorted(os.environ):
@@ -119,7 +124,8 @@ def main():
     style, ex = 0x00CF0000, (0x08000008 if topmost else 0)          # WS_OVERLAPPEDWINDOW; WS_EX_NOACTIVATE | WS_EX_TOPMOST
     r = wt.RECT(0, 0, w, h)
     u32.AdjustWindowRectEx(ctypes.byref(r), style, False, ex)
-    hwnd = u32.CreateWindowExW(ex, 'fake_game_window', 'fake cover' if topmost else 'fake game window', style, x, y, r.right - r.left,
+    title = 'fake cover' if topmost else 'fake game window' + (f' [{arg("--instance")}]' if arg('--instance') else '')
+    hwnd = u32.CreateWindowExW(ex, 'fake_game_window', title, style, x, y, r.right - r.left,
                                r.bottom - r.top, None, None, inst, None)
     u32.ShowWindow(hwnd, 4)                                          # SW_SHOWNOACTIVATE
     if (s := arg('--exit-after')) is not None:
