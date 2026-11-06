@@ -685,6 +685,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         limits_.subgroup_size = p11.subgroupSize;
         limits_.subgroup_ops = p11.subgroupSupportedOperations;
         limits_.max_memory_allocation_count = props_.limits.maxMemoryAllocationCount;
+        NXLOG_I(kTag, "limits: %u memory allocations, min imported host alignment %llu, max buffer %llu MiB", limits_.max_memory_allocation_count,
+                static_cast<unsigned long long>(limits_.min_imported_host_alignment), static_cast<unsigned long long>(limits_.max_buffer_size >> 20));
     }
     if (features_.conservative_raster_dynamic) {
         VkPhysicalDeviceConservativeRasterizationPropertiesEXT cp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONSERVATIVE_RASTERIZATION_PROPERTIES_EXT};

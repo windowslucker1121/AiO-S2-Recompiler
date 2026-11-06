@@ -3,7 +3,7 @@
 What a new agent needs to know before working here. Keep it current: add what you learn, remove what stops being true.
 Repository basics are in `README.md`, the recompiler in `recomp/README.md`, the game boundary in `runtime/docs/GAME_BOUNDARY.md`.
 
-## State (branch `oot-nup`, 2026-11-05)
+## State (branch `oot-nup`, 2026-11-06)
 
 Porting **The Legend of Zelda: Ocarina of Time** (Switch 2, program `0400486024DEC000`, update 2.0.0 / `131072`) next to the
 existing Pokopia port. Game id `oot`: `recomp/games/oot/` (manifest `game.toml`, `config.py`, `CMakeLists.txt`, `main.sites`).
@@ -161,7 +161,7 @@ Open points besides the milestones:
 | A5 | setup window | blurry (DPI-virtualised) | fixed in code (per-monitor DPI), not yet seen |
 | A6 | all | Opus audio was silent: `hwopus` decoded silence. Now libopus 1.6.1 (vcpkg `opus:x64-windows-static`, repo-local); the Ex open forms carry {rate, channels} in the raw data (OoT: 48 kHz mono, was read from a buffer: 0/0 and "buffer too small") | fixed (not listened to) |
 | A7 | game (expected) | shadows of clustered (point/spot) lights are missing: 4,336 fragment shaders sample their shadow maps with TEX.SCR.B.DC through a handle read per pixel (light index from a storage loop), which the handle expressions cannot bind; the sample answers 1 (lit). Fix: pool-sized texture + sampler arrays in the runtime (Ryujinx GenerateBindlessAccess, harness QueryHostSupportsSeparateSampler true) | open |
-| A8 | first scene | **VK_ERROR_DEVICE_LOST** a few frames into the first gameplay scene, every run (2026-11-06). No display-driver timeout event (4101), so a GPU fault, most likely an out-of-range access (robustBufferAccess is off for speed). Not the compute shaders with unmapped storage buffers (skipped now, still lost). `[gfx] robust_access = 1` changes the driver's pipeline keys, so the prepared cache misses and everything recompiles (black screen for 30+ min): not usable as a quick test | open |
+| A8 | first scene | **VK_ERROR_DEVICE_LOST** 1-7 s after the first gameplay frame, every full run (2026-11-06). Ruled out, one run each: a GPU timeout (no event 4101); compute (`[nvn] debug_skip_compute = 1`: still lost); the handle-expression fragment shaders and the other newly translated fragment shaders (`[nvn] skip_fs_file` lists: still lost); memory pressure (handheld mode + `[nvn] tex_prep_mb = 128` + no pipeline cache: still lost); texture upgrades (`[gfx] astc_quality = fast`: still lost); the allocation count (limit 2,342,492). Skipping every draw with a fragment shader (skip_fs_file with 0..f) avoids it, and so does running any single 1/16 hash slice (8, 90-97, 98-9b, 9c-9d, 9e-9f; gameplay then runs for minutes at 10-15 fps), but 8+9 together faults: not one bad shader, more likely an interaction (a pass reading what another wrote) or an amount. `[gfx] robust_access = 1` would tell out-of-range accesses apart but misses the prepared pipeline cache (30+ min of compiles). Next: a per-draw submit-and-wait debug mode to find the faulting draw, or the Vulkan validation layer with GPU-assisted validation (needs the Vulkan SDK: the user decides) | open |
 | A9 | game | foliage/terrain use **mesh shaders** (`nvnCommandBufferDrawMeshTasks`, unknown proc; the 800 stage 6/7 blocks "without code"): nothing is drawn for them | open |
 | A10 | game | **compute shaders read their resources from c[0] at offsets the runtime does not map**: storage buffers at c0 bytes 0xC0, 0xD0, 0x100, 0x110, 0x120, 0x150, 0x160 (Pokopia: 0x210 uniforms-as-storage, 0x310 storage) and texture/image handles at c0 words 8-142; the same word is a storage descriptor in one shader and an image handle in another, so it is a per-program table (GLSLC reflection was not extracted for the corpus). Dispatches whose storage buffers map to nothing are skipped (`[nvn] skip_unmapped_dispatch`) | open |
 
@@ -180,6 +180,8 @@ delay is dav1d's own choice and `[media] video_decoder_threads` defaults to half
 Flow after the title: A -> `Dm_Kokiri_0000.webm` (the intro, **5 minutes**, no skip with A/B/+ presses or 3 s holds), then the first
 scene. Hiding the intro file makes the game wait forever on a black loading screen. For tests, `[media] video_max_pictures = 120` ends
 every movie stream after 120 pictures (the title movie then restarts every 4 s).
+
+**Test shortcuts (2026-11-06):** reaching the first scene takes ~3 min per run: `media.video_max_pictures = 120` (movies end early), A pressed at 50, 54 and 58 s on the virtual pad (the title menu is ready around 45 s; earlier presses are lost), then ~70 s of loading. `[nvn] skip_fs_file` (fragment hash prefixes, re-read every 500 ms) bisects draws; `[nvn] trace_frame = 3500-9000` with `trace_targets = 0` traces every draw (700 MB of log). Gameplay with 1/16 of the fragment draws ran at 10-15 fps.
 
 **First gameplay frame (2026-11-06):** after the intro the first scene's frame has ~13,100 draws and took 85-112 s to replay: 850 MB of texture uploads with ~100 ASTC->BC7 transcodes on the render thread (first use; stand-ins exist but most waited), 3,000 pipelines linked, 460-650 memory pool imports. Later starts find the BC7 entries on disk. Pipeline parts come from the prepared cache (9,000 parts in 12 s of worker time instead of 350 s).
 
