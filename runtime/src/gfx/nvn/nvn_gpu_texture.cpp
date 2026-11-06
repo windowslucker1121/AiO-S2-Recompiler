@@ -2319,7 +2319,9 @@ bool snapshot_write(int index, const std::string& path_in, std::string* stats) {
         return wrote;
     }
     const bool ok = convert_png_impl(static_cast<const uint8_t*>(s.buf.mapped), s.format, s.e, s.bpp, s.aspect, path, stats);
-    if ((s.aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || s.format == VK_FORMAT_R16G16B16A16_UNORM) {   // depth, 16-bit colour: the texel bytes too (<path>.bin), an 8-bit PNG loses the precision
+    // depth, 16-bit and float colour: the texel bytes too (<path>.bin), an 8-bit PNG loses the precision (and clamps HDR values at 1)
+    if ((s.aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || s.format == VK_FORMAT_R16G16B16A16_UNORM || s.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 ||
+        s.format == VK_FORMAT_R16G16B16A16_SFLOAT || s.format == VK_FORMAT_R32_SFLOAT || s.format == VK_FORMAT_R32G32B32A32_SFLOAT) {
         if (FILE* f = std::fopen((path + ".bin").c_str(), "wb")) {
             std::fwrite(s.buf.mapped, 1, static_cast<size_t>(s.e.width) * s.e.height * s.bpp, f);
             std::fclose(f);

@@ -1186,6 +1186,15 @@ const ShaderInfo* ShaderCache::find(const uint8_t* code, const uint8_t* control,
         return nullptr;
     }
     std::string hash = shader_hash(code, c.code_size);  // a pass over the block: outside the lock
+    {   // [nvn] dump_shader: hash prefixes whose blocks go to [nvn] dump_missing even when translated (blocks built into main are in no corpus)
+        static const std::string list = nxrt::config_get_str("nvn", "dump_shader", "");
+        for (size_t at = 0; !list.empty() && at < list.size();) {
+            size_t end = list.find(',', at);
+            if (end == std::string::npos) end = list.size();
+            if (end > at && hash.compare(0, end - at, list, at, end - at) == 0) dump_missing_block(hash, code, control, c.code_size);
+            at = end + 1;
+        }
+    }
     std::string record;
     bool have_record = false, is_open;
     {
