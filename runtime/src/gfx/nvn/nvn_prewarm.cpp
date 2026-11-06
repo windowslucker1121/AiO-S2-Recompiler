@@ -135,9 +135,11 @@ bool stub_key(const Rec& r, GraphicsKey& k, const ProgLayout*& pl) {
     return pl != nullptr;
 }
 
-// The parts of a record, for the pipeline-library threads.
+// The parts of a record, for the pipeline-library threads (which of them a shader preparation built: gpl_prepared_parts).
 void queue_parts(const Rec& r, bool front) {
-    gpl_prebuild([r](GraphicsKey& k, const ProgLayout*& pl) { return stub_key(r, k, pl); }, front);
+    const uint8_t prepared = gpl_prepared_parts(r.h, r.rest[offsetof(GraphicsKey, polygon_mode) - kStageBytes], r.rest[offsetof(GraphicsKey, depth_clamp) - kStageBytes],
+                                                r.rest[offsetof(GraphicsKey, depth_neg_one) - kStageBytes]);
+    gpl_prebuild([r](GraphicsKey& k, const ProgLayout*& pl) { return stub_key(r, k, pl); }, front, prepared);
 }
 
 void erase_job_locked(const std::shared_ptr<Job>& j) {

@@ -395,4 +395,15 @@ bool read_programs_file(const std::string& path, std::vector<ProgramHashes>* out
 // translator, a re-run of the batch) only matter when they complete programs.
 uint64_t usable_programs(const std::vector<ProgramHashes>& progs);
 
+// ---- the shader preparation's state file (prepare.state next to programs.bin; written by gpl_prepare) --------------------------------------
+// Version of what a preparation builds. 2: pre-raster parts for every raster flag set of [nvn] prepare_rasters (1 built only the console's
+// default, depth clamp on, while OoT draws 98% of its pipelines with depth clamp off), and the state names the pipeline cache file it wrote.
+constexpr int kPrepareScheme = 2;
+// [nvn] prepare_rasters: the raster flags (polygon mode . depth clamp . negative-one-to-one depth) every program's pre-raster part is prepared
+// with, as "p.c.n" groups. Normalised text, the same in the state file.
+std::string prepare_rasters_setting();
+// Finished by this scheme with the current raster flags, and the pipeline cache file it wrote is still there with at least half of the bytes it
+// had then (a later in-game save only adds to it). No device needed: the GPU/driver key is checked where a device exists. *why says what is off.
+bool prepare_state_complete(const std::string& state_path, std::string* why);
+
 }  // namespace nxrt::nvn::be
