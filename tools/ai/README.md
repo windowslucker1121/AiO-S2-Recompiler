@@ -68,9 +68,12 @@ a route name or a dict with one of `route`, `wait_for` (the tool's arguments), `
 `press_until` (`input`, `every_s`, `until` = wait_for arguments, `timeout_s`; a log condition counts from the first press); `optional`
 lets a step fail. The routes use log lines and the window, so they survive load times that vary by minutes.
 
-Limits: a state is only as close to the moment as the game's last save (OoT saves when the player saves; a state made right after an
-autosave or a save is exact, later ones restart from that save); everything after the save (position, enemies, time of day as the game
-does not store it) comes back as the game restores it. A state made with another build still loads; the result says so.
+Limits: a state is only as close to the moment as the game's last save (OoT has an auto-save manager and a save in the menu; a state
+made right after an autosave or a save is exact, later ones restart from that save); everything after the save (position, enemies, what
+the game does not store) comes back as the game restores it. Before the first save a state is its route: `first_scene` and a state saved
+there replay New Game every time. A state made with another build still loads; the result says so. On 2026-11-06 the game wrote no slot
+in the first eight minutes after New Game (the first scene's picture stayed black behind the intro's subtitles, the pause key showed
+nothing), so the `continue` route (A on the first title entry, meant to continue a save) is not checked against a real slot yet.
 
 ## Bug bundles
 
@@ -127,11 +130,14 @@ and with none running, `bugs` (list, one in full with its picture), `load_state(
 checked-in `ai_states.toml` names only known routes and step kinds. The runtime side (bundle contents, committed-only save copy, request
 files): `runtime\build\release\nxrt_tests.exe bugcapture`.
 
-## Only checkable once the game boots
+## Seen on the real game (oot.exe, RTX 4080, 2026-11-06)
 
-- Whether the SDL window takes posted key/mouse messages while unfocused and the play layer acts on them (else use `method="send"`),
-  and whether the window really opens without taking the focus (`SW_SHOWNOACTIVATE` + `SDL_WINDOW_ACTIVATE_WHEN_SHOWN=0`).
-- Whether PrintWindow captures the Vulkan swapchain (else `method="screen"` with the window in front, or the game's own `@shot` /
-  `boot.screenshot_at`).
-- Raw mouse look with `rel`, scripted runs on the real exe (`frame_source=tick` delivering frames, the exit codes, `result.json`,
-  `@peek`/`@poke`), and Ocarina of Time probes (there is no `runtime/games/oot` yet, so the trace has only frame, hash and time).
+- The window opens without taking the focus, and posted key messages reach the play layer while it is covered and unfocused: Enter
+  posted by `send_input` is A on the title menu, Escape is +, F9 the bug hotkey.
+- **PrintWindow and BitBlt do not see the Vulkan swapchain** (black), and `method="screen"` shows whatever covers the window (another
+  application on the desktop). `screenshot` therefore asks the game for its own next presented frame first (request file
+  `<exe dir>/screenshot.<pid>`, answered by the runtime's bug-capture poller); bundles and states never keep a black or screen picture.
+- `load_state("first_scene")`: boot to the title movie 17 s, A taken on the second press at 27 s (the title movie's decoder finalized
+  after 26 pictures), the first frame with 13,049 draws at 51 s; 57 s in all.
+- Still open: raw mouse look with `rel`, scripted runs on the real exe (`frame_source=tick`, `result.json`, `@peek`/`@poke`), and Ocarina
+  of Time probes (`runtime/games/oot` has no `tt::GameProbes`, so the trace has only frame, hash and time).

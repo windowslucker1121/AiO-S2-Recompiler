@@ -30,6 +30,7 @@ steps = [
 ]
 
 [route.continue]
+# not yet checked with a real slot (no run has reached a save so far): with a save the title may show a slot choice first
 description = "title: A on the first menu entry (with a save: continue it) until the title movie is cut"
 steps = [
   { press_until = { input = ["key Return"], every_s = 3, until = { until = "log", pattern = "finalized after ([0-9]|[1-9][0-9]|1[01][0-9]) pictures" }, timeout_s = 120 } },
@@ -47,5 +48,7 @@ description = "the title screen, fresh save data"
 reach = ["title"]
 
 [state.first_scene]
-description = "New Game from fresh save data: the intro movie cut short, the first 3D scene after the loading (~3.5 min)"
+# 57 s on the RTX 4080 (2026-11-06): the title at 17 s, A taken at 27 s, 13,049 draws at 51 s. The intro's timeline (subtitles, voices)
+# still runs for minutes after its video ends; the picture of that scene was black in that run.
+description = "New Game from fresh save data: the intro video cut short, the first 3D scene (thousands of draws) loaded behind it (~1 min)"
 reach = ["title", "new_game", "in_game"]
