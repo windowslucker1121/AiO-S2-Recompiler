@@ -35,6 +35,7 @@
 #include "nvn_gpu_internal.h"
 #include "nvn_tess_gen.h"
 #include "nxrt/lowlat.h"
+#include "nxrt/gaps.h"
 #include "extras/hdr_nvn.h"
 #include "extras/fsr1_spatial.h"
 #include "extras/spatial_upscaler.h"
@@ -322,6 +323,7 @@ int storage_nonzero_pct(const Texture* t) {
 }
 
 void log_once(const char* key, const char* msg) {
+    nxrt::gap("nvn", msg);   // counted every time, logged once
     static std::unordered_map<std::string, bool> seen;
     if (seen.emplace(key, true).second) NXLOG_W(kTag, "%s", msg);
 }
@@ -2287,6 +2289,7 @@ const ShaderInfo* tcs_now() { return S.stage[kTessCtl] ? S.stage[kTessCtl] : g_g
 // On-demand shader translation (nvn_shaders.h): a bound program with a stage still being translated skips its draws (graphics stages bound)
 // or dispatches (compute bound) until the stage is there. Counted, and logged once per 10 s while it happens.
 bool g_gfx_pending = false, g_cs_pending = false;
+std::string g_gfx_missing;   // the untranslated block(s) of the bound graphics program (gaps: draws made without them)
 uint64_t g_pending_draws = 0, g_pending_dispatches = 0;
 std::chrono::steady_clock::time_point g_pending_log_at{};
 
@@ -2307,6 +2310,8 @@ void upscaler_note_draw(const ShaderInfo* fs);
 
 bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* topo_out) {
     if (g_gfx_pending) { note_pending_skip(false); return false; }
+    if (!g_gfx_missing.empty())   // a stage the translator could not do: skipped (no vertex shader) or drawn without it (no fragment shader)
+        nxrt::gap("draw", S.stage[kVertex] ? "drawn without an untranslated stage" : "skipped: untranslated vertex stage", g_gfx_missing);
     const ShaderInfo* vs = S.stage[kVertex];
     if (!vs) { log_once("draw-no-vs", "draw without a vertex shader skipped"); return false; }
     if (!S.render_enable) return false;
@@ -3101,7 +3106,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     }
     if (upscaler_dispatch(cs ? cs->hash : g_cs_missing)) return;   // [nvn] upscaler_replace: the game's upscaler, replaced
     if (g_cs_pending) { note_pending_skip(true); return; }
-    if (!cs) return;
+    if (!cs) { if (!g_cs_missing.empty()) nxrt::gap("dispatch", "skipped: untranslated compute shader", g_cs_missing); return; }
     static const bool debug_skip = config_get_bool("nvn", "debug_skip_compute", false);   // diagnosis: no dispatch runs
     if (debug_skip) return;
     const ShaderInfo* stages[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, cs};
@@ -3624,7 +3629,10 @@ void do_write_memory(uint64_t gpu_addr, const void* data, uint32_t size) {
 // ---- the interpreter ----------------------------------------------------------------------------------------------------------
 void apply_bind_program(const P_BindProgram& p) {
     const bool pending = p.program && program_resolve_pending(p.program);
-    if (p.stages & ((1u << kCompute) - 1)) g_gfx_pending = pending;
+    if (p.stages & ((1u << kCompute) - 1)) {
+        g_gfx_pending = pending;
+        g_gfx_missing = (p.program && p.program->missing[0]) ? std::string(p.program->missing) : std::string();
+    }
     if (p.stages & (1u << kCompute)) g_cs_pending = pending;
     for (int st = 0; st < 6; ++st)
         if (p.stages & (1u << st)) S.stage[st] = p.program ? p.program->stage[st] : nullptr;

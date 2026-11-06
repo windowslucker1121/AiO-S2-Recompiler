@@ -120,6 +120,24 @@ data and environment, and the reach of the state its run was loaded from (`bug.j
 | `NXRT_AI_BUGS_DIR` | `work/bugs` |
 | `NXRT_AI_STATES_TOML` | `recomp/games/<id>/ai_states.toml` |
 
+## Gaps: what is not implemented, without looking at every scene
+
+Every run writes `gaps.tsv` next to its log (rewritten every 30 s while new gaps appear, and at the end): each request the runtime only
+stands in for, counted every time it happens. Areas: `nvn-proc` (an NVN entry point without an implementation, e.g. the mesh draws),
+`nvn` (an operation the Vulkan back end leaves out or answers wrongly, e.g. GPU-side WaitEvent), `draw` / `dispatch` (skipped, or drawn
+without a stage the translator could not do; detail = the shader hash), `shader` (a program set with an untranslated block), `import`,
+`ipc`, `svc`. The end-of-run log has the 25 most frequent. The work list over one or more runs:
+
+```bat
+tools\.venv\Scripts\python tools\ai\gaps.py work\run\gaps_1 [more runs...] [--md gaps.md]
+```
+
+ranks them, joins shader hashes with the shader cache's `results.tsv` (stage, status, translator error; `--cache` or
+`NXRT_NVN_SHADER_CACHE`, default the main checkout's `work\shaders\oot\spirv`), sums the untranslated stages by translator error weighted
+by the draws that needed them, and names the AGENTS.md artifact row of known gaps. A place that answers with a stand-in and is not counted
+yet should call `nxrt::gap(area, what, detail)` (`runtime/include/nxrt/gaps.h`). Things the runtime cannot see (a shader that translates
+but computes the wrong thing, a texture decoded wrongly) never show up here.
+
 ## What the running exe offers (and what it does not)
 
 There is no live control channel into a running game: no pipe, socket, command file or stdin reader (searched `runtime/src`,

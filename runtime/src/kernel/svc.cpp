@@ -22,6 +22,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
+#include "nxrt/gaps.h"
 #include "nxrt/module.h"
 #include "nxrt/tt.h"
 
@@ -154,6 +155,7 @@ static void report_unknown(::Ctx* c, uint32_t number, uint64_t pc) {
         count = ++r.count;
     }
     g_unknown_total.fetch_add(1, std::memory_order_relaxed);
+    { char nm[16]; std::snprintf(nm, sizeof nm, "0x%02X", static_cast<unsigned>(number)); nxrt::gap("svc", "unknown supervisor call", nm); }
     if (g_log_limit.load() < 0) g_log_limit = config_get_int("svc", "unknown_log_limit", 100);
     if (static_cast<int64_t>(count) <= g_log_limit.load() || count % 1000 == 0) {
         const kernel::KThread* t = kernel::current_thread();

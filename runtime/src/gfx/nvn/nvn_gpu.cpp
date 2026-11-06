@@ -23,6 +23,7 @@
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 #include "nxrt/lowlat.h"
+#include "nxrt/gaps.h"
 #include "vk_gauges.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_impl.h"
@@ -361,6 +362,7 @@ uint64_t poll_completed() { return g ? read_completed() : 0; }
 uint64_t current_serial() { return g ? (g->recording ? g->recording : g->submitted) : 0; }
 
 void note_unsupported(const char* what) {
+    nxrt::gap("nvn", what);
     if (!g) return;
     g->ctr.unsupported_ops.fetch_add(1);
     std::lock_guard<std::mutex> lk(g->unsupported_mu);

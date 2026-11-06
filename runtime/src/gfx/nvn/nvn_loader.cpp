@@ -15,6 +15,7 @@
 #include "nxrt/config.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/log.h"
+#include "nxrt/gaps.h"
 
 namespace nxrt::nvn {
 namespace {
@@ -89,6 +90,8 @@ void stub_handler(::Ctx* c) {
         std::lock_guard<std::mutex> lk(g_unknown_mu);
         n = ++g_unknown_by_name[name ? name : "?"];
     }
+    if (idx >= 0) nxrt::gap("nvn-proc", "logging stub called", g_entries[idx].name);
+    else nxrt::gap("nvn-proc", "entry point without an implementation called", name ? name : "?");
     const uint64_t caller = lr(c) - 4;   // lr is the return address: the BLR is the instruction before it
     if (static_cast<int64_t>(n) <= log_first_calls()) {
         if (idx >= 0) {

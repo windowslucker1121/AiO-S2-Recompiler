@@ -271,6 +271,20 @@ every storage buffer of a dispatch to device-local memory and back (40 GB in 10 
 - Discovery can be inspected with `nxrecomp.funcs.analyse(img)` (rows with src E/S/B/R/T/A/G and end_from). When the game calls an
   address that is "not a known function", check discovery for that address first (boot fixes 12/13).
 
+## Gaps list: what is not implemented (since 2026-11-06)
+
+Each run writes `gaps.tsv` next to its log: every request the runtime only stands in for, counted (NVN entry points without an
+implementation, operations the back end leaves out, draws skipped or drawn without an untranslated stage, dispatches skipped, programs with
+an untranslated block, unhandled IPC commands, unimplemented imports, unknown SVCs; `runtime/include/nxrt/gaps.h`). The end of the log has
+the 25 most frequent (`[gaps]` lines). `tools\.venv\Scripts\python tools\ai\gaps.py <run dirs...>` merges runs into a ranked work list,
+joins shader hashes with `results.tsv` and groups blocks by translator error (`tools/ai/README.md`, "Gaps"). Use it before asking the user
+what looks wrong; add `nxrt::gap()` to any new stand-in. First list (run `work\run\gaps_1` in worktree quirky-panini-7286ba, first scene,
+240 s, fresh main cache): VRS palette image not converted (670k binds, perf only), `nvnCommandBufferSetGeometryProcessingMode` stub (203k),
+`DrawMeshTasksIndirect` / `DrawMeshTasks` stubs (A9/A15), GPU-side WaitEvent (93k), **`CallCommands` of an unknown handle skipped (24k:
+whole command lists not replayed)**, compute f2422a7a skipped (1,580 dispatches, unsupported `.UNKNOWN_243`), fragment 471bac84 untranslated
+(`.UNKNOWN_526`, its 1,393 draws run without a fragment shader), 1,444 draws without a usable render target, 98 task/mesh blocks, 8
+vertex/fragment blocks failing with an IndexOutOfRange in `GetConstantBufferBinding`.
+
 ## AI tools for the running game (`tools/ai/`)
 
 MCP server `game` (registered in `.mcp.json`, enabled by `"enabledMcpjsonServers": ["game"]` in the local, git-ignored
