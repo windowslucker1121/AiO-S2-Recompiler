@@ -80,6 +80,18 @@ threads: black screen and 9-18 fps for minutes (boot 23). The preparation runs a
 `prepare.state`'s key now holds the size of the cache's `results.tsv`: shaders translated since (the bindless work made 10,000 more
 programs preparable) make the next start prepare again. Without that, the new shaders flooded the background part builder (350 s of
 worker CPU in two minutes) and starved the game (no frame for 10 s). Headless: `oot.exe --prepare-shaders --if-needed`.
+**Prepared cache lost / parts missed (fixed 2026-11-06, RTX 4080):** two causes. (1) `ensure_cache` sized the file with `ftell`, which
+is 32-bit on Windows (-1 from 2 GiB on): NVIDIA's prepared cache is 2.2-2.3 GB, so the first game start loaded nothing and its periodic
+save replaced the file with what it compiled itself (boot1: 2.2 GB -> 88 MB; oot_cap -> 170 MB). Sizes are 64-bit now, the log says what
+the driver holds after loading (NVIDIA returns every imported byte), and a save never writes less than that. (2) The preparation built
+pre-raster parts with depth clamp on only, while 1,061 of the 1,085 keys in `pipeline_keys.bin` draw with it off: `[nvn] prepare_rasters`
+(default both). `prepare.state` is scheme 2 (raster flags, cache file and `cache_bytes`); the setup prepares again for an older scheme or
+a cache file that is missing or under half its size. First scene, same loop-capped shaders: before 74.9 ms per background part (5,101
+parts, cache not loaded), overlay ~12,300 left; after 0.73 ms per prepared part (12,241) and 20 ms per new one (175), overlay 0 from
+12 s on (17 at most), cache 2,305,488,425 bytes loaded in 3.3 s and unchanged after the run. The log line `shader parts built: N the
+preparation made (x ms each), M new (y ms each); the overlay shows K left` tracks it. With the driver's disk cache warm the preparation
+took 25 min for 117,981 parts (both raster sets); a forced second one loads the file, rebuilds everything in 58 s and saves the same
+2,305,488,425 bytes. Test folder: `work\shaders\pcfix` (its `spirv` is a junction to `oot_cap\spirv`; runs `work\run\pcfix_*`).
 
 Hardware of this machine (since 2026-11-06, the second development machine): AMD Ryzen 7 5800X3D (8 cores, 16 threads), **NVIDIA
 GeForce RTX 4080** (discrete, 15.7 GiB, Vulkan 1.4.341, driver 610.88), 32 GB RAM, Windows 11 Pro 26200. Everything above that names
