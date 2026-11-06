@@ -39,6 +39,7 @@ enum class Op : uint16_t {
     SubmitDeviceCommands,                             // nvnCommandBufferSubmitDeviceCommands: P_SubmitDeviceCommands (nvn_devcmd.h, docs/nvn2_device_commands.md)
     EvaluateDlss,                                     // nvnCommandBufferEvaluateDlss (NVN2): P_EvaluateDlss, upscales the game's colour into its output at replay (api_dlss.cpp)
     Small,                                            // push constants, shading rate, exclusive scissor, conservative raster: P_Small (nvn_small.h)
+    DrawMeshTasks,                                    // nvnCommandBuffer(Multi)DrawMeshTasks*(3D)(Indirect)(Count) (NVN2): P_DrawMesh (task/mesh programs)
     Count
 };
 const char* op_name(Op op);
@@ -102,7 +103,10 @@ struct P_Dispatch { uint32_t x, y, z, pad; };
 struct P_DispatchIndirect { uint64_t address; };
 struct P_Counter { uint32_t type, pad; uint64_t address; };                                    // ReportCounter / ResetCounter(address 0)
 struct P_ReportValue { uint32_t value, pad; uint64_t address; };
-struct P_DrawXfb { uint32_t mode, pad; uint64_t control; };                                    // DrawTransformFeedback: the primitive and the feedback control buffer address
+struct P_DrawXfb { uint32_t mode, pad; uint64_t control; };
+// Mesh draws. kind: 0 DrawMeshTasks(first = x, count = y), 1 DrawMeshTasks3D(x, y, z), 2 ...Indirect, 3 ...3DIndirect; multi: max_count records
+// `stride` apart (count_address: the draw count is read there, at most max_count). Indirect records: 2 = {count, first}, 3 = {x, y, z}.
+struct P_DrawMesh { uint32_t kind, x, y, z; uint32_t multi, max_count; int64_t stride; uint64_t indirect, count_address; };                                    // DrawTransformFeedback: the primitive and the feedback control buffer address
 struct P_DebugGroup { uint32_t id, length; };                                                  // PushDebugGroup (blob: length + 1 bytes) / PopDebugGroup (length 0)
 struct P_Small { uint32_t kind, a, b, c; uint64_t addr; };                                      // SmallKind (nvn_small.h) and its arguments; blob per kind
 struct P_Barrier { uint32_t bits, pad; };

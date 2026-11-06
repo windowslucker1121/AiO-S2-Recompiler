@@ -1,0 +1,24 @@
+Ryujinx SPIR-V back end, task/mesh hooks (tools/shaders/ampere/frontend/AmpereMesh.cs): a return of main first emits the
+hardware end of a task or mesh program (EmitMeshTasksEXT / SetMeshOutputsEXT and the output copies), and a shared memory access
+to the task payload region uses the TaskPayloadWorkgroupEXT storage class. The Ryujinx code in the context lines is MIT.
+
+--- a/CodeGen/Spirv/Instructions.cs
++++ b/CodeGen/Spirv/Instructions.cs
+@@ -1049,7 +1049,7 @@
+             {
+                 context.ReturnValue(context.Get(context.CurrentFunction.ReturnType, operation.GetSource(0)));
+             }
+-            else
++            else if (!(context.IsMainFunction && AmpereMesh.EmitEpilogue(context)))   // task/mesh: the hardware's end of program first (AmpereMesh.cs)
+             {
+                 context.Return();
+             }
+@@ -1721,7 +1721,7 @@
+                     }
+                     else
+                     {
+-                        storageClass = StorageClass.Workgroup;
++                        storageClass = AmpereMesh.StorageClassOf(context.Properties.SharedMemories[bindingId.Value].Name);   // task payload (AmpereMesh.cs)
+                         varType = context.Properties.SharedMemories[bindingId.Value].Type & AggregateType.ElementTypeMask;
+                         baseObj = context.SharedMemories[bindingId.Value];
+                     }

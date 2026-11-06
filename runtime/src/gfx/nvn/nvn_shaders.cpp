@@ -312,6 +312,7 @@ int stage_slot(ShaderStage s) {
     case ShaderStage::Geometry: return 2;
     case ShaderStage::TessControl: return 3;
     case ShaderStage::TessEval: return 4;
+    case ShaderStage::Mesh: return 4;    // the harness binds task programs in slot 0 and mesh programs in slot 4 (AmpereMesh.cs)
     default: return 0;
     }
 }
@@ -333,10 +334,12 @@ void set_c0_offset(NvnMeaning& m, ShaderStage stage, int byte_offset) {
         return;
     }
     // tessellation control 1 and evaluation 2: Ryujinx's hardware stage order (inferred; no game shader checked)
+    // task and mesh: 0x650 / 0x750, four slots past the pattern (measured; storage_slot_for in nvn_replay.cpp has the evidence)
     int graphics_index = stage == ShaderStage::Vertex ? 0 : stage == ShaderStage::TessControl ? 1 : stage == ShaderStage::TessEval ? 2
-                         : stage == ShaderStage::Geometry ? 3 : stage == ShaderStage::Fragment ? 4 : -1;
+                         : stage == ShaderStage::Geometry ? 3 : stage == ShaderStage::Fragment ? 4 : stage == ShaderStage::Task ? 5
+                         : stage == ShaderStage::Mesh ? 6 : -1;
     if (graphics_index < 0) return;
-    int base = 0x110 + 0x100 * graphics_index;
+    int base = 0x110 + 0x100 * graphics_index + (graphics_index >= 5 ? 0x40 : 0);
     if (in(base, 16)) m.source = NvnSource::StorageBuffer, m.index = ((byte_offset - base) / 0x10) ^ graphics_ssbo_slot_xor();
 }
 
@@ -471,6 +474,8 @@ bool reflect_spirv(const uint32_t* words, size_t count, ShaderReflection& out, s
                             : model == kExecutionModelGeometry ? ShaderStage::Geometry
                             : model == kExecutionModelTessControl ? ShaderStage::TessControl
                             : model == kExecutionModelTessEval ? ShaderStage::TessEval
+                            : model == 5364 ? ShaderStage::Task     // TaskEXT
+                            : model == 5365 ? ShaderStage::Mesh     // MeshEXT
                             : ShaderStage::Unknown;
             }
             break;
@@ -958,6 +963,8 @@ const char* stage_name(ShaderStage s) {
     case ShaderStage::Geometry: return "geometry";
     case ShaderStage::TessControl: return "tessellationcontrol";      // the harness's spelling (results.tsv)
     case ShaderStage::TessEval: return "tessellationevaluation";
+    case ShaderStage::Task: return "task";
+    case ShaderStage::Mesh: return "mesh";
     default: return "unknown";
     }
 }

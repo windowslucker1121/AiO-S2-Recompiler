@@ -549,6 +549,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT agpl = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
     VkPhysicalDeviceFragmentShadingRateFeaturesKHR afsr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR};
     VkPhysicalDeviceTransformFeedbackFeaturesEXT atfb = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT};
+    VkPhysicalDeviceMeshShaderFeaturesEXT amesh = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
     VkPhysicalDeviceIndexTypeUint8FeaturesEXT au8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT};
     VkPhysicalDevicePresentIdFeaturesKHR apid = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
     VkPhysicalDeviceAntiLagFeaturesAMD aal = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ANTI_LAG_FEATURES_AMD};
@@ -572,6 +573,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     const bool x_vids = add_ext(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME, &avids);
     const bool x_drua = add_ext(VK_EXT_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_EXTENSION_NAME, &adrua);
     const bool x_tfb = add_ext(VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME, &atfb);
+    const bool x_mesh = config_get_bool("gfx", "mesh_shader", true) && add_ext(VK_EXT_MESH_SHADER_EXTENSION_NAME, &amesh);
     // NVN2 smaller features (nvn_small.h): shading rate and conservative raster (the latter has no feature struct; its mode is set dynamically through EDS3)
     const bool x_fsr = add_ext(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME, &afsr);
     const bool x_cr = has_dext(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
@@ -610,6 +612,10 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     avail.features.robustBufferAccess = robust ? avail.features.robustBufferAccess : VK_FALSE;
     if (robust) NXLOG_I(kTag, "robust buffer access %s, robust image access %s ([gfx] robust_access)",
                         avail.features.robustBufferAccess ? "on" : "not available", a13.robustImageAccess ? "on" : "not available");
+    // mesh shaders: task and mesh stages only (the multiview / shading-rate / query variants need features of their own)
+    amesh.multiviewMeshShader = VK_FALSE;
+    amesh.primitiveFragmentShadingRateMeshShader = VK_FALSE;
+    amesh.meshShaderQueries = VK_FALSE;
     VkPhysicalDeviceFeatures2& en = avail;
     const VkPhysicalDeviceFeatures& af = avail.features;
     features_.bc = af.textureCompressionBC;
@@ -652,6 +658,15 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     features_.vertex_input_dynamic_state = x_vids && avids.vertexInputDynamicState;
     features_.dynamic_rendering_unused_attachments = x_drua && adrua.dynamicRenderingUnusedAttachments;
     features_.transform_feedback = x_tfb && atfb.transformFeedback;
+    features_.mesh_shader = x_mesh && amesh.meshShader;
+    features_.task_shader = x_mesh && amesh.taskShader;
+    if (features_.mesh_shader) {
+        VkPhysicalDeviceMeshShaderPropertiesEXT mp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
+        VkPhysicalDeviceProperties2 mpp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &mp};
+        vkGetPhysicalDeviceProperties2(physical_, &mpp);
+        limits_.mesh_max_groups = mp.maxMeshWorkGroupCount[0];
+        limits_.task_max_groups = mp.maxTaskWorkGroupCount[0];
+    }
     features_.fragment_shading_rate = x_fsr && afsr.pipelineFragmentShadingRate;
     features_.conservative_raster_dynamic = x_cr && x_eds3 && aeds3.extendedDynamicState3ConservativeRasterizationMode && aeds3.extendedDynamicState3ExtraPrimitiveOverestimationSize;
     features_.index_type_uint8 = x_u8 && au8.indexTypeUint8;
@@ -687,6 +702,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
             features_.geometry_shader, features_.shader_float64, features_.shader_int64, features_.dual_src_blend, features_.logic_op,
             features_.multi_viewport, features_.shader_draw_parameters, features_.descriptor_indexing, features_.fragment_shader_interlock,
             features_.depth_clip_control, features_.custom_border_color, features_.external_memory_host, features_.push_descriptor);
+    NXLOG_I(kTag, "mesh shaders: mesh %d task %d (max work groups %u / %u)", features_.mesh_shader, features_.task_shader, limits_.mesh_max_groups, limits_.task_max_groups);
     {
         VkPhysicalDeviceExternalMemoryHostPropertiesEXT xh = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
         VkPhysicalDeviceVulkan11Properties p11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES, features_.external_memory_host ? &xh : nullptr};

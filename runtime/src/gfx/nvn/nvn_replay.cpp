@@ -49,14 +49,14 @@ namespace {
 constexpr const char* kTag = "nvn.replay";
 constexpr int kMaxDepth = 8;
 
-enum Stage { kVertex = 0, kFragment = 1, kGeometry = 2, kTessCtl = 3, kTessEval = 4, kCompute = 5 };
+enum Stage { kVertex = 0, kFragment = 1, kGeometry = 2, kTessCtl = 3, kTessEval = 4, kCompute = 5, kTask = 6, kMesh = 7, kStages = 8 };
 
 struct GState {
-    const ShaderInfo* stage[6] = {};
+    const ShaderInfo* stage[kStages] = {};
     struct Bind { uint64_t addr = 0, size = 0; };
-    Bind vtx[16], ubo[6][16], ssbo[6][16], xfb[4];
-    uint64_t tex[6][64] = {};
-    uint64_t img[6][16] = {};
+    Bind vtx[16], ubo[kStages][16], ssbo[kStages][16], xfb[4];
+    uint64_t tex[kStages][64] = {};
+    uint64_t img[kStages][16] = {};
     Ref<TexturePool> tpool;
     Ref<SamplerPool> spool;
     VertexAttribInfo attr[16];
@@ -1140,6 +1140,10 @@ int storage_slot_for(int nvn_stage, int c0_offset) {
         case kGeometry: base = 0x410; break;
         case kFragment: base = 0x510; break;
         case kCompute: base = 0x310; break;
+        // task / mesh: four slots past the 0x110 + 0x100 * i pattern (measured in OoT's first scene: the task shader dereferences a pointer
+        // from c[0] 0x670, and the game's task slot 2 is the only bound buffer of pointers; 0x680 / 0x770 / 0x780 fit slots 3 / 2 / 3 alike)
+        case kTask: base = 0x650; break;
+        case kMesh: base = 0x750; break;
         default: return 0;
     }
     if (c0_offset < base) return 0;
@@ -1243,8 +1247,8 @@ BufRef held_or_pool(uint64_t addr, uint64_t size, int why, bool flush) {
 void out_draw_bindings() {
     for (const GState::Bind& b : S.vtx) out_draw_read(b.addr, b.size, true, kOutDrawBuffer);
     const VkDeviceSize ualign = device().properties().limits.minUniformBufferOffsetAlignment;
-    for (int st = 0; st < kCompute; ++st) {
-        if (!S.stage[st]) continue;
+    for (int st = 0; st < kStages; ++st) {
+        if (st == kCompute || !S.stage[st]) continue;
         for (const GState::Bind& b : S.ubo[st]) out_draw_read(b.addr, b.size, ualign && (b.addr % ualign) == 0, kOutDrawBuffer);
         for (const GState::Bind& b : S.ssbo[st]) out_draw_read(b.addr, b.size, true, kOutStorageXfb);   // bound from the copy (build_set)
     }
@@ -1342,6 +1346,17 @@ void out_before_op(const RecordReader& r) {
             return;
         }
         case Op::DrawXfb: flush_compute_out(kOutIndirect); return;
+        case Op::DrawMeshTasks: {
+            out_draw_bindings();
+            const auto& p = r.payload<P_DrawMesh>();
+            if (p.kind >= 2) {
+                const uint64_t rec = p.kind == 3 ? 12 : 8, stride = p.stride ? static_cast<uint64_t>(p.stride) : rec;
+                const uint64_t n = p.multi ? std::max<uint64_t>(1, p.max_count) : 1;
+                out_draw_read(p.indirect, stride * (n - 1) + rec, true, kOutIndirect);
+                if (p.multi && p.count_address) out_draw_read(p.count_address, 4, true, kOutIndirect);
+            }
+            return;
+        }
         default:
             if (r.op() < Op::DrawArrays) return;    // state
             flush_compute_out(kOutOther);           // feedback begin/end and the rest: everything first
@@ -1897,11 +1912,13 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
 
 // ---- draws -------------------------------------------------------------------------------------------------------------------
 const ShaderInfo* tcs_now();   // the program's control shader, or the generated pass-through one (below)
-bool build_key(GraphicsKey& key, VkPrimitiveTopology topo) {
+// `mesh`: a mesh draw's key: task and mesh stages instead of vertex (and geometry / tessellation), no vertex input.
+bool build_key(GraphicsKey& key, VkPrimitiveTopology topo, bool mesh = false) {
     std::memset(&key, 0, sizeof key);
-    key.stage[0] = S.stage[kVertex];
+    key.stage[0] = mesh ? nullptr : S.stage[kVertex];
     key.stage[1] = S.stage[kFragment];
-    key.stage[2] = S.stage[kGeometry];
+    key.stage[2] = mesh ? nullptr : S.stage[kGeometry];
+    if (mesh) { key.mesh[0] = S.stage[kTask]; key.mesh[1] = S.stage[kMesh]; }
     if (topo == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {      // begin_draw checked: both tessellation stages, patches
         key.tess[0] = tcs_now();
         key.tess[1] = S.stage[kTessEval];
@@ -1913,7 +1930,8 @@ bool build_key(GraphicsKey& key, VkPrimitiveTopology topo) {
     struct Missing { uint32_t location; ScalarType type; };
     Missing missing[32];
     uint32_t nmissing = 0;
-    for (const ShaderIo& in : vs->refl.inputs) {
+    static const std::vector<ShaderIo> kNoInputs;
+    for (const ShaderIo& in : vs ? vs->refl.inputs : kNoInputs) {
         const uint32_t elems = in.array ? in.array : 1;
         for (uint32_t e = 0; e < elems; ++e) {
             const uint32_t loc = in.location + e;
@@ -1994,7 +2012,7 @@ bool build_key(GraphicsKey& key, VkPrimitiveTopology topo) {
                                     uses_src1(static_cast<VkBlendFactor>(key.blend_src_a[i])) || uses_src1(static_cast<VkBlendFactor>(key.blend_dst_a[i]))))
             key.dual_src = 1;
     }
-    key.xfb = g_xfb_active && device().features().transform_feedback && S.stage[kVertex] && xfb_stride(S.stage[kVertex]) ? 1 : 0;
+    key.xfb = !mesh && g_xfb_active && device().features().transform_feedback && S.stage[kVertex] && xfb_stride(S.stage[kVertex]) ? 1 : 0;
     key.depth_format = P.depth_fmt;
     key.stencil_format = P.has_stencil ? P.depth_fmt : VK_FORMAT_UNDEFINED;
     key.samples = P.samples;
@@ -2308,12 +2326,17 @@ void note_pending_skip(bool dispatch) {
 
 void upscaler_note_draw(const ShaderInfo* fs);
 
-bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* topo_out) {
+// `mesh`: a DrawMeshTasks draw (task/mesh program, no vertex input): the mesh stage takes the vertex stage's place below.
+bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* topo_out, bool mesh = false) {
     if (g_gfx_pending) { note_pending_skip(false); return false; }
-    if (!g_gfx_missing.empty())   // a stage the translator could not do: skipped (no vertex shader) or drawn without it (no fragment shader)
-        nxrt::gap("draw", S.stage[kVertex] ? "drawn without an untranslated stage" : "skipped: untranslated vertex stage", g_gfx_missing);
-    const ShaderInfo* vs = S.stage[kVertex];
-    if (!vs) { log_once("draw-no-vs", "draw without a vertex shader skipped"); return false; }
+    static bool last_mesh = false;
+    if (mesh != last_mesh) { g_dirty |= kPipe | kDesc | kVb; last_mesh = mesh; }
+    if (!g_gfx_missing.empty())   // a stage the translator could not do: skipped (no vertex / mesh shader) or drawn without it (no fragment shader)
+        nxrt::gap("draw", S.stage[mesh ? kMesh : kVertex] ? "drawn without an untranslated stage" : mesh ? "skipped: untranslated mesh stage" : "skipped: untranslated vertex stage",
+                  g_gfx_missing);
+    const ShaderInfo* vs = S.stage[mesh ? kMesh : kVertex];
+    if (!vs) { log_once(mesh ? "draw-no-ms" : "draw-no-vs", mesh ? "mesh draw without a mesh shader skipped" : "draw without a vertex shader skipped"); return false; }
+    if (mesh && (S.stage[kGeometry] || S.stage[kTessCtl] || S.stage[kTessEval])) { note_unsupported("mesh draw with geometry or tessellation stages"); return false; }
     if (!S.render_enable) return false;
     ++g_draw_idx;
     if (S.stage[kFragment] && skip_fs_draw(S.stage[kFragment]->hash)) return false;
@@ -2332,7 +2355,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     }
     // Tessellation: Vulkan runs it only with both shaders and a patch list. NVN also allows an evaluation shader alone (fixed levels from
     // SetInner/OuterTessellationLevels): those draws get a generated pass-through control shader (passthrough_tcs_for).
-    if (S.stage[kTessCtl] || S.stage[kTessEval] || mode == NVN_DRAW_PRIMITIVE_PATCHES) {
+    if (!mesh && (S.stage[kTessCtl] || S.stage[kTessEval] || mode == NVN_DRAW_PRIMITIVE_PATCHES)) {
         if (mode != NVN_DRAW_PRIMITIVE_PATCHES) { note_unsupported("tessellation draw: tessellation program drawn without patches"); return false; }
         if (!S.stage[kTessEval]) { note_unsupported("tessellation draw: patches without a tessellation evaluation shader"); return false; }
         if (!S.stage[kTessCtl]) {
@@ -2345,8 +2368,9 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         g_gen_tcs = nullptr;
     }
     if (g_dirty & (kPipe | kDesc)) {
-        const ShaderInfo* stages[6] = {vs, S.stage[kFragment], S.stage[kGeometry], tcs_now(), S.stage[kTessEval], nullptr};
-        g_pl = prog_layout(stages);
+        const ShaderInfo* stages[kStages] = {vs, S.stage[kFragment], S.stage[kGeometry], tcs_now(), S.stage[kTessEval], nullptr, nullptr, nullptr};
+        const ShaderInfo* mstages[kStages] = {nullptr, S.stage[kFragment], nullptr, nullptr, nullptr, nullptr, S.stage[kTask], S.stage[kMesh]};
+        g_pl = prog_layout(mesh ? mstages : stages);
     }
     if (!g_trigger_fs.empty() && !g_trigger_done && trigger_time_ok() && S.stage[kFragment] && S.stage[kFragment]->hash.compare(0, g_trigger_fs.size(), g_trigger_fs) == 0) {
         g_trigger_seen = true;
@@ -2380,10 +2404,10 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (g_fb_seen || (g_dirty & (kDesc | kPipe))) feedback_prepare(*pl);
     if (!ensure_pass(g_want_depth_ro)) { log_once("draw-no-target", "draw without a usable render target skipped"); return false; }
     if (g_prog_writes || g_xfb_active) g_pass_unsafe = true;
-    const VkPrimitiveTopology topo = vk_topology(mode);
+    const VkPrimitiveTopology topo = mesh ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : vk_topology(mode);
     if ((g_dirty & kPipe) || topo != g_pipe_topo || !g_pipe) {
         GraphicsKey key;
-        build_key(key, topo);
+        build_key(key, topo, mesh);
         g_pipe = graphics_pipeline(key, *pl);
         g_pipe_xfb = key.xfb != 0;
         g_pipe_topo = topo;
@@ -2418,7 +2442,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
                   S.blend[0].dst_a, S.blend[0].eq_a, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]);
         // [nvn] trace_ubo_bytes = N (NXRT_NVN_TRACE_UBO_BYTES, default 768, at most 65536): how many leading bytes of each uniform block the trace prints
         static const uint64_t ubo_bytes = static_cast<uint64_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "trace_ubo_bytes", 768), 16, 65536));
-        for (int stg = kVertex; stg <= kFragment; ++stg)
+        for (int stg : mesh ? std::initializer_list<int>{kTask, kMesh, kFragment} : std::initializer_list<int>{kVertex, kFragment})
         for (uint32_t slot = 0; slot < 16; ++slot) {    // the first words of every uniform block bound to the vertex and the fragment stage
             const GState::Bind& ub = S.ubo[stg][slot];
             if (!ub.addr) continue;
@@ -2432,14 +2456,14 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
                 std::snprintf(t, sizeof t, " %08x", w[i]);
                 words += t;
                 if ((i + 1) % 128 == 0 && i + 1 < nwords) {
-                    TRACE("    %s ubo%u %llx/%llu +%u:%s", stg == kVertex ? "vs" : "fs", slot, static_cast<unsigned long long>(ub.addr), static_cast<unsigned long long>(ub.size), first, words.c_str());
+                    TRACE("    %s ubo%u %llx/%llu +%u:%s", stg == kVertex ? "vs" : stg == kTask ? "ts" : stg == kMesh ? "ms" : "fs", slot, static_cast<unsigned long long>(ub.addr), static_cast<unsigned long long>(ub.size), first, words.c_str());
                     words.clear();
                     first = i + 1;
                 }
             }
-            TRACE("    %s ubo%u %llx/%llu%s +%u:%s", stg == kVertex ? "vs" : "fs", slot, static_cast<unsigned long long>(ub.addr), static_cast<unsigned long long>(ub.size), ur.ok ? "" : " (outside every pool)", first, words.c_str());
+            TRACE("    %s ubo%u %llx/%llu%s +%u:%s", stg == kVertex ? "vs" : stg == kTask ? "ts" : stg == kMesh ? "ms" : "fs", slot, static_cast<unsigned long long>(ub.addr), static_cast<unsigned long long>(ub.size), ur.ok ? "" : " (outside every pool)", first, words.c_str());
         }
-        for (int stg = kVertex; stg <= kFragment; ++stg)
+        for (int stg : mesh ? std::initializer_list<int>{kTask, kMesh, kFragment} : std::initializer_list<int>{kVertex, kFragment})
         for (uint32_t slot = 0; slot < 16; ++slot) {    // the storage buffers bound to the vertex and the fragment stage, and their first words
             const GState::Bind& sb = S.ssbo[stg][slot];
             if (!sb.addr) continue;
@@ -2449,7 +2473,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
                 const uint32_t* w = reinterpret_cast<const uint32_t*>(sb.addr);
                 for (uint32_t i = 0; i < 64 && i * 4 < sb.size; ++i) { char t[16]; std::snprintf(t, sizeof t, " %08x", w[i]); words += t; }
             }
-            TRACE("    %s ssbo%u %llx/%llu%s:%s", stg == kVertex ? "vs" : "fs", slot, static_cast<unsigned long long>(sb.addr), static_cast<unsigned long long>(sb.size), sr.ok ? "" : " (outside every pool)", words.c_str());
+            TRACE("    %s ssbo%u %llx/%llu%s:%s", stg == kVertex ? "vs" : stg == kTask ? "ts" : stg == kMesh ? "ms" : "fs", slot, static_cast<unsigned long long>(sb.addr), static_cast<unsigned long long>(sb.size), sr.ok ? "" : " (outside every pool)", words.c_str());
         }
         TRACE("    viewport %u: %g %g %g %g depth %g..%g scissor %u: %d %d %d %d", S.nvp, S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0][0], S.dr[0][1], S.nsc,
               S.sc[0][0], S.sc[0][1], S.sc[0][2], S.sc[0][3]);
@@ -2514,7 +2538,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
                   r.tex && r.tex->cpu_dirty.load() ? " cpu-dirty" : "", smp, vw);
         }
     }
-    if (g_xfb_active) {
+    if (g_xfb_active && !mesh) {
         static std::unordered_map<std::string, bool> seen;
         if (seen.emplace(S.stage[kVertex]->hash, true).second)
             NXLOG_I("nvn.xfb", "draw under transform feedback: vs %s mode %d attrs %u xfb0 %llx/%llu", S.stage[kVertex]->hash.c_str(), mode, S.attr_count,
@@ -2564,7 +2588,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
                     S.stage[kTessEval]->hash.c_str(), g_gen_tcs->hash.c_str(), static_cast<unsigned>(std::clamp<uint32_t>(S.patch_size, 1, 32)),
                     S.tess_outer[0], S.tess_outer[1], S.tess_outer[2], S.tess_outer[3], S.tess_inner[0], S.tess_inner[1]);
     }
-    if (g_dirty & (kVb | kPipe)) {
+    if (!mesh && (g_dirty & (kVb | kPipe))) {
         for (uint32_t i = 0; i < g_key_attr_count; ++i) {
             const uint32_t binding = g_key_binding[i];
             bool done = false;
@@ -2940,6 +2964,63 @@ void do_draw_indirect(const P_DrawIndirect& p) {
 // DrawTransformFeedback(mode, control): draws what the feedback section begun with this control buffer wrote, as many vertices as it wrote
 // (vkCmdDrawIndirectByteCountEXT over the section's byte counter, divided by the stride of the vertex stream that reads the feedback buffer). The game
 // binds the feedback buffer as an ordinary vertex buffer. The feedback writes are ordered before the vertex fetch by ending the pass first.
+// Mesh draws (NVN2 task/mesh programs, VK_EXT_mesh_shader). The work-group count goes to the task stage when the program has one, else to the
+// mesh stage. Vulkan has no first work group: a draw with first != 0 is drawn from 0 (counted as a gap). Indirect records stay on the GPU (the
+// game's culling compute writes them): {x, y, z} records (the 3D forms) go to vkCmdDrawMeshTasksIndirectEXT as they are; {count, first} records
+// (DrawMeshTasksIndirect; VK_NV_mesh_shader's layout, which NVN2's API mirrors: inferred, the driver is not in the game) get their count copied
+// into {count, 1, 1} records in the upload ring first (outside the pass).
+void do_draw_mesh(const P_DrawMesh& p) {
+    if (!device().features().mesh_shader || (S.stage[kTask] && !device().features().task_shader)) {
+        nxrt::gap("draw", "mesh draw: the device has no VK_EXT_mesh_shader"); counters().draws_skipped.fetch_add(1); return;
+    }
+    VkPrimitiveTopology topo;
+    if (p.kind <= 1) {
+        uint32_t x = p.kind == 0 ? p.y : p.x, y = p.kind == 0 ? 1 : p.y, z = p.kind == 0 ? 1 : p.z;
+        if (p.kind == 0 && p.x) nxrt::gap("draw", "mesh draw with a first work group other than 0 (drawn from 0)");
+        if (!x || !y || !z) return;
+        if (!begin_draw(NVN_DRAW_PRIMITIVE_TRIANGLES, false, 0, &topo, true)) { counters().draws_skipped.fetch_add(1); return; }
+        const uint32_t lim = S.stage[kTask] ? device().limits_ext().task_max_groups : device().limits_ext().mesh_max_groups;
+        TRACE("    mesh work groups %u x %u x %u (task %s mesh %s)", x, y, z, S.stage[kTask] ? S.stage[kTask]->hash.c_str() : "-", S.stage[kMesh]->hash.c_str());
+        vkCmdDrawMeshTasksEXT(F->cb, lim ? std::min(x, lim) : x, y, z);
+    } else {
+        const uint32_t rec = p.kind == 3 ? 12 : 8;
+        const uint64_t stride = p.stride ? static_cast<uint64_t>(p.stride) : rec;
+        const uint32_t n = p.multi ? std::max<uint32_t>(1, std::min<uint32_t>(p.max_count, 4096)) : 1;
+        const BufRef ib = held_or_pool(p.indirect, stride * (n - 1) + rec, kOutIndirect, false);
+        if (!ib.ok) { nxrt::gap("draw", "mesh indirect draw: arguments outside every pool"); counters().draws_skipped.fetch_add(1); return; }
+        VkBuffer buf = ib.buffer;
+        VkDeviceSize off = ib.offset;
+        uint32_t vstride = static_cast<uint32_t>(stride);
+        if (p.kind == 2) {   // {count, first} -> {count, 1, 1}
+            UploadAlloc u = F->upload(12ull * n, 16);
+            if (!u) { counters().draws_skipped.fetch_add(1); return; }
+            uint32_t* w = reinterpret_cast<uint32_t*>(u.ptr);
+            for (uint32_t i = 0; i < n; ++i) { w[3 * i] = 0; w[3 * i + 1] = 1; w[3 * i + 2] = 1; }
+            std::vector<VkBufferCopy> regions(n);
+            for (uint32_t i = 0; i < n; ++i) regions[i] = {ib.offset + stride * i, u.offset + 12ull * i, 4};
+            end_pass();
+            memory_barrier(F->cb);
+            vkCmdCopyBuffer(F->cb, ib.buffer, u.buffer, n, regions.data());
+            memory_barrier(F->cb);
+            buf = u.buffer;
+            off = u.offset;
+            vstride = 12;
+        }
+        if (!begin_draw(NVN_DRAW_PRIMITIVE_TRIANGLES, false, 0, &topo, true)) { counters().draws_skipped.fetch_add(1); return; }
+        TRACE("    mesh indirect draw: kind %u, %u record(s) at %llx stride %llu%s (task %s mesh %s)", p.kind, n, static_cast<unsigned long long>(p.indirect),
+              static_cast<unsigned long long>(stride), p.count_address ? ", count from the GPU" : "", S.stage[kTask] ? S.stage[kTask]->hash.c_str() : "-", S.stage[kMesh]->hash.c_str());
+        if (p.multi && p.count_address) {
+            const BufRef cb = held_or_pool(p.count_address, 4, kOutIndirect, false);
+            vkCmdDrawMeshTasksIndirectCountEXT(F->cb, buf, off, cb.buffer, cb.offset, n, n > 1 || vstride >= 12 ? vstride : 12);
+        } else {
+            vkCmdDrawMeshTasksIndirectEXT(F->cb, buf, off, n, n > 1 ? vstride : 12);
+        }
+    }
+    counters().draws.fetch_add(1, std::memory_order_relaxed);
+    g_pass_draws++;
+    trace_snap_after_draw();
+}
+
 void do_draw_xfb(const P_DrawXfb& p) {
     static bool noted = false;
     if (!noted) { noted = true; NXLOG_I("nvn.xfb", "replay: transform feedback draw (first): mode %u control %llx", p.mode, static_cast<unsigned long long>(p.control)); }
@@ -3109,7 +3190,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     if (!cs) { if (!g_cs_missing.empty()) nxrt::gap("dispatch", "skipped: untranslated compute shader", g_cs_missing); return; }
     static const bool debug_skip = config_get_bool("nvn", "debug_skip_compute", false);   // diagnosis: no dispatch runs
     if (debug_skip) return;
-    const ShaderInfo* stages[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, cs};
+    const ShaderInfo* stages[kStages] = {nullptr, nullptr, nullptr, nullptr, nullptr, cs, nullptr, nullptr};
     const ProgLayout* pl = prog_layout(stages);
     if (!pl) return;
     // A storage buffer whose c[0] descriptor maps to no NVN binding would be the shared 64 KiB dummy, which the shader may write (it also
@@ -3629,13 +3710,21 @@ void do_write_memory(uint64_t gpu_addr, const void* data, uint32_t size) {
 // ---- the interpreter ----------------------------------------------------------------------------------------------------------
 void apply_bind_program(const P_BindProgram& p) {
     const bool pending = p.program && program_resolve_pending(p.program);
-    if (p.stages & ((1u << kCompute) - 1)) {
+    if (p.stages & (((1u << kCompute) - 1) | (1u << kTask) | (1u << kMesh))) {
         g_gfx_pending = pending;
         g_gfx_missing = (p.program && p.program->missing[0]) ? std::string(p.program->missing) : std::string();
     }
     if (p.stages & (1u << kCompute)) g_cs_pending = pending;
-    for (int st = 0; st < 6; ++st)
-        if (p.stages & (1u << st)) S.stage[st] = p.program ? p.program->stage[st] : nullptr;
+    // Task and mesh (NVN stages 6 and 7) go with the graphics stages: a bind with graphics stage bits also sets or clears them, so a vertex
+    // program bound after a mesh program leaves no mesh stage behind (whichever bits NVN2 gives them).
+    const uint32_t bits = p.stages | ((p.stages & ((1u << kCompute) - 1)) ? ((1u << kTask) | (1u << kMesh)) : 0u);
+    for (int st = 0; st < kStages; ++st)
+        if (bits & (1u << st)) S.stage[st] = p.program ? p.program->stage[st] : nullptr;
+    if (p.program && (p.program->stage[kTask] || p.program->stage[kMesh])) {
+        static bool logged = false;
+        if (!logged) { logged = true; NXLOG_I(kTag, "mesh program bound with NVN stage bits 0x%x (task %s, mesh %s)", p.stages,
+                                              p.program->stage[kTask] ? p.program->stage[kTask]->hash.c_str() : "-", p.program->stage[kMesh] ? p.program->stage[kMesh]->hash.c_str() : "-"); }
+    }
     if (p.stages & (1u << kCompute)) {   // also outside traces: the upscaler override names untranslated passes by it
         g_cs_missing = (p.program && !p.program->stage[kCompute]) ? std::string(p.program->missing) : std::string();
         if (!g_cs_missing.empty()) TRACE("bind program: compute block(s) %s not in the shader cache", g_cs_missing.c_str());
@@ -3689,7 +3778,7 @@ bool counter_window_has_gpu_draw(RecordReader look, uint32_t type) {
     while (look.next()) {
         const Op op = look.op();
         if ((op == Op::ReportCounter || op == Op::ResetCounter) && look.payload<P_Counter>().type == type) return false;
-        if (op == Op::DrawIndirect || op == Op::DrawXfb) return true;
+        if (op == Op::DrawIndirect || op == Op::DrawXfb || op == Op::DrawMeshTasks) return true;
     }
     return false;
 }
@@ -3826,8 +3915,8 @@ void run_list(const CmdList& list, int depth) {
                     const uint32_t k = p.first + i;
                     if (p.kind == kBufVertex && k < 16) S.vtx[k] = {rg[i].address, rg[i].size};
                     // a uniform or storage buffer in a virtual (sparse) pool is bound through the physical memory mapped there (physical_buffer_address)
-                    else if (p.kind == kBufUniform && p.stage < 6 && k < 16) S.ubo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
-                    else if (p.kind == kBufStorage && p.stage < 6 && k < 16) S.ssbo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
+                    else if (p.kind == kBufUniform && p.stage < kStages && k < 16) S.ubo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
+                    else if (p.kind == kBufStorage && p.stage < kStages && k < 16) S.ssbo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
                     else if (p.kind == kBufXfb && k < 4) S.xfb[k] = {rg[i].address, rg[i].size};
                 }
                 break;
@@ -3836,14 +3925,14 @@ void run_list(const CmdList& list, int depth) {
                 const auto& p = r.payload<P_BindTextures>();
                 const uint64_t* h = reinterpret_cast<const uint64_t*>(r.blob<P_BindTextures>());
                 for (uint32_t i = 0; i < p.count; ++i)
-                    if (p.stage < 6 && p.first + i < 64) S.tex[p.stage][p.first + i] = h[i];
+                    if (p.stage < kStages && p.first + i < 64) S.tex[p.stage][p.first + i] = h[i];
                 break;
             }
             case Op::BindImages: {
                 const auto& p = r.payload<P_BindTextures>();
                 const uint64_t* h = reinterpret_cast<const uint64_t*>(r.blob<P_BindTextures>());
                 for (uint32_t i = 0; i < p.count; ++i)
-                    if (p.stage < 6 && p.first + i < 16) S.img[p.stage][p.first + i] = h[i];
+                    if (p.stage < kStages && p.first + i < 16) S.img[p.stage][p.first + i] = h[i];
                 break;
             }
             case Op::BindVertexAttribs: {
@@ -3970,6 +4059,7 @@ void run_list(const CmdList& list, int depth) {
             case Op::DrawIndirect: do_draw_indirect(r.payload<P_DrawIndirect>()); break;
             case Op::SubmitDeviceCommands: do_submit_device_commands(r.payload<P_SubmitDeviceCommands>(), depth); break;
             case Op::DrawXfb: do_draw_xfb(r.payload<P_DrawXfb>()); break;
+            case Op::DrawMeshTasks: do_draw_mesh(r.payload<P_DrawMesh>()); break;
             case Op::PushDebugGroup:
                 if (device().features().debug_labels && vkCmdBeginDebugUtilsLabelEXT) {
                     VkDebugUtilsLabelEXT l = {VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};

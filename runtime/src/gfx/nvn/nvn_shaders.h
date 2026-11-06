@@ -78,7 +78,7 @@ ShaderControl read_control(const uint8_t* control);
 
 // ---- SPIR-V reflection ----------------------------------------------------------------------------------------------
 
-enum class ShaderStage : uint8_t { Unknown, Vertex, Fragment, Compute, Geometry, TessControl, TessEval };
+enum class ShaderStage : uint8_t { Unknown, Vertex, Fragment, Compute, Geometry, TessControl, TessEval, Task, Mesh };   // Task/Mesh: NVN2 stages 6/7 (VK_EXT_mesh_shader)
 
 // Values are VkDescriptorType's (checked against the Vulkan headers in the runtime build).
 enum class DescriptorType : uint32_t {

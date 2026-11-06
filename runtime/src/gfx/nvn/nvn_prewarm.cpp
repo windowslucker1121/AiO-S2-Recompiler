@@ -130,7 +130,7 @@ bool stub_key(const Rec& r, GraphicsKey& k, const ProgLayout*& pl) {
         if (!k.stage[i]) return false;
     }
     std::memcpy(reinterpret_cast<uint8_t*>(&k) + kStageBytes, r.rest, kRestBytes);
-    const ShaderInfo* st6[6] = {k.stage[0], k.stage[1], k.stage[2], nullptr, nullptr, nullptr};
+    const ShaderInfo* st6[kProgStages] = {k.stage[0], k.stage[1], k.stage[2], nullptr, nullptr, nullptr};
     pl = prog_layout(st6);
     return pl != nullptr;
 }

@@ -5,9 +5,24 @@ logged "Pixld is not implemented" and left the destination register unwritten, w
 Lowering: MY_INDEX reads gl_SampleID (BuiltIn SampleId; 0 when the pipeline is not multisampled), the other modes
 (COVMASK, COVERED, OFFSET, CENTROID_OFFSET) write 0 and log. Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a
 copy under the build folder; the checkout in third_party stays untouched. The Ryujinx code in the context lines is MIT.
+Also: the task/mesh payload shared memory is declared TaskPayloadWorkgroupEXT (AmpereMesh.StorageClassOf).
+
 --- a/CodeGen/Spirv/Declarations.cs
 +++ b/CodeGen/Spirv/Declarations.cs
-@@ -451,7 +451,7 @@
+@@ -60,8 +60,10 @@
+         {
+             foreach ((int id, MemoryDefinition memory) in memories)
+             {
+-                SpvInstruction pointerType = context.TypePointer(storage, context.GetType(memory.Type, memory.ArrayLength));
+-                SpvInstruction variable = context.Variable(pointerType, storage);
++                // task/mesh: the ISBE payload region is the task payload (AmpereMesh.cs)
++                StorageClass sc = storage == StorageClass.Workgroup ? AmpereMesh.StorageClassOf(memory.Name) : storage;
++                SpvInstruction pointerType = context.TypePointer(sc, context.GetType(memory.Type, memory.ArrayLength));
++                SpvInstruction variable = context.Variable(pointerType, sc);
+ 
+                 context.AddGlobalVariable(variable);
+ 
+@@ -451,7 +453,7 @@
          {
              SpvInstruction vec4FloatType = context.TypeVector(context.TypeFP32(), 4);
              SpvInstruction floatType = context.TypeFP32();
@@ -16,7 +31,7 @@ copy under the build folder; the checkout in third_party stays untouched. The Ry
              SpvInstruction array1FloatType = context.TypeArray(context.TypeFP32(), context.Constant(context.TypeU32(), 1));
  
              SpvInstruction perVertexStructType = context.TypeStruct(true, vec4FloatType, floatType, array8FloatType, array1FloatType);
-@@ -508,6 +508,11 @@
+@@ -508,6 +510,11 @@
                  (builtIn, varType) = IoMap.GetSpirvBuiltIn(ioVariable);
                  isBuiltIn = true;
  

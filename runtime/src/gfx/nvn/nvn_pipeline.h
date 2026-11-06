@@ -42,7 +42,9 @@ struct ProgLayout {
 };
 
 // Stages by NVN stage index (0 vertex, 1 fragment, 2 geometry, 5 compute); null = absent.
-const ProgLayout* prog_layout(const ShaderInfo* const stages[6]);
+// Stages by NVN stage number: 0 vertex, 1 fragment, 2 geometry, 3 tessellation control, 4 evaluation, 5 compute, 6 task, 7 mesh.
+constexpr int kProgStages = 8;
+const ProgLayout* prog_layout(const ShaderInfo* const stages[kProgStages]);
 
 // Vertex input for the key.
 struct KeyAttr {
@@ -78,6 +80,8 @@ struct GraphicsKey {
     // Tessellation control and evaluation stages (null: none). Last, so that the prewarm key file keeps its record layout (it records the bytes
     // before these and never a tessellated key). A key with them has topology PATCH_LIST and patch_control_points = the NVN patch size.
     const ShaderInfo* tess[2] = {};
+    // Task and mesh stages of a mesh draw (VK_EXT_mesh_shader; stage[0] and stage[2] are then null, no vertex input). Never in the key file.
+    const ShaderInfo* mesh[2] = {};
     bool operator==(const GraphicsKey& o) const;
     uint64_t hash() const;
 };

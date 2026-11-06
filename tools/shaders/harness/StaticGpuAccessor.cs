@@ -39,7 +39,8 @@ namespace SpirvHarness
         // Draw-time queries the translator made for this shader (what a runtime variant would have to key on).
         public readonly SortedSet<string> DrawTimeQueries = new();
 
-        public StaticGpuAccessor(byte[] code, int constOff, int constSize, ShaderStage stage, byte[] ctrl)
+        /// `stageSlot`: Ryujinx's binding slot when it is not the stage's own (task 0, mesh 4: AmpereMesh.cs); -1 = the stage's.
+        public StaticGpuAccessor(byte[] code, int constOff, int constSize, ShaderStage stage, byte[] ctrl, int stageSlot = -1)
         {
             // Pad so that the decoder may read past the program end (it asks for minimum sizes) without bounds errors.
             _code = new byte[(code.Length + 0x1000 + 7) & ~7];
@@ -55,6 +56,7 @@ namespace SpirvHarness
                 ShaderStage.TessellationEvaluation => 4,
                 _ => 0,
             };
+            if (stageSlot >= 0) _stageSlot = stageSlot;
             // Compute work-group size: control section +0x748..+0x750 (verified against BNSH reflection, SHADERS.md).
             _localX = _localY = _localZ = 1;
             if (Program.IsNvn2(ctrl))
@@ -80,6 +82,9 @@ namespace SpirvHarness
             // Shared memory bytes: control +0x754 (0 exactly for the compute shaders without shared memory). Without
             // it the translator declares its default, 0xc000, past the 32 KB Metal allows (docs/nvn/DEBUG.md #23).
             if (!Program.IsNvn2(ctrl) && ctrl != null && ctrl.Length >= 0x758) _sharedSize = BitConverter.ToInt32(ctrl, 0x754);
+            // Task/mesh (stageSlot set): no shared memory of their own (no LDS/STS in the game's blocks); their ISBE regions are separate
+            // definitions (AmpereMesh.cs). 4 bytes keeps Ryujinx's default 4 KiB array out of the mesh stage's 28 KiB.
+            if (stageSlot >= 0) _sharedSize = 4;
         }
 
         // NVN2 tessellation evaluation blocks keep their GLSL input layout in the control section as GL enums: +0x58 domain

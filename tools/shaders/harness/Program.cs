@@ -232,12 +232,27 @@ namespace SpirvHarness
                 0 => ShaderStage.Vertex, 1 => ShaderStage.Fragment, 2 => ShaderStage.Geometry,
                 3 => ShaderStage.TessellationControl, 4 => ShaderStage.TessellationEvaluation, _ => ShaderStage.Compute,
             };
+            // Task (6) and mesh (7) programs: a graphics SPH, translated as compute work groups into VK_EXT_mesh_shader stages
+            // (tools/shaders/ampere/frontend/AmpereMesh.cs). Their resources bind in Ryujinx's vertex slot (task) and tessellation
+            // evaluation slot (mesh): a mesh pipeline has neither of those stages.
+            AmpereMeshInfo mesh = null;
+            if (nvnStage is 6 or 7)
+            {
+                mesh = AmpereMeshInfo.FromNvn2(code, ctrl, nvnStage, out string meshError);
+                if (mesh == null)
+                {
+                    r.Stage = nvnStage == 6 ? "task" : "mesh";
+                    r.Status = "unsupported";
+                    r.Error = "unsupported: " + meshError;
+                    return r;
+                }
+            }
             bool compute = stage == ShaderStage.Compute;
-            r.Stage = stage.ToString().ToLowerInvariant();
-            int start = compute ? 0 : 0x80;
+            r.Stage = mesh != null ? (mesh.IsTask ? "task" : "mesh") : stage.ToString().ToLowerInvariant();
+            int start = compute && mesh == null ? 0 : 0x80;
             int end = Math.Min(progEnd, code.Length) & ~0xf;
             while (end - 16 >= start && code.AsSpan(end - 16, 16).IndexOfAnyExcept((byte)0) < 0) end -= 16;
-            if (nvnStage > 5 || end <= start)
+            if (nvnStage > 7 || end <= start)
             {
                 r.Status = "exception";
                 r.Error = $"NVN2 block without code (stage {nvnStage}, program end 0x{progEnd:x}, code 0x{code.Length:x} bytes)";
@@ -252,7 +267,7 @@ namespace SpirvHarness
             {
                 // Address 0 of the accessor's code is the SPH (graphics) or the first instruction (compute); the constant
                 // data offset (+0x40) is from the start of the code area in both cases.
-                StaticGpuAccessor gpu = new(code, constOff, constSize, stage, ctrl);
+                StaticGpuAccessor gpu = new(code, constOff, constSize, stage, ctrl, mesh == null ? -1 : mesh.IsTask ? 0 : 4);
                 if (refl != null) foreach (var h in refl.BufferTextureHandles(nvnStage, ctrl)) gpu.BufferTextures.Add(h);
                 else foreach (var h in BufferFetchHandles(insts, compute)) gpu.BufferTextures.Add(h);
                 TranslationFlags flags = (compute ? TranslationFlags.Compute : TranslationFlags.None) |
@@ -261,7 +276,7 @@ namespace SpirvHarness
                 AmpereProgram prog = null;
                 try
                 {
-                    TranslatorContext tctx = AmpereTranslator.CreateContext(gpu, options, insts, out prog);
+                    TranslatorContext tctx = AmpereTranslator.CreateContext(gpu, options, insts, out prog, mesh);
                     ShaderProgram sp = tctx.Translate();
                     if (prog.Unsupported.Count == 0)
                     {

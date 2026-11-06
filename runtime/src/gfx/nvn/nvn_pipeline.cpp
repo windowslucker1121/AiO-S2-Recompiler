@@ -33,7 +33,7 @@ namespace {
 constexpr const char* kTag = "nvn.pipe";
 
 struct LayoutKey {
-    const ShaderInfo* s[6];
+    const ShaderInfo* s[kProgStages];
     bool operator<(const LayoutKey& o) const { return std::memcmp(s, o.s, sizeof s) < 0; }
 };
 
@@ -89,6 +89,8 @@ VkShaderStageFlagBits stage_bit(ShaderStage s) {
         case ShaderStage::TessControl: return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
         case ShaderStage::TessEval: return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
         case ShaderStage::Compute: return VK_SHADER_STAGE_COMPUTE_BIT;
+        case ShaderStage::Task: return VK_SHADER_STAGE_TASK_BIT_EXT;
+        case ShaderStage::Mesh: return VK_SHADER_STAGE_MESH_BIT_EXT;
         default: return VK_SHADER_STAGE_VERTEX_BIT;
     }
 }
@@ -455,16 +457,16 @@ static VkShaderModule producer_module(const ShaderInfo* producer, const ShaderIn
     return m;
 }
 
-const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
+const ProgLayout* prog_layout(const ShaderInfo* const stages[kProgStages]) {
     LayoutKey key;
-    for (int i = 0; i < 6; ++i) key.s[i] = stages[i];
+    for (int i = 0; i < kProgStages; ++i) key.s[i] = stages[i];
     std::lock_guard<std::mutex> lk(g_layout_mu);
     auto it = g_layouts.find(key);
     if (it != g_layouts.end()) return &it->second;
 
     ProgLayout pl;
     std::map<std::pair<uint32_t, uint32_t>, size_t> index;
-    for (int st = 0; st < 6; ++st) {
+    for (int st = 0; st < kProgStages; ++st) {
         const ShaderInfo* s = stages[st];
         if (!s) continue;
         for (size_t i = 0; i < s->refl.bindings.size(); ++i) {
@@ -507,7 +509,7 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
     }
     // push constants of generated stages (the pass-through tessellation control shader): one range from offset 0 over those stages
     VkPushConstantRange pcr = {0, 0, 0};
-    for (int st = 0; st < 6; ++st)
+    for (int st = 0; st < kProgStages; ++st)
         if (stages[st] && stages[st]->push_bytes) {
             pcr.stageFlags |= stage_bit(stages[st]->stage);
             pcr.size = std::max(pcr.size, stages[st]->push_bytes);
@@ -653,9 +655,28 @@ void note_pipeline_created(double ms, const char* what) {
     NXLOG_D(kTag, "%s created in %.1f ms", what, ms);
 }
 
+// The dynamic states of a mesh pipeline: the graphics list without the vertex input and input assembly ones (VK_EXT_mesh_shader forbids them).
+const VkPipelineDynamicStateCreateInfo* mesh_dynamic_state() {
+    static const struct Dyn {
+        std::vector<VkDynamicState> s;
+        VkPipelineDynamicStateCreateInfo ci;
+        Dyn() {
+            const VkPipelineDynamicStateCreateInfo* g = pipeline_dynamic_state();
+            for (uint32_t i = 0; i < g->dynamicStateCount; ++i) {
+                const VkDynamicState d = g->pDynamicStates[i];
+                if (d == VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY || d == VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE || d == VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE) continue;
+                s.push_back(d);
+            }
+            ci = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, nullptr, 0, static_cast<uint32_t>(s.size()), s.data()};
+        }
+    } dyn;
+    return &dyn.ci;
+}
+
 VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     ensure_cache();
     const auto t0 = std::chrono::steady_clock::now();
+    const bool mesh = key.mesh[1] != nullptr;
 
     VkPipelineShaderStageCreateInfo stages[5] = {};
     uint32_t ns = 0;
@@ -668,6 +689,16 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
         stages[ns] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stages[ns].stage = bits[i];
         stages[ns].module = sm.m[i];
+        stages[ns].pName = "main";
+        ++ns;
+    }
+    for (int i = 0; mesh && i < 2; ++i) {   // task, mesh
+        if (!key.mesh[i]) continue;
+        VkShaderModule m = shader_module(key.mesh[i]);
+        if (!m) return VK_NULL_HANDLE;
+        stages[ns] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stages[ns].stage = i == 0 ? VK_SHADER_STAGE_TASK_BIT_EXT : VK_SHADER_STAGE_MESH_BIT_EXT;
+        stages[ns].module = m;
         stages[ns].pName = "main";
         ++ns;
     }
@@ -744,22 +775,22 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
     VkGraphicsPipelineCreateInfo gi = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &ri};
     gi.stageCount = ns;
     gi.pStages = stages;
-    gi.pVertexInputState = &vi;
-    gi.pInputAssemblyState = &ia;
-    gi.pTessellationState = key.patch_control_points ? &ts : nullptr;
+    gi.pVertexInputState = mesh ? nullptr : &vi;
+    gi.pInputAssemblyState = mesh ? nullptr : &ia;
+    gi.pTessellationState = key.patch_control_points && !mesh ? &ts : nullptr;
     gi.pViewportState = &vp;
     gi.pRasterizationState = &rs;
     gi.pMultisampleState = &ms;
     gi.pDepthStencilState = &ds;
     gi.pColorBlendState = &cb;
-    gi.pDynamicState = pipeline_dynamic_state();
+    gi.pDynamicState = mesh ? mesh_dynamic_state() : pipeline_dynamic_state();
     gi.layout = layout.layout;
     VkPipeline pipe = VK_NULL_HANDLE;
     const VkResult r = create_graphics_pipeline_tracked(vkdev(), g_cache, &gi, &pipe);
     const double ms_taken = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (r != VK_SUCCESS) {
-        NXLOG_E(kTag, "graphics pipeline failed (%d): vs %s fs %s, %u colour targets", static_cast<int>(r), key.stage[0] ? key.stage[0]->hash.c_str() : "-",
-                key.stage[1] ? key.stage[1]->hash.c_str() : "-", key.color_count);
+        NXLOG_E(kTag, "graphics pipeline failed (%d): %s %s fs %s, %u colour targets", static_cast<int>(r), mesh ? "ms" : "vs",
+                mesh ? key.mesh[1]->hash.c_str() : key.stage[0] ? key.stage[0]->hash.c_str() : "-", key.stage[1] ? key.stage[1]->hash.c_str() : "-", key.color_count);
         pipe = VK_NULL_HANDLE;
     } else {
         counters().pipelines_created.fetch_add(1);
@@ -787,6 +818,14 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     VkPipeline pipe = VK_NULL_HANDLE;
     std::shared_ptr<PipeUpgrade> later;          // the key file's whole pipeline, still being built: it replaces the linked one
     // compiled ahead on a worker; one being compiled is linked from its parts meanwhile when they are built (else waited for)
+    if (key.mesh[1]) {   // mesh pipelines: built whole at the first draw (no pipeline library parts, not in the prewarm key file)
+        NXFT("pipe.create");
+        pipe = build_graphics_pipeline(key, layout);
+        if (pipe) { ++g_pipeline_count; g_built_at_draw.fetch_add(1, std::memory_order_relaxed); }
+        g_gfx_keys.add(1);
+        bucket.push_back({key, pipe, VK_NULL_HANDLE, nullptr});
+        return pipe;
+    }
     if (prewarm_take(key, &pipe, [&] { return gpl_ready(key, layout); }, &later)) {
         ++g_pipeline_count;
         g_gfx_keys.add(1);

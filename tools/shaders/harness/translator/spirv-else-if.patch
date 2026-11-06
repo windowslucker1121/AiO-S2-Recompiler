@@ -6,6 +6,8 @@ variable, reach N. Default 4096 for graphics stages (a runaway per-pixel loop in
 took the GPU to TDR / device lost minutes into the first scene), off for compute; NXRT_HARNESS_LOOP_CAP=N overrides (0 = off).
 Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a copy in private/build; the
 checkout in private/third_party stays untouched. The Ryujinx code in the context lines is MIT.
+Also the task/mesh hooks of tools/shaders/ampere/frontend/AmpereMesh.cs (declarations after DeclareAll, execution model and modes,
+the epilogue at the end of main, every global in the entry point).
 
 --- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
 +++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
@@ -20,7 +22,49 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
          private const int GeneratorPoolCount = 1;
          private static readonly ObjectPool<SpvInstructionPool> _instructionPool;
          private static readonly ObjectPool<SpvLiteralIntegerPool> _integerPool;
-@@ -311,6 +315,41 @@
+@@ -121,6 +125,7 @@
+             }
+ 
+             Declarations.DeclareAll(context, info);
++            AmpereMesh.Declare(context);   // task/mesh (tools/shaders/ampere/frontend/AmpereMesh.cs): outputs, capability, SPIR-V 1.4
+ 
+             for (int funcIndex = 0; funcIndex < info.Functions.Count; funcIndex++)
+             {
+@@ -147,6 +152,7 @@
+                 Generate(context, info, funcIndex);
+             }
+ 
++            AmpereMesh.FinishModule(context);   // task/mesh: every global variable in the entry point (SPIR-V 1.4)
+             byte[] result = context.Generate();
+ 
+             lock (_poolLock)
+@@ -178,14 +184,15 @@
+             if (function.MainBlock.Last is not AstOperation operation ||
+                 (operation.Inst != Instruction.Return && operation.Inst != Instruction.Discard))
+             {
+-                context.Return();
++                if (!(funcIndex == 0 && AmpereMesh.EmitEpilogue(context))) context.Return();   // task/mesh: the hardware's end of program first
+             }
+ 
+             context.FunctionEnd();
+ 
+             if (funcIndex == 0)
+             {
+-                context.AddEntryPoint(context.Definitions.Stage.Convert(), spvFunc, "main", context.GetMainInterface());
++                // task/mesh: the interface (every global, SPIR-V 1.4) is filled in by AmpereMesh.FinishModule
++                context.AddEntryPoint(AmpereMesh.Model(context.Definitions.Stage.Convert()), spvFunc, "main", AmpereMesh.Active ? Array.Empty<SpvInstruction>() : context.GetMainInterface());
+ 
+                 if (context.Definitions.Stage == ShaderStage.TessellationControl)
+                 {
+@@ -294,6 +301,7 @@
+                         localSizeX,
+                         localSizeY,
+                         localSizeZ);
++                    AmpereMesh.AddModes(context, spvFunc);   // mesh: output vertices / primitives / triangles
+                 }
+ 
+                 if (context.Definitions.TransformFeedbackEnabled && context.Definitions.LastInVertexPipeline)
+@@ -311,6 +319,41 @@
  
              context.LoopTargets = loopTargets;
  
@@ -62,7 +106,7 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
              visitor.BlockEntered += (sender, e) =>
              {
                  AstBlock mergeBlock = e.Block.Parent;
-@@ -320,7 +359,7 @@
+@@ -320,7 +363,7 @@
                      AstBlock ifTrueBlock = e.Block;
                      AstBlock ifFalseBlock;
  
@@ -71,10 +115,11 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
                      {
                          ifFalseBlock = nextBlock;
                      }
-@@ -334,6 +373,23 @@
+@@ -333,6 +376,23 @@
+ 
                      context.SelectionMerge(context.GetNextLabel(mergeBlock), SelectionControlMask.MaskNone);
                      context.BranchConditional(condition, context.GetNextLabel(ifTrueBlock), context.GetNextLabel(ifFalseBlock));
-                 }
++                }
 +                else if (e.Block.Type == AstBlockType.ElseIf)
 +                {
 +                    // Header block of the nested selection (the false target of the previous If/ElseIf).
@@ -91,14 +136,14 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
 +
 +                    context.SelectionMerge(elseIfMerge, SelectionControlMask.MaskNone);
 +                    context.BranchConditional(condition, context.GetNextLabel(e.Block), ifFalseLabel);
-+                }
+                 }
                  else if (e.Block.Type == AstBlockType.DoWhile)
                  {
-                     SpvInstruction continueTarget = context.Label();
-@@ -364,6 +420,14 @@
+@@ -363,6 +423,14 @@
+                         context.AddLabel(continueTarget);
  
                          SpvInstruction condition = context.Get(AggregateType.Bool, e.Block.Condition);
- 
++
 +                        if (loopCounter != null)
 +                        {
 +                            SpvInstruction s32 = context.TypeS32();
@@ -106,11 +151,10 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
 +                            context.Store(loopCounter, n);
 +                            condition = context.LogicalAnd(context.TypeBool(), condition, context.SLessThan(context.TypeBool(), n, context.Constant(s32, loopCap)));
 +                        }
-+
+ 
                          context.BranchConditional(condition, loopTarget, context.GetNextLabel(mergeBlock));
                      }
-                     else
-@@ -378,7 +442,7 @@
+@@ -378,7 +446,7 @@
  
                          if (!lastIsCf)
                          {
@@ -119,7 +163,7 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
                          }
                      }
  
-@@ -386,9 +450,22 @@
+@@ -386,9 +454,22 @@
                          (nextBlock.Type == AstBlockType.Else ||
                           nextBlock.Type == AstBlockType.ElseIf);
  
