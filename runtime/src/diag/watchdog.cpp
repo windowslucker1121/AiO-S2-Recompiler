@@ -20,6 +20,7 @@
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
 #include "nxrt/gauge.h"
+#include "nxrt/instance.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/kernel.h"
 #include "nxrt/log.h"
@@ -236,25 +237,8 @@ std::string emit_dump(const std::string& report_path, const std::string& header)
     return text;
 }
 
-std::string exe_path() {
-    char b[4096];
-    const DWORD n = GetModuleFileNameA(nullptr, b, sizeof b);
-    return std::string(b, n);
-}
-
-std::string exe_dir(const std::string& path) {
-    const size_t s = path.find_last_of("\\/");
-    return s == std::string::npos ? std::string() : path.substr(0, s);
-}
-
-// The exe path with its extension replaced by _freeze.txt.
-std::string default_report_path(const std::string& path) {
-    std::string base = path;
-    const size_t dot = path.find_last_of('.');
-    const size_t sl = path.find_last_of("\\/");
-    if (dot != std::string::npos && (sl == std::string::npos || dot > sl)) base.erase(dot);
-    return base + "_freeze.txt";
-}
+// The exe path with its extension replaced by _freeze.txt; a named instance: <instance folder>\<exe stem>_freeze.txt (nxrt/instance.h).
+std::string default_report_path() { return instance_report_path("_freeze.txt"); }
 
 struct Control {
     std::mutex ctl;  // serialises watchdog_start / watchdog_stop
@@ -266,7 +250,7 @@ struct Control {
     double threshold_s = 0;
     uint32_t poll_ms = 250;
     std::string report_path;   // "" = no file
-    std::string request_path;  // <exe dir>\dump_threads
+    std::string request_path;  // <exe dir>\dump_threads (a named instance: <instance folder>\dump_threads)
     void (*on_fire)(const char* dump, void* user) = nullptr;
     void* user = nullptr;
 };
@@ -345,11 +329,10 @@ void watchdog_start(const WatchdogOptions& opt) {
     if (opt.seconds < 0) return;  // disabled
     const double secs = opt.seconds > 0 ? opt.seconds : config_get_double("diag", "watchdog_seconds", 10.0);
     if (!(secs > 0)) return;      // disabled (also for a NaN value)
-    const std::string exe = exe_path();
     c.threshold_s = secs;
     c.poll_ms = opt.poll_ms ? opt.poll_ms : 1;
-    c.report_path = opt.report_path ? std::string(opt.report_path) : default_report_path(exe);
-    c.request_path = exe_dir(exe) + "\\dump_threads";
+    c.report_path = opt.report_path ? std::string(opt.report_path) : default_report_path();
+    c.request_path = instance_request_dir() + "\\dump_threads";     // next to the exe, or in the instance folder
     c.on_fire = opt.on_fire;
     c.user = opt.user;
     {

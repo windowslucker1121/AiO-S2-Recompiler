@@ -36,6 +36,10 @@ bool config_has(const char* section, const char* key);                          
 const char* config_source(const char* section, const char* key);
 // Logs (Info, tag "config") every key read so far with its effective value and source.
 void config_log_effective();
+// The same as text, one "[section] key = value (source)" line per key (bug capture bundles).
+std::string config_effective_text();
+// The file the last config_load_file read ("" when it read none).
+std::string config_file_path();
 // The environment variable name used for a key, e.g. NXRT_DIAG_WATCHDOG_SECONDS.
 std::string config_env_name(const char* section, const char* key);
 

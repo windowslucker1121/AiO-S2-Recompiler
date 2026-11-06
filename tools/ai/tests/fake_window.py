@@ -1,17 +1,29 @@
 """Stand-in for the game exe with a real window, for test_gamectl.py (stdlib + ctypes only).
 
-  fake_window.py [--log FILE] [--pos X,Y] [--size W,H] [--topmost] [--exit-after S] [any other game argument, ignored]
+  fake_window.py [--log FILE] [--pos X,Y] [--size W,H] [--topmost] [--exit-after S] [--instance NAME] [--refuse] [any other game argument, ignored]
 
 Paints its client area one colour (grey; key R / G / B turns it red / green / blue, a click white) and writes what it receives to the log:
 its arguments, the NXRT_* / SDL_* environment, keys (vk, scan code, extended bit), characters, clicks (client x y), wheel deltas.
 --topmost: a magenta always-on-top window (covers the other one). --exit-after S: exit 0 after S seconds; with NXRT_TEST_OUT set it then
 writes result.json and a trace line there, and answers every `@peek IN OUT` line of NXRT_TEST_SCRIPT with 8 bytes, like the runtime.
+--instance NAME: the title ends in " [NAME]", as the game's does. --refuse: exit at once with code 7 and a line on stderr, as the game does
+when it refuses to start beside another run.
+Save data and bug capture, like the runtime: logs "save data in '<save folder>'" (NXRT_FS_SAVE_DIR, else <instance dir>/save) and
+"fake: title"; key S saves a slot (committed file + an uncommitted work folder), Return logs "fake: loaded slot <text>" or "fake: new
+game". Request files in the request folder (--instance-dir, else FAKE_EXE_DIR = the folder of the .cmd posing as the exe): capture_bug.<pid>
+gets a bundle under NXRT_BUG_DIR (note.txt, env.txt, save/, bug.json last, the instance in its name and bug.json), screenshot.<pid> naming
+a PNG gets the window's colour written there (the runtime writes its presented frame).
 """
 import ctypes
 import ctypes.wintypes as wt
 import json
 import os
+import re
+import shutil
+import struct
 import sys
+import time
+import zlib
 from pathlib import Path
 
 u32, g32, k32 = ctypes.WinDLL('user32'), ctypes.WinDLL('gdi32'), ctypes.WinDLL('kernel32')
@@ -47,11 +59,84 @@ def arg(name, default=None):
     return sys.argv[sys.argv.index(name) + 1] if name in sys.argv[:-1] else default
 
 
+if '--refuse' in sys.argv:
+    sys.stderr.write('oot: Not enough free memory for another run (fake)\n')
+    sys.exit(7)
 log = open(arg('--log', os.devnull), 'a', encoding='utf-8', buffering=1)
 log.write(f'argv {sys.argv[1:]}\n')
 for k in sorted(os.environ):
     if k.startswith(('NXRT_', 'SDL_')):
         log.write(f'env {k}={os.environ[k]}\n')
+
+INSTANCE = arg('--instance')
+REQUESTS = Path(arg('--instance-dir') or os.environ.get('FAKE_EXE_DIR', '.'))
+SAVE = Path(os.environ.get('NXRT_FS_SAVE_DIR') or (Path(arg('--instance-dir')) / 'save' if arg('--instance-dir') else
+            Path(os.environ.get('TEMP', '.')) / 'fake_game_save'))
+SLOT = SAVE / 'account' / 'user' / 'slot.sav'
+saves = [0]
+log.write(f"fs: fsp-srv: RomFS from 'romfs', save data in '{SAVE}'\n")
+log.write('boot: built from commit fake0123 with uncommitted changes\n')
+log.write('fake: title\n')
+
+
+def save_slot():
+    saves[0] += 1
+    SLOT.parent.mkdir(parents=True, exist_ok=True)
+    SLOT.write_text(f'saved {saves[0]}')
+    (SAVE / 'account' / 'user.meta').write_text('size=1024\n')
+    work = SAVE / 'account' / f'user.work.{os.getpid()}'           # what a running game has besides the committed state
+    work.mkdir(parents=True, exist_ok=True)
+    (work / 'slot.sav').write_text('uncommitted')
+    log.write(f'fake: saved {saves[0]}\n')
+
+
+def write_png(path, w, h, colour):
+    """A solid PNG of the window's colour (COLORREF 0x00BBGGRR), as the runtime writes the presented frame."""
+    rgb = bytes((colour & 0xFF, colour >> 8 & 0xFF, colour >> 16 & 0xFF))
+    raw = b''.join(b'\0' + rgb * w for _ in range(h))
+
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xFFFFFFFF)
+    Path(path).write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) +
+                          chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+
+
+def answer_screenshot_request(hwnd):
+    req = REQUESTS / f'screenshot.{os.getpid()}'
+    if not req.exists():
+        return
+    target = req.read_text(encoding='utf-8').strip()
+    req.unlink()
+    r = wt.RECT()
+    u32.GetClientRect(hwnd, ctypes.byref(r))
+    write_png(target, r.right, r.bottom, colour[0])
+    log.write(f'screenshot request {target}\n')
+
+
+def answer_bug_request():
+    req = REQUESTS / f'capture_bug.{os.getpid()}'
+    if not req.exists():
+        return
+    text = req.read_text(encoding='utf-8')
+    req.unlink()
+    opts = dict(re.findall(r'^@(\w+) ?(.*)$', text, re.M))
+    note = '\n'.join(ln for ln in text.splitlines() if not ln.startswith('@')).strip()
+    label = '-'.join(x for x in (INSTANCE, opts.get('name')) if x)
+    d = Path(os.environ['NXRT_BUG_DIR']) / (time.strftime('%Y%m%d-%H%M%S') + (f'-{label}' if label else ''))
+    d.mkdir(parents=True)
+    log.write(f'bug: capture {d} ({opts.get("origin", "request")})\n')
+    if note:
+        (d / 'note.txt').write_text(note + '\n')
+    (d / 'env.txt').write_text(''.join(f'{k}={v}\n' for k, v in os.environ.items() if k.startswith(('NXRT_', 'SDL_'))))
+    n = 0
+    if SAVE.exists():
+        shutil.copytree(SAVE, d / 'save', ignore=shutil.ignore_patterns('*.work.*'))
+        n = sum(1 for q in (d / 'save').rglob('*') if q.is_file())
+    (d / 'bug.json').write_text(json.dumps({'format': 1, 'complete': True, 'origin': opts.get('origin', 'request'),
+                                            'instance': INSTANCE or 'default', 'state': os.environ.get('NXRT_AI_STATE', ''),
+                                            'trace_frame': 'trace' in opts, 'build': {'commit': 'fake0123', 'exe_sha256': ''}}))
+    log.write(f'bug: bundle complete {d} ({n} save files, no screenshot)\n')
+
 
 topmost = '--topmost' in sys.argv
 colour = [0xFF00FF if topmost else 0x404040]          # COLORREF 0x00BBGGRR
@@ -84,6 +169,10 @@ def wndproc(h, m, wp, lp):
         return 0
     if m in (0x0100, 0x0101, 0x0104, 0x0105):           # WM_(SYS)KEYDOWN / UP
         log.write(f'key{"down" if m in (0x100, 0x104) else "up"} vk=0x{wp:02x} sc=0x{(lp >> 16) & 0xFF:02x} ext={(lp >> 24) & 1}\n')
+        if m == 0x0100 and wp == ord('S'):
+            save_slot()
+        if m == 0x0100 and wp == 0x0D:
+            log.write(f'fake: loaded slot {SLOT.read_text()}\n' if SLOT.exists() else 'fake: new game\n')
         if m == 0x0100 and wp in KEY_COLOURS:
             colour[0] = KEY_COLOURS[wp]
             u32.InvalidateRect(h, None, True)
@@ -102,7 +191,11 @@ def wndproc(h, m, wp, lp):
         log.write(f'wheel {ctypes.c_short((wp >> 16) & 0xFFFF).value}\n')
         return 0
     if m == 0x0113:                                      # WM_TIMER
-        finish()
+        if wp == 2:
+            answer_screenshot_request(h)
+            answer_bug_request()
+        else:
+            finish()
         return 0
     if m == 0x0002:                                      # WM_DESTROY
         u32.PostQuitMessage(0)
@@ -119,11 +212,14 @@ def main():
     style, ex = 0x00CF0000, (0x08000008 if topmost else 0)          # WS_OVERLAPPEDWINDOW; WS_EX_NOACTIVATE | WS_EX_TOPMOST
     r = wt.RECT(0, 0, w, h)
     u32.AdjustWindowRectEx(ctypes.byref(r), style, False, ex)
-    hwnd = u32.CreateWindowExW(ex, 'fake_game_window', 'fake cover' if topmost else 'fake game window', style, x, y, r.right - r.left,
+    title = 'fake cover' if topmost else 'fake game window' + (f' [{arg("--instance")}]' if arg('--instance') else '')
+    hwnd = u32.CreateWindowExW(ex, 'fake_game_window', title, style, x, y, r.right - r.left,
                                r.bottom - r.top, None, None, inst, None)
     u32.ShowWindow(hwnd, 4)                                          # SW_SHOWNOACTIVATE
     if (s := arg('--exit-after')) is not None:
         u32.SetTimer(hwnd, 1, int(float(s) * 1000), None)
+    if not topmost:
+        u32.SetTimer(hwnd, 2, 100, None)                             # request files (screenshot, capture_bug)
     msg = wt.MSG()
     while u32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
         u32.TranslateMessage(ctypes.byref(msg))

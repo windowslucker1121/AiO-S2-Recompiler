@@ -34,6 +34,8 @@ std::unordered_map<std::string, std::string> g_ini;
 std::unordered_set<std::string> g_soft;
 // every key read so far, keyed by canonical id, ordered for a stable dump.
 std::map<std::string, Seen> g_seen;
+// the file the last config_load_file read ("" when none was read)
+std::string g_file;
 
 std::string S(const char* p) { return p ? std::string(p) : std::string(); }
 
@@ -215,6 +217,8 @@ bool config_load_file(const char* path) {
     std::FILE* f = path ? std::fopen(path, "rb") : nullptr;
     if (!f) {
         config_clear();
+        std::lock_guard<std::mutex> g(g_mu);
+        g_file.clear();
         return false;
     }
     std::string text;
@@ -223,7 +227,14 @@ bool config_load_file(const char* path) {
     while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
     std::fclose(f);
     replace_ini(text);
+    std::lock_guard<std::mutex> g(g_mu);
+    g_file = path;
     return true;
+}
+
+std::string config_file_path() {
+    std::lock_guard<std::mutex> g(g_mu);
+    return g_file;
 }
 
 void config_load_string(const char* text) { replace_ini(S(text)); }
@@ -328,6 +339,21 @@ void config_log_effective() {
             logf(LogLevel::Info, "config", "[%s] %s = %s (%s)", s.section.c_str(), s.key.c_str(), s.value.c_str(),
                  s.source.c_str());
     }
+}
+
+std::string config_effective_text() {
+    std::vector<Seen> snap;
+    {
+        std::lock_guard<std::mutex> g(g_mu);
+        snap.reserve(g_seen.size());
+        for (const auto& kv : g_seen) snap.push_back(kv.second);
+    }
+    std::string out;
+    for (const Seen& s : snap) {
+        if (!s.section.empty()) out += "[" + s.section + "] ";
+        out += s.key + " = " + s.value + " (" + s.source + ")\n";
+    }
+    return out;
 }
 
 std::string config_env_name(const char* section, const char* key) {

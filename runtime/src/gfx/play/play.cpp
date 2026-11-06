@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "nxrt/audio_sink.h"
+#include "nxrt/bugcapture.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/game.h"
 #include "play_display.h"
@@ -219,6 +220,7 @@ struct G {
     uint64_t base = 0;                   // set by load: [play] game_base, default the game's Info::main_base
     uint32_t hook_update = 0;            // the frame boundary (the game's GamePlay::frame_update)
     bool capture_mouse = true, quit_on_close = true, log_status = false;
+    int bug_key = 0;                     // [bug] key: the bug capture hotkey's SDL scancode (0 = none)
     bool pointer_draw = false;         // [play] pointer_draw: the menu pointer is also drawn into the frame (screenshots show it); a test aid
     bool late_sample = true;           // pump the window's events again right before the mouse counts are taken (S11: the counts are as new as ProcessInput)
     double pitch_limit_deg = 0;
@@ -469,6 +471,29 @@ void toggle_fullscreen() {
 
 void toggle_fps_counter();       // defined after the settings page host
 
+// The bug capture hotkey: a bundle of this moment (nxrt/bugcapture.h: screenshot, log, config, save data, thread dump), then a small
+// window of its own asks for a note while the game keeps running ([bug] note_prompt = false: no window).
+void bug_hotkey() {
+    bug::Request r;
+    r.origin = "hotkey";
+    r.trace_frame = config_get_bool("bug", "trace_frame", false);
+    const std::string dir = bug::capture(r);
+    if (dir.empty() || !g().window || !config_get_bool("bug", "note_prompt", true)) return;
+    std::thread([dir] {
+        services::swkbdui::Request q;
+        const char* product = game::info().product;
+        q.title = std::string(product && *product ? product : "Game") + ": bug capture";
+        q.header = "Saved to " + dir;
+        q.guide = "What went wrong? Enter saves the note, Escape leaves it out.";
+        q.ok_text = "Save note";
+        std::string note;
+        if (services::swkbdui::win32_prompt(q, &note) && !note.empty()) {
+            bug::add_note(dir, note);
+            NXLOG_I(kTag, "bug note saved in %s", dir.c_str());
+        }
+    }).detach();
+}
+
 // Tells the overlay how the frame rate counter should look (the overlay draws it; nothing happens while it is off).
 void apply_fps_counter(const FpsSettings& f) {
     G& st = g();
@@ -542,6 +567,11 @@ void handle_event(const input::Event& e, uint64_t now) {
             return;
         }
         if (e.type == EventType::GamepadButtonDown || e.type == EventType::GamepadAxis) return;
+    }
+    // The bug capture hotkey ([bug] key, default F9): never reaches the game either.
+    if (st.bug_key && (e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == st.bug_key) {
+        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) bug_hotkey();
+        return;
     }
     // The frame rate counter hotkey: flips the counter and never reaches the game (press, repeat and release).
     if (st.overlay && (e.type == EventType::KeyDown || e.type == EventType::KeyUp) && st.settings.fps.key.kind == InKind::Key &&
@@ -1342,6 +1372,12 @@ bool start(const StartOptions& opt) {
     tt::set_mouse_sink(&input::mouse_delta_add);
     tt::set_key_sink(&key_sink);
     if (st.renderer) tt::set_screenshot_provider(&screenshot_provider, nullptr);
+    if (st.renderer) bug::set_screenshot_fn([](const char* path) { return screenshot_provider(path, nullptr); });
+    bug::set_trace_fn(&nvn::backend_trace_next_frame);
+    if (const std::string k = config_get_str("bug", "key", "F9"); !k.empty() && k != "none") {
+        st.bug_key = static_cast<int>(SDL_GetScancodeFromName(k.c_str()));
+        if (!st.bug_key) NXLOG_W(kTag, "[bug] key '%s' is not a key name (SDL names: F9, Pause, ...): no bug capture hotkey", k.c_str());
+    }
     if (const std::string script = config_get_str("play", "selftest", ""); !script.empty()) {
         std::string err;
         if (!st.selftest.parse(script, &err)) {
