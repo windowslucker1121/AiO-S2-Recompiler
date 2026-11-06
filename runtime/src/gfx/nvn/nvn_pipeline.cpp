@@ -225,6 +225,7 @@ uint64_t save_cache() {
     }
     if (ec) return 0;
     if (n > g_cache_base) g_cache_base = n;
+    if (n >= (64u << 20)) g_cache_big = true;       // from now on rewritten as rarely as a loaded big one
     if (g_cache_big || n >= (64u << 20)) NXLOG_I(kTag, "pipeline cache saved: %zu bytes to %s (driver %.0f ms, %.0f ms in all)", n, g_cache_path.c_str(), get_ms, ms_from(t0));
     return n;
 }
@@ -238,8 +239,10 @@ bool pipeline_cache_dirty() {
     return !g_cache_big || g_new_since_save.load(std::memory_order_relaxed) >= 3000;
 }
 uint64_t pipeline_cache_save() { return save_cache(); }
-// The write at the end of a session: skipped when the cache is the big one of a preparation and little was added.
+// The write at the end of a session: skipped when nothing changed since the last save (the preparation has just written its gigabytes),
+// and when the cache is a big one and little was added.
 void pipeline_cache_flush() {
+    if (!g_cache_dirty.load(std::memory_order_relaxed)) return;
     if (!g_cache_big || g_new_since_save.load(std::memory_order_relaxed) >= 300) save_cache();
 }
 std::string pipeline_cache_path() {
@@ -911,7 +914,7 @@ void pipeline_shutdown() {
     VkDevice d = vkdev();
     prewarm_shutdown();
     gpl_stop();
-    if (!g_cache_big || g_new_since_save.load() >= 300) save_cache();
+    pipeline_cache_flush();
     for (auto& [h, bucket] : g_gfx)
         for (auto& e : bucket) {
             if (e.second) vkDestroyPipeline(d, e.second, nullptr);
@@ -958,6 +961,9 @@ void pipeline_shutdown() {
     g_cache_tried = false;
     g_cache_ready.store(false);
     g_cache_dirty.store(false);
+    g_cache_big = false;
+    g_cache_base = 0;
+    g_cache_unreadable = false;
     g_pipeline_count.sub(g_pipeline_count.get());
 }
 
