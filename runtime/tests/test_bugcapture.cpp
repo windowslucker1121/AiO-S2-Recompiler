@@ -144,3 +144,18 @@ NXTEST(request_file_is_taken_with_note_and_options) {
     CHECK(!stdfs::exists(found / "threads.txt"));
     nxrt::bug::stop_requests();
 }
+
+NXTEST(screenshot_request_writes_the_named_png) {
+    Fixture f;
+    nxrt::bug::set_screenshot_fn(&fake_shot);
+    nxrt::bug::stop_requests();
+    nxrt::bug::start_requests();
+    const std::string req = nxrt::bug::screenshot_request_path(true);
+    CHECK(has(req, "screenshot."));
+    const stdfs::path png = f.dir / "requested.png";
+    std::ofstream(req, std::ios::binary) << png.string() << "\r\n";
+    CHECK_MSG(wait_for([&] { return stdfs::exists(png); }, 10000), "the requested PNG was not written");
+    CHECK_MSG(wait_for([&] { return !stdfs::exists(req); }, 2000), "the request file was not taken");
+    CHECK_EQ(read(png), std::string("PNG stand-in"));
+    nxrt::bug::stop_requests();
+}

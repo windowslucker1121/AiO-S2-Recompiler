@@ -8,12 +8,15 @@ its arguments, the NXRT_* / SDL_* environment, keys (vk, scan code, extended bit
 writes result.json and a trace line there, and answers every `@peek IN OUT` line of NXRT_TEST_SCRIPT with 8 bytes, like the runtime.
 Save data and bug capture, like the runtime: logs "save data in '<NXRT_FS_SAVE_DIR>'" and "fake: title"; key S saves a slot (committed
 file + an uncommitted work folder), Return logs "fake: loaded slot <text>" or "fake: new game"; a request file FAKE_EXE_DIR/capture_bug.<pid>
-gets a bundle under NXRT_BUG_DIR (note.txt, env.txt, save/, bug.json last).
+gets a bundle under NXRT_BUG_DIR (note.txt, env.txt, save/, bug.json last); FAKE_EXE_DIR/screenshot.<pid> naming a PNG gets the window's
+colour written there (the runtime writes its presented frame).
 """
 import ctypes
 import re
 import shutil
+import struct
 import time
+import zlib
 import ctypes.wintypes as wt
 import json
 import os
@@ -76,6 +79,29 @@ def save_slot():
     work.mkdir(parents=True, exist_ok=True)
     (work / 'slot.sav').write_text('uncommitted')
     log.write(f'fake: saved {saves[0]}\n')
+
+
+def write_png(path, w, h, colour):
+    """A solid PNG of the window's colour (COLORREF 0x00BBGGRR), as the runtime writes the presented frame."""
+    rgb = bytes((colour & 0xFF, colour >> 8 & 0xFF, colour >> 16 & 0xFF))
+    raw = b''.join(b'\0' + rgb * w for _ in range(h))
+
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xFFFFFFFF)
+    Path(path).write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) +
+                          chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+
+
+def answer_screenshot_request(hwnd):
+    req = Path(os.environ.get('FAKE_EXE_DIR', '.')) / f'screenshot.{os.getpid()}'
+    if not req.exists():
+        return
+    target = req.read_text(encoding='utf-8').strip()
+    req.unlink()
+    r = wt.RECT()
+    u32.GetClientRect(hwnd, ctypes.byref(r))
+    write_png(target, r.right, r.bottom, colour[0])
+    log.write(f'screenshot request {target}\n')
 
 
 def answer_bug_request():
@@ -154,6 +180,7 @@ def wndproc(h, m, wp, lp):
         return 0
     if m == 0x0113:                                      # WM_TIMER
         if wp == 2:
+            answer_screenshot_request(h)
             answer_bug_request()
         else:
             finish()

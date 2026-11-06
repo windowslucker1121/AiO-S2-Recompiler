@@ -337,10 +337,27 @@ void poll_loop() {
     const uint32_t poll_ms = static_cast<uint32_t>(config_get_int("bug", "poll_ms", 250));
     const stdfs::path own = stdfs::u8path(request_path(true)), any = stdfs::u8path(request_path(false));
     const stdfs::path taken = exe_dir() / ("capture_bug.taken." + std::to_string(GetCurrentProcessId()));
+    const stdfs::path shot_own = stdfs::u8path(screenshot_request_path(true)), shot_any = stdfs::u8path(screenshot_request_path(false));
+    const stdfs::path shot_taken = exe_dir() / ("screenshot.taken." + std::to_string(GetCurrentProcessId()));
     for (;;) {
         {
             std::unique_lock<std::mutex> lk(g().pmu);
             if (g().cv.wait_for(lk, std::chrono::milliseconds(poll_ms ? poll_ms : 250), [] { return g().stop; })) return;
+        }
+        // a screenshot request: the file names the PNG to write (tools/ai screenshot: PrintWindow does not see a Vulkan swapchain)
+        for (const stdfs::path* p : {&shot_own, &shot_any}) {
+            if (!MoveFileExW(p->c_str(), shot_taken.c_str(), MOVEFILE_REPLACE_EXISTING)) continue;
+            Sleep(20);
+            std::string target = read_file(shot_taken);
+            DeleteFileW(shot_taken.c_str());
+            while (!target.empty() && (target.back() == '\n' || target.back() == '\r' || target.back() == ' ')) target.pop_back();
+            ScreenshotFn fn;
+            {
+                std::lock_guard<std::mutex> lk(g().mu);
+                fn = g().shot;
+            }
+            if (target.empty() || !fn || !fn(target.c_str())) NXLOG_W(kTag, "screenshot request '%s': no presented frame to write", target.c_str());
+            break;
         }
         // whichever process renames the shared file first takes it; the own file belongs to this process
         bool got = false;
@@ -377,6 +394,12 @@ std::string root() {
 
 std::string request_path(bool own_process) {
     std::string p = u8(exe_dir() / "capture_bug");
+    if (own_process) p += "." + std::to_string(GetCurrentProcessId());
+    return p;
+}
+
+std::string screenshot_request_path(bool own_process) {
+    std::string p = u8(exe_dir() / "screenshot");
     if (own_process) p += "." + std::to_string(GetCurrentProcessId());
     return p;
 }

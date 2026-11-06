@@ -210,17 +210,26 @@ class Game(states.StateTools):
         self.run_dir = Path(run_dir or os.environ.get('NXRT_AI_RUN_DIR') or ROOT / 'work' / 'ai_run' / self.id).resolve()
         self.proc = self.launch_t = self.log_path = self.last_launch = None
         self.log_pos, self.peeks = 0, []
+        self._no_game_shots = None
 
     # ---- finding the game ----------------------------------------------------------------------------------------------------------------
     def _pids(self):
-        """The game's processes: the tree this object started while it runs, else every process with the exe's file name."""
+        """The game's processes: the tree this object started while it runs, else every process running this very exe (same full path:
+        other checkouts' and worktrees' copies of the exe belong to other people's runs and are never touched)."""
         procs = processes()
         if self.proc and self.proc.poll() is None:
             pids = {self.proc.pid}
             while more := {p for p, pp, _ in procs if pp in pids} - pids:
                 pids |= more
             return sorted(pids)
-        return [p for p, _, n in procs if n.lower() == self.exe.name.lower()]
+        mine = os.path.normcase(str(self.exe))
+        return [p for p, _, n in procs if n.lower() == self.exe.name.lower() and os.path.normcase(proc_info(p).get('path') or '') == mine]
+
+    def others_running(self):
+        """Processes with the exe's file name that run another copy (another checkout's or worktree's build): [(pid, path)]."""
+        mine = os.path.normcase(str(self.exe))
+        return [(p, proc_info(p).get('path')) for p, _, n in processes()
+                if n.lower() == self.exe.name.lower() and os.path.normcase(proc_info(p).get('path') or '') != mine]
 
     def _window(self, required=True):
         """(hwnd, title, pid) of the largest visible top-level window of the game's processes."""
@@ -230,9 +239,58 @@ class Game(states.StateTools):
             raise RuntimeError('no game window: not running, still starting, or headless (headless runs take screenshots with the script step @shot)')
         return best[1:] if best else None
 
+    def _game_shot(self, timeout_s=6.0):
+        """The game's own picture of its next presented frame: a request file <exe dir>/screenshot.<pid> naming a PNG (the runtime's
+        bug-capture poller writes it, nxrt/bugcapture.h). None when the game does not answer (an older build, a stand-in, no frames)."""
+        names = {p: n for p, _, n in processes()}
+        pids = self._pids()
+        targets = [p for p in pids if names.get(p, '').lower() == self.exe.name.lower()] or \
+                  [p for p in pids if names.get(p, '').lower() not in ('cmd.exe', 'conhost.exe')]
+        if not targets or self._no_game_shots == tuple(targets):
+            return None
+        out = self._shot_path('game')
+        reqs = []
+        for p in targets:
+            r = self.exe.parent / f'screenshot.{p}'
+            r.write_text(str(out) + '\n', encoding='utf-8')
+            reqs.append(r)
+        end, last = time.time() + timeout_s, -1
+        img = None
+        while time.time() < end:
+            time.sleep(0.15)
+            size = out.stat().st_size if out.exists() else 0
+            if size and size == last:                            # written on the renderer's worker: done once the size holds
+                try:
+                    img = Image.open(out).convert('RGB')
+                    img.load()
+                    break
+                except OSError:
+                    pass
+            last = size
+        for r in reqs:
+            r.unlink(missing_ok=True)
+        if img is None:
+            if not out.exists():
+                self._no_game_shots = tuple(targets)              # this process never answers: do not wait for it again
+            return None
+        return img
+
     def _capture(self, method=None):
+        """(picture, method, window). method None: the game's own frame, then PrintWindow, then BitBlt. Never the screen unless asked
+        (method="screen" captures whatever covers the window: other people's windows)."""
         w = self._window()
-        img, how = wincap.capture_best(w[0], method)
+        if method in (None, 'game'):
+            if (img := self._game_shot()) is not None:
+                return img, 'game', w
+            if method == 'game':
+                raise RuntimeError('the game did not answer the screenshot request (a build without it, or no frame presented)')
+        if method:
+            return wincap.capture(w[0], method), method, w
+        img, how = None, None
+        for m in ('printwindow', 'bitblt'):
+            img, how = wincap.capture(w[0], m), m
+            if not wincap.is_black(img):
+                break
         return img, how, w
 
     def _shot_path(self, kind):
@@ -271,6 +329,8 @@ class Game(states.StateTools):
         pids, win = self._pids(), self._window(required=False)
         s = {'game': self.id, 'exe': str(self.exe), 'exe_built': time.ctime(self.exe.stat().st_mtime) if self.exe.exists() else 'missing',
              'running': bool(pids), 'processes': [proc_info(p) for p in pids]}
+        if others := self.others_running():
+            s['other_copies_running'] = [{'pid': p, 'path': path} for p, path in others]
         if self.proc and self.proc.poll() is not None:
             s['exit_code'] = self.proc.returncode
             s['exit_meaning'] = EXIT.get(self.proc.returncode, 'unexpected')
@@ -290,7 +350,7 @@ class Game(states.StateTools):
         return s
 
     def launch(self, args: list = None, settings: dict = None, env: dict = None, script: list = None, headless: bool = False,
-               wait: bool = False, timeout_s: float = 600, exe: str = None, cwd: str = None):
+               wait: bool = False, timeout_s: float = 600, exe: str = None, cwd: str = None, allow_others: bool = False):
         """(Re)start the game; a running instance is killed first. The exe gets `--log <run dir>/<log>` (unless args has --log),
         `--headless` when asked, then args, e.g. ["--max-seconds", "60", "--exefs", "D:/dump/exefs", "--ini", "x.ini"]. The window is asked
         to open without taking the focus. cwd defaults to the run dir (an installed exe changes to its own folder).
@@ -301,13 +361,18 @@ class Game(states.StateTools):
         `peek <addr> <len> [off ...]` and `poke <addr> [off ...] : <hexbytes>`.
         With a script or test.enabled the test output (result.json, trace.jsonl = per-frame state from the game probes, shots/) is in
         <run dir>/testout; test.frame_source defaults to tick (the present path, needs no game hooks; set "test.frame_source" to change it).
-        wait: block until the game exits (killed after timeout_s) and return exit code, scripted-run result, peeks and the log tail."""
+        wait: block until the game exits (killed after timeout_s) and return exit code, scripted-run result, peeks and the log tail.
+        Refused while another copy of the exe (another checkout's or worktree's build) runs: one game at a time on a machine (the GPU,
+        the CPU and the player's save are shared); allow_others=true starts anyway. Only this exe's own processes are ever killed."""
         self.last_launch = {k: v for k, v in locals().items() if k != 'self'}
+        if exe:
+            self.exe = Path(exe).resolve()
+        if not allow_others and (others := self.others_running()):
+            raise RuntimeError(f'another copy of the game runs ({others}): one at a time on this machine; wait for it '
+                               '(status shows other_copies_running) or pass allow_others=true')
         self.kill()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / 'launch.json').write_text(json.dumps(self.last_launch, indent=1, default=str), encoding='utf-8')
-        if exe:
-            self.exe = Path(exe).resolve()
         if not self.exe.exists():
             raise RuntimeError(f'{self.exe} not found: build the game exe, or pass exe= (or set NXRT_AI_EXE)')
         rd, args = self.run_dir, [str(a) for a in args or []]
@@ -376,7 +441,7 @@ class Game(states.StateTools):
         return self.launch(**last)
 
     def kill(self):
-        """End the game: the process tree this server started, or every running process with the exe's file name."""
+        """End the game: the process tree this server started, or every process running this exe (same path; other copies are left alone)."""
         pids = self._pids()
         for pid in pids:
             subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -385,7 +450,8 @@ class Game(states.StateTools):
                 self.proc.wait(10)
             except subprocess.TimeoutExpired:
                 pass
-        for _ in range(50):
+        # a big game takes seconds to hand its memory back after TerminateProcess: wait up to a minute, so the next launch finds it gone
+        for _ in range(600):
             if not self._pids():
                 break
             time.sleep(0.1)
@@ -394,8 +460,9 @@ class Game(states.StateTools):
     def screenshot(self, show: bool = True, crop: str = None, save: str = None, method: str = None):
         """Capture the game window's client area: works while it is covered or unfocused, not while minimised. Saves a full-size PNG
         (path in the result) and, with show, returns the picture (at most 1280 px wide). crop: "x0,y0,x1,y1" in client pixels, or fractions
-        when written with decimal points ("0,0,0.5,0.5" = top-left quarter). method: printwindow | bitblt | screen (default printwindow,
-        falling back to the others when the picture is black)."""
+        when written with decimal points ("0,0,0.5,0.5" = top-left quarter). method: game | printwindow | bitblt | screen. Default: the
+        game's own next presented frame (a request file the runtime answers; PrintWindow does not see the Vulkan swapchain), then
+        PrintWindow, then BitBlt. screen is only used when asked: it shows whatever covers the window."""
         img, how, w = self._capture(method)
         if crop:
             img = img.crop(_xy(*crop.split(',')[:2], img.size) + _xy(*crop.split(',')[2:], img.size))
@@ -528,7 +595,7 @@ class Game(states.StateTools):
                     lines, pos = _read_from(lp, pos)
                     hit = next((ln for ln in lines if rx.search(ln)), None)
             elif (w := self._window(required=False)) is not None:
-                img = wincap.capture_best(w[0])[0]
+                img = self._capture()[0]
                 if until == 'visible':
                     hit = not wincap.is_black(img)
                 elif until == 'change':

@@ -51,5 +51,8 @@ void start_requests();
 void stop_requests();
 // The request file paths: <exe dir>\capture_bug and <exe dir>\capture_bug.<pid>.
 std::string request_path(bool own_process);
+// Screenshot requests, polled by the same thread: <exe dir>\screenshot[.<pid>] holding the path of a PNG; the next presented frame is
+// written there (tools/ai `screenshot`: PrintWindow does not see the game's Vulkan swapchain, and a covered window has nothing on screen).
+std::string screenshot_request_path(bool own_process);
 
 }  // namespace nxrt::bug

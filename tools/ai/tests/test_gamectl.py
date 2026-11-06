@@ -94,8 +94,12 @@ class GameCtl(unittest.TestCase):
         # covered by a window of another process (topmost, larger): the capture still shows the game's window, and input goes only to it
         type(self).cover = subprocess.Popen([PY, str(FAKE), '--topmost', '--pos', '20,20', '--size', '400,300'])
         time.sleep(1.0)
-        grey = g.screenshot(show=False)['path']
+        shot = g.screenshot(show=False)
+        grey = shot['path']
+        self.assertEqual(shot['method'], 'game')                # the game's own frame (request file), like the runtime's
+        self.log_has('screenshot request ')
         self.assertEqual(self.centre(), GREY)
+        self.assertEqual(g.screenshot(show=False, method='printwindow')['method'], 'printwindow')
         jpeg, info = g.screenshot(crop='0,0,0.5,0.5')
         self.assertEqual(tuple(info['size']), (160, 120))
         self.assertEqual(jpeg[:2], b'\xff\xd8')

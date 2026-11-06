@@ -244,6 +244,19 @@ works when covered), `send_input` (posted messages in the background, or SendInp
 Verified only against a stand-in window: whether PrintWindow sees the Vulkan swapchain and whether the SDL window takes posted
 input while unfocused is known only once `oot.exe` runs. `launch` sets `test.frame_source=tick` for scripts (OoT has no frame hook).
 
+**States and bug bundles (2026-11-06)**: tools `states`, `save_state`, `load_state`, `capture_bug`, `bugs` (`tools/ai/states.py`, README
+"States" and "Bug bundles"). **No process snapshot** (guest threads live on host stacks of lifted frames, plus kernel/service/Vulkan
+objects; nothing can write that out and recreate it). A state = the game's committed save data (`work/states/oot/<name>/save`) + reach
+steps from `recomp/games/oot/ai_states.toml` (routes `title`, `new_game`, `continue`, `in_game`; built-in states `title`,
+`first_scene`) + build/settings/env. `load_state` copies the save into `<run dir>/save` and launches with `[fs] save_dir` there: the
+player's `%APPDATA%\OcarinaRecompPC\save` is never touched. The routes default to the loop-capped shader cache and
+`[media] video_max_pictures = 120` (see A8). OoT has an auto-save manager (`AutoSaveMgr`, `TriggerRequestAutoSave` in main's strings),
+so states made right after an autosave are exact. Bug bundles: the player presses **F9** in game (note prompt follows; `[bug]` keys in
+`runtime/docs/CONFIG.md`), or `capture_bug` (request file `<exe dir>\capture_bug.<pid>`); they land in `work\bugs\<time>[-name]` of the
+checkout the exe was built in; `load_state(bug=<id>)` starts from one. Every exe now logs `boot: built from commit <sha>` (gen/build_id.h,
+rewritten at each build only when the commit or the dirty state changes). `launch` refuses while another copy of `oot.exe` (another
+worktree's) runs and `kill` only ends processes of the same exe path (before, a CLI `kill`/`launch` ended every `oot.exe` on the machine).
+
 ## Machine setup (this checkout, Windows 11)
 
 | Tool | Where | Notes |

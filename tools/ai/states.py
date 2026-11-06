@@ -89,6 +89,11 @@ def read_json(p):
         return None
 
 
+def wincap_black(img):
+    import wincap
+    return wincap.is_black(img)
+
+
 def jpeg(path, width=1280):
     from PIL import Image
     img = Image.open(path).convert('RGB')
@@ -257,8 +262,13 @@ class StateTools:
             shutil.copy2(bug / 'screen.png', tmp / 'shot.png')
             shot = tmp / 'shot.png'
         elif self._window(required=False):
-            self.screenshot(show=False, save=str(tmp / 'shot.png'))
-            shot = tmp / 'shot.png'
+            try:
+                img, _, _ = self._capture()
+                if not wincap_black(img):
+                    img.save(tmp / 'shot.png')
+                    shot = tmp / 'shot.png'
+            except Exception:                                       # noqa: BLE001  (a picture is optional)
+                pass
         (tmp / 'state.json').write_text(json.dumps(state, indent=1), encoding='utf-8')
         if dst.exists():
             shutil.rmtree(dst)
@@ -466,11 +476,12 @@ class StateTools:
         if made is None:
             made = self._outside_bundle(note, name, why)
         extra = []
-        if self._window(required=False):
+        if not (made / 'screen.png').exists() and self._window(required=False):     # the game's own frame is better when it is there
             try:
-                img = self._capture()[0]
-                img.save(made / 'window.png')
-                extra.append('window.png')
+                img, how, _ = self._capture()
+                if not wincap_black(img):
+                    img.save(made / 'window.png')
+                    extra.append(f'window.png ({how})')
             except Exception as e:                                  # noqa: BLE001  (a picture is optional)
                 extra.append(f'window.png failed: {e}')
         for f in ('stdout.txt', 'stderr.txt'):
