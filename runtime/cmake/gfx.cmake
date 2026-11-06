@@ -61,7 +61,10 @@ if(NXRT_BUILD_TESTS)
         file(GLOB NXRT_GAME_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/games/${NXRT_TEST_GAME}/tests/*.cpp")
         list(APPEND NXRT_GFX_TEST_SOURCES ${NXRT_GAME_TEST_SOURCES})
     endif()
-    add_executable(nxrt_gfx_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_main.cpp" ${NXRT_GFX_TEST_SOURCES})
+    # tests/play_fixture: Metroid Prime Remastered's play vocabulary and factory controls.ini, the data the play_config and play_engine groups
+    # are written against (its game module is not in every checkout).
+    add_executable(nxrt_gfx_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_main.cpp" ${NXRT_GFX_TEST_SOURCES}
+                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/play_fixture/mpr_play_fixture.cpp")
     target_include_directories(nxrt_gfx_tests PRIVATE tests src/gfx src/gfx/nvn)
     target_link_libraries(nxrt_gfx_tests PRIVATE nxrt_gfx)
     target_compile_definitions(nxrt_gfx_tests PRIVATE NXRT_GFX_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/gfx")

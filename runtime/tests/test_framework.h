@@ -3,6 +3,8 @@
 //   NXTEST_GROUP(mymodule)            // first line, no leading space: CMake reads it to create the CTest entry
 //   NXTEST(does_thing) { CHECK_EQ(1 + 1, 2); }
 // Child-process modes (for crash/watchdog self-tests): NXTEST_CHILD(name) { ... } runs on `nxrt_tests --child name`.
+// A group fixture (after NXTEST_GROUP): NXTEST_GROUP_FIXTURE(before, after) runs before() ahead of every case of the group and after() once
+// the case has returned (a failed REQUIRE returns too), e.g. to register data the group's checks are written against.
 #pragma once
 #include <cstdint>
 #include <cstdio>
@@ -30,6 +32,15 @@ struct Registrar {
 struct ChildRegistrar {
     ChildRegistrar(const char* n, int (*f)(int, char**)) { children().push_back({n, f}); }
 };
+struct GroupFixture {
+    const char* group;
+    void (*before)();
+    void (*after)();
+};
+std::vector<GroupFixture>& group_fixtures();
+struct GroupFixtureRegistrar {
+    GroupFixtureRegistrar(const char* g, void (*b)(), void (*a)()) { group_fixtures().push_back({g, b, a}); }
+};
 template <class T>
 std::string to_s(const T& v) {
     if constexpr (std::is_pointer_v<T>) {
@@ -49,6 +60,7 @@ std::string to_s(const T& v) {
 }  // namespace nxtest
 
 #define NXTEST_GROUP(name) static constexpr const char* kNxGroup = #name;
+#define NXTEST_GROUP_FIXTURE(before, after) static ::nxtest::GroupFixtureRegistrar nxtest_group_fixture_reg(kNxGroup, (before), (after));
 #define NXTEST(name)                                                                  \
     static void nxtest_##name();                                                      \
     static ::nxtest::Registrar nxtest_reg_##name(kNxGroup, #name, &nxtest_##name);    \

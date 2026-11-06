@@ -19,6 +19,10 @@ std::vector<Child>& children() {
     static std::vector<Child> v;
     return v;
 }
+std::vector<GroupFixture>& group_fixtures() {
+    static std::vector<GroupFixture> v;
+    return v;
+}
 static thread_local int t_failures = 0;
 static thread_local bool t_skipped = false;
 void fail(const char* file, int line, const char* expr, const std::string& detail) {
@@ -63,7 +67,11 @@ int main(int argc, char** argv) {
         t_failures = 0;
         t_skipped = false;
         std::printf("[ RUN  ] %s\n", full.c_str());
+        for (const GroupFixture& f : group_fixtures())
+            if (f.before && !std::strcmp(f.group, c.group)) f.before();
         c.fn();
+        for (auto it = group_fixtures().rbegin(); it != group_fixtures().rend(); ++it)
+            if (it->after && !std::strcmp(it->group, c.group)) it->after();
         if (t_failures) {
             failed++;
             std::printf("[ FAIL ] %s (%d check(s) failed)\n", full.c_str(), t_failures);

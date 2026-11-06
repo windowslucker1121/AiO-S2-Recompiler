@@ -32,7 +32,10 @@ set_target_properties(mpr_launcher PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_
 
 if(NXRT_BUILD_TESTS)
     file(GLOB NXRT_LAUNCHER_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher/*.cpp")
-    add_executable(mpr_launcher_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_main.cpp" ${NXRT_LAUNCHER_TEST_SOURCES})
+    # tests/play_fixture: the play vocabulary and factory controls.ini the bindings and tweaks groups are written against (Metroid Prime
+    # Remastered's; its game module is not in every checkout).
+    add_executable(mpr_launcher_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_main.cpp" ${NXRT_LAUNCHER_TEST_SOURCES}
+                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/play_fixture/mpr_play_fixture.cpp")
     target_include_directories(mpr_launcher_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     target_link_libraries(mpr_launcher_tests PRIVATE mpr_launcher_core)
     set(NXRT_LAUNCHER_GROUPS "")

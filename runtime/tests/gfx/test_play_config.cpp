@@ -14,7 +14,10 @@
 #include "nxrt/input_source.h"
 #include "play/play_types.h"
 #include "test_framework.h"
+#include "play_fixture/mpr_play_fixture.h"
 NXTEST_GROUP(play_config)
+// The checks are written against Metroid Prime Remastered's play vocabulary and factory controls.ini (play_fixture/mpr_play_fixture.h).
+NXTEST_GROUP_FIXTURE(nxtest::mpr_play::install, nxtest::mpr_play::remove)
 
 // A REQUIRE with a message (test_framework.h has REQUIRE only).
 #define REQUIRE_MSG(cond, msg)                                                        \
@@ -1674,7 +1677,7 @@ NXTEST(alt_sensitivity_keeps_a_separate_vertical) {
 }
 
 NXTEST(ball_camera_keys_with_the_mpr_vocabulary) {
-    // the test executable registers Metroid Prime Remastered: its words for the alternate body's camera keys
+    // the group's fixture is Metroid Prime Remastered's vocabulary: its words for the alternate body's camera keys
     REQUIRE(std::string(key_alt_camera()) == "ball_camera");
     REQUIRE(std::string(key_alt_sens()) == "ball_sensitivity");
     REQUIRE(std::string(key_alt_yaw()) == "morph_yaw");
