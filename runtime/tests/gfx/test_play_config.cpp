@@ -1713,3 +1713,55 @@ NXTEST(ball_sensitivity_range) {
     }
     for (const char* ok : {"0.1", "2", "20"}) REQUIRE_MSG(parse_settings(std::string("[mouse]\nball_sensitivity = ") + ok + "\n", &s, &err), err);
 }
+
+// ---- the F1 menu's keys: [display] upscaler_replace, [menu], [config] ---------------------------------------------------------------------
+
+NXTEST(menu_and_config_sections_round_trip) {
+    Settings s = default_settings();
+    CHECK(s.display.upscaler_replace);
+    CHECK(s.menu.auto_apply);
+    CHECK(s.config.empty());
+    s.display.upscaler_replace = false;
+    s.menu.auto_apply = false;
+    s.config["am.operation_mode"] = "handheld";
+    s.config["gfx.device_diagnostics"] = "1";
+    s.config["am.resolution"] = "";   // an empty value is kept (it sets the key to the empty string)
+    const std::string text = format_settings(s);
+    CHECK(text.find("\nupscaler_replace = 0\n") != std::string::npos);
+    CHECK(text.find("\n[menu]\nauto_apply = 0\n") != std::string::npos);
+    CHECK(text.find("\n[config]\n") != std::string::npos);
+    CHECK(text.find("\nam.operation_mode = handheld\n") != std::string::npos);
+    Settings back;
+    std::string err;
+    REQUIRE_MSG(parse_settings(text, &back, &err), err);
+    CHECK(!back.display.upscaler_replace);
+    CHECK(!back.menu.auto_apply);
+    CHECK_EQ(back.config.size(), static_cast<size_t>(3));
+    CHECK(back.config["am.operation_mode"] == "handheld");
+    CHECK(back.config["gfx.device_diagnostics"] == "1");
+    CHECK(back.config.count("am.resolution") == 1 && back.config["am.resolution"].empty());
+    CHECK(format_settings(back) == text);
+}
+
+NXTEST(config_section_rejects_names_that_are_not_section_dot_key) {
+    Settings s;
+    std::string err;
+    for (const char* bad : {"operation_mode", ".mode", "am.", "am.operation.mode", "am.Mode!", "a-b.c"}) {
+        CHECK(!parse_settings(std::string("[config]\n") + bad + " = 1\n", &s, &err));
+        CHECK(!err.empty());
+    }
+    // section and key names are case-insensitive in the file: kept in lower case
+    REQUIRE_MSG(parse_settings("[config]\nGFX.Device_Diagnostics = 1\n", &s, &err), err);
+    CHECK(s.config.count("gfx.device_diagnostics") == 1);
+    CHECK(config_entry_name_ok("diag.hitch_ms"));
+    CHECK(!config_entry_name_ok("diag"));
+}
+
+NXTEST(older_file_without_menu_keys_keeps_the_defaults) {
+    Settings s;
+    std::string err;
+    REQUIRE_MSG(parse_settings("[display]\nvsync = 1\n", &s, &err), err);
+    CHECK(s.display.upscaler_replace);
+    CHECK(s.menu.auto_apply);
+    CHECK(s.config.empty());
+}

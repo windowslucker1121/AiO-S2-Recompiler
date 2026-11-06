@@ -478,3 +478,46 @@ NXTEST(config_log_effective_lines) {
     CHECK(count_containing(cap.lines, "config: probe_name = x (default)") == 1);
     config_clear();
 }
+
+NXTEST(log_tail_keeps_the_newest_lines_in_order) {
+    quiet_init(LogLevel::Info);
+    std::vector<LogTailLine> t;
+    CHECK_EQ(log_tail(&t, 10), 0ull);
+    CHECK(t.empty());
+    for (int i = 0; i < 5; ++i) NXLOG_I("tail", "line %d", i);
+    NXLOG_W("tail", "a warning");
+    NXLOG_D("tail", "filtered out: not kept");
+    CHECK_EQ(log_tail(&t, 3), 6ull);
+    REQUIRE(t.size() == 3);
+    CHECK(contains(t[0].text, "tail: line 3"));
+    CHECK(contains(t[1].text, "tail: line 4"));
+    CHECK(contains(t[2].text, "tail: a warning") && t[2].level == LogLevel::Warn);
+    // more lines than the ring holds: the oldest go, the count goes on
+    for (unsigned i = 0; i < kLogTailLines + 10; ++i) NXLOG_I("tail", "bulk %u", i);
+    CHECK_EQ(log_tail(&t, kLogTailLines * 2), 6ull + kLogTailLines + 10);
+    REQUIRE(t.size() == kLogTailLines);
+    CHECK(contains(t.front().text, "tail: bulk 10"));
+    const std::string last = "tail: bulk " + std::to_string(kLogTailLines + 9);
+    CHECK(contains(t.back().text, last.c_str()));
+    quiet_init(LogLevel::Info);   // a new log starts a new tail
+    CHECK_EQ(log_tail(&t, 10), 0ull);
+}
+
+NXTEST(config_set_default_is_not_a_user_setting) {
+    clear_env();
+    config_clear();
+    CHECK(!config_user_set("game", "upscaler"));
+    config_set_default("game", "upscaler", "abc");
+    CHECK(config_has("game", "upscaler"));
+    CHECK(config_get_str("game", "upscaler", "") == "abc");
+    CHECK(!config_user_set("game", "upscaler"));   // a default: the settings file of the player may replace it
+    config_set("game", "upscaler", "");             // the choice of the player (an empty value turns it off)
+    CHECK(config_user_set("game", "upscaler"));
+    CHECK(config_get_str("game", "upscaler", "x").empty());
+    config_load_string("[game]\nother = 1\n");
+    CHECK(config_user_set("game", "other"));       // from the ini
+    _putenv_s("NXRT_GAME_ENVKEY", "7");
+    CHECK(config_user_set("game", "envkey"));      // from the environment
+    _putenv_s("NXRT_GAME_ENVKEY", "");
+    config_clear();
+}

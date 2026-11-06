@@ -132,7 +132,8 @@ const play::GamePlay& game_play() {
     static const play::GamePlay t = [] {
         play::GamePlay p;
         p.frame_update = kFrameUpdate;
-        p.display_options = play::kDisplayOptQuality;   // view distance and the quality preset (pkp_quality.cpp)
+        // view distance and the quality preset (pkp_quality.cpp); the render size and dynamic resolution (pkp_play.cpp); the HDR LUT tone map
+        p.display_options = play::kDisplayOptQuality | play::kDisplayOptRenderSize | play::kDisplayOptDynRes | play::kDisplayOptHdr;
         p.quality_preset = &quality_preset;
         p.install_render = &play_install_render;
         p.install = &install_all;

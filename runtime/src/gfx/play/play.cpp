@@ -25,8 +25,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -48,6 +50,7 @@
 #include "nxrt/overlay.h"
 #include "nxrt/platform.h"
 #include "nxrt/runtime.h"
+#include "nxrt/services.h"
 #include "nxrt/timestep.h"
 #include "nxrt/tt.h"
 #include "menu_mouse.h"
@@ -255,6 +258,20 @@ struct G {
     std::mutex cap_mu;
     bool cap_have = false;
     InputId cap_id;
+    // press-to-rebind of a pad button (the Gamepad tab)
+    std::atomic<int> pad_capture_state{0};   // 0 idle, 1 waiting for a pad button
+    std::atomic<uint64_t> pad_capture_since{0};
+    bool pad_cap_have = false;
+    PadSrc pad_cap_src = PadSrc::South;
+
+    // pads: what each one presses right now (the Input page), and the buttons still held when the menu closed (held back until released)
+    std::vector<PadLive> pads_live;      // under st_mu
+    uint64_t seen_hides = 0;
+    std::map<uint32_t, uint32_t> pad_hold;   // pad id -> SDL button bits, plus bit 16 / 17 for the left / right trigger
+    std::atomic<uint64_t> rumble_test_until{0};
+
+    // [config] of the settings file at the start: the keys applied, and the ones the game ini or the environment set instead
+    std::set<std::string> config_applied, config_blocked;
 
     // live status
     mutable std::mutex st_mu;
@@ -505,6 +522,27 @@ void handle_event(const input::Event& e, uint64_t now) {
         if (cancel) { st.capture_state.store(0); return; }
         if (e.type == EventType::KeyDown || e.type == EventType::KeyUp) return;    // nothing reaches the game while capturing
     }
+    // press-to-rebind of a pad button: the next press on any pad (or a trigger past the threshold) is the answer; it reaches neither the menu nor
+    // the game. Releases still go to the menu, so the press that started the capture is not left held there.
+    if (st.pad_capture_state.load() == 1) {
+        PadSrc src = PadSrc::South;
+        bool got = false;
+        if (e.type == EventType::GamepadButtonDown) {
+            got = pad_src_of_sdl_button(e.u.gpbutton.button, &src);
+        } else if (e.type == EventType::GamepadAxis && (e.u.gpaxis.axis == 4 || e.u.gpaxis.axis == 5) &&
+                   e.u.gpaxis.value / 32767.0 >= st.settings.pad.trigger_threshold) {
+            src = e.u.gpaxis.axis == 4 ? PadSrc::LeftTrigger : PadSrc::RightTrigger;
+            got = true;
+        }
+        if (got) {
+            std::lock_guard<std::mutex> lk(st.cap_mu);
+            st.pad_cap_src = src;
+            st.pad_cap_have = true;
+            st.pad_capture_state.store(0);
+            return;
+        }
+        if (e.type == EventType::GamepadButtonDown || e.type == EventType::GamepadAxis) return;
+    }
     // The frame rate counter hotkey: flips the counter and never reaches the game (press, repeat and release).
     if (st.overlay && (e.type == EventType::KeyDown || e.type == EventType::KeyUp) && st.settings.fps.key.kind == InKind::Key &&
         e.u.key.scancode == st.settings.fps.key.code) {
@@ -612,6 +650,20 @@ void poll_pads(uint64_t now) {
         const float l = std::max(st.vib[0][0].load(), st.vib[1][0].load()), h = std::max(st.vib[0][1].load(), st.vib[1][1].load());
         map_rumble(l, h, st.settings.pad, &lo, &hi);
     }
+    if (now < st.rumble_test_until.load()) {   // the Gamepad tab's Test rumble: both motors, through the player's rumble settings
+        uint16_t tl = 0, th = 0;
+        map_rumble(0.7f, 0.7f, st.settings.pad, &tl, &th);
+        lo = std::max(lo, tl);
+        hi = std::max(hi, th);
+    }
+    // The menu just closed: the pad buttons still held (the chord that closed it, a face button) stay held back until they are released, so the
+    // game does not get the tail of a press that was meant for the menu.
+    const uint64_t hides = st.overlay ? st.overlay->hide_count() : 0;
+    const bool menu_closed = hides != st.seen_hides;
+    st.seen_hides = hides;
+    if (menu_closed) st.pad_hold.clear();
+    std::vector<PadLive> live_pads;
+    live_pads.reserve(n);
     const Ctx cx = st.engine ? st.engine->context() : Ctx::Menu;
     const bool look_ctx = cx == Ctx::Play || cx == Ctx::Alt || cx == Ctx::Inspect;      // the right stick is a look only in play
     const bool rumble_changed = lo != st.rumble_lo || hi != st.rumble_hi;
@@ -619,6 +671,31 @@ void poll_pads(uint64_t now) {
     for (size_t i = 0; i < n; ++i) {
         platform::GamepadRaw raw;
         if (!platform::gamepad_poll(infos[i].id, &raw)) continue;
+        {
+            PadLive pl;
+            pl.name = infos[i].name;
+            pl.kind = static_cast<int>(infos[i].kind);
+            pl.gyro = infos[i].gyro;
+            pl.rumble = infos[i].rumble;
+            pl.sources = pad_sources_pressed(raw, st.settings.pad.trigger_threshold);
+            pl.lx = raw.axes[0] / 32767.f;
+            pl.ly = -raw.axes[1] / 32767.f;
+            pl.rx = raw.axes[2] / 32767.f;
+            pl.ry = -raw.axes[3] / 32767.f;
+            pl.lt = raw.axes[4] / 32767.f;
+            pl.rt = raw.axes[5] / 32767.f;
+            live_pads.push_back(std::move(pl));
+        }
+        {   // held back since the menu closed: a bit stays until its button is let go
+            const double thr = st.settings.pad.trigger_threshold;
+            const uint32_t down = raw.buttons | (raw.axes[4] / 32767.0 >= thr ? 1u << 16 : 0u) | (raw.axes[5] / 32767.0 >= thr ? 1u << 17 : 0u);
+            uint32_t& hold = st.pad_hold[infos[i].id];
+            if (menu_closed) hold = down;
+            hold &= down;
+            raw.buttons &= ~(hold & 0xffffu);
+            if (hold & (1u << 16)) raw.axes[4] = 0;
+            if (hold & (1u << 17)) raw.axes[5] = 0;
+        }
         hid::NpadInput tmp;
         map_pad(raw, st.settings.pad, &tmp);
         {   // a pressed button or a stick well off centre makes this the pad the prompts follow
@@ -649,6 +726,10 @@ void poll_pads(uint64_t now) {
         st.rumble_lo = lo;
         st.rumble_hi = hi;
         st.last_rumble_ns = now;
+    }
+    {
+        std::lock_guard<std::mutex> lk(st.st_mu);
+        st.pads_live = std::move(live_pads);
     }
     // The settings menu is open: the pad does not reach the game (the keyboard and mouse are held back the same way in handle_event).
     if (st.overlay && st.overlay->visible()) {
@@ -713,6 +794,7 @@ int update_hook(::Ctx*, uint64_t, void*) {
             if (const GamePlay* gp = game_play(); gp && gp->settings_changed) gp->settings_changed(s);     // the game's display options, lock-on
             extras::set_settings(s.extras);
             extras::hdr_refresh_levels();
+            nvn::set_upscaler_replace_enabled(s.display.upscaler_replace);
             apply_fps_counter(s.fps);
             st.want_present.store(static_cast<int>(present_mode_for(s.display)));
             apply_audio(s.audio);
@@ -966,6 +1048,12 @@ public:
         s.out = st.engine->output(now_ns());
         s.pitch_deg = gs.pitch_rad * 180.0 / kPi;
         s.input_calls = st.pi_calls.load();
+        {
+            std::lock_guard<std::mutex> lk(st.st_mu);
+            s.pad_list = st.pads_live;
+        }
+        s.docked = services::amctl::docked();
+        s.upscaler_configured = nvn::upscaler_replace_configured();
         return s;
     }
     std::string settings_path() const override { return g().path; }
@@ -988,6 +1076,58 @@ public:
     bool reserved_key(const InputId& id) const override {
         G& st = g();
         return st.overlay && id.kind == InKind::Key && id.code == st.overlay->toggle_scancode();
+    }
+    void begin_pad_capture() override {
+        G& st = g();
+        std::lock_guard<std::mutex> lk(st.cap_mu);
+        st.pad_cap_have = false;
+        st.pad_capture_since.store(now_ns());
+        st.pad_capture_state.store(1);
+    }
+    bool pad_capturing() const override {
+        G& st = g();
+        if (st.pad_capture_state.load() != 1) return false;
+        if (now_ns() - st.pad_capture_since.load() > 8000 * kMs) {   // nobody pressed anything: give up
+            st.pad_capture_state.store(0);
+            return false;
+        }
+        return true;
+    }
+    bool pad_capture_result(PadSrc* out) override {
+        G& st = g();
+        std::lock_guard<std::mutex> lk(st.cap_mu);
+        if (!st.pad_cap_have) return false;
+        st.pad_cap_have = false;
+        if (out) *out = st.pad_cap_src;
+        return true;
+    }
+    void cancel_pad_capture() override { g().pad_capture_state.store(0); }
+    void test_rumble() override { g().rumble_test_until.store(now_ns() + 500 * kMs); }
+    void draw_debug() override {
+        G& st = g();
+        gfx::Overlay::Context c;
+        c.device = st.device;
+        c.renderer = st.renderer;
+        c.limiter = &st.limiter;
+        c.has_window = st.window;
+        gfx::draw_debug_page(c);
+    }
+    ConfigKeyState config_key(const std::string& name) const override {
+        G& st = g();
+        ConfigKeyState k;
+        const size_t dot = name.find('.');
+        if (dot == std::string::npos) return k;
+        const std::string sec = name.substr(0, dot), key = name.substr(dot + 1);
+        k.now = config_get_str(sec.c_str(), key.c_str(), "");
+        if (std::getenv(config_env_name(sec.c_str(), key.c_str()).c_str())) k.from = "env";
+        else if (st.config_applied.count(name)) k.from = "controls.ini";
+        else if (config_user_set(sec.c_str(), key.c_str())) k.from = "ini";
+        else if (config_has(sec.c_str(), key.c_str())) k.from = "game";
+        return k;
+    }
+    void set_docked_now(bool docked) override {
+        NXLOG_I(kTag, "the menu tells the game it is %s now", docked ? "docked" : "handheld");
+        services::amctl::set_docked(docked);
     }
 };
 Host g_host;
@@ -1105,6 +1245,31 @@ bool load() {
         else
             NXLOG_W(kTag, "cannot save the upgraded %s: %s", st.path.c_str(), e3.c_str());
     }
+    // [config]: restart-only runtime keys the menu set. Each becomes [section] key unless the game ini or the environment sets it (a game module's
+    // own default is replaced). Read before anything else reads them: the device, the services' profile and the back end start after this.
+    {
+        bool profile_keys = false;
+        for (const auto& e : st.settings.config) {
+            const size_t dot = e.first.find('.');
+            if (dot == std::string::npos) continue;
+            const std::string sec = e.first.substr(0, dot), key = e.first.substr(dot + 1);
+            if (config_user_set(sec.c_str(), key.c_str())) {
+                st.config_blocked.insert(e.first);
+                NXLOG_I(kTag, "%s [config] %s = %s not used: the %s sets it", st.path.c_str(), e.first.c_str(), e.second.c_str(),
+                        std::getenv(config_env_name(sec.c_str(), key.c_str()).c_str()) ? "environment" : "ini");
+                continue;
+            }
+            config_set(sec.c_str(), key.c_str(), e.second.c_str());
+            st.config_applied.insert(e.first);
+            if (sec == "am" || sec == "system") profile_keys = true;
+            NXLOG_I(kTag, "[%s] %s = %s (from %s)", sec.c_str(), key.c_str(), e.second.c_str(), st.path.c_str());
+        }
+        if (profile_keys) {   // the services' profile may have been read already: the operation mode comes from it
+            services::profile_reload();
+            services::amctl::set_docked(services::profile().docked);
+        }
+    }
+    nvn::set_upscaler_replace_enabled(st.settings.display.upscaler_replace);
     // Display extras: a value set in mpr.ini or in the environment (NXRT_HDR_MODE ...) overrides the file; the file overrides the built-in defaults.
     st.settings.extras = merge_env(st.settings.extras);
     extras::set_settings(st.settings.extras);
@@ -1198,12 +1363,14 @@ bool start(const StartOptions& opt) {
             oc.renderer = opt.renderer;
             oc.limiter = &st.limiter;
             oc.has_window = st.window;
+            oc.diagnostics_window = false;     // the menu's Debug page shows it
             std::string err;
             st.overlay = gfx::Overlay::create(oc, &err);
             if (!st.overlay) {
                 NXLOG_W(kTag, "no overlay: %s", err.c_str());
             } else {
-                st.overlay->add_panel("Settings", [] { draw_settings_page(g_host); });
+                const std::string title = std::string(game::info().short_title && *game::info().short_title ? game::info().short_title : "Game") + " menu###nxrt_menu";
+                st.overlay->add_panel(title, [] { draw_settings_page(g_host); });
                 st.overlay->install_on_renderer();
                 apply_fps_counter(st.settings.fps);
             }

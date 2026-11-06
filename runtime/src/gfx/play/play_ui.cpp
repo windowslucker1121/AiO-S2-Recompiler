@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Play mode settings page: the "Controls" window of the F1 overlay. The contract is play_ui.h. The page edits a working copy of the
-// settings: Apply and save hands it to the host, Revert and Factory defaults replace the copy, and nothing else reaches the game.
+// Play mode's F1 menu: Input, Graphics, Audio, Debug, About (and the game's page). The contract is play_ui.h; runtime/docs/MENU.md describes it.
+// The page edits a working copy of the settings. With "Apply changes at once" ([menu] auto_apply, the default) a change is handed to the host as
+// soon as no control is held any more (a slider is let go, a field is left); otherwise Apply and save hands it over. Revert and Factory defaults
+// replace the copy. Nothing else reaches the game.
 #include "play_ui.h"
 
 #include <algorithm>
@@ -21,6 +23,7 @@
 #include "nxrt/lowlat.h"
 #include "nxrt/overlay.h"
 #include "nxrt/platform.h"
+#include "pad_map.h"
 #include "play_game.h"
 
 namespace nxrt::play {
@@ -32,6 +35,7 @@ namespace hid = nxrt::hid;
 const ImVec4 kRed(1.0f, 0.35f, 0.35f, 1.0f);
 const ImVec4 kYellow(1.0f, 0.85f, 0.3f, 1.0f);
 const ImVec4 kOrange(1.0f, 0.65f, 0.25f, 1.0f);
+const ImVec4 kGreenLive(0.45f, 0.85f, 0.45f, 1.0f);
 const ImVec4 kPressed(0.20f, 0.60f, 0.30f, 1.0f);
 const ImVec4 kReleased(0.25f, 0.25f, 0.28f, 1.0f);
 
@@ -75,7 +79,7 @@ struct Page {
     bool loaded = false;
     bool dirty = false;                    // the working copy differs from the settings in force (set by every change)
     Settings edit;
-    Ctx ctx = Ctx::Play;               // the context shown in the Bindings tab
+    Ctx ctx = Ctx::All;                // the context shown in the Bindings tab
     int rebind = -1;                       // index into edit.bindings of the row waiting for an input; -1 = none
     bool link_pitch = true;                // Mouse tab: moving the horizontal sensitivity moves the vertical one too (local, not saved)
     bool out_tab_open = false;             // the Switch layout tab was open last frame; its fields are refilled when it opens
@@ -89,9 +93,14 @@ struct Page {
     double monitors_at = -1e9;
     std::vector<std::string> audio_devices;   // Audio page: output device names, read when the page opens and by its Refresh button
     bool audio_loaded = false;
+    int pad_rebind = -1;                   // Gamepad tab: the Switch button (index into kSwitchButtons) waiting for a pad button; -1 = none
+    bool want_apply = false;               // auto-apply: a change waits until no control is held any more
 };
 
-void mark(Page& p) { p.dirty = true; }
+void mark(Page& p) {
+    p.dirty = true;
+    p.want_apply = true;
+}
 
 const char* yes_no(bool b) { return b ? "yes" : "no"; }
 const char* cstr(const char* s) { return s ? s : ""; }
@@ -264,9 +273,21 @@ bool render_size_field(const char* label, int* v) {
 // Sizes are in units of the 16 px reference font, so the page follows the overlay's UI scale (overlay.cpp).
 float px(float v) { return v * ImGui::GetFontSize() / 16.0f; }
 
-// A hover tooltip for the item drawn last.
+// The game's kDisplayOpt* bits (play_game.h): which display options its hooks honour.
+unsigned display_opts() {
+    const GamePlay* gp = game_play();
+    return gp ? gp->display_options : 0u;
+}
+
+// A hover tooltip for the item drawn last (also shown while keyboard or gamepad navigation is on it), wrapped to a readable width.
 void tip(const char* text) {
-    if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("%s", text);
+    if (!ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) return;
+    if (ImGui::BeginTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 36.0f);
+        ImGui::TextUnformatted(text);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
 }
 
 // Marks the item drawn last as one that only takes effect at the next start.
@@ -292,6 +313,17 @@ void game_mouse_section(int where, Page& p) {
     if (gp && gp->mouse_tab && gp->mouse_tab(where, p.edit)) mark(p);
 }
 
+// The game turns raw mouse motion into its own aim through its input hooks (GamePlay::install); a game without them has no mouse aim.
+bool game_has_mouse_aim() {
+    const GamePlay* gp = game_play();
+    return gp && gp->install;
+}
+// The mouse as a pointer in the game's own menus needs the game's menu hooks (GamePlay::menu_frame).
+bool game_has_menu_pointer() {
+    const GamePlay* gp = game_play();
+    return gp && gp->menu_frame;
+}
+
 void mouse_tab(Page& p) {
     MouseSettings& m = p.edit.mouse;
     double src = source_sens(m.yaw_rad);
@@ -315,7 +347,7 @@ void mouse_tab(Page& p) {
     if (ImGui::Checkbox("Invert vertical", &m.invert_y)) mark(p);
     if (ImGui::Checkbox("Invert horizontal", &m.invert_x)) mark(p);
     game_mouse_section(1, p);
-    if (ImGui::Checkbox("Mouse pointer in menus (cursor, hover, click)", &m.menu_cursor)) mark(p);
+    if (game_has_menu_pointer() && ImGui::Checkbox("Mouse pointer in menus (cursor, hover, click)", &m.menu_cursor)) mark(p);
     game_mouse_section(2, p);
 }
 
@@ -355,7 +387,6 @@ int pad_choice_of(uint64_t v) {
 }
 
 void pad_buttons_group(Page& p) {
-    ImGui::SeparatorText("Pad buttons");
     ImGui::TextWrapped("What each controller button presses on the Switch pad. Default keeps the built-in layout.");
     if (ImGui::BeginTable("pad_buttons", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
         ImGui::TableSetupColumn("Controller button");
@@ -422,8 +453,113 @@ void prompts_row(const LiveStatus& live, Page& p) {
     }
 }
 
-void pad_tab(const LiveStatus& live, Page& p) {   // the Gamepad tab of the Controls page
+constexpr const char* kPadKindNames[] = {"Gamepad", "Xbox", "PlayStation", "Nintendo"};
+
+// The controller buttons (PadSrc bits) as text: "A / Cross (bottom), LB / L1".
+std::string sources_text(uint32_t bits) {
+    std::string s;
+    for (int i = 0; i < kPadSrcCount; ++i) {
+        if (!(bits & (1u << i))) continue;
+        if (!s.empty()) s += ", ";
+        s += kPadSrcLabels[i];
+    }
+    return s;
+}
+
+// The connected pads, each with what is pressed on it right now (the raw buttons, before the mapping) and its sticks.
+void pads_group(UiHost& host, const LiveStatus& live) {
+    ImGui::SeparatorText("Connected gamepads");
+    if (live.pad_list.empty()) {
+        ImGui::TextWrapped("No gamepad connected. Xbox, PlayStation, Switch Pro and most other controllers work as they are plugged in (SDL gamepad "
+                           "database); they all drive the same Switch pad.");
+        return;
+    }
+    if (ImGui::BeginTable("pads", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("Controller");
+        ImGui::TableSetupColumn("Gyro / rumble", ImGuiTableColumnFlags_WidthFixed, px(120.0f));
+        ImGui::TableSetupColumn("Sticks (left, right)", ImGuiTableColumnFlags_WidthFixed, px(210.0f));
+        ImGui::TableSetupColumn("Pressed now");
+        ImGui::TableHeadersRow();
+        for (std::size_t i = 0; i < live.pad_list.size(); ++i) {
+            const PadLive& d = live.pad_list[i];
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::Text("%d. %s (%s)", static_cast<int>(i) + 1, d.name.c_str(), kPadKindNames[std::clamp(d.kind, 0, 3)]);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%s / %s", yes_no(d.gyro), yes_no(d.rumble));
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("(%+.2f %+.2f) (%+.2f %+.2f)", d.lx, d.ly, d.rx, d.ry);
+            ImGui::TableSetColumnIndex(3);
+            const std::string pressed = sources_text(d.sources);
+            if (pressed.empty() && d.lt < 0.05f && d.rt < 0.05f) ImGui::TextDisabled("nothing");
+            else ImGui::TextWrapped("%s%s", pressed.c_str(), (d.lt >= 0.05f || d.rt >= 0.05f) && pressed.empty() ? "triggers moving" : "");
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Test rumble")) host.test_rumble();
+    tip("Half a second of rumble on every connected pad, at the strength set below.");
+}
+
+// Press-to-rebind: one row per Switch button with the controller buttons that press it now. Rebind waits for a press on any pad; that button then
+// presses this Switch button, and the button that pressed it before takes over the old job of the pressed one (a swap, so nothing is lost).
+void pad_rebind_group(UiHost& host, Page& p) {
+    ImGui::SeparatorText("Button mapping");
+    ImGui::TextWrapped("Choose Rebind and press a button on the controller (or pull a trigger): it then presses that Switch button, and the two buttons swap "
+                       "jobs. Nothing is pressed in the game while it waits; it gives up after 8 seconds.");
+    if (ImGui::BeginTable("pad_rebind", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("Switch button", ImGuiTableColumnFlags_WidthFixed, px(120.0f));
+        ImGui::TableSetupColumn("Pressed by");
+        ImGui::TableSetupColumn("##rebind", ImGuiTableColumnFlags_WidthFixed, px(150.0f));
+        ImGui::TableHeadersRow();
+        for (int t = 0; t < kSwitchButtonCount; ++t) {
+            const uint64_t bit = hid::btn(kSwitchButtons[t].bit);
+            uint32_t by = 0;
+            for (int s = 0; s < kPadSrcCount; ++s)
+                if (pad_effective_buttons(static_cast<PadSrc>(s), p.edit.pad) & bit) by |= 1u << s;
+            ImGui::PushID(t);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(kSwitchButtons[t].name);
+            ImGui::TableSetColumnIndex(1);
+            if (by) ImGui::TextUnformatted(sources_text(by).c_str());
+            else ImGui::TextColored(kOrange, "no controller button (keyboard only)");
+            ImGui::TableSetColumnIndex(2);
+            if (p.pad_rebind == t) {
+                ImGui::PushStyleColor(ImGuiCol_Button, kPressed);
+                if (ImGui::Button("press a button...", ImVec2(-FLT_MIN, 0.0f))) {   // a second click cancels
+                    host.cancel_pad_capture();
+                    p.pad_rebind = -1;
+                }
+                ImGui::PopStyleColor();
+            } else if (ImGui::Button("Rebind", ImVec2(-FLT_MIN, 0.0f))) {
+                stop_rebind(host, p);
+                stop_fps_capture(host, p);
+                p.pad_rebind = t;
+                host.begin_pad_capture();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Reset pad buttons")) {
+        bool changed = false;
+        for (uint64_t& v : p.edit.pad.remap) {
+            if (v != kPadDefault) {
+                v = kPadDefault;
+                changed = true;
+            }
+        }
+        if (changed) mark(p);
+    }
+    tip("Every controller button back to the built-in layout (the layout choice above still applies).");
+    if (ImGui::CollapsingHeader("Per controller button (combinations, nothing)")) pad_buttons_group(p);
+}
+
+void pad_tab(UiHost& host, const LiveStatus& live, Page& p) {   // the Gamepad tab of the Input page
     PadSettings& pad = p.edit.pad;
+    pads_group(host, live);
+
+    ImGui::SeparatorText("Layout");
     const bool by_label = pad.label_abxy;
     if (ImGui::RadioButton("Buttons by label (Xbox A = Switch A)", by_label) && !by_label) {
         pad.label_abxy = true;
@@ -439,22 +575,29 @@ void pad_tab(const LiveStatus& live, Page& p) {   // the Gamepad tab of the Cont
     tip("The stick must move this far from the centre before it counts (a fraction of its travel). Applies before the game's own dead zone.");
     if (slider("Right stick dead zone", &pad.right_deadzone, 0.0, 0.5, "%.2f")) mark(p);
     tip("The same for the right stick (looking).");
-    if (ImGui::Checkbox("Invert look (right stick up looks down)", &pad.invert_y)) mark(p);
-    if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("%s", "Applies in play only; adds to the game's own invert option.");
-    if (slider("Look sensitivity", &pad.look_sens, 0.25, 3.0, "%.2f", ImGuiSliderFlags_Logarithmic)) mark(p);
-    if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("%s", "Multiplies the right stick while playing. Below 1 the top turning speed is lower; above 1 you reach it with less stick.");
+    // The look options act in play only (play.cpp poll_pads): a game that does not report when it is in play (GamePlay::frame) never gets them.
+    if (const GamePlay* gp = game_play(); gp && gp->frame) {
+        if (ImGui::Checkbox("Invert look (right stick up looks down)", &pad.invert_y)) mark(p);
+        tip("Applies in play only; adds to the game's own invert option.");
+        if (slider("Look sensitivity", &pad.look_sens, 0.25, 3.0, "%.2f", ImGuiSliderFlags_Logarithmic)) mark(p);
+        tip("Multiplies the right stick while playing. Below 1 the top turning speed is lower; above 1 you reach it with less stick.");
+    }
     if (slider("Trigger threshold", &pad.trigger_threshold, 0.05, 1.0, "%.2f")) mark(p);
-    if (ImGui::Checkbox("Gyro (six-axis sensor)", &pad.gyro)) mark(p);
-    if (slider("Gyro scale", &pad.gyro_scale, 0.1, 4.0, "%.2f", ImGuiSliderFlags_Logarithmic)) mark(p);
+    tip("How far an analog trigger must be pulled before it counts as ZL / ZR.");
+
+    ImGui::SeparatorText("Rumble and motion");
     if (ImGui::Checkbox("Rumble", &pad.rumble)) mark(p);
-    if (slider("Rumble scale", &pad.rumble_scale, 0.0, 2.0, "%.2f")) mark(p);
+    tip("The game's vibration on the controller's motors.");
+    ImGui::BeginDisabled(!pad.rumble);
+    if (slider("Rumble strength", &pad.rumble_scale, 0.0, 2.0, "%.2f")) mark(p);
+    ImGui::EndDisabled();
+    if (ImGui::Checkbox("Gyro (six-axis sensor)", &pad.gyro)) mark(p);
+    tip("Passes the controller's motion sensor to the game (DualSense, DualShock 4, Switch Pro). Controllers without one send a resting pad.");
+    ImGui::BeginDisabled(!pad.gyro);
+    if (slider("Gyro scale", &pad.gyro_scale, 0.1, 4.0, "%.2f", ImGuiSliderFlags_Logarithmic)) mark(p);
+    ImGui::EndDisabled();
 
-    pad_buttons_group(p);
-
-    ImGui::SeparatorText("Gamepad");
-    if (live.pads == 0) ImGui::TextUnformatted("No gamepad open.");
-    else ImGui::Text("%d open: %s", live.pads, live.pad_name.c_str());
-    ImGui::Text("Gyro available: %s    Rumble available: %s", yes_no(live.pad_gyro), yes_no(live.pad_rumble));
+    pad_rebind_group(host, p);
 }
 
 // ---- Display ------------------------------------------------------------------------------------------------------------------------
@@ -645,9 +788,17 @@ void hdr_group(Page& p) {
                 static_cast<double>(hs.peak_nits), static_cast<double>(hs.peak_ratio), yes_no(hs.display_hdr));
 }
 
-void upscale_group(Page& p) {
+void upscale_group(const LiveStatus& live, Page& p) {
     extras::UpscaleSettings& u = p.edit.extras.upscale;
+    const bool hdr_scene = (display_opts() & kDisplayOptHdr) != 0;
     ImGui::SeparatorText("Upscaling");
+    if (live.upscaler_configured) {
+        if (ImGui::Checkbox("Replace the game's own upscaler (stopgap)", &p.edit.display.upscaler_replace)) mark(p);
+        tip("The game builds its output picture with a chain of compute passes (including a neural network) that the PC port cannot run yet. With this on, "
+            "the chain becomes a plain scaled copy of the 3D scene; off runs the game's own passes (the 3D scene then stays black). Applies at once.");
+        ImGui::SameLine();
+        ImGui::TextColored(kGreenLive, "live");
+    }
 
     // Only the modes that work are offered. A file that holds another one shows it as the current entry, marked, until the player picks.
     const int mode = static_cast<int>(u.mode);
@@ -660,6 +811,8 @@ void upscale_group(Page& p) {
     if (open) {
         for (extras::UpscaleMode m : kUpscaleOrder) {
             const int i = static_cast<int>(m);
+            const bool temporal = m == extras::UpscaleMode::Fsr3 || m == extras::UpscaleMode::Dlss || m == extras::UpscaleMode::Dlaa || m == extras::UpscaleMode::Xess;
+            if (temporal && !hdr_scene) continue;   // they need the game's HDR scene (depth, motion, jitter): only where it is matched
             const bool ok = upscale_available(m);
             if (!ok) ImGui::BeginDisabled();
             if (ImGui::Selectable(kUpscaleNames[i], i == mode) && i != mode && ok) {
@@ -692,9 +845,11 @@ void upscale_group(Page& p) {
 
     if (slider("Sharpness", &u.sharpness, 0.0, 1.0, "%.2f")) mark(p);
     tip("How much FSR 1, NIS or FSR 3 sharpens the upscaled picture; 1 is the sharpest (DLSS has no sharpening).");
-    if (ImGui::SliderInt("Scene resolution##upscale_scene", &u.scene_scale, 25, 100, "%d%%")) mark(p);
-    tip("Renders the 3D scene at this percent of the output size per side; the game scales it up and keeps the HUD and the post effects at full size. 100 turns it off. Applies live.");
-    ImGui::TextDisabled("Or render everything below the window size with the render scale above; the upscaler then fills the rest.");
+    if (hdr_scene) {
+        if (ImGui::SliderInt("Scene resolution##upscale_scene", &u.scene_scale, 25, 100, "%d%%")) mark(p);
+        tip("Renders the 3D scene at this percent of the output size per side; the game scales it up and keeps the HUD and the post effects at full size. 100 turns it off. Applies live.");
+    }
+    ImGui::TextDisabled("FSR 1 and NIS enlarge the game's picture when the window is larger than what the game renders (the output size).");
 }
 
 void latency_group(Page& p) {
@@ -849,13 +1004,13 @@ void framerate_group(UiHost& host, const LiveStatus& live, Page& p) {
     ImGui::SameLine();
     if (live.refresh_hz > 0.0f) ImGui::TextDisabled("display %.2f Hz", live.refresh_hz);
     else ImGui::TextDisabled("display refresh rate unknown");
-
-    fps_group(host, p);
+    (void)host;
 }
 
 void resolution_group(Page& p) {
+    if (!(display_opts() & kDisplayOptRenderSize)) return;
     DisplaySettings& d = p.edit.display;
-    ImGui::SeparatorText("Resolution");
+    ImGui::SeparatorText("Render scale");
     bool autos = d.render_scale <= 0;
     if (ImGui::Checkbox("Automatic render scale", &autos)) {
         d.render_scale = autos ? 0 : 100;
@@ -896,7 +1051,7 @@ void picture_group(Page& p) {
     DisplaySettings& d = p.edit.display;
     const GamePlay* gp = game_play();
     const unsigned opts = gp ? gp->display_options : 0u;
-    ImGui::SeparatorText("Picture");
+    ImGui::SeparatorText("Textures and the game's picture");
 
     if (opts & kDisplayOptAspect) {
         const int aspect_sel = aspect_index(d.aspect, p.aspect_custom);
@@ -919,23 +1074,25 @@ void picture_group(Page& p) {
         if (aspect_sel == kAspectCustom && slider("Custom aspect ratio", &d.aspect, 1.0, 5.0, "%.2f")) mark(p);
     }
 
-    ImGui::TextUnformatted("Fixed render size (0 = follow the window)");
-    ImGui::SetNextItemWidth(px(120.0f));
-    if (render_size_field("##render_w", &d.render_width)) mark(p);
-    ImGui::SameLine();
-    ImGui::TextUnformatted("x");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(px(120.0f));
-    if (render_size_field("##render_h", &d.render_height)) mark(p);
-    restart_badge();
-    tip("Renders at exactly this size instead of the window size times the render scale (Display page).");
+    if (opts & kDisplayOptRenderSize) {
+        ImGui::TextUnformatted("Fixed render size (0 = follow the window)");
+        ImGui::SetNextItemWidth(px(120.0f));
+        if (render_size_field("##render_w", &d.render_width)) mark(p);
+        ImGui::SameLine();
+        ImGui::TextUnformatted("x");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(px(120.0f));
+        if (render_size_field("##render_h", &d.render_height)) mark(p);
+        restart_badge();
+        tip("Renders at exactly this size instead of the window size times the render scale (Display tab).");
+    }
 
     if (opts & kDisplayOptFov) {
         if (slider("Field of view offset (degrees)", &d.fov_offset, -30.0, 40.0, "%.1f")) mark(p);
         tip("Degrees added to the vertical field of view of every game camera. 0 is the game's own.");
     }
-    if (ImGui::Checkbox("Dynamic resolution", &d.dynamic_resolution)) mark(p);
-    tip("The game's own dynamic resolution: it lowers the render size when the GPU is late. Off keeps the full size.");
+    if ((opts & kDisplayOptDynRes) && ImGui::Checkbox("Dynamic resolution", &d.dynamic_resolution)) mark(p);
+    if (opts & kDisplayOptDynRes) tip("The game's own dynamic resolution: it lowers the render size when the GPU is late. Off keeps the full size.");
 
     const bool quality = (opts & kDisplayOptQuality) != 0;
     if (quality) quality_preset_combo(p, gp);
@@ -1024,14 +1181,164 @@ void color_group(Page& p) {
         extras::set_picture_live(c);
         mark(p);
     }
-    ImGui::TextDisabled(c.neutral() ? "Neutral: the picture is presented as the game drew it." : "Applies live; Apply and save keeps it.");
+    ImGui::TextDisabled(c.neutral() ? "Neutral: the picture is presented as the game drew it."
+                        : p.edit.menu.auto_apply ? "Applies live and is saved." : "Applies live; Apply and save keeps it.");
 }
 
-void graphics_page(Page& p) {
-    hdr_group(p);
-    picture_group(p);
-    color_group(p);
-    gpu_group(p);
+// ---- restart-only runtime keys ([config]) ---------------------------------------------------------------------------------------------
+
+struct CfgChoice {
+    const char* value;
+    const char* label;
+};
+struct CfgUi {
+    const char* name;                    // "am.operation_mode"
+    const char* label;
+    const char* def;                     // what the runtime uses when nothing sets the key
+    bool is_bool;
+    std::vector<CfgChoice> choices;      // for a choice
+    const char* tip;
+};
+
+const std::vector<CfgUi>& cfg_console() {
+    static const std::vector<CfgUi> v = {
+        {"am.operation_mode", "Console mode", "docked", false, {{"docked", "Docked (TV)"}, {"handheld", "Handheld"}},
+         "What the game is told it runs on. Docked renders the console's TV picture; handheld renders the smaller handheld one (less GPU work)."},
+        {"am.resolution", "Output resolution", "", false,
+         {{"", "Default (1080p docked, 720p handheld)"}, {"1280x720", "1280 x 720"}, {"1920x1080", "1920 x 1080"}, {"2560x1440", "2560 x 1440"},
+          {"3840x2160", "3840 x 2160"}},
+         "The display resolution the game is told about (GetDefaultDisplayResolution). A game may size its output by it or ignore it."},
+        {"am.graphics_scale", "Graphics scaling level", "10", false, {{"10", "Level 0 (full quality)"}, {"20", "Level 1"}, {"30", "Level 2"}},
+         "The Switch 2 graphics scaling answer: higher levels ask the game for a lighter picture (lower dynamic-resolution ceilings)."},
+    };
+    return v;
+}
+
+const std::vector<CfgUi>& cfg_debug() {
+    static const std::vector<CfgUi> v = {
+        {"gfx.device_diagnostics", "GPU checkpoints (NVIDIA)", "false", true, {},
+         "A checkpoint before every draw and dispatch: after a device loss the log names the draw and its shaders. Costs some CPU per draw."},
+        {"gfx.device_fault", "Driver fault report after a device loss", "true", true, {},
+         "VK_EXT_device_fault: the faulting addresses or shader instruction pointers go to the log (and gpu_fault_vendor.bin on NVIDIA)."},
+        {"gfx.exit_on_device_lost", "End the game after a device loss", "true", true, {},
+         "After the report the process ends with exit code 4 instead of freezing with a black window."},
+        {"gfx.robust_access", "Robust buffer and image access", "false", true, {},
+         "Out-of-range reads of the translated shaders give 0 instead of faulting the GPU. Slower, and the prepared pipeline cache no longer matches: "
+         "every pipeline is built again (minutes of stutter)."},
+        {"nvn.skip_unmapped_dispatch", "Skip compute dispatches with unmapped buffers", "true", true, {},
+         "A compute dispatch whose storage buffers map to nothing is left out (artifact A10) instead of running on garbage."},
+        {"nvn.debug_skip_compute", "Skip every compute dispatch", "false", true, {}, "Diagnosis only: no compute shader runs."},
+        {"gfx.log_fps", "Log the frame rate every second", "false", true, {}, "One log line a second with the presented frame rate and the output pass's GPU time."},
+        {"diag.hitch_ms", "Slow-frame threshold (hitch log)", "50", false, {{"0", "Off"}, {"33", "33 ms"}, {"50", "50 ms"}, {"100", "100 ms"}, {"250", "250 ms"}},
+         "A presented frame slower than this is logged with what happened during it (and counted on the Debug page)."},
+    };
+    return v;
+}
+
+std::string lower_copy(std::string s) {
+    for (char& c : s)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return s;
+}
+bool truthy(const std::string& v) {
+    const std::string l = lower_copy(v);
+    return l == "1" || l == "true" || l == "yes" || l == "on";
+}
+// The value as the runtime would read it, for comparing two spellings ("1" and "true").
+std::string cfg_norm(const CfgUi& c, const std::string& v) {
+    if (c.is_bool) return truthy(v.empty() ? c.def : v) ? "1" : "0";
+    return lower_copy(v);
+}
+
+std::string cfg_value(const Page& p, const CfgUi& c) {
+    const auto it = p.edit.config.find(c.name);
+    return it == p.edit.config.end() ? std::string(c.def) : it->second;
+}
+
+void cfg_store(Page& p, const CfgUi& c, const std::string& v) {
+    if (cfg_norm(c, v) == cfg_norm(c, c.def)) p.edit.config.erase(c.name);   // the default: nothing in the file
+    else p.edit.config[c.name] = v;
+    mark(p);
+}
+
+const char* cfg_label_of(const CfgUi& c, const std::string& v) {
+    for (const CfgChoice& ch : c.choices)
+        if (lower_copy(ch.value) == lower_copy(v)) return ch.label;
+    return nullptr;
+}
+
+// One [config] row: the control, the restart marker, and a line when the value in force differs (the next start changes it) or when the game ini or
+// the environment sets the key (then the menu's choice does not count).
+void cfg_row(UiHost& host, Page& p, const CfgUi& c) {
+    ImGui::PushID(c.name);
+    const std::string v = cfg_value(p, c);
+    if (c.is_bool) {
+        bool b = truthy(v);
+        if (ImGui::Checkbox(c.label, &b)) cfg_store(p, c, b ? "1" : "0");
+    } else {
+        const char* cur = cfg_label_of(c, v);
+        if (ImGui::BeginCombo(c.label, cur ? cur : v.c_str())) {
+            for (const CfgChoice& ch : c.choices) {
+                const bool sel = lower_copy(ch.value) == lower_copy(v);
+                if (ImGui::Selectable(ch.label, sel) && !sel) cfg_store(p, c, ch.value);
+            }
+            ImGui::EndCombo();
+        }
+    }
+    tip(c.tip);
+    restart_badge();
+    const ConfigKeyState now = host.config_key(c.name);
+    const std::string in_force = now.now.empty() ? std::string(c.def) : now.now;
+    if (now.from == "env" || now.from == "ini") {
+        ImGui::TextColored(kOrange, "  set to '%s' by the %s: this choice is not used", in_force.c_str(), now.from == "env" ? "environment (NXRT_...)" : "game ini");
+    } else if (cfg_norm(c, in_force) != cfg_norm(c, v)) {
+        const char* lbl = c.is_bool ? (truthy(in_force) ? "on" : "off") : cfg_label_of(c, in_force);
+        ImGui::TextColored(kYellow, "  now: %s; the next start uses the choice above", lbl ? lbl : in_force.c_str());
+    }
+    ImGui::PopID();
+}
+
+void console_group(UiHost& host, const LiveStatus& live, Page& p) {
+    ImGui::SeparatorText("Console mode and resolution");
+    for (const CfgUi& c : cfg_console()) cfg_row(host, p, c);
+    ImGui::TextDisabled("The game is told: %s.", live.docked ? "docked" : "handheld");
+    const bool want_docked = cfg_value(p, cfg_console()[0]) != "handheld";
+    if (want_docked != live.docked) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton(want_docked ? "Switch to docked now (experimental)" : "Switch to handheld now (experimental)")) host.set_docked_now(want_docked);
+        tip("Sends the console's operation-mode change to the running game, as plugging a Switch into its dock does. Whether the game changes its "
+            "picture is up to the game; the next start uses the choice above in any case.");
+    }
+}
+
+void textures_group(Page& p) { picture_group(p); }
+
+void graphics_page(UiHost& host, const LiveStatus& live, Page& p) {
+    if (ImGui::BeginTabBar("graphics_tabs")) {
+        if (ImGui::BeginTabItem("Display")) {
+            window_group(live, p);
+            framerate_group(host, live, p);
+            console_group(host, live, p);
+            resolution_group(p);
+            ImGui::SeparatorText("Live");
+            ImGui::Text("Window: %s, present mode: %s, display %.2f Hz, window %d x %d, %.1f fps", cstr(live.window_mode), cstr(live.present_mode), live.refresh_hz,
+                        live.width, live.height, live.fps);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Picture")) {
+            textures_group(p);
+            upscale_group(live, p);
+            color_group(p);
+            if (display_opts() & kDisplayOptHdr) hdr_group(p);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Advanced")) {
+            gpu_group(p);
+            latency_group(p);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
 }
 
 // ---- Audio --------------------------------------------------------------------------------------------------------------------------
@@ -1080,18 +1387,6 @@ void audio_page(Page& p) {
         ImGui::TextColored(kOrange, "'%s' is not connected: the system default is used.", a.device.c_str());
 }
 
-void display_page(UiHost& host, const LiveStatus& live, Page& p) {
-    window_group(live, p);
-    framerate_group(host, live, p);
-    resolution_group(p);
-    upscale_group(p);
-    latency_group(p);
-
-    ImGui::SeparatorText("Live");
-    ImGui::Text("Window: %s, present mode: %s", cstr(live.window_mode), cstr(live.present_mode));
-    ImGui::Text("Display %.2f Hz, window %d x %d, %.1f fps", live.refresh_hz, live.width, live.height, live.fps);
-}
-
 // ---- Bindings -----------------------------------------------------------------------------------------------------------------------
 
 std::string input_button_text(const Binding& b, bool waiting) {
@@ -1102,6 +1397,10 @@ std::string input_button_text(const Binding& b, bool waiting) {
 }
 
 void bindings_tab(UiHost& host, Page& p) {
+    if (const GamePlay* gp = game_play(); !gp || !gp->frame) {
+        ImGui::TextWrapped("This game does not report yet whether it is in play or in a menu, so it always uses the '%s' bindings plus the '%s' layer under "
+                           "them: bind keys there.", ctx_name(Ctx::Menu), ctx_name(Ctx::All));
+    }
     if (ImGui::BeginCombo("Context", ctx_name(p.ctx))) {
         for (int c = 0; c < kCtxCount; ++c) {
             const Ctx ctx = static_cast<Ctx>(c);
@@ -1288,11 +1587,13 @@ void switch_tab(Page& p) {
 // Live view only: nothing here touches the working copy.
 void status_tab(const LiveStatus& live) {
     ImGui::Text("Context: %s", ctx_name(live.ctx));
-    ImGui::Text("Aim: %s", cstr(live.aim));
-    ImGui::Text("Mouse captured: %s", yes_no(live.mouse_captured));
-    ImGui::Text("Pitch: %.1f degrees", live.pitch_deg);
-    if (live.input_calls == 0) ImGui::TextDisabled("ProcessInput calls: 0 (the game has not reached gameplay yet)");
-    else ImGui::Text("ProcessInput calls: %llu", static_cast<unsigned long long>(live.input_calls));
+    if (game_has_mouse_aim()) {
+        ImGui::Text("Aim: %s", cstr(live.aim));
+        ImGui::Text("Mouse captured: %s", yes_no(live.mouse_captured));
+        ImGui::Text("Pitch: %.1f degrees", live.pitch_deg);
+        if (live.input_calls == 0) ImGui::TextDisabled("ProcessInput calls: 0 (the game has not reached gameplay yet)");
+        else ImGui::Text("ProcessInput calls: %llu", static_cast<unsigned long long>(live.input_calls));
+    }
 
     ImGui::SeparatorText("Switch pad output");
     for (int i = 0; i < kSwitchButtonCount; ++i) {
@@ -1306,29 +1607,34 @@ void status_tab(const LiveStatus& live) {
     }
     ImGui::Text("LS (%5.2f, %5.2f)   RS (%5.2f, %5.2f)", live.out.lx, live.out.ly, live.out.rx, live.out.ry);
 
-    ImGui::SeparatorText("Gamepad");
-    if (live.pads == 0) ImGui::TextUnformatted("No gamepad open.");
-    else ImGui::Text("%d open: %s", live.pads, live.pad_name.c_str());
-    ImGui::Text("Gyro: %s    Rumble: %s", yes_no(live.pad_gyro), yes_no(live.pad_rumble));
+    ImGui::TextDisabled("Keyboard, mouse and every pad together (the pads are held back while this menu is open).");
+    ImGui::SeparatorText("Gamepads");
+    if (live.pad_list.empty()) ImGui::TextUnformatted("No gamepad connected.");
+    for (std::size_t i = 0; i < live.pad_list.size(); ++i) {
+        const PadLive& d = live.pad_list[i];
+        const std::string pressed = sources_text(d.sources);
+        ImGui::Text("%d. %s: %s; LS (%+.2f, %+.2f) RS (%+.2f, %+.2f) LT %.2f RT %.2f", static_cast<int>(i) + 1, d.name.c_str(), pressed.empty() ? "-" : pressed.c_str(),
+                    d.lx, d.ly, d.rx, d.ry, d.lt, d.rt);
+    }
 }
 
 // ---- Controls and Game --------------------------------------------------------------------------------------------------------------
 
-// The Controls page: the button prompt style on top, then mouse, keyboard bindings, gamepad, the Switch layout and the live status.
-void controls_page(UiHost& host, const LiveStatus& live, Page& p) {
+// The Input page: the button prompt style on top, then the gamepads, the keyboard and mouse, the Switch layout and the live view.
+void input_page(UiHost& host, const LiveStatus& live, Page& p) {
     prompts_row(live, p);
     ImGui::Spacing();
-    if (ImGui::BeginTabBar("controls_tabs")) {
-        if (ImGui::BeginTabItem("Mouse")) {
-            mouse_tab(p);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Keyboard and mouse buttons")) {
-            bindings_tab(host, p);
-            ImGui::EndTabItem();
-        }
+    if (ImGui::BeginTabBar("input_tabs")) {
         if (ImGui::BeginTabItem("Gamepad")) {
-            pad_tab(live, p);
+            pad_tab(host, live, p);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Keyboard and mouse")) {
+            bindings_tab(host, p);
+            if (game_has_mouse_aim()) {
+                ImGui::SeparatorText("Mouse aim");
+                mouse_tab(p);
+            }
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Switch layout")) {
@@ -1339,7 +1645,7 @@ void controls_page(UiHost& host, const LiveStatus& live, Page& p) {
         } else {
             p.out_tab_open = false;
         }
-        if (ImGui::BeginTabItem("Status")) {
+        if (ImGui::BeginTabItem("Live view")) {
             status_tab(live);
             ImGui::EndTabItem();
         }
@@ -1347,7 +1653,45 @@ void controls_page(UiHost& host, const LiveStatus& live, Page& p) {
     }
 }
 
+// ---- Debug ------------------------------------------------------------------------------------------------------------------------------
+
+void debug_page(UiHost& host, Page& p) {
+    fps_group(host, p);
+    ImGui::Spacing();
+    host.draw_debug();
+    if (ImGui::CollapsingHeader("Diagnostics switches (next start)")) {
+        ImGui::TextWrapped("For tracking down GPU crashes and broken passes. Saved in the settings file ([config]); the game ini and NXRT_* variables win.");
+        for (const CfgUi& c : cfg_debug()) cfg_row(host, p, c);
+    }
+}
+
+// Takes the pad button of a press-to-rebind (Gamepad tab).
+void poll_pad_capture(UiHost& host, Page& p) {
+    PadSrc src;
+    if (host.pad_capture_result(&src)) {
+        if (p.pad_rebind >= 0 && p.pad_rebind < kSwitchButtonCount) {
+            const SwitchButton& t = kSwitchButtons[p.pad_rebind];
+            if (pad_assign(&p.edit.pad, src, hid::btn(t.bit))) mark(p);
+            set_notice(p, std::string(kPadSrcLabels[static_cast<int>(src)]) + " now presses Switch " + t.name + ".", false);
+        }
+        p.pad_rebind = -1;
+    } else if (p.pad_rebind >= 0 && !host.pad_capturing()) {
+        p.pad_rebind = -1;
+        set_notice(p, "No controller button was pressed: nothing changed.", false);
+    }
+}
+
 }  // namespace
+
+const std::vector<ConfigOption>& menu_config_options() {
+    static const std::vector<ConfigOption> v = [] {
+        std::vector<ConfigOption> o;
+        for (const CfgUi& c : cfg_console()) o.push_back({c.name, c.label, c.def});
+        for (const CfgUi& c : cfg_debug()) o.push_back({c.name, c.label, c.def});
+        return o;
+    }();
+    return v;
+}
 
 void draw_settings_page(UiHost& host) {
     static Page page;
@@ -1357,43 +1701,78 @@ void draw_settings_page(UiHost& host) {
         p.edit.fps = host.settings().fps;
         refresh_out_text(p);
         p.loaded = true;
+    } else if (!p.dirty && p.rebind < 0 && p.pad_rebind < 0 && !p.fps_capture && !ImGui::IsAnyItemActive()) {
+        // Nothing waits in the page: it follows the settings in force, so a change made elsewhere (Alt+Enter, the frame rate hotkey, a settings
+        // file reloaded by the host) is not undone by the next apply of an old copy.
+        p.edit = host.settings();
     }
     poll_capture(host, p);
+    poll_pad_capture(host, p);
     const LiveStatus live = host.status();
 
     if (host.capturing()) ImGui::TextColored(kYellow, "Press the key or mouse button for the binding, Escape cancels");
+    else if (host.pad_capturing()) ImGui::TextColored(kYellow, "Press a button on the controller (or pull a trigger) for Switch %s",
+                                                      p.pad_rebind >= 0 && p.pad_rebind < kSwitchButtonCount ? kSwitchButtons[p.pad_rebind].name : "?");
     else if (!p.notice.empty()) ImGui::TextColored(p.notice_warn ? kOrange : ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "%s", p.notice.c_str());
-    ImGui::TextDisabled("Settings file: %s", host.settings_path().c_str());
-    if (p.dirty) {
-        ImGui::SameLine();
-        ImGui::TextColored(kOrange, "unsaved changes");
+    else {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("F1 or View + Menu on a controller opens and closes this menu (Start alone closes it too); the game gets no input while it is open.");
+        ImGui::PopStyleColor();
     }
-    if (ImGui::Button("Apply and save")) apply_now(host, p);
-    tip("Applies the changes to the running game (items marked 'restart' wait for the next start) and writes them to the settings file.");
+
+    bool auto_apply = p.edit.menu.auto_apply;
+    if (ImGui::Checkbox("Apply changes at once", &auto_apply)) {
+        p.edit.menu.auto_apply = auto_apply;
+        mark(p);
+    }
+    tip("On: every change takes effect (and is saved) as soon as you let go of the control; items marked 'restart' wait for the next start. "
+        "Off: changes wait for Apply and save.");
+    if (!p.edit.menu.auto_apply) {
+        ImGui::SameLine();
+        if (ImGui::Button("Apply and save")) apply_now(host, p);
+        tip("Applies the changes to the running game (items marked 'restart' wait for the next start) and writes them to the settings file.");
+        ImGui::SameLine();
+        if (ImGui::Button("Revert")) revert_to_saved(host, p);
+        tip("Drops the changes made since the last Apply and save.");
+        if (p.dirty) {
+            ImGui::SameLine();
+            ImGui::TextColored(kOrange, "unsaved changes");
+        }
+    }
     ImGui::SameLine();
-    if (ImGui::Button("Revert")) revert_to_saved(host, p);
-    tip("Drops the changes made since the last Apply and save.");
+    if (ImGui::Button("Factory defaults...")) ImGui::OpenPopup("factory_confirm");
+    tip("Every setting of this menu back to the factory values (keys, pad, display, audio).");
+    if (ImGui::BeginPopupModal("factory_confirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Set every setting of this menu back to the factory values?");
+        if (ImGui::Button("Reset")) {
+            load_factory(host, p);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
     ImGui::SameLine();
-    if (ImGui::Button("Factory defaults")) load_factory(host, p);
-    tip("Loads the factory settings into the page. Nothing changes until Apply and save.");
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("Settings file: %s", host.settings_path().c_str());
     ImGui::Separator();
 
     ImGui::PushItemWidth(std::max(px(200.0f), ImGui::GetContentRegionAvail().x * 0.42f));
     if (ImGui::BeginTabBar("settings_pages")) {
-        if (ImGui::BeginTabItem("Display")) {
-            display_page(host, live, p);
+        if (ImGui::BeginTabItem("Input")) {
+            input_page(host, live, p);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Graphics")) {
-            graphics_page(p);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Controls")) {
-            controls_page(host, live, p);
+            graphics_page(host, live, p);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Audio")) {
             audio_page(p);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Debug")) {
+            debug_page(host, p);
             ImGui::EndTabItem();
         }
         if (const GamePlay* gp = game_play(); gp && gp->tweaks_tab && ImGui::BeginTabItem("Game")) {   // the game's optional looks and start-up tweaks
@@ -1408,6 +1787,18 @@ void draw_settings_page(UiHost& host) {
         ImGui::EndTabBar();
     }
     ImGui::PopItemWidth();
+
+    // Apply changes at once: the working copy goes to the host when no control is held any more (a slider while it is dragged, a text field while
+    // it is typed in would otherwise apply and save the file every frame). The switch itself is part of the copy, so turning it off is saved too.
+    const bool switch_changed = p.edit.menu.auto_apply != host.settings().menu.auto_apply;
+    if (p.want_apply && (p.edit.menu.auto_apply || switch_changed)) {
+        if (!ImGui::IsAnyItemActive()) {
+            apply_now(host, p);
+            p.want_apply = false;
+        }
+    } else {
+        p.want_apply = false;   // changes wait for Apply and save
+    }
 }
 
 }  // namespace nxrt::play

@@ -188,10 +188,12 @@ namespace {
 
 // Game side (init_once): what a finished preparation for this GPU and driver covers, from <shader cache>/../programs.bin and its prepare.state.
 // Only a complete state of this scheme whose GPU/driver key and raster flags match counts; otherwise every part counts as new.
+std::string g_prepare_note = "no shader cache open";   // what load_prepared_locked found (shader_stats); under g_mu
 void load_prepared_locked() {
     g_prepared.clear();
     g_prepared_rasters.clear();
     if (!shader_cache().is_open()) return;
+    g_prepare_note = "no programs.bin next to the shader cache";
     const std::filesystem::path base = std::filesystem::path(shader_cache().dir()).parent_path();
     const std::string state = (base / "prepare.state").string();
     std::vector<ProgramHashes> progs;
@@ -199,6 +201,7 @@ void load_prepared_locked() {
     if (!read_programs_file((base / "programs.bin").string(), &progs, &why)) return;
     if (!prepare_state_complete(state, &why)) {
         NXLOG_I(kTag, "shader preparation in %s not usable (%s): every shader part counts as new", base.string().c_str(), why.c_str());
+        g_prepare_note = "not used: " + why;
         return;
     }
     {
@@ -212,12 +215,14 @@ void load_prepared_locked() {
         }
         if (!key_ok) {
             NXLOG_I(kTag, "shader preparation in %s was made for another GPU, driver or program list: every shader part counts as new", base.string().c_str());
+            g_prepare_note = "not used: made for another GPU, driver or program list";
             return;
         }
     }
     g_prepared.reserve(progs.size());
     for (const ProgramHashes& p : progs) g_prepared.insert(program_id(p.vs, p.fs, p.gs));
     g_prepared_rasters = rasters_of_setting(prepare_rasters_setting());
+    g_prepare_note = "complete, raster flags " + prepare_rasters_setting();
     NXLOG_I(kTag, "shader preparation found: %zu programs with raster flags %s; their parts come from the pipeline cache and the overlay leaves them out",
             g_prepared.size(), prepare_rasters_setting().c_str());
 }
@@ -1108,6 +1113,34 @@ GplStats gpl_stats() {
     return s;
 }
 
+nxrt::nvn::ShaderStats shader_stats_now() {   // nxrt::nvn::shader_stats (nvn_backend.h), at the end of this file
+    nxrt::nvn::ShaderStats r;
+    GplStats s;
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        s = g_stats;
+        s.jobs_pending = g_exact_q.size() + g_hot_q.size() + g_pre_q.size() + (g_cold ? g_cold_q.size() : 0) + static_cast<uint64_t>(g_running);
+        r.pipelines_ahead = g_inited && g_enabled;
+        r.prepare_status = g_inited ? g_prepare_note : std::string("the back end has not started");
+        r.prepared_programs = g_prepared.size();
+    }
+    r.parts_prepared = s.shader_parts_prepared;
+    r.parts_new = s.shader_parts_new;
+    r.prepared_ms = s.prepared_ms;
+    r.new_ms = s.new_ms;
+    r.linked = s.linked;
+    r.link_failed = s.link_failed;
+    r.parts_at_draw = s.parts_at_draw;
+    r.parts_waited = s.parts_waited;
+    r.draws_deferred = s.draws_deferred;
+    r.jobs_pending = s.jobs_pending;
+    r.link_ms = s.link_ms;
+    r.draw_part_ms = s.draw_part_ms;
+    r.wait_ms = s.wait_ms;
+    r.backlog = nxrt::gfx::shader_backlog();
+    return r;
+}
+
 void gpl_stop() {
     std::vector<std::thread> workers, ups;
     {
@@ -1402,3 +1435,7 @@ GplGauges g_gpl_gauges;
 }  // namespace
 
 }  // namespace nxrt::nvn::be::gpu
+
+namespace nxrt::nvn {
+ShaderStats shader_stats() { return be::gpu::shader_stats_now(); }
+}  // namespace nxrt::nvn
