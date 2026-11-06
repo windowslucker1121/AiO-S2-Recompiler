@@ -98,6 +98,14 @@ uint64_t current_serial();        // the serial of the submission being recorded
 bool gpass_on();
 void gpass_stamp(Frame& f, const char* label, uint32_t arg = 0);
 
+// ---- device-loss diagnostics -------------------------------------------------------------------------------------------------------
+// [gfx] device_diagnostics (NVIDIA, VK_NV_device_diagnostic_checkpoints): checkpoint() puts a marker with this description in the
+// command buffer; after a device loss the report names the last marker each pipeline stage reached. No-ops when off.
+bool checkpoints_on();
+void checkpoint(Frame& f, const char* text);
+// A submission or wait returned VK_ERROR_DEVICE_LOST: report once, then end the process ([gfx] exit_on_device_lost, default on).
+void device_lost(const char* where);
+
 // ---- barriers ---------------------------------------------------------------------------------------------------------------
 void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImageLayout to, VkImageAspectFlags aspect,
                    uint32_t base_level, uint32_t level_count, uint32_t base_layer, uint32_t layer_count);

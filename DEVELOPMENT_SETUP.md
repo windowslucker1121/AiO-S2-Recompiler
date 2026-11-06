@@ -177,8 +177,12 @@ tools\shaders\build\bin\Release\net10.0\spirv_harness.exe --batch work\shaders\o
 rem program list for the pre-boot shader preparation (~100 s)
 tools\.venv\Scripts\python -I tools\shaders\scripts\bnsh_programs.py --romfs game\oot\updates\131072\romfs --out work\shaders\oot\programs.bin
 ```
-The game finds the shaders through environment variables; the first start then shows the "Preparing shaders" window (15-30 min),
-which fills `work\shaders\oot\pipeline_cache.bin`:
+A development build (`game-build\build\release\oot.exe`, not a release package) started without `--game` / `--exefs` finds all
+of it in this checkout: the game folder `game\oot\updates\<newest>` and, unless the ini or `NXRT_NVN_*` variables say otherwise,
+`[nvn] shader_cache` / `shader_corpus` / `shader_translator` in `work\shaders\oot` and `tools\shaders\build`. So a plain `oot.exe`
+(double click or terminal) runs the game; its log is then `game\oot\updates\131072\oot.log`. The first start shows the "Preparing
+shaders" window (10-30 min, depending on the GPU), which fills `work\shaders\oot\pipeline_cache.bin`. The explicit form, as test runs
+use it:
 ```bat
 set NXRT_NVN_SHADER_CACHE=%CD%\work\shaders\oot\spirv
 set NXRT_NVN_SHADER_CORPUS=%CD%\work\shaders\oot\corpus

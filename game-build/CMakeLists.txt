@@ -112,6 +112,10 @@ set_source_files_properties("${GAME_GEN}/game.rc" PROPERTIES COMPILE_DEFINITIONS
                             OBJECT_DEPENDS "${GAME_GEN}/game.manifest")
 target_include_directories(game_exe PRIVATE "${GAME_GEN}")
 target_compile_definitions(game_exe PRIVATE GAME_EXEFS_DEFAULT="${GAME_EXEFS_DEFAULT}")
+# Development builds know their checkout: started without --game they run game/<id>/updates/<newest> with work/shaders/<id> (game_main.cpp).
+if(NOT GAME_RELEASE)
+    target_compile_definitions(game_exe PRIVATE GAME_DEV_ROOT="${GAME_ROOT}")
+endif()
 target_link_libraries(game_exe PRIVATE ${GM_MODULE_LIBS} nxrt_game_${GM_ID} nxrt_gfx nxrt)   # nxrt_game_<id>: runtime/games/<id>
 # Same link options as the runtime test executables: a linker map next to the exe (host frames get names), a big main stack (lifted
 # code nests deeply), low host allocations so the guest ranges at 0x71_0000_0000 and up stay free.
