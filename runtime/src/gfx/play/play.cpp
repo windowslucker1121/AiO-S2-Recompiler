@@ -61,6 +61,7 @@
 #include "play_types.h"
 #include "play_vpad.h"
 #include "play_ui.h"
+#include "win_menu.h"
 #include "prompts.h"
 #include "pad_map.h"
 #include "pad_orient.h"
@@ -847,6 +848,17 @@ int update_hook(::Ctx*, uint64_t, void*) {
 
     apply_unfocused_mute();
 
+    // The native menu bar: on the window in windowed mode, off in fullscreen. The in-game menu (the overlay's panel, F1 / the pad chord) is the
+    // menu only where the bar is not: [gfx] overlay_menu = fullscreen (default), always or never.
+    if (st.window) {
+        win_menu_frame();
+        if (st.overlay) {
+            static const std::string mode = config_get_str("gfx", "overlay_menu", "fullscreen");
+            const bool bar = win_menu_installed() && win_menu_attached();
+            st.overlay->set_menu_enabled(mode == "always" || (mode != "never" && !bar));
+        }
+    }
+
     // events
     input::Event buf[128];
     for (;;) {
@@ -1246,6 +1258,49 @@ extras::Settings merge_env(const extras::Settings& from_file) {
 
 }  // namespace
 
+// The native menu bar (win_menu.h) with play mode's own actions.
+void install_menu_bar() {
+    G& st = g();
+    WinMenuHooks h;
+    if (st.bug_key) {
+        h.capture_bug = [] { bug_hotkey(); };
+        h.bug_key = SDL_GetScancodeName(static_cast<SDL_Scancode>(st.bug_key));
+    }
+    h.fps_key = input_name(st.settings.fps.key);
+    h.quit = [] { quit_now("Game > Exit"); };
+    h.save_now = [](std::string* err) {
+        G& s = g();
+        Settings cur = g_host.settings();
+        if (!save_settings(s.path, cur, err)) return false;
+        NXLOG_I(kTag, "settings saved to %s (menu)", s.path.c_str());
+        return true;
+    };
+    h.reload = [](std::string* err) {
+        Settings fresh;
+        if (!load_settings(g().path, &fresh, err)) return false;
+        fresh.fps = g_host.settings().fps;   // the counter is live state, as the in-game page keeps it
+        g_host.apply(fresh);
+        NXLOG_I(kTag, "settings reloaded from %s (menu)", g().path.c_str());
+        return true;
+    };
+    h.set_debug_overlay = [](bool on) {
+        if (g().overlay) g().overlay->set_debug_window(on);
+    };
+    h.debug_overlay = [] { return g().overlay && g().overlay->debug_window(); };
+    h.debug_report = [] {
+        G& s = g();
+        gfx::Overlay::Context c;
+        c.device = s.device;
+        c.renderer = s.renderer;
+        c.limiter = &s.limiter;
+        c.has_window = s.window;
+        return gfx::debug_report_text(c);
+    };
+    if (const GamePlay* gp = game_play()) h.display_options = gp->display_options;
+    h.upscaler_configured = nvn::upscaler_replace_configured();
+    if (!win_menu_install(platform::native_hwnd(), platform::native_window(), &g_host, h)) NXLOG_W(kTag, "no menu bar on the game window");
+}
+
 // ---- public API ---------------------------------------------------------------------------------------------------------------------------
 bool load() {
     G& st = g();
@@ -1414,6 +1469,7 @@ bool start(const StartOptions& opt) {
     }
     if (st.window && st.settings.display.monitor > 0) platform::move_to_display(st.settings.display.monitor);
     if (st.window && st.settings.display.window_mode != "windowed") set_window_mode(st.settings.display.window_mode);
+    if (st.window && config_get_bool("play", "menu_bar", true)) install_menu_bar();
 
     const GamePlay* gp = game_play();
     {   // display options: the internal resolution comes from the window as it is now (after the window mode change above)

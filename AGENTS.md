@@ -217,19 +217,18 @@ game folder is rewritten from the factory text.
 **Gamepad verified** (2026-11-06) with the test tooling's virtual SDL pad: script `keydown vpad attach xbox`, `keydown vpad button south 1`
 / `0` (MCP `launch` script lines): A on the pad starts the game from the title, and the intro's rumble reaches the pad (`vpad rumble` log
 lines). A real XInput pad goes through the same SDL gamepad path.
-**F1 menu** (2026-11-06, `runtime/docs/MENU.md`): one window, F1 or View + Menu on a pad (`[gfx] overlay_pad_chord`; Start alone closes it),
-navigable with mouse, keyboard and gamepad. Pages Input (pads with live state, rumble test, dead zones, press-to-rebind of pad buttons with a
-swap, keyboard bindings, Switch layout, live view), Graphics (window, vsync / frame limit, docked or handheld + output resolution + scaling
-level as restart-only `[config]` keys, anisotropy / LOD bias, the OoT upscaler stopgap on/off live, FSR 1 / NIS, colour, GPU paths), Audio,
-Debug (fps and frame-time graph, hitches, GPU / VRAM, shader preparation and pipeline counters, NVN counters, log tail, gauges, device-loss
-switches) and About. Changes apply and save at once (`[menu] auto_apply`); restart-only runtime keys go to `controls.ini [config]` as
-`section.key = value` and become config keys at the next start unless the ini or `NXRT_*` set them (game-module defaults give way:
-`config_set_default`). Options a game cannot honour are hidden (`kDisplayOptRenderSize/DynRes/Hdr`, mouse aim, look options; OoT has none of
-them yet). Checked on the title screen (runs `work\run\menu1`, `menu2` of the menu branch): keyboard and virtual-pad navigation, live colour
-change saved, `[config]` handheld applied at the next start, pad presses while the menu is open never reach the game. For such runs: keep a
-test run out of the main checkout's game folder with `NXRT_PLAY_CONTROLS`, `NXRT_NVN_PIPELINE_CACHE` (hard link to the prepared cache: saves
-rename over the link), `NXRT_NVN_PIPELINE_KEYS`, `NXRT_NVN_SHADER_ORDER`, `NXRT_NVN_BC7_CACHE`, `NXRT_FS_SAVE_DIR` and
-`NXRT_BOOT_SCREENSHOT_DIR` (new); posted mouse clicks miss (SDL reads the real cursor), posted keys and the virtual pad work.
+**Game window menu** (2026-11-06, `runtime/docs/MENU.md`; the user asked for real Windows menus, not an in-game window): a native menu bar
+(Game, Input, Graphics, Audio, Debug, Help; `src/gfx/play/win_menu.cpp` from the data model `menu_model.cpp`) and modeless native dialogs on
+their own thread (Gamepad with press-to-rebind, Keyboard and mouse bindings, More graphics settings, Debug info, Log). Changes apply at once
+and are saved in `controls.ini`; "(next start)" entries are runtime keys in `controls.ini [config]` (`section.key = value`, applied at start
+unless the ini or `NXRT_*` set them; game-module defaults give way via `config_set_default`). The bar is hidden in fullscreen; there the ImGui
+window (F1, View + Menu) is the menu (`[gfx] overlay_menu`). Alt alone and F10 stay game keys. **An open drop-down holds the game's frame**
+(Windows' modal menu loop runs on the game thread that pumps the window; audio continues, the watchdog is fed); dialogs do not. Checked as
+named instances on the title screen (`workun
+m1`..`nm3` of the menu branch): bar and client size 1280x720, fullscreen round trip, each dialog,
+a menu toggle saved, a 12 s drop-down without a freeze report, press-to-rebind with the virtual pad from the native dialog. Native UI is
+driven and captured without the mouse through ctypes (`PostMessage WM_COMMAND`, `SC_KEYMENU`, `PrintWindow`): boot screenshots and `@shot`
+contain only the Vulkan frame. Posted mouse clicks miss in the game window (SDL reads the real cursor).
 
 **Performance notes so far:** the lifted code is built for baseline x86-64, so every FMADD is a CRT `fmaf` call (software FMA): a worker
 spent its time in `fmaf` in main+0x370a5a0. `/arch:AVX2`-style flags (FMA3) would need a full rebuild. `[nvn] compute_shadows` copies

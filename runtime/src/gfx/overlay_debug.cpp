@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdarg>
 #include <chrono>
 #include <cfloat>
 #include <cmath>
@@ -397,7 +398,97 @@ void gauges(PageState& p, const Sample& smp) {
     ImGui::TextDisabled("%zu gauges, read %.1f s ago. [diag] soak_csv writes them to a file every few seconds.", smp.gauges.size(), now_s() - smp.at_s);
 }
 
+void line(std::string& out, const char* fmt, ...) IM_FMTARGS(2);
+void line(std::string& out, const char* fmt, ...) {
+    char b[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    out += b;
+    out += "\r\n";
+}
+
 }  // namespace
+
+std::string debug_report_text(const Overlay::Context& ctx) {
+    sampler().want();
+    const Sample smp = sampler().copy();
+    std::string o;
+    std::vector<float> graph;
+    const FrameTimeStats s5 = frame_time_stats(5.0, &graph, 60), s30 = frame_time_stats(30.0);
+    line(o, "PERFORMANCE");
+    if (s5.frames >= 2)
+        line(o, "  %.1f fps, 1%% low %.1f fps, median %.2f ms, worst %.1f ms (last 5 s)", s5.mean_fps, s5.low1_fps, s5.median_ms, s5.worst_ms);
+    else
+        line(o, "  no frame presented in the last 5 s");
+    if (s30.frames >= 2) line(o, "  last 30 s: %zu frames, %.1f fps, worst %.1f ms, %zu over twice the median", s30.frames, s30.mean_fps, s30.worst_ms, s30.over2x);
+    line(o, "  presented since start: %llu frames", ull(s5.total_frames));
+    if (ctx.renderer) {
+        const RendererStats rs = ctx.renderer->stats();
+        const VkExtent2D e = ctx.renderer->extent();
+        line(o, "  swapchain %ux%u, %u images, %s; output pass GPU %.2f ms", e.width, e.height, ctx.renderer->image_count(), present_mode_name(ctx.renderer->present_mode()),
+             rs.gpu_ms_avg);
+    }
+    if (ctx.limiter) line(o, "  frame limiter: %s", ctx.limiter->target_fps() > 0 ? (std::to_string(static_cast<int>(ctx.limiter->target_fps() + 0.5)) + " fps").c_str() : "off");
+    uint64_t hitches = 0;
+    double limit = 0;
+    const std::vector<std::string> recent = hitch_recent(5, &hitches, &limit);
+    line(o, "");
+    line(o, "HITCHES");
+    if (limit > 0) line(o, "  %llu frames over %.0f ms since start", ull(hitches), limit);
+    else line(o, "  not counted ([diag] hitch_ms = 0)");
+    for (size_t i = recent.size(); i-- > 0;) line(o, "  - %s", recent[i].c_str());
+    line(o, "");
+    line(o, "GPU AND MEMORY");
+    if (ctx.device) {
+        const GpuInfo& g = ctx.device->gpu();
+        line(o, "  %s (0x%04x:0x%04x), driver 0x%08x, %.1f GiB video memory", g.name.c_str(), g.vendor_id, g.device_id, g.driver_version,
+             static_cast<double>(g.vram_bytes) / (1024.0 * 1024.0 * 1024.0));
+    }
+    if (smp.have) {
+        const int64_t used = gauge_value(smp, "vma.device_usage_mb"), budget = gauge_value(smp, "vma.device_budget_mb");
+        if (used >= 0 && budget > 0) line(o, "  video memory in use: %lld of %lld MB (the driver's budget)", static_cast<long long>(used), static_cast<long long>(budget));
+        line(o, "  process: working set %.2f GB (peak %.2f), private %.2f GB", smp.working_set / 1e9, smp.peak_working_set / 1e9, smp.private_bytes / 1e9);
+    } else {
+        line(o, "  reading ...");
+    }
+    line(o, "");
+    line(o, "SHADERS AND PIPELINES");
+    if (smp.have) {
+        const nvn::ShaderStats& s = smp.shaders;
+        line(o, "  shader preparation: %s (%llu programs)", s.prepare_status.c_str(), ull(s.prepared_programs));
+        line(o, "  parts built: %llu from the preparation (%.2f ms each), %llu new (%.1f ms each)", ull(s.parts_prepared),
+             s.parts_prepared ? s.prepared_ms / static_cast<double>(s.parts_prepared) : 0.0, ull(s.parts_new), s.parts_new ? s.new_ms / static_cast<double>(s.parts_new) : 0.0);
+        line(o, "  pipelines linked %llu (%llu failed), built at the draw %llu, waited for %llu, draws deferred %llu", ull(s.linked), ull(s.link_failed), ull(s.parts_at_draw),
+             ull(s.parts_waited), ull(s.draws_deferred));
+        line(o, "  background jobs %llu, waiting to be built %d", ull(s.jobs_pending), s.backlog);
+    }
+    const nvn::BackendStats b = nvn::backend_stats();
+    line(o, "");
+    line(o, "NVN BACK END%s", nvn::backend_installed() ? "" : " (not running)");
+    const uint64_t all = b.draws + b.draws_skipped;
+    line(o, "  draws %llu, skipped %llu (%.1f%%), dispatches %llu, submissions %llu, passes %llu", ull(b.draws), ull(b.draws_skipped),
+         all ? 100.0 * static_cast<double>(b.draws_skipped) / static_cast<double>(all) : 0.0, ull(b.dispatches), ull(b.submits), ull(b.passes));
+    line(o, "  textures %llu, uploads %llu (%.0f MB), BC7 transcodes %llu, failed %llu; pools imported %llu", ull(b.textures_created), ull(b.texture_uploads),
+         static_cast<double>(b.texture_upload_bytes) / (1024.0 * 1024.0), ull(b.bc7_transcodes), ull(b.textures_failed), ull(b.pools_imported));
+    line(o, "  not supported: %llu operations, %llu unresolved addresses, %llu missing handles; stub calls %llu (%zu distinct)", ull(b.unsupported_ops),
+         ull(b.unresolved_addresses), ull(b.missing_handles), ull(nvn::stub_calls_total()), nvn::stubs_called_distinct());
+    if (!smp.unsupported.empty()) {
+        line(o, "");
+        line(o, "UNSUPPORTED OPERATIONS");
+        std::string u = smp.unsupported;
+        size_t at = 0;
+        while (at < u.size()) {
+            const size_t e = u.find('\n', at);
+            const std::string l = u.substr(at, e == std::string::npos ? std::string::npos : e - at);
+            if (!l.empty()) line(o, "  %s", l.c_str());
+            if (e == std::string::npos) break;
+            at = e + 1;
+        }
+    }
+    return o;
+}
 
 void draw_debug_page(const Overlay::Context& ctx) {
     sampler().want();

@@ -18,6 +18,7 @@
 #include "nxrt/input_source.h"
 #include "nxrt/overlay.h"
 #include "play/pad_map.h"
+#include "play/menu_model.h"
 #include "play/play_ui.h"
 
 NXTEST_GROUP(play_ui)
@@ -412,4 +413,72 @@ NXTEST(config_switch_is_stored_and_removed_at_the_default) {
     activate(host, box);
     CHECK_EQ(host.applies, 2);
     CHECK(host.last_applied.config.empty());   // false is the default: nothing in the file
+}
+
+// ---- the native menu bar's model (menu_model.h): what every entry changes and shows ----------------------------------------------------------
+
+NXTEST(menu_model_ids_are_unique_and_findable) {
+    play::MenuOptions o;
+    o.upscaler_configured = true;
+    const std::vector<play::MenuItem> m = play::build_menu(o);
+    REQUIRE(m.size() == 6);   // Game, Input, Graphics, Audio, Debug, Help
+    std::vector<int> ids;
+    play::menu_for_each(m, [&](const play::MenuItem& it) { ids.push_back(it.id); });
+    CHECK(ids.size() > 60);
+    for (size_t i = 0; i < ids.size(); ++i) {
+        CHECK(ids[i] == play::kMenuFirstId + static_cast<int>(i));   // consecutive, in the order they are shown
+        const play::MenuItem* f = play::menu_find(m, ids[i]);
+        CHECK(f != nullptr && f->id == ids[i]);
+    }
+    CHECK(play::menu_find(m, play::kMenuFirstId - 1) == nullptr);
+    o.upscaler_configured = false;
+    o.bug_capture = false;
+    std::vector<int> fewer;
+    play::menu_for_each(play::build_menu(o), [&](const play::MenuItem& it) { fewer.push_back(it.id); });
+    CHECK(fewer.size() == ids.size() - 2);   // no upscaler switch, no bug capture entry
+}
+
+// Every check and radio entry changes the settings, and shows itself checked afterwards; a check box goes back with a second click.
+NXTEST(menu_model_entries_change_what_they_show) {
+    play::MenuOptions o;
+    o.upscaler_configured = true;
+    const std::vector<play::MenuItem> m = play::build_menu(o);
+    const play::LiveStatus live;
+    int checks = 0, radios = 0;
+    play::menu_for_each(m, [&](const play::MenuItem& it) {
+        if (it.kind != play::MenuItem::Kind::Check && it.kind != play::MenuItem::Kind::Radio) return;
+        if (!it.set) return;   // the debug overlay: live state, the host answers
+        play::Settings s = play::default_settings();
+        const bool before = it.checked(s, live);
+        const std::string text_before = play::format_settings(s);
+        const bool changed = it.set(s);
+        if (it.kind == play::MenuItem::Kind::Radio) {
+            ++radios;
+            CHECK_MSG(changed == !before, it.label);
+            CHECK_MSG(it.checked(s, live), it.label);
+            CHECK_MSG(!it.set(s), it.label);   // picking the checked one again changes nothing
+        } else {
+            ++checks;
+            CHECK_MSG(changed, it.label);
+            CHECK_MSG(it.checked(s, live) == !before, it.label);
+            CHECK_MSG(play::format_settings(s) != text_before, it.label);   // written to the file
+            it.set(s);
+            CHECK_MSG(play::format_settings(s) == text_before, it.label);   // and back
+        }
+    });
+    CHECK(checks >= 14);   // pad rumble and gyro, 16:9, vsync, upscaler, mute, fps counter, 7 diagnostics switches
+    CHECK(radios >= 40);
+}
+
+NXTEST(menu_model_config_entries_store_and_remove) {
+    play::Settings s = play::default_settings();
+    CHECK(play::config_store(s, "gfx.device_diagnostics", "1", "false", true));
+    CHECK(s.config["gfx.device_diagnostics"] == "1");
+    CHECK(!play::config_store(s, "gfx.device_diagnostics", "true", "false", true) || s.config.count("gfx.device_diagnostics") == 1);
+    CHECK(play::config_store(s, "gfx.device_diagnostics", "0", "false", true));   // the default: the line goes
+    CHECK(s.config.empty());
+    CHECK(!play::config_store(s, "am.operation_mode", "Docked", "docked", false));
+    CHECK(play::config_store(s, "am.operation_mode", "handheld", "docked", false));
+    CHECK(play::config_value(s, "am.operation_mode", "docked") == "handheld");
+    CHECK(play::config_value(s, "diag.hitch_ms", "50") == "50");
 }

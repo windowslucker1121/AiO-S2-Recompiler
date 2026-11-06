@@ -1,116 +1,87 @@
-# The F1 menu
+# The game window's menu
 
-One window over the game with everything the PC port lets the player change, plus a debug view. Game independent (`runtime/src`); a game
-module only says which of its own options exist (`play_game.h` `GamePlay`).
+The PC port's settings live in a **native Windows menu bar** on the game window (Game, Input, Graphics, Audio, Debug, Help) and the native
+dialogs it opens. Game independent (`runtime/src/gfx/play`); a game module only says which of its own options exist (`play_game.h`
+`GamePlay`). The ImGui window drawn over the game (F1) is kept only as the menu for fullscreen, where the bar is not shown.
 
-## Opening, closing, moving around
+## The menu bar
 
-| Input | What it does |
+| Menu | Entries |
 |---|---|
-| F1 (`[gfx] overlay_key`) | Opens and closes the menu. The key never reaches the game. |
-| View + Menu held together on one pad (`[gfx] overlay_pad_chord`, default `back+start`) | Opens and closes the menu. |
-| Start alone (menu open) | Closes the menu. |
-| Mouse | Click, drag sliders, wheel scrolls. |
-| Keyboard | Arrow keys move between controls, Space or Enter activates, Escape backs out of a combo or a field. |
-| Gamepad | D-pad or left stick moves, the bottom face button (A / Cross) activates, the right one (B / Circle) backs out. |
+| Game | Save settings now, Reload settings from the file, Open the settings file, Show the settings folder, Capture a bug report (F9), Exit |
+| Input | Gamepad..., Keyboard and mouse bindings..., Rumble, Test rumble, Gyro, Face buttons (by label / by position), Button prompts |
+| Graphics | Window mode, Window size, Keep the 16:9 picture, Vsync, Frame limit, Console mode (docked / handheld, next start; "tell the game now", experimental), Texture anisotropy, Replace the game's upscaler (OoT stopgap, live), Upscaler (off / FSR 1 / NIS), Colour (neutral / vivid), More graphics settings... |
+| Audio | Volume, Mute when the window is not in focus |
+| Debug | Debug info..., Log..., Open the log file, Show the log folder, Copy a debug report to the clipboard, Frame rate counter (F2) and its corner, In-game debug overlay, Diagnostics switches (next start), Hitch threshold (next start) |
+| Help | Keys and controls, About |
 
-While the menu is open the game gets no input at all: keys, mouse buttons and pads are held back. Pad buttons that are still held when the
-menu closes (the chord, a face button) stay held back until they are released, so the game does not get the tail of a press meant for the
-menu. The window opens centred and takes the keyboard and gamepad focus at once.
+Check marks show the settings in force; they are read when a menu opens. A change applies at once and is saved in the play settings file
+(`controls.ini` in the game folder, or the instance folder of a named run; `[play] controls` names another). Entries marked
+**(next start)** are runtime configuration keys: they go to the `[config]` section of that file as `section.key = value` and become config
+keys at the next start, unless the game ini or an `NXRT_*` variable sets them (a game module's own default gives way). A value back at its
+default removes the line.
 
-## Saving
+The bar is on the window in windowed mode and taken off in fullscreen (Alt+Enter switches; Graphics > Window mode too). The client area keeps
+its size when the bar comes and goes (SDL counts the bar when it sizes the window), so the swapchain and the mouse coordinates are those of
+the picture. Alt alone and F10 do not open the bar (SDL swallows `SC_KEYMENU`, and so does the menu's window subclass): they stay game keys.
+Alt + the underlined letter of a top-level menu (Alt+G, Alt+I, Alt+R, Alt+A, Alt+D, Alt+H) opens it, as in any Windows program.
 
-Everything is stored in the play settings file, `controls.ini` in the game folder (`[play] controls` / `NXRT_PLAY_CONTROLS` names another
-file). With **Apply changes at once** on (`[menu] auto_apply`, the default) a change takes effect and the file is written as soon as the
-control is let go (a slider when it is released, a text field when it is left). Off: changes wait for **Apply and save**; **Revert** drops
-them. **Factory defaults...** asks first, then loads the factory settings. While nothing waits in the menu it follows the settings in force,
-so a change made elsewhere (Alt+Enter, the frame-rate hotkey F2) is never undone by the menu.
+## The dialogs
 
-Items marked **restart** are read once at start. Those that are runtime configuration keys (`docs/CONFIG.md`) go to the `[config]` section
-of `controls.ini` as `section.key = value`; at the next start each becomes that key unless the game ini or an `NXRT_*` variable sets it (then
-the menu says so in orange and its choice does not count). A game module's own defaults (`game::Info::config_defaults`) give way to
-`[config]`. A row whose value is the default is removed from the file. When the value in force differs from the menu's choice the row says
-"now: ...; the next start uses the choice above".
+Modeless windows on a thread of their own (`menu-ui`), with the system's visual styles and the game window's DPI. **The game keeps running
+while a dialog is open.** They change settings through the same host as everything else (`UiHost::apply`), and re-read the settings when
+they come to the front.
 
-## Pages
+- **Gamepad**: the connected controllers and what is pressed on each, Test rumble, face-button layout, dead zones, trigger threshold, rumble
+  strength, gyro scale, rumble and gyro on/off, and the button mapping: select a Switch button, Rebind, press a button on the controller (or
+  pull a trigger); the button that had the job takes over the old job of the pressed one (a swap). Built-in layout resets all of them.
+  Sliders apply when they are let go.
+- **Keyboard and mouse bindings**: the bindings of a context (a game that does not report play or menu, like OoT for now, uses the `menu`
+  bindings plus the `all` layer), Rebind, Remove, Add a key for an action, Factory bindings. Rebind and Add bring the game window to the front:
+  press the key, mouse button or wheel there (Escape cancels); the key that opens the in-game menu and the frame-rate hotkey are refused.
+- **More graphics settings**: texture LOD bias, FSR 1 / NIS sharpness and the colour controls (live; the colour shows while a slider is
+  dragged), output resolution, graphics scaling level and texture compression (next start), the GPU paths (next start), window size.
+- **Debug info**: performance (fps, 1% low, worst frame), hitches, GPU and video memory, shader preparation and pipeline counters, NVN
+  counters and the unsupported operations; refreshed every second (`gfx::debug_report_text`, the same text as Debug > Copy a debug report).
+- **Log**: the last 512 log lines kept in memory, filtered by level, following the end.
 
-**Input**
-- *Button prompts* (top): the icon set of the game's prompts; Auto follows the device used last.
-- *Gamepad*: every connected pad with its type, gyro and rumble, sticks and what is pressed on it right now (before the mapping);
-  **Test rumble** (half a second on every pad, at the strength set below). Layout (buttons by printed label or by position), dead zones,
-  trigger threshold, rumble on/off and strength, gyro on/off and scale. **Button mapping**: one row per Switch button with the controller
-  buttons that press it; **Rebind** waits up to 8 s for a press on any pad (or a trigger pulled past the threshold) and makes that button
-  press this Switch button; the button that had the job before takes over the old job of the pressed one (a swap). The per-controller-button
-  table (combinations, "nothing") is under *Per controller button*. Look inversion and look sensitivity only act while the game reports that
-  it is in play (`GamePlay::frame`); they are hidden for a game that does not (OoT for now).
-- *Keyboard and mouse*: bindings (click an input and press a key, mouse button or wheel notch; Escape cancels), per context and trigger.
-  A game that does not report play or menu (OoT for now) always uses the `menu` bindings plus the `all` layer; the page says so and opens on
-  `all`. The mouse-aim settings appear only for a game with aim hooks (`GamePlay::install`), the menu pointer only with menu hooks.
-- *Switch layout*: what each action presses on the Switch pad.
-- *Live view*: the Switch pad output of keyboard and mouse, and each pad's raw state.
+## Threads, and what waits
 
-**Graphics**
-- *Display*: window mode, monitor, window size (live); vsync and frame limit (live); **Console mode and resolution** (restart, `[config]`):
-  docked or handheld (`[am] operation_mode`), the output resolution the game is told (`[am] resolution`) and the graphics scaling level
-  (`[am] graphics_scale`). "Switch to ... now (experimental)" sends the console's operation-mode change to the running game; whether the game
-  changes its picture is up to it. Render scale only for games whose render size can be changed (`kDisplayOptRenderSize`).
-- *Picture*: anisotropy and texture LOD bias (live, every game); the game's own options where its hooks honour them (aspect, field of view,
-  dynamic resolution, bloom, chromatic aberration, quality preset); **Replace the game's own upscaler (stopgap)** (live, shown when the game
-  module names a replacement, `[display] upscaler_replace`; OoT: off runs the game's own compute chain and the 3D scene is black, A12); FSR 1
-  and NIS in the output pass (every game); colour (contrast, saturation, black level, gamma; live). HDR output, the scene-resolution slider and
-  the temporal upscalers need the HDR scene pipeline matched to the game's tone map (`kDisplayOptHdr`); OoT does not show them.
-- *Advanced*: texture compression quality, GPU memory mirror, pass barriers, pipeline prewarm, low latency (restart).
+Menu commands arrive on the thread that pumps the game window: the game's main thread (a window subclass, `SetWindowSubclass`, takes
+`WM_COMMAND`, `WM_INITMENUPOPUP` and the menu-loop messages). **While a drop-down is open Windows runs its modal menu loop on that thread, so
+the game's frame waits** until the drop-down closes (measured: a drop-down held 12 s gave one 12.3 s frame). Audio keeps playing (no
+underruns), and a timer in the menu loop feeds the freeze watchdog (`diag_progress`), so no freeze report is written. Moving the window's
+message pump off the game thread would avoid the wait; it is not done. Everything that stays open (the dialogs) runs on its own thread.
 
-**Audio**: master volume, mute while unfocused (live), output device (restart).
+## The in-game menu (fullscreen)
 
-**Debug** (game independent, `src/gfx/overlay_debug.cpp`)
-- Frame rate counter (corner overlay, hotkey F2).
-- *Performance*: fps, 1% low, median and worst frame of the last 5 s and a frame-time graph of the last 300 presented frames with the 60 and
-  30 fps lines; GPU time of the output pass, swapchain, frame limiter.
-- *Hitches*: slow frames since start (`[diag] hitch_ms`, default 50 ms), the last 30 s (frames over twice the median), and the hitch log's
-  lines (the worst slow frame of each second with what happened during it).
-- *GPU and video memory*: GPU, driver, validation layer, video memory in use against the driver's budget, process memory.
-- *Shaders and pipelines*: what the start found of the shader preparation (`prepare.state`), parts built from it and new ones with their
-  times, pipelines linked, built at the draw, draws deferred, background jobs, the "Preparing shaders" backlog.
-- *NVN back end*: draws drawn and skipped, dispatches, submissions, textures and uploads, unsupported operations, unresolved addresses,
-  missing handles, entry points and stub calls (most called), the unsupported-operation report.
-- *Log*: the last 512 lines of the log in memory, filtered by level and text, with Follow and Copy.
-- *Gauges*: every registered gauge (live Vulkan and NVN objects, caches, queues), filterable.
-- *Diagnostics switches (next start)*, `[config]`: GPU checkpoints (`gfx.device_diagnostics`), the driver fault report
-  (`gfx.device_fault`), ending after a device loss (`gfx.exit_on_device_lost`), robust access (`gfx.robust_access`; the prepared pipeline
-  cache then no longer matches), skipping dispatches with unmapped buffers (`nvn.skip_unmapped_dispatch`) or every dispatch
-  (`nvn.debug_skip_compute`), the frame-rate log line (`gfx.log_fps`), the hitch threshold (`diag.hitch_ms`).
-  Reads that may take locks other threads hold (gauges, shader statistics, the unsupported report) run on a small sampler thread once a
-  second while the page is on screen; the presenting thread only copies the result.
-
-**About**: version, build, folders and files in use. A game's own page (**Game**) appears when its module has one.
+The ImGui window over the game (`play_ui.cpp`, Input / Graphics / Audio / Debug / About) opens with F1 or View + Menu on a controller
+(`[gfx] overlay_pad_chord`) only where the bar is not shown: `[gfx] overlay_menu = fullscreen` (default), `always` or `never`. With the bar on
+the window, F1 and the chord pass through to the game. Keyboard and gamepad navigate it; Start closes it; while it is open the game gets no
+input, and pad buttons still held when it closes stay held back until released. Debug > In-game debug overlay shows the Debug page alone over
+the game (display only), also in fullscreen.
 
 ## Code
 
 | Part | File |
 |---|---|
-| The overlay: toggle key and pad chord, gamepad and keyboard navigation, window placement | `src/gfx/overlay.cpp`, `include/nxrt/overlay.h` |
-| The Debug page | `src/gfx/overlay_debug.cpp` (`draw_debug_page`) |
-| The menu pages and the `[config]` rows | `src/gfx/play/play_ui.cpp`, `play_ui.h` (`UiHost`) |
-| The host: settings in force, key and pad capture, pad list, rumble test, `[config]` applied at start, held-back pad buttons | `src/gfx/play/play.cpp` |
-| The settings file (`[menu]`, `[config]`, `[display] upscaler_replace`) | `src/gfx/play/play_config.cpp`, `play_types.h` |
+| The menu as data: labels, check marks, what each entry changes | `src/gfx/play/menu_model.cpp`, `menu_model.h` |
+| The bar, the subclass, the dialogs and their thread | `src/gfx/play/win_menu.cpp`, `win_menu.h` (Windows only; elsewhere the functions do nothing) |
+| Play mode's hooks (save, reload, exit, bug capture, debug report), the bar per frame, the in-game menu's switch | `src/gfx/play/play.cpp` (`install_menu_bar`) |
+| The in-game menu and the `UiHost` contract | `src/gfx/play/play_ui.cpp`, `play_ui.h` |
+| The overlay: toggle key and chord, navigation, the debug window | `src/gfx/overlay.cpp`, `overlay_debug.cpp`, `include/nxrt/overlay.h` |
+| Settings file (`[menu]`, `[config]`, `[display] upscaler_replace`) | `src/gfx/play/play_config.cpp`, `play_types.h` |
 | Pad helpers (press-to-rebind swap, pressed sources) | `src/gfx/play/pad_map.cpp` |
 | Data sources | `log_tail` (`diag/log.cpp`), `frame_time_stats` and `hitch_recent` (`diag/gauge.cpp`), `nvn::shader_stats` (`nvn_gpl.cpp`), `nvn::set_upscaler_replace_enabled` (`nvn_replay.cpp`), `config_set_default` / `config_user_set` (`diag/config.cpp`) |
 
-Tests: `play_ui` (every page and tab drawn headless; press-to-rebind with the swap and auto-apply; auto-apply off; a `[config]` switch stored
-and removed; changes made elsewhere kept), `gfx_overlay` (pad chord, navigation, Start closes, the menu without the stand-alone Diagnostics
-window), `play_config` (`[menu]`, `[config]`, `upscaler_replace`), `play_pad` (rebind helpers), `log_config` (log tail,
-`config_set_default`), `soak` (frame-time statistics).
+Keys: `[play] menu_bar` (default `1`; `0`: no bar), `[gfx] overlay_menu`, `[gfx] overlay_key`, `[gfx] overlay_pad_chord`, `[menu] auto_apply`
+(the in-game menu's Apply mode), `[config]`, `[boot] screenshot_dir` (docs/CONFIG.md).
 
-Checking a change in the running game: the menu is in the boot screenshots (`[boot] screenshot_at`, `screenshot_every`, `screenshot_dir`)
-and in the test tooling's `@shot`; the virtual pad of the test tooling (`keydown vpad attach xbox`, `keydown vpad button back 1` ...) drives
-the chord and the navigation. Window messages posted for mouse clicks do not land where they are aimed (SDL reads the real cursor), so drive
-the menu with keys or the virtual pad.
+Tests: `play_ui` (the menu model: unique ids, every check and radio entry changes the settings and shows its state, `[config]` entries stored
+and removed; the in-game menu's pages, press-to-rebind, auto-apply), `gfx_overlay` (pad chord, navigation), `play_config`, `play_pad`,
+`log_config`, `soak`.
 
-## Limits
-
-- The pad mapping is one mapping for all pads. The rebind table assumes the printed labels A B X Y at the bottom, right, left and top (Xbox,
-  PlayStation); on a Nintendo-layout pad with "buttons by label" the face rows show the positions' Xbox names.
-- The live docked/handheld switch only sends the console's notice; OoT's reaction to it is not verified. The setting for the next start is
-  the reliable one.
-- `[am] resolution` and `[am] graphics_scale` are answers the game may use or ignore; their effect on OoT is not measured yet.
+Checking the native UI in a running game without touching the mouse: `work/run/nm_driver.py` style ctypes calls (git-ignored helper of the
+menu branch): `GetMenu` and `GetMenuStringW` list the bar, `PostMessage(WM_COMMAND, id)` runs an entry, `WM_SYSCOMMAND SC_KEYMENU 'g'` opens a
+drop-down, `PrintWindow(PW_RENDERFULLCONTENT)` captures the window or a dialog. Boot screenshots and `@shot` contain only the Vulkan frame, not
+the bar or the dialogs.

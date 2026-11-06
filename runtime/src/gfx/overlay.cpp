@@ -147,6 +147,8 @@ struct Overlay::Impl {
     };
     PadHeld held[8];                  // buttons down per pad (the chord), from the input events
     std::atomic<uint64_t> hides{0};
+    std::atomic<bool> menu_enabled{true};   // the toggle key and the chord open the panels
+    std::atomic<bool> debug_win{false};     // the display-only Debug window
     std::atomic<bool> focus_next{false};   // the menu was just shown: give it the keyboard and gamepad focus
     bool restore_relative = false;
     std::chrono::steady_clock::time_point last_frame = std::chrono::steady_clock::now();
@@ -402,6 +404,12 @@ int Overlay::toggle_scancode() const { return impl_->toggle_sc; }
 void Overlay::set_toggle_scancode(int sc) { impl_->toggle_sc = sc; }
 uint64_t Overlay::frames_drawn() const { return impl_->drawn; }
 uint64_t Overlay::hide_count() const { return impl_->hides.load(); }
+void Overlay::set_menu_enabled(bool on) {
+    if (impl_->menu_enabled.exchange(on) != on && !on) set_visible(false);
+}
+bool Overlay::menu_enabled() const { return impl_->menu_enabled.load(); }
+void Overlay::set_debug_window(bool on) { impl_->debug_win.store(on); }
+bool Overlay::debug_window() const { return impl_->debug_win.load(); }
 uint32_t Overlay::pad_chord() const { return impl_->pad_chord; }
 
 void Overlay::set_pointer(bool show, float x, float y, bool in_screenshots) {
@@ -441,7 +449,7 @@ void Overlay::add_panel(const std::string& title, std::function<void()> fn) { im
 bool Overlay::handle_event(const input::Event& e) {
     Impl& s = *impl_;
     using input::EventType;
-    if ((e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.toggle_sc) {
+    if ((e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.toggle_sc && s.menu_enabled.load()) {
         if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) toggle();
         return true;   // the toggle key never reaches the game (press, repeat and release)
     }
@@ -460,7 +468,7 @@ bool Overlay::handle_event(const input::Event& e) {
         }
         const uint32_t bit = e.u.gpbutton.button < 32 ? 1u << e.u.gpbutton.button : 0u;
         if (h) h->mask = e.type == EventType::GamepadButtonDown ? (h->mask | bit) : (h->mask & ~bit);
-        if (e.type == EventType::GamepadButtonDown && s.pad_chord && (s.pad_chord & bit) && h && (h->mask & s.pad_chord) == s.pad_chord) {
+        if (e.type == EventType::GamepadButtonDown && s.menu_enabled.load() && s.pad_chord && (s.pad_chord & bit) && h && (h->mask & s.pad_chord) == s.pad_chord) {
             toggle();
             return true;
         }
@@ -666,7 +674,8 @@ void Overlay::draw(const FrameInfo& f) {
     const double now_s = std::chrono::duration<double>(now.time_since_epoch()).count();
     const bool note_on = s.note_visible(now_s) && (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
     const bool ptr_on = s.ptr_show.load(std::memory_order_relaxed) && (s.ptr_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
-    if (!s.visible && !counter_on && !note_on && !ptr_on) {
+    const bool debug_on = s.debug_win.load(std::memory_order_relaxed) && !s.ctx.renderer->capture_pending();
+    if (!s.visible && !counter_on && !note_on && !ptr_on && !debug_on) {
         s.last_frame = now;
         s.counter_was_on = false;
         return;
@@ -689,7 +698,7 @@ void Overlay::draw(const FrameInfo& f) {
     }
     // a screenshot leaves the counter out unless asked for; with the menu hidden there is then nothing to draw
     const bool show_counter = counter_on && (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
-    if (!s.visible && !show_counter && !note_on && !ptr_on) {
+    if (!s.visible && !show_counter && !note_on && !ptr_on && !debug_on) {
         s.last_frame = now;
         return;
     }
@@ -708,6 +717,14 @@ void Overlay::draw(const FrameInfo& f) {
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
     if (s.visible) s.build_ui();
+    if (debug_on) {   // display only: it takes no input unless the menu is up (handle_event feeds ImGui only then)
+        const float k = s.ui_scale > 0.f ? s.ui_scale : 1.f;
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 16.f * k, 16.f * k), ImGuiCond_FirstUseEver, ImVec2(1.f, 0.f));
+        ImGui::SetNextWindowSize(ImVec2(std::min(560.f * k, io.DisplaySize.x * 0.5f), std::min(640.f * k, io.DisplaySize.y - 32.f * k)), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowBgAlpha(0.80f);
+        if (ImGui::Begin("Debug###nxrt_debug_window", nullptr, ImGuiWindowFlags_NoFocusOnAppearing)) draw_debug_page(s.ctx);
+        ImGui::End();
+    }
     if (show_counter) s.draw_counter(f, now_s);
     if (note_on) s.draw_note(f);
     if (ptr_on) {   // a plain arrow, white with a dark outline, sized with the frame height

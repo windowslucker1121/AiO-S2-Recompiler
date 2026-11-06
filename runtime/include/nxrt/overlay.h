@@ -84,6 +84,14 @@ public:
     // The visible -> hidden edges so far (play mode holds back the pad buttons that are still down when the menu closes).
     uint64_t hide_count() const;
 
+    // The menu window (the panels) may be opened with the toggle key or the pad chord. False: those inputs pass through to the game and the
+    // panels are not drawn (the native menu bar is the menu); the debug window below still works.
+    void set_menu_enabled(bool on);
+    bool menu_enabled() const;
+    // A display-only window with the Debug page over the game (the native menu's Debug > In-game debug overlay), drawn whether or not the menu is up.
+    void set_debug_window(bool on);
+    bool debug_window() const;
+
 private:
     Overlay() = default;
     struct Impl;
@@ -94,6 +102,9 @@ private:
 // the log tail and every gauge. Draws into the current ImGui window, on the presenting thread. Device, renderer and limiter may be null (headless
 // tests): their parts are left out.
 void draw_debug_page(const Overlay::Context& ctx);
+// The same numbers as plain text (the native Debug info window, the clipboard report). Any thread; reads that take other threads' locks come
+// from the page's sampler (started by the first call; its numbers are up to a second old, and the first call may show "reading ...").
+std::string debug_report_text(const Overlay::Context& ctx);
 
 // "back+start" -> SDL_GamepadButton bits; "none" or "" -> 0. Names: south east west north back guide start lstick rstick lb rb dpad_up
 // dpad_down dpad_left dpad_right (a b x y are south east west north). False for an unknown name.
