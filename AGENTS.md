@@ -36,14 +36,27 @@ game\oot\plain\exefs\main --out work\shaders\oot\corpus --jobs 6 --progress` (ne
 tooling's permission check blocks adding external repositories: the user added the submodule themselves.
 The corpus is extracted (`work\shaders\oot\corpus`, 25 min): 47,203 unique blocks (17,417 vs, 25,228 ps, 3,743 cs, 815 of stages 6/7),
 nearly all from `Shader/Model.Product.1x0.product.Nin_Ounce_NVN2.bfsha.zs`; the "oodle: no oozx DLL" notes are false positives of the
-generic scan (OoT uses zstd). Next: translate it and point oot.exe at the cache (not run yet):
-`dotnet tools\shaders\build\bin\Release\net10.0\spirv_harness.dll --batch work\shaders\oot\corpus --out work\shaders\oot\spirv --jobs 12 --no-val`,
-then run with `NXRT_NVN_SHADER_CACHE=<repo>\work\shaders\oot\spirv`, `NXRT_NVN_SHADER_CORPUS=<repo>\work\shaders\oot\corpus` and, for
-blocks the batch missed, `NXRT_NVN_SHADER_TRANSLATOR=<repo>\tools\shaders\build\bin\Release\net10.0\spirv_harness.exe`.
+generic scan (OoT uses zstd). Translate:
+`tools\shaders\build\bin\Release\net10.0\spirv_harness.exe --batch work\shaders\oot\corpus --out work\shaders\oot\spirv --jobs 16 --no-val`;
+run the game with `NXRT_NVN_SHADER_CACHE=<repo>\work\shaders\oot\spirv`, `NXRT_NVN_SHADER_CORPUS=<repo>\work\shaders\oot\corpus` and
+`NXRT_NVN_SHADER_TRANSLATOR=<repo>\tools\shaders\build\bin\Release\net10.0\spirv_harness.exe` (the MCP `launch` takes them as `env`).
+A few blocks the game uses are not in the corpus; the on-demand translator gets them.
 
-Requirement from the user: a **shader compilation screen before the first boot**, so the game runs without shader-compile stutter. The
-pieces exist (`oot.exe --prepare-shaders`, the launcher's setup step that builds the cache, `tools/shaders`); they need OoT's shader
-extraction (`[shaders] extractor = "generic"` in game.toml) and the translator (`tools/shaders/harness`, .NET 8) working first.
+Batch translation (done, 262 s with `--jobs 16`, cache in `work\shaders\oot\spirv`): 37,576 of 47,203 blocks ok; 8,805 unsupported
+(fragment 8,514: `.UNKNOWN_f60` in 5,332 blocks = a TEX form with bit 10 set beside the decoded bound 0xb60, fields unknown without
+nvdisasm; `TEX.SCR.B.DC.NODEP` bindless handle form in 4,336; `S2R SR_VARIABLE_RATE` 350), 822 exceptions (815 stage 6/7 blocks "without
+code": Foliage/Terrain programs are stages {6, 7, 1}, probably task/mesh; 7 GotoElimination NullReference). Draws that need them are skipped.
+
+**Shader compilation screen (user requirement: no shader-compile stutter in game)**: `nxrt::nvn::shader_setup_before_start`
+(`runtime/src/gfx/nvn/nvn_setup.cpp`, called from `game_main.cpp` before the game window opens): a Win32 "Preparing shaders" window that
+(1) translates every corpus block without a `results.tsv` row through the cache's own `--serve` translator (corpus "C" requests,
+all cores but two) and (2) runs the shader preparation (`run_shader_prepare` in game_main: headless device, pipeline parts of
+`<cache>/../programs.bin` into `pipeline_cache.bin`) unless `prepare.state` says `complete: 1`. No work: no window. Closing it ends the
+process; the next start resumes. `[nvn] setup_on_start = false` skips it. The freeze watchdog is paused while it runs.
+`programs.bin` comes from `tools/shaders/scripts/bnsh_programs.py --romfs <romfs> --out <cache>/../programs.bin` (BNSH program records
+in Shader/, Layout2Shader/ (the UI), Effect/ (vsetb); records of one program are 0x40 apart; 39,363 vertex+fragment programs, 100 s).
+Without the preparation the game queues ~4,400 programs at boot and the Arc driver needs ~350 ms per pipeline part on the background
+threads: black screen and 9-18 fps for minutes (boot 23). The preparation runs at ~34 programs/s on this machine (~20 min).
 
 Hardware of this machine: Intel Core Ultra 5 125H, integrated Intel Arc graphics (driver Vulkan 1.4.325, 8.8 GiB shared), 16 GB
 RAM shared with the GPU. Expect GPU-bound performance; the README's minimum is a Vulkan 1.3 GPU and 16 GB.
@@ -115,7 +128,48 @@ Open points besides the milestones:
   Oracles, from `recomp\`: `..\tools\.venv\Scripts\python oracle/difftest/difftest.py all`, `oracle/e2e/run_e2e.py`,
   `oracle/hooks/test_hooks.py`; runtime tests `runtime\scripts\build.ps1 -Test`.
 
+## Artifacts (the user wants every one fixed; add each one seen, mark it fixed with the cause)
+
+| # | Where | What | State |
+|---|---|---|---|
+| A1 | title, intro | UI text invisible ("press a button" plate, likely the intro subtitles). Layout2 text is rendered on the GPU into sparse (virtual-pool) render targets: glyph pass vs `a6e1624c` fs `2488ab4f` (font atlas R8 256x46 + 4x4 white) into RGBA8 (e.g. 242x40), then R8 passes (fs `1d8ac4b3`, `78ed7ef1`) into the R8 text texture the composite (fs `7c4fccd6`) samples. The glyph pass already writes (almost) nothing: its vs reads glyph data from two storage buffers (c0 words 0x74/0x5c = vertex bindings 12 and 6) and cb7. Next: check those storage buffers in a trace (`ssbo` lines, added) | open |
+| A2 | title | black background: the title is a movie. Fixed: AV1 on dav1d (below) and the NDVE model hidden | fixed |
+| A3 | title | faint vertical stripes in the logo/smoke area (x 340-940), seen over the black background; not seen over the movie | check again |
+| A4 | title -> A | the screen stayed black after A: the game waited for the title movie (no video decoder). Fixed with A2; A now leads into the intro (tapestry movie) | fixed |
+| A5 | setup window | blurry (DPI-virtualised) | fixed in code (per-monitor DPI), not yet seen |
+| A6 | all | Opus audio is silent: `hwopus` (IHardwareOpusDecoder) "decodes silence" (no Opus decoder in the runtime). vcpkg `opus:x64-windows-static` would give one | open |
+
+**Movies** (`romfs/Event/Movie/*.webm`, 26 files, 1.6 GB) are **AV1** in WebM (mime `video/av01`), decoded by nn::codec on the host: libvpx
+(VP9/VP8) and **dav1d 1.5.4** (AV1), both static from the repo-local vcpkg (`tools\vcpkg`, git-ignored; the user ran the bootstrap and
+`vcpkg install libvpx:x64-windows-static`; `vcpkg install dav1d:x64-windows-static` ran from here). `runtime/cmake/media_deps.cmake` finds
+both in `tools/vcpkg/installed/x64-windows-static` (reconfigure: `cmake game-build\build\release`). `video_codec.cpp` now has the SDK 22
+names (AV1 `By{Transfer,Remote}Memory`, the 1-argument `Get*SubmissionReadyEvent`, `UnregisterAv1DecoderBuffer`, image calls without
+CodecMode) and decodes **lazily** (packets queued, decoded when an output buffer waits: OoT submits the whole file at once, 10 GB of
+pictures otherwise). The movie player also runs **NDVE** (an NVIDIA video-enhancement network, `romfs/Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs`,
+parsed at main+0x20e4d20): it needs NVN2 device info 0x67 (=256; the runtime now answers 0x62-0xA9 with the sdk's constants, read from
+sdk+0x656210/0x648380) and then costs ~100 ms of GPU time per frame on this iGPU (8 fps). Without the file the player shows the decoded
+frames directly, so OoT's title profile hides it (`TitleProfile::romfs_hide`, `[title] romfs_hide`).
+
+**Play mode / frame hook:** OoT's frame update is main+0x3b4ea90 (entryhook in `main.sites`; the framework's per-frame virtual, vtable
+0x4c63f80 +224, called by the endless loop main+0x9467b0; the base class's +224 0x346c8d0 is never called). `runtime/games/oot/oot_game.cpp`
+registers it plus factory key bindings (WASD move, arrows camera, Enter/E/Space A, Shift/Backspace/left mouse B, Q ZL, F R, R/T X/Y,
+G ZR, Escape +); pads keep the console layout (the base engine maps SDL gamepads to a Pro Controller). A deleted `controls.ini` in the
+game folder is rewritten from the factory text.
+
+**Performance notes so far:** the lifted code is built for baseline x86-64, so every FMADD is a CRT `fmaf` call (software FMA): a worker
+spent its time in `fmaf` in main+0x370a5a0. `/arch:AVX2`-style flags (FMA3) would need a full rebuild. `[nvn] compute_shadows` copies
+every storage buffer of a dispatch to device-local memory and back (40 GB in 10 s during NDVE): pointless on an integrated GPU.
+
 ## Techniques that worked
+
+- Bring-up probes without a full main rebuild: `entryhook <addr>` in `main.sites` (one shard recompiles) plus
+  `NXRT_DIAG_TRACE_SITES=<addr,...>` and `NXRT_DIAG_TRACE_PEEK=x1+4,...`: logs registers at each function entry (trace_sites now also
+  registers entry hooks). Remove the probe sites again afterwards.
+- Name NVN calls the game makes through its proc globals: `peek <GOT slot> 8 0` in an MCP `launch` script (with
+  `settings {"diag.watchdog_seconds": -1}`), then look the thunk address up in a debug log (`nvnDeviceGetProcAddress("...") -> 0x74...`).
+- Trace a frame range: `NXRT_NVN_TRACE_FRAME=1560-1700` (ranges now work; slow: every traced frame writes its targets as PNG into the
+  game folder); `NXRT_NVN_TRACE_TEX_EVENTS=2` logs init/upload/render-target events of every sparse texture.
+- Thread dumps of a running game: create the file `game-build\build\release\dump_threads` (the watchdog writes all stacks to the log).
 
 - Name an import of main: lifted stub `void f_<plt>(Ctx*) { host_import(c, NX_IMPORT_ID(0, N)); }` -> N is the index into main's
   `img.symbols()` (`nxrecomp.program.open_image`); demangle with `tools\llvm\bin\llvm-cxxfilt.exe` (absolute path).

@@ -299,6 +299,16 @@ TitleProfile load_profile() {
     p.main_thread_priority = static_cast<int>(config_get_int("title", "main_thread_priority", p.main_thread_priority));
     p.main_thread_core = static_cast<int>(config_get_int("title", "main_thread_core", p.main_thread_core));
     p.system_resource_size = static_cast<uint64_t>(config_get_int("title", "system_resource_size", static_cast<int64_t>(p.system_resource_size)));
+    if (config_has("title", "romfs_hide")) {   // a comma list replaces the game's own
+        p.romfs_hide.clear();
+        const std::string list = config_get_str("title", "romfs_hide", "");
+        for (size_t i = 0; i < list.size();) {
+            size_t j = list.find(',', i);
+            if (j == std::string::npos) j = list.size();
+            if (j > i) p.romfs_hide.push_back(list.substr(i, j - i));
+            i = j + 1;
+        }
+    }
 
     // Language: [system] language of the game ini, else the player's pick in controls.ini, else the Windows display language; "auto" or empty
     // passes to the next. A language the title lacks falls to its nearest sibling, else American English.

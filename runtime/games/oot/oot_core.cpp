@@ -32,6 +32,9 @@ void title_defaults(services::TitleProfile& p) {
     p.user_nickname = "Player";
     p.user_uid_hi = 0x0000000000000001ull;
     p.user_uid_lo = 0x4f4f545265636d70ull;     // "OOTRecmp"
+    // The movies' NDVE enhancement network (main+0x20e4d20 parses this file): run as translated compute shaders it costs ~100 ms per frame on an
+    // integrated GPU (title at 8 fps). Without the file the player shows the decoded AV1 frames directly (the title movie at full speed).
+    p.romfs_hide = {"/Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs"};
 }
 
 }  // namespace

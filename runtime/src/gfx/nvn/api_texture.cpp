@@ -67,6 +67,8 @@ uint64_t linear_layer_bytes(const TextureBuilderInfo& b, const TexLayout& L) {
 // What a texel call works on: the texture, its layout, and the level and layer the view selects.
 struct Target {
     Texture* t = nullptr;
+    uint8_t* mem = nullptr;           // the storage: the texture's memory, or for a sparse texture a copy of its mapped tiles (sparse_buf)
+    std::vector<uint8_t> sparse_buf;  // written back to the tiles by the texel write (texture_scatter_virtual)
     TexLayout L;
     uint32_t level = 0, layer = 0;
     bool ok = false;   // false: no storage, unknown layout or a view out of range (the call does nothing)
@@ -76,7 +78,10 @@ struct Target {
 Target resolve(const NVNtexture* texture, const NVNtextureView* view) {
     Target r;
     r.t = tex_of(texture);
-    if (!r.t || !r.t->mem) return r;
+    if (!r.t) return r;
+    r.mem = r.t->mem;
+    if (!r.mem && r.t->vpool && be::texture_gather_virtual(*r.t, r.sparse_buf)) r.mem = r.sparse_buf.data();   // sparse: Layout2's text textures
+    if (!r.mem) return r;
     r.L = be::compute_texture_layout(r.t->b);
     if (!r.L.valid) return r;
     r.ok = select_level_layer(r.L, view, r.level, r.layer);
@@ -116,7 +121,7 @@ void write_block_linear(const Target& r, const NVNcopyRegion& g, const uint8_t* 
     const uint32_t z0 = r.is3d() ? static_cast<uint32_t>(g.zoffset) : 0, nz = r.is3d() ? static_cast<uint32_t>(g.depth) : 1;
     const uint64_t slice = static_cast<uint64_t>(lv.linear_row_stride) * lv.blocks_y;
 
-    uint8_t* tiled = r.t->mem + r.layer * r.L.layout.tiled_layer_stride + lv.tiled_offset;
+    uint8_t* tiled = r.mem + r.layer * r.L.layout.tiled_layer_stride + lv.tiled_offset;
     std::vector<uint8_t> lin(lv.linear_slice_size);
     tegra::untile_level(r.L.desc, lv, tiled, lin.data());
     for (uint32_t z = 0; z < nz; ++z)
@@ -136,7 +141,7 @@ void read_block_linear(const Target& r, const NVNcopyRegion& g, uint8_t* dst, in
     const uint32_t z0 = r.is3d() ? static_cast<uint32_t>(g.zoffset) : 0, nz = r.is3d() ? static_cast<uint32_t>(g.depth) : 1;
     const uint64_t slice = static_cast<uint64_t>(lv.linear_row_stride) * lv.blocks_y;
 
-    const uint8_t* tiled = r.t->mem + r.layer * r.L.layout.tiled_layer_stride + lv.tiled_offset;
+    const uint8_t* tiled = r.mem + r.layer * r.L.layout.tiled_layer_stride + lv.tiled_offset;
     std::vector<uint8_t> lin(lv.linear_slice_size);
     tegra::untile_level(r.L.desc, lv, tiled, lin.data());
     for (uint32_t z = 0; z < nz; ++z)
@@ -156,7 +161,7 @@ void write_linear(const Target& r, const NVNcopyRegion& g, const uint8_t* src, i
     const uint64_t bx0 = static_cast<uint64_t>(g.xoffset) / bw, by0 = static_cast<uint64_t>(g.yoffset) / bh;
     const uint64_t nbx = div_up(g.width, bw), nby = div_up(g.height, bh);
     const uint32_t z0 = r.is3d() ? static_cast<uint32_t>(g.zoffset) : 0, nz = r.is3d() ? static_cast<uint32_t>(g.depth) : 1;
-    uint8_t* base = r.t->mem + r.layer * linear_layer_bytes(b, r.L);
+    uint8_t* base = r.mem + r.layer * linear_layer_bytes(b, r.L);
     for (uint32_t z = 0; z < nz; ++z)
         for (uint32_t y = 0; y < nby; ++y) {
             uint8_t* d = base + (z0 + z) * rows * pitch + (by0 + y) * pitch + bx0 * bpb;
@@ -172,7 +177,7 @@ void read_linear(const Target& r, const NVNcopyRegion& g, uint8_t* dst, int64_t 
     const uint64_t bx0 = static_cast<uint64_t>(g.xoffset) / bw, by0 = static_cast<uint64_t>(g.yoffset) / bh;
     const uint64_t nbx = div_up(g.width, bw), nby = div_up(g.height, bh);
     const uint32_t z0 = r.is3d() ? static_cast<uint32_t>(g.zoffset) : 0, nz = r.is3d() ? static_cast<uint32_t>(g.depth) : 1;
-    const uint8_t* base = r.t->mem + r.layer * linear_layer_bytes(b, r.L);
+    const uint8_t* base = r.mem + r.layer * linear_layer_bytes(b, r.L);
     for (uint32_t z = 0; z < nz; ++z)
         for (uint32_t y = 0; y < nby; ++y) {
             const uint8_t* s = base + (z0 + z) * rows * pitch + (by0 + y) * pitch + bx0 * bpb;
@@ -183,6 +188,7 @@ void read_linear(const Target& r, const NVNcopyRegion& g, uint8_t* dst, int64_t 
 void write_texels(const Target& r, const NVNcopyRegion& g, const uint8_t* src, int64_t row, int64_t image) {
     if (r.L.block_linear) write_block_linear(r, g, src, row, image);
     else write_linear(r, g, src, row, image);
+    if (!r.sparse_buf.empty()) be::texture_scatter_virtual(*r.t, r.sparse_buf);
     be::tev(r.t, "write_texels");
     be::tx_mark("tx.write", r.t);
     r.t->cpu_dirty.store(true);

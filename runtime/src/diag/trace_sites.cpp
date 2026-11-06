@@ -3,7 +3,7 @@
 // logs x0-x3, x19-x20, lr and sp the first [diag] trace_limit (default 50) times per site,
 // then on every power-of-two hit (with the hit number), so a site that keeps running stays visible. [diag] trace_peek (NXRT_DIAG_TRACE_PEEK)
 // = "x1+0x30,x0+0x18,sp+0x10" adds the 64-bit words at those register-relative addresses to every line. The lifter emits a site only where main.sites asks for
-// one (`midhook <addr>`), so list the same addresses there and re-lift. Answers "which branch did the game take" without a debugger.
+// one (`midhook <addr>`, or `entryhook <addr>` at a function start: only that shard recompiles), so list the same addresses there and re-lift. Answers "which branch did the game take" without a debugger.
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -81,7 +81,12 @@ void trace_sites_install() {
         if (j == std::string::npos) j = list.size();
         if (j > i) {
             const uint64_t a = std::strtoull(list.substr(i, j - i).c_str(), nullptr, 0);
-            if (a) { hook_add_mid(a, trace_site, new unsigned(0)); ++n; }
+            if (a) {   // a midhook site or a function with an entryhook site (main.sites): whichever the lifted code has calls it
+                unsigned* hits = new unsigned(0);
+                hook_add_mid(a, trace_site, hits);
+                hook_add_entry(a, trace_site, hits);
+                ++n;
+            }
         }
         i = j + 1;
     }

@@ -18,6 +18,7 @@
 
 #include "nvn_shaders.h"
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/log.h"
 #include "nxrt/nvn_backend.h"
 
@@ -140,6 +141,7 @@ LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 HWND open_window() {
+    SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);   // sharp text: paint() scales by the window's DPI
     WNDCLASSW wc{};
     wc.lpfnWndProc = wndproc;
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -191,6 +193,8 @@ bool shader_setup_before_start(const char* title, const ShaderSetupPrepare& prep
     if (!g.title.empty()) g.title.pop_back();   // the terminator
     g.steps = (missing.empty() ? 0 : 1) + (want_prepare ? 1 : 0);
     NXLOG_I("setup", "preparing shaders before the start: %zu blocks to translate%s", missing.size(), want_prepare ? ", then the shader parts" : "");
+    const bool watchdog = watchdog_running();   // no frames while this runs: not a freeze
+    if (watchdog) watchdog_stop();
     g_wnd = open_window();
     bool ok = true;
     std::thread worker([&] {
@@ -227,6 +231,7 @@ bool shader_setup_before_start(const char* title, const ShaderSetupPrepare& prep
     }
     worker.join();
     g_wnd = nullptr;
+    if (watchdog) watchdog_start();
     if (g.cancel) {
         NXLOG_I("setup", "shader preparation stopped by the player: the game does not start");
         return false;

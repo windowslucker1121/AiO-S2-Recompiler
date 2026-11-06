@@ -12,6 +12,7 @@
 // `save` it last switched away through: FiberType +80, or a stack-local FiberType for a thread's own context).
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -46,6 +47,7 @@ std::unordered_map<uint64_t, HostFiber*> g_by_slot;   // context slot -> the fib
 thread_local HostFiber* t_cur = nullptr;               // the fiber running on this thread (null until it first switches)
 thread_local HostFiber* t_thread = nullptr;            // this thread's own context as a fiber
 SIZE_T g_stack_reserve = 64u << 20;
+std::atomic<uint64_t> g_switches{0}, g_made{0};          // logged at every power of two
 
 uint64_t& guest64(uint64_t addr) { return *reinterpret_cast<uint64_t*>(static_cast<uintptr_t>(addr)); }
 
@@ -75,6 +77,8 @@ int dispatch_fiber_context(::Ctx* c, uint64_t, void*) {
     guest64(save) = frame;
 
     HostFiber* next = nullptr;
+    const uint64_t n = ++g_switches;
+    if ((n & (n - 1)) == 0) NXLOG_I("fiber", "%llu switches, %llu fibers made", static_cast<unsigned long long>(n), static_cast<unsigned long long>(g_made.load()));
     {
         std::lock_guard<std::mutex> lk(g_mu);
         g_by_slot[save] = cur;
@@ -89,6 +93,7 @@ int dispatch_fiber_context(::Ctx* c, uint64_t, void*) {
             }
             // ponytail: a finished fiber whose slot is never reused keeps its host stack; hook nn::os::FinalizeFiber if that adds up
             next = new HostFiber;
+            ++g_made;
             next->own = std::make_unique<::Ctx>();
             std::memset(next->own.get(), 0, sizeof(::Ctx));
             next->ctx = next->own.get();

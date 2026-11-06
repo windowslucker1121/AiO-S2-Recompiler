@@ -22,6 +22,7 @@
 
 #include "nxrt/diag.h"
 #include "nxrt/log.h"
+#include "nxrt/services.h"
 #include "nxrt/write_watch.h"
 
 namespace nxrt::services::fs {
@@ -136,6 +137,12 @@ bool scan(Node& dir, std::string& msg) {
         Node k;
         k.name = name;
         k.path = dir.path + "/" + name;
+        const std::vector<std::string>& hide = profile().romfs_hide;
+        if (std::find(hide.begin(), hide.end(), k.path) != hide.end()) {   // [title] romfs_hide: not in the served RomFS
+            NXLOG_I("fs", "romfs: %s left out ([title] romfs_hide)", k.path.c_str());
+            it.increment(ec);
+            continue;
+        }
         if (k.path.size() > kMaxPath) {
             msg = "path too long for a RomFS (0x300 bytes): " + k.path;
             return false;

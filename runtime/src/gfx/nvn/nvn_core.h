@@ -230,6 +230,8 @@ bool texture_gather_virtual(const Texture& t, std::vector<uint8_t>& out);
 // Copies [at, at + len) of a sparse texture's storage out of the mapped tiles into dst (unmapped bytes are zeros). Returns true when the
 // whole range is mapped.
 bool texture_read_virtual(const Texture& t, uint64_t at, uint64_t len, uint8_t* dst);
+// Writes a buffer of the whole storage (texture_gather_virtual's layout) back into the mapped tiles: CPU texel writes to a sparse texture.
+bool texture_scatter_virtual(const Texture& t, const std::vector<uint8_t>& in);
 // The physical memory behind each 64 KiB tile of a sparse texture's storage (null: not mapped as one piece); a later map wins.
 void texture_virtual_tile_ptrs(const Texture& t, std::vector<const uint8_t*>& out);
 // Another initialized texture whose storage starts at the same address and has the same shape (target, size, levels, format, layout),

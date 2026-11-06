@@ -6,7 +6,8 @@
 # NXRT_LIBVPX_ROOT points at that install (default: C:/vcpkg, then $VCPKG_ROOT) (the folder with include/vpx and lib/vpx.lib). Without it the runtime builds without the
 # decoders (NXRT_HAVE_LIBVPX=0) and Switch 2 movies are left out.
 set(NXRT_LIBVPX_ROOT "" CACHE PATH "vcpkg x64-windows-static install with libvpx (include/vpx, lib/vpx.lib); empty: look in the usual places")
-set(_nxrt_vpx_roots "${NXRT_LIBVPX_ROOT}" "C:/vcpkg/installed/x64-windows-static")
+set(_nxrt_vpx_roots "${NXRT_LIBVPX_ROOT}" "${CMAKE_CURRENT_LIST_DIR}/../../tools/vcpkg/installed/x64-windows-static"   # repo-local vcpkg (git-ignored)
+    "C:/vcpkg/installed/x64-windows-static")
 if(DEFINED ENV{VCPKG_ROOT})
     list(APPEND _nxrt_vpx_roots "$ENV{VCPKG_ROOT}/installed/x64-windows-static")
 endif()
@@ -22,4 +23,17 @@ if(NXRT_LIBVPX_INCLUDE AND NXRT_LIBVPX_LIB)
 else()
     message(STATUS "nxrt: libvpx not found (looked in: ${_nxrt_vpx_roots}): no host video decoders")
     target_compile_definitions(nxrt PRIVATE NXRT_HAVE_LIBVPX=0)
+endif()
+
+# dav1d (BSD-2-Clause) for the AV1 decoder (Ocarina of Time's movies are AV1), from the same vcpkg install: vcpkg install dav1d:x64-windows-static.
+# Used only together with libvpx (the decoders share video_codec.cpp's host side).
+find_path(NXRT_DAV1D_INCLUDE dav1d/dav1d.h PATHS ${_nxrt_vpx_inc} NO_DEFAULT_PATH)
+find_library(NXRT_DAV1D_LIB NAMES dav1d libdav1d PATHS ${_nxrt_vpx_lib} NO_DEFAULT_PATH)
+if(NXRT_LIBVPX_INCLUDE AND NXRT_LIBVPX_LIB AND NXRT_DAV1D_INCLUDE AND NXRT_DAV1D_LIB)
+    message(STATUS "nxrt: dav1d ${NXRT_DAV1D_LIB} (host AV1 decoder)")
+    target_include_directories(nxrt SYSTEM PRIVATE "${NXRT_DAV1D_INCLUDE}")
+    target_link_libraries(nxrt PUBLIC "${NXRT_DAV1D_LIB}")
+    target_compile_definitions(nxrt PRIVATE NXRT_HAVE_DAV1D=1)
+else()
+    target_compile_definitions(nxrt PRIVATE NXRT_HAVE_DAV1D=0)
 endif()

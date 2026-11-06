@@ -146,7 +146,12 @@ NVNboolean nvnProgramSetShaders(NVNprogram* program, int count, const NVNshaderD
                 std::snprintf(p->missing + used, sizeof p->missing - used, "%s%s", used ? "," : "", key.c_str());
             }
             all_found = false;
-            if (!code || !control) addresses_ok = false;
+            if (!code || !control) {
+                addresses_ok = false;
+                if (first_report("null:" + std::to_string(k) + ":" + std::to_string(count)))
+                    NXLOG_W("nvn", "nvnProgramSetShaders: stage %d of %d has code %llx control %p (null): SetShaders fails", k, count,
+                            static_cast<unsigned long long>(shaders[k].data), shaders[k].control);
+            }
             continue;
         }
         const int stage = nvn_stage_of(si->stage);
@@ -262,7 +267,10 @@ NVNboolean nvnProgramInitializeFromBuilder(NVNprogram* program, const NVNprogram
     if (!nvnProgramInitialize(program, nullptr)) return 0;
     nvnProgramSetSampleShading(program, static_cast<int>(sample));
     if (count <= 0) return 1;
-    return nvnProgramSetShaders(program, count, reinterpret_cast<const NVNshaderData*>(static_cast<uintptr_t>(shaders)));
+    const NVNboolean ok = nvnProgramSetShaders(program, count, reinterpret_cast<const NVNshaderData*>(static_cast<uintptr_t>(shaders)));
+    if (!ok && first_report("from_builder"))
+        NXLOG_W("nvn", "nvnProgramInitializeFromBuilder: %d shaders at %llx: SetShaders failed", count, static_cast<unsigned long long>(shaders));
+    return ok;
 }
 
 // NVN 55 name the game asks for and never calls (signature assumed): the sub-tile size is not modelled; it reports 0 x 0.

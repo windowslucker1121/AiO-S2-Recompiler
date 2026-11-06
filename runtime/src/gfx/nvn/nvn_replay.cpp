@@ -1493,6 +1493,15 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                 }
                 case NvnSource::StorageBuffer: {
                     const int slot = b.nvn.index >= 0 ? b.nvn.index : storage_slot_for(d.nvn_stage, b.nvn.c0_offset);   // NVN2 compute: index from the c[0] table
+                    if (g_trace) {
+                        const bool bound = slot >= 0 && slot < 16 && S.ssbo[d.nvn_stage][slot].addr;
+                        const uint64_t a = bound ? S.ssbo[d.nvn_stage][slot].addr : 0, sz = bound ? S.ssbo[d.nvn_stage][slot].size : 0;
+                        std::string words;
+                        if (const uint8_t* p = bound ? host_ptr(a) : nullptr)
+                            for (int k = 0; k < 16 && static_cast<uint64_t>(k) * 4 < sz; ++k) { char w[12]; std::snprintf(w, sizeof w, " %08x", reinterpret_cast<const uint32_t*>(p)[k]); words += w; }
+                        TRACE("    ssbo %s stage %d slot %d (c0 0x%x) %s %llx/%llu:%s", b.name.c_str(), d.nvn_stage, slot, b.nvn.c0_offset, bound ? "bound" : "NOT BOUND",
+                              static_cast<unsigned long long>(a), static_cast<unsigned long long>(sz), words.c_str());
+                    }
                     if (slot >= 0 && slot < 16 && S.ssbo[d.nvn_stage][slot].addr) {
                         const GState::Bind& bind = S.ssbo[d.nvn_stage][slot];
                         BufRef br = resolve_buffer(bind.addr, bind.size);
@@ -3567,6 +3576,7 @@ void run_list(const CmdList& list, int depth) {
                     S.color_level[i] = hv && v.has_levels ? static_cast<uint32_t>(v.min_level) : 0;
                     S.color_layer[i] = hv && v.has_layers ? static_cast<uint32_t>(v.min_layer) : 0;
                     S.color_layers[i] = hv && v.has_layers ? static_cast<uint32_t>(v.num_layers) : (S.color_tex[i] ? static_cast<uint32_t>(S.color_tex[i]->layers) : 0u);
+                    if (S.color_tex[i]) tev(S.color_tex[i].get(), "render_target", i, 0);
                 }
                 S.depth_tex = Ref<Texture>::share(p.depth.tex);
                 S.depth_view = p.depth.view;
@@ -3850,15 +3860,19 @@ void replay_begin_submit(Frame& f) {
     tex_poll_cpu_writes();
     if (extras::LowLatency* ll = extras::lowlat()) ll->submit_begin();     // RENDERSUBMIT_START of the frame (S14)
     if (g_trace_frame == -2) {
-        // [nvn] trace_frame = "6050" or "6050,9300": every listed presented frame is traced (the first one is the main one)
+        // [nvn] trace_frame = "6050", "6050,9300" or a range "1590-1660": every listed presented frame is traced (the first one is the main one)
         const std::string list = nxrt::config_get_str("nvn", "trace_frame", "");
         g_trace_frame = -1;
         size_t i = 0;
         while (i < list.size()) {
             size_t j = list.find(',', i);
             if (j == std::string::npos) j = list.size();
-            const long long v = std::atoll(list.substr(i, j - i).c_str());
-            if (g_trace_frame < 0) g_trace_frame = v; else g_trace_extra.push_back(v);
+            const std::string item = list.substr(i, j - i);
+            const size_t dash = item.find('-', 1);
+            const long long lo = std::atoll(item.c_str()), hi = dash == std::string::npos ? lo : std::atoll(item.c_str() + dash + 1);
+            for (long long v = lo; v <= hi; ++v) {
+                if (g_trace_frame < 0) g_trace_frame = v; else g_trace_extra.push_back(v);
+            }
             i = j + 1;
         }
     }

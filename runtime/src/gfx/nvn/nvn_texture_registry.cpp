@@ -40,9 +40,13 @@ void tx_mark(const char* what, const Texture* t) {
 }
 
 void tev(const Texture* t, const char* what, uint64_t a, uint64_t b) {
-    static const bool on = nxrt::config_get_int("nvn", "trace_tex_events", 0) != 0;
-    if (!on || !t || !t->fmt || t->b.width != 128 || t->layers != 6 || t->levels != 8) return;
-    NXLOG_I("nvn.tev", "t%u %s mem %p size %llu: %llx %llx", t->id, what, static_cast<const void*>(t->mem), static_cast<unsigned long long>(t->storage_size),
+    // 1: the 128 x 128 six-layer eight-level textures; 2: sparse textures (a virtual pool's), e.g. Layout2's text textures
+    static const int64_t mode = nxrt::config_get_int("nvn", "trace_tex_events", 0);
+    if (!mode || !t || !t->fmt) return;
+    if (mode == 1 && (t->b.width != 128 || t->layers != 6 || t->levels != 8)) return;
+    if (mode == 2 && !t->vpool) return;
+    NXLOG_I("nvn.tev", "t%u %s %ux%u fmt %s mem %p size %llu: %llx %llx", t->id, what, t->b.width, t->b.height, t->fmt->name, static_cast<const void*>(t->mem),
+            static_cast<unsigned long long>(t->storage_size),
             static_cast<unsigned long long>(a), static_cast<unsigned long long>(b));
 }
 
@@ -115,6 +119,13 @@ bool texture_gather_virtual(const Texture& t, std::vector<uint8_t>& out) {
     out.assign(static_cast<size_t>(t.storage_size), 0);
     for (const VSeg& s : segs) std::memcpy(out.data() + s.at, s.ptr, static_cast<size_t>(s.len));
     return true;
+}
+
+bool texture_scatter_virtual(const Texture& t, const std::vector<uint8_t>& in) {
+    std::vector<VSeg> segs;
+    if (!virtual_segments(t, segs) || in.size() < t.storage_size) return false;
+    for (const VSeg& s : segs) std::memcpy(const_cast<uint8_t*>(s.ptr), in.data() + s.at, static_cast<size_t>(s.len));
+    return !segs.empty();
 }
 
 bool texture_read_virtual(const Texture& t, uint64_t at, uint64_t len, uint8_t* dst) {

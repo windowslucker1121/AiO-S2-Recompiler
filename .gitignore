@@ -30,3 +30,4 @@ obj/
 __pycache__/
 /tools/llvm/
 /tools/sccache/
+/tools/vcpkg/

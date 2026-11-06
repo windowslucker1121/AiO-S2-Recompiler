@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// nn::codec hardware video decoders (VP9, VP8) + their fences on the host, decoding with libvpx. See include/nxrt/video_codec.h.
+// nn::codec hardware video decoders (VP9, VP8, AV1) + their fences on the host, decoding with libvpx and dav1d (AV1: Ocarina of Time's
+// movies). See include/nxrt/video_codec.h. The AV1 calls take the VP9 shapes except: GetAv1DecoderSubmissionReadyEvent(dec) returns the event,
+// InitializeAv1DecoderByRemoteMemory has no extra size_t, and UnregisterAv1DecoderBuffer(dec, index) exists.
 //
 // Calling conventions, read off Pokopia's subsdk0 (movie::detail::*, which forwards its registers unchanged to nn::codec) and off the
 // mangled names (Mario Kart World's variants differ where noted):
@@ -54,6 +56,9 @@
 #include <vpx/vp8dx.h>
 #include <vpx/vpx_decoder.h>
 #endif
+#if NXRT_HAVE_LIBVPX && NXRT_HAVE_DAV1D
+#include <dav1d/dav1d.h>
+#endif
 
 namespace nxrt::media {
 
@@ -70,6 +75,7 @@ constexpr uint64_t kEvtMarker = 0x4e58524353594e43ull;    // "NXRCSYNC" at +0x60
 constexpr uint64_t kSyncMarker = 0x4e58435600000000ull;   // "NXCV" in the high half of a fence handle's first word
 constexpr uint32_t kManualClear = 0;                      // nn::os::EventClearMode_ManualClear
 constexpr size_t kBacklog = 3;                            // decoded pictures waiting for a buffer before input stops being "ready"
+constexpr size_t kPacketBacklog = 32;                     // packets not decoded yet (decoding waits for an output buffer) before the same
 
 bool g_log = false;
 int g_threads = 4;
@@ -178,17 +184,26 @@ struct BufInfo {
     int64_t pts = 0;
     bool eos = false;
 };
+struct Packet {   // submitted, decoded once an output buffer waits for a picture (so decoded pictures never pile up)
+    std::vector<uint8_t> data;
+    int64_t pts = 0;
+    bool eos = false;
+};
 struct Decoder {
     uint32_t id = 0;
-    int codec = 9;
+    int codec = 9;                                        // 9 VP9, 8 VP8, 1 AV1
     std::mutex mu;
     vpx_codec_ctx_t vpx{};
-    bool vpx_ok = false;
+#if NXRT_HAVE_DAV1D
+    Dav1dContext* av1 = nullptr;
+#endif
+    bool vpx_ok = false;                                  // the codec library's decoder is open (libvpx or dav1d)
     std::map<uint32_t, uint64_t> pools;                   // buffer index -> guest pool
     std::map<uint32_t, BufInfo> info;                     // buffer index -> picture properties
     std::deque<uint32_t> free;                            // registered or released, not acquired
     std::deque<std::pair<uint32_t, uint64_t>> waiting;    // acquired buffers without a picture yet (index, fence sequence)
     std::deque<Picture> ready;                            // decoded pictures without a buffer yet
+    std::deque<Packet> packets;                           // submitted, not decoded yet
     uint64_t next_seq = 1;
     std::atomic<uint64_t> done_seq{0};
     alignas(16) uint8_t submit_event[0x100]{};            // the guest os::SystemEventType handed out as "submission ready"
@@ -219,6 +234,18 @@ bool fence_done(uint64_t w0, uint64_t seq) {
 }
 
 bool vpx_open(Decoder& d) {
+#if NXRT_HAVE_DAV1D
+    if (d.codec == 1) {
+        Dav1dSettings s;
+        dav1d_default_settings(&s);
+        s.n_threads = g_threads;
+        s.max_frame_delay = 1;   // a picture per packet, as the player expects of the console decoder
+        const int e = dav1d_open(&d.av1, &s);
+        d.vpx_ok = e == 0;
+        if (!d.vpx_ok) note_error("decoder %u: dav1d_open failed (%d)", d.id, e);
+        return d.vpx_ok;
+    }
+#endif
     vpx_codec_dec_cfg_t cfg{};
     cfg.threads = static_cast<unsigned>(g_threads);
     const vpx_codec_err_t e = vpx_codec_dec_init(&d.vpx, d.codec == 8 ? vpx_codec_vp8_dx() : vpx_codec_vp9_dx(), &cfg, 0);
@@ -227,6 +254,13 @@ bool vpx_open(Decoder& d) {
     return d.vpx_ok;
 }
 void vpx_close(Decoder& d) {
+#if NXRT_HAVE_DAV1D
+    if (d.codec == 1) {
+        if (d.av1) dav1d_close(&d.av1);
+        d.vpx_ok = false;
+        return;
+    }
+#endif
     if (d.vpx_ok) vpx_codec_destroy(&d.vpx);
     d.vpx_ok = false;
 }
@@ -277,6 +311,43 @@ Picture to_nv12(const vpx_image_t* img, int64_t pts) {
     return p;
 }
 
+#if NXRT_HAVE_DAV1D
+// An 8- or 10-bit 4:2:0 dav1d picture as NV12 (10-bit is cut to 8).
+bool av1_to_nv12(const Dav1dPicture& pic, Picture& p) {
+    if (pic.p.layout != DAV1D_PIXEL_LAYOUT_I420 || (pic.p.bpc != 8 && pic.p.bpc != 10)) return false;
+    const int dw = pic.p.w, dh = pic.p.h;
+    p.w = static_cast<uint16_t>((dw + 1) & ~1);
+    p.h = static_cast<uint16_t>((dh + 1) & ~1);
+    p.pts = pic.m.timestamp;
+    const size_t w = p.w, h = p.h;
+    p.nv12.assign(w * h + w * h / 2, 0);
+    const bool hi = pic.p.bpc == 10;
+    auto sample = [hi](const uint8_t* row, int x) -> uint8_t {
+        if (!hi) return row[x];
+        uint16_t v;
+        std::memcpy(&v, row + 2 * x, 2);
+        return static_cast<uint8_t>(v >> 2);
+    };
+    for (int y = 0; y < dh; y++) {
+        const uint8_t* r = static_cast<const uint8_t*>(pic.data[0]) + static_cast<ptrdiff_t>(y) * pic.stride[0];
+        if (!hi) std::memcpy(&p.nv12[y * w], r, static_cast<size_t>(dw));
+        else for (int x = 0; x < dw; x++) p.nv12[y * w + x] = sample(r, x);
+    }
+    uint8_t* uv = p.nv12.data() + w * h;
+    const int cw = (dw + 1) / 2, ch = (dh + 1) / 2;
+    for (int y = 0; y < ch; y++) {
+        const uint8_t* u = static_cast<const uint8_t*>(pic.data[1]) + static_cast<ptrdiff_t>(y) * pic.stride[1];
+        const uint8_t* v = static_cast<const uint8_t*>(pic.data[2]) + static_cast<ptrdiff_t>(y) * pic.stride[1];
+        uint8_t* o = uv + y * w;
+        for (int x = 0; x < cw; x++) {
+            o[2 * x] = sample(u, x);
+            o[2 * x + 1] = sample(v, x);
+        }
+    }
+    return true;
+}
+#endif
+
 // Copies `p` into the pool's image (at the pool's size; padding black when the picture is smaller).
 void place(Pool& pool, const Picture& p) {
     const size_t pw = pool.w ? pool.w : p.w, ph = pool.h ? pool.h : p.h;
@@ -316,7 +387,7 @@ void after_change(::Ctx* c, Decoder& d, bool fences) {
     bool signal = false;
     {
         std::lock_guard<std::mutex> lk(d.mu);
-        if (d.submit_event_made && d.started && d.ready.size() < kBacklog) {
+        if (d.submit_event_made && d.started && d.ready.size() < kBacklog && d.packets.size() < kPacketBacklog) {
             signal = d.want_submit_signal;
             d.want_submit_signal = false;
         }
@@ -324,8 +395,65 @@ void after_change(::Ctx* c, Decoder& d, bool fences) {
     if (signal) gcall(c, os().signal_sysevent, reinterpret_cast<uint64_t>(d.submit_event));
 }
 
+void keep_picture(Decoder& d, Picture&& p, unsigned w, unsigned h) {
+    if (d.pictures++ == 0)
+        NXLOG_I("vcodec", "decoder %u: first picture %ux%u (%s, %d threads)", d.id, w, h, d.codec == 1 ? "AV1" : d.codec == 8 ? "VP8" : "VP9", g_threads);
+    d.last = p.nv12;
+    d.last_w = p.w;
+    d.last_h = p.h;
+    d.ready.push_back(std::move(p));
+    s_decoded++;
+}
+
+#if NXRT_HAVE_DAV1D
+// One packet into dav1d (null data: drain), every picture it gives back into d.ready.
+void av1_decode(Decoder& d, const uint8_t* data, size_t size, int64_t pts) {
+    Dav1dData dd{};
+    if (data && size) {
+        uint8_t* buf = dav1d_data_create(&dd, size);
+        if (!buf) {
+            note_error("decoder %u: dav1d_data_create(%zu) failed", d.id, size);
+            return;
+        }
+        std::memcpy(buf, data, size);
+        dd.m.timestamp = pts;
+    }
+    for (int round = 0; round < 64; round++) {
+        if (dd.sz) {
+            const int r = dav1d_send_data(d.av1, &dd);
+            if (r < 0 && r != DAV1D_ERR(EAGAIN)) {
+                note_error("decoder %u: dav1d_send_data(%zu bytes, pts %lld) failed (%d)", d.id, size, (long long)pts, r);
+                dav1d_data_unref(&dd);
+                return;
+            }
+        }
+        for (;;) {
+            Dav1dPicture pic{};
+            const int g = dav1d_get_picture(d.av1, &pic);
+            if (g == DAV1D_ERR(EAGAIN)) break;
+            if (g < 0) {
+                note_error("decoder %u: dav1d_get_picture failed (%d)", d.id, g);
+                break;
+            }
+            Picture p;
+            if (av1_to_nv12(pic, p)) keep_picture(d, std::move(p), static_cast<unsigned>(pic.p.w), static_cast<unsigned>(pic.p.h));
+            else note_error("decoder %u: AV1 picture layout %d, %d bits not handled (4:2:0, 8 or 10 bits only)", d.id, static_cast<int>(pic.p.layout), pic.p.bpc);
+            dav1d_picture_unref(&pic);
+        }
+        if (!dd.sz) break;
+    }
+    if (dd.sz) dav1d_data_unref(&dd);
+}
+#endif
+
 void decode_into(Decoder& d, const uint8_t* data, size_t size, int64_t pts) {
     if (!d.vpx_ok && !vpx_open(d)) return;
+#if NXRT_HAVE_DAV1D
+    if (d.codec == 1) {
+        av1_decode(d, data, size, pts);
+        return;
+    }
+#endif
     const vpx_codec_err_t e = vpx_codec_decode(&d.vpx, data, static_cast<unsigned>(size), nullptr, 0);
     if (e != VPX_CODEC_OK)
         note_error("decoder %u: vpx_codec_decode(%zu bytes, pts %lld) failed: %s (%s)", d.id, size, (long long)pts, vpx_codec_err_to_string(e),
@@ -336,14 +464,30 @@ void decode_into(Decoder& d, const uint8_t* data, size_t size, int64_t pts) {
             note_error("decoder %u: picture format 0x%x not handled (8-bit 4:2:0 only)", d.id, img->fmt);
             continue;
         }
-        Picture p = to_nv12(img, pts);
-        if (d.pictures++ == 0) NXLOG_I("vcodec", "decoder %u: first picture %ux%u (VP%d, %d threads)", d.id, img->d_w, img->d_h, d.codec, g_threads);
-        d.last = p.nv12;
-        d.last_w = p.w;
-        d.last_h = p.h;
-        d.ready.push_back(std::move(p));
-        s_decoded++;
+        keep_picture(d, to_nv12(img, pts), img->d_w, img->d_h);
     }
+}
+
+// Decodes queued packets while an output buffer waits and no picture is ready, then pairs pictures with buffers. Caller holds d.mu.
+// Returns true when a fence completed.
+bool pump(Decoder& d) {
+    while (!d.waiting.empty() && d.ready.empty() && !d.packets.empty()) {
+        Packet p = std::move(d.packets.front());
+        d.packets.pop_front();
+        if (!p.data.empty()) decode_into(d, p.data.data(), p.data.size(), p.pts);
+        if (p.eos) {
+            if (d.vpx_ok) decode_into(d, nullptr, 0, p.pts);   // drain
+            Picture e;
+            e.nv12 = d.last;
+            e.w = d.last_w;
+            e.h = d.last_h;
+            e.pts = p.pts;
+            e.eos = true;
+            d.ready.push_back(std::move(e));
+            NXLOG_I("vcodec", "decoder %u: end of stream after %llu pictures", d.id, (unsigned long long)d.pictures);
+        }
+    }
+    return assign(d);
 }
 
 // ---- nn::codec handlers -----------------------------------------------------------------------------------------------------------
@@ -461,6 +605,10 @@ void create_decoder(::Ctx* c, int codec, uint32_t w, uint32_t h) {
     wr64(g, d->id);
     wr64(g + 8, kDecMarker);
     s_created++;
+#if NXRT_HAVE_DAV1D
+    if (codec == 1) NXLOG_I("vcodec", "AV1 decoder %u created (%ux%u max) on dav1d %s", d->id, w, h, dav1d_version());
+    else
+#endif
     NXLOG_I("vcodec", "VP%d decoder %u created (%ux%u max) on libvpx %s", codec, d->id, w, h, vpx_codec_version_str());
     RET(0);
 }
@@ -470,6 +618,8 @@ void init_vp9_rm2(::Ctx* c) { create_decoder(c, 9, static_cast<uint16_t>(A(3)), 
 void init_vp8_tm(::Ctx* c) { create_decoder(c, 8, static_cast<uint16_t>(A(4)), static_cast<uint16_t>(A(5))); }
 void init_vp8_rm(::Ctx* c) { create_decoder(c, 8, static_cast<uint16_t>(A(2)), static_cast<uint16_t>(A(3))); }
 void init_vp8_rm2(::Ctx* c) { create_decoder(c, 8, static_cast<uint16_t>(A(3)), static_cast<uint16_t>(A(4))); }
+void init_av1_tm(::Ctx* c) { create_decoder(c, 1, static_cast<uint16_t>(A(4)), static_cast<uint16_t>(A(5))); }
+void init_av1_rm(::Ctx* c) { create_decoder(c, 1, static_cast<uint16_t>(A(2)), static_cast<uint16_t>(A(3))); }
 
 void finalize_decoder(::Ctx* c) {
     const uint64_t g = A(0);
@@ -537,6 +687,7 @@ void flush_decoder(::Ctx* c) {
         if (!d->waiting.empty()) d->done_seq.store(d->waiting.back().second);
         d->waiting.clear();
         d->ready.clear();
+        d->packets.clear();
         vpx_close(*d);
         d->want_submit_signal = true;
     }
@@ -544,9 +695,8 @@ void flush_decoder(::Ctx* c) {
     after_change(c, *d, true);
     RET(0);
 }
-void submission_event(::Ctx* c) {   // (SystemEventType** out, dec)
-    auto d = dec_of(A(1));
-    if (!d) { if (A(0)) wr64(A(0), 0); RET(0); return; }
+// The decoder's "submission ready" system event, made on first request.
+uint64_t submit_event_of(::Ctx* c, const std::shared_ptr<Decoder>& d) {
     bool make = false;
     {
         std::lock_guard<std::mutex> lk(d->mu);
@@ -563,7 +713,25 @@ void submission_event(::Ctx* c) {   // (SystemEventType** out, dec)
         }
         if (started) gcall(c, os().signal_sysevent, ev);   // asked for after Start: input is accepted now (else Start signals it)
     }
+    return ev;
+}
+void submission_event(::Ctx* c) {   // (SystemEventType** out, dec)
+    auto d = dec_of(A(1));
+    const uint64_t ev = d ? submit_event_of(c, d) : 0;
     if (A(0)) wr64(A(0), ev);
+    RET(0);
+}
+void submission_event_av1(::Ctx* c) {   // (dec) -> SystemEventType*
+    auto d = dec_of(A(0));
+    RET(d ? submit_event_of(c, d) : 0);
+}
+void unregister_buffer(::Ctx* c) {   // (dec, index)
+    if (auto d = dec_of(A(0))) {
+        std::lock_guard<std::mutex> lk(d->mu);
+        const uint32_t index = static_cast<uint32_t>(A(1));
+        d->pools.erase(index);
+        d->free.erase(std::remove(d->free.begin(), d->free.end(), index), d->free.end());
+    }
     RET(0);
 }
 void submit(::Ctx* c) {   // (u64* out, dec, data, size, pts, eos)
@@ -578,19 +746,12 @@ void submit(::Ctx* c) {   // (u64* out, dec, data, size, pts, eos)
     bool fences = false;
     {
         std::lock_guard<std::mutex> lk(d->mu);
-        if (data && size) decode_into(*d, data, size, pts);
-        if (eos) {
-            if (d->vpx_ok) decode_into(*d, nullptr, 0, pts);   // drain
-            Picture p;
-            p.nv12 = d->last;
-            p.w = d->last_w;
-            p.h = d->last_h;
-            p.pts = pts;
-            p.eos = true;
-            d->ready.push_back(std::move(p));
-            NXLOG_I("vcodec", "decoder %u: end of stream after %llu pictures", d->id, (unsigned long long)d->pictures);
-        }
-        fences = assign(*d);
+        Packet p;
+        if (data && size) p.data.assign(data, data + size);
+        p.pts = pts;
+        p.eos = eos;
+        d->packets.push_back(std::move(p));
+        fences = pump(*d);
         d->want_submit_signal = true;
     }
     static std::atomic<uint32_t> first_submits{0};
@@ -614,7 +775,7 @@ void acquire_output(::Ctx* c) {   // (u32* index, NativeSyncHandle* fence, dec)
             d->free.pop_front();
             seq = d->next_seq++;
             d->waiting.emplace_back(index, seq);
-            fences = assign(*d);
+            fences = pump(*d);
         }
     }
     if (A(0)) wr32(A(0), index);
@@ -873,6 +1034,31 @@ const Import kImports[] = {
     // H.264 / AV1: not decoded here (a clear error instead of the console driver path)
     {"_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm", unsupported_codec},
     {"_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm", unsupported_codec},
+    // SDK 22 (Ocarina of Time): the image calls without CodecMode, the decoders "By{Transfer,Remote}Memory" with an output mode, and the
+    // submission-ready event returned instead of written through a pointer
+    {"_ZN2nn5codec25MakeDecodeImagePreferenceEttNS0_24VideoDecoderOutputFormatENS0_15ImageTilingModeE", make_pref},
+    {"_ZN2nn5codec26InitializeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTypeEPvmRKNS0_27VideoDecoderImagePreferenceEj", init_pool},
+    {"_ZN2nn5codec36InitializeVp9DecoderByTransferMemoryEPNS0_14Vp9DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", init_vp9_tm},
+    {"_ZN2nn5codec34InitializeVp9DecoderByRemoteMemoryEPNS0_14Vp9DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", init_vp9_rm},
+    {"_ZN2nn5codec33GetVp9DecoderSubmissionReadyEventEPNS0_14Vp9DecoderTypeE", submission_event_av1},
+    {"_ZN2nn5codec36InitializeVp8DecoderByTransferMemoryEPNS0_14Vp8DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", init_vp8_tm},
+    {"_ZN2nn5codec34InitializeVp8DecoderByRemoteMemoryEPNS0_14Vp8DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", init_vp8_rm},
+    {"_ZN2nn5codec33GetVp8DecoderSubmissionReadyEventEPNS0_14Vp8DecoderTypeE", submission_event_av1},
+#if NXRT_HAVE_DAV1D
+    {"_ZN2nn5codec36InitializeAv1DecoderByTransferMemoryEPNS0_14Av1DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", init_av1_tm},
+    {"_ZN2nn5codec34InitializeAv1DecoderByRemoteMemoryEPNS0_14Av1DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", init_av1_rm},
+    {"_ZN2nn5codec18FinalizeAv1DecoderEPNS0_14Av1DecoderTypeE", finalize_decoder},
+    {"_ZN2nn5codec24RegisterAv1DecoderBufferEPNS0_14Av1DecoderTypeEjPNS0_25VideoDecoderImagePoolTypeEj", register_buffer},
+    {"_ZN2nn5codec26UnregisterAv1DecoderBufferEPNS0_14Av1DecoderTypeEj", unregister_buffer},
+    {"_ZN2nn5codec15StartAv1DecoderEPNS0_14Av1DecoderTypeE", start_decoder},
+    {"_ZN2nn5codec14StopAv1DecoderEPNS0_14Av1DecoderTypeE", stop_decoder},
+    {"_ZN2nn5codec15FlushAv1DecoderEPNS0_14Av1DecoderTypeE", flush_decoder},
+    {"_ZN2nn5codec33GetAv1DecoderSubmissionReadyEventEPNS0_14Av1DecoderTypeE", submission_event_av1},
+    {"_ZN2nn5codec27SubmitAv1DecoderInputBufferEPmPNS0_14Av1DecoderTypeEPKvmNS_8TimeSpanEb", submit},
+    {"_ZN2nn5codec29AcquireAv1DecoderOutputBufferEPjPNS_2gs16NativeSyncHandleEPNS0_14Av1DecoderTypeE", acquire_output},
+    {"_ZN2nn5codec29ReleaseAv1DecoderOutputBufferEPNS0_14Av1DecoderTypeEjNS_2gs16NativeSyncHandleE", release_output},
+    {"_ZN2nn5codec35GetAv1DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_14Av1DecoderTypeEj", props},
+#endif
     {"_ZN2nn5codec20InitializeAv1DecoderEPNS0_14Av1DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE", unsupported_codec},
     {"_ZN2nn5codec20InitializeAv1DecoderEPNS0_14Av1DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE", unsupported_codec},
     // fences
@@ -904,8 +1090,8 @@ bool install_video_codec_hle() {
             module_override_symbol(im.name);
         }
         g_enabled = true;
-        NXLOG_I("vcodec", "nn::codec VP9/VP8 decoders on the host (libvpx %s, %d threads): %zu imports routed", vpx_codec_version_str(), g_threads,
-                sizeof kImports / sizeof kImports[0]);
+        NXLOG_I("vcodec", "nn::codec VP9/VP8%s decoders on the host (libvpx %s, %d threads): %zu imports routed", NXRT_HAVE_DAV1D ? "/AV1 (dav1d)" : "",
+                vpx_codec_version_str(), g_threads, sizeof kImports / sizeof kImports[0]);
         if (config_get_bool("media", "movie_trace", true)) {
             for (const TraceImport& ti : kTraceImports) {
                 hle_register(ti.t->name, ti.fn);

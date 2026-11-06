@@ -107,6 +107,8 @@ struct TitleProfile {
     int main_thread_priority = 44, main_thread_core = 0;   // main.npdm
     uint64_t system_resource_size = 0;                     // main.npdm META SystemResourceSize ([title] system_resource_size): GetInfo 16.
                                                            // Non-zero turns on the SDK's virtual address memory manager (nn::os VAMM).
+    std::vector<std::string> romfs_hide;                   // RomFS paths ("/Movie/x.dat") left out of the served RomFS: files the game copes
+                                                           // without whose use here is not possible or too slow ([title] romfs_hide, comma list)
     // console
     Language language = Language::AmericanEnglish;         // [system] language (name, e.g. AmericanEnglish)
     int region = 1;                                        // [system] region: Japan 0, USA 1, Europe 2, Australia 3, HongKongTaiwanKorea 4, China 5 (name or number; Switchbrew RegionCode)

@@ -1,1 +1,18 @@
-# hook sites of main (none yet)
+# hook sites of main (nxrecomp/program.py load_sites)
+# frame update: the game framework's per-frame virtual (vtable 0x4c63f80 +224; main loop main+0x9467b0): calc (+296), the frame step
+# (60 / fps), then the draw (main+0x346c680, which ends in the present)
+entryhook 0x7103b4ea90
+# bring-up probes ([diag] trace_sites): the NDVE (movie video enhancement) setup that aborts the title movie
+entryhook 0x71020e6be0
+entryhook 0x71020e8500
+entryhook 0x71020e7680
+entryhook 0x71020eada0
+entryhook 0x71020eb1e0
+entryhook 0x71020eafa0
+entryhook 0x71020e8de0
+entryhook 0x71020e9600
+entryhook 0x71020e9850
+entryhook 0x71020ea8c0
+entryhook 0x71020eb3b0
+entryhook 0x71020e9910
+entryhook 0x71020e9c10

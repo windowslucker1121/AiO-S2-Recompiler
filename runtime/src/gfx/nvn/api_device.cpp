@@ -115,6 +115,20 @@ void nvnDeviceGetInteger(const NVNdevice* device, NVNdeviceInfo info, int* out) 
             case 0x5A: *out = 0; return;            // SUPPORTS_DEBUG_LAYER
             default: break;
         }
+        // The NVN2-only values 0x62..0xA9, read from Ocarina of Time's sdk (SDK 22): nvnDeviceGetInteger (sdk+0x656210) answers a few itself and
+        // takes the rest from its constant table (sdk+0x648380, byte map at sdk+0xC7A318). 0 = not a constant there (device fields; unused so far).
+        // Its movie enhancer (NDVE in main) needs 0x67 = 256 (an alignment): with 0 it aborts the title movie.
+        static constexpr int kNvn2[0xAA - 0x62] = {
+            32, 256, 16, 65535, 65535, 256, 1, 16, 16, 16, 1, 1, 1, 256,                       // 0x62..0x6F
+            0, 16, 8, 16, 32, 31, 536870912, 16777216, 16777216, 1073741824, 32, 1, 64, 8, 1, 0,   // 0x70..0x7F
+            32, 32, 0, 512, 256, 32, 16383, 1, 8, 0, 0, 4, 256, 16, 0, 1,                       // 0x80..0x8F
+            31, 0, 64, 1, 58368, 0, 0, 256, 262144, 2, 1, 0, 201, 14, 201, 20,                  // 0x90..0x9F
+            0, 8, 4, 256, 256, 4, 65536, 201, 5, 1,                                             // 0xA0..0xA9
+        };
+        if (static_cast<int>(info) >= 0x62 && static_cast<int>(info) <= 0xA9) {
+            *out = kNvn2[static_cast<int>(info) - 0x62];
+            return;
+        }
     }
     *out = device_info_value(static_cast<int>(info));
 }
