@@ -5,7 +5,7 @@
   python tools/ai/mcp_server.py <tool> [key=value ...]   run one tool; values are JSON when they parse (steps='["key a"]'), else text
 
 Only what Claude Code uses is implemented: initialize, ping, tools/list, tools/call (a tool error comes back as isError).
-The CLI is a new process per call: it finds the game by the exe's file name, not by the process a previous call started.
+The CLI is a new process per call: it finds the game by the exe's file name and command line, not by the process a previous call started.
 """
 import base64
 import inspect
@@ -54,9 +54,13 @@ def serve():
         if method == 'initialize':
             reply['result'] = {'protocolVersion': params.get('protocolVersion', '2025-06-18'), 'capabilities': {'tools': {}},
                                'serverInfo': {'name': 'game', 'version': '1'},
-                               'instructions': 'Drives the game exe of this repo (game id from NXRT_AI_GAME, default oot). Start with status. '
-                                               'The exe has no live control channel: the runtime test tooling (pad scripts, peek/poke, probes) '
-                                               'runs through launch(script=...); live input is send_input to the game window.'}
+                               'instructions': 'Drives the game exe of this repo (game id from NXRT_AI_GAME, default oot). Start with status: it lists '
+                                               'every running game process, this server\'s and other sessions\'. Several runs can run at once: '
+                                               'launch(instance="<name>") gives a run its own folder for everything it writes; while another '
+                                               'session may run the game, always pass an instance name, and address a run with instance= or pid= '
+                                               'in the other tools. Never kill another session\'s run (kill refuses without force). The exe has '
+                                               'no live control channel: the runtime test tooling (pad scripts, peek/poke, probes) runs through '
+                                               'launch(script=...); live input is send_input to the game window.'}
         elif method == 'ping':
             reply['result'] = {}
         elif method == 'tools/list':

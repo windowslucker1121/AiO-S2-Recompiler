@@ -188,7 +188,7 @@ Rules:
 | `account` | `nickname` | `Samus` | `NXRT_ACCOUNT_NICKNAME` | `src/services/common.cpp` | Nickname of the local user. |
 | `account` | `uid` | empty (`00000000000000014d50525265636f6d`) | `NXRT_ACCOUNT_UID` | `src/services/common.cpp` | Local user id as 32 hex digits. Anything that is not 32 hex digits keeps the default. |
 | `fs` | `romfs` | `game/romfs` | `NXRT_FS_ROMFS` | `src/services/common.cpp` | Host folder served as the game's RomFS, relative to the working directory. |
-| `fs` | `save_dir` | empty (`%APPDATA%\MPRRecomp\save`) | `NXRT_FS_SAVE_DIR` | `src/services/common.cpp` | Folder for save data. Empty: the APPDATA default. |
+| `fs` | `save_dir` | empty (`%APPDATA%\MPRRecomp\save`) | `NXRT_FS_SAVE_DIR` | `src/services/common.cpp` | Folder for save data. Empty: the APPDATA default. A named instance: `<instance folder>\save` (see "Named instances"). |
 | `album` | `dir` | `album` | `NXRT_ALBUM_DIR` | `src/services/album.cpp` | Folder the game's photos (caps:su SaveScreenShotEx0/1/2) are written to, one PNG per photo named by the local date and time (`YYYY-MM-DD_HH-MM-SS-mmm.png`). A relative path is taken from the exe's folder. Created when the first photo is saved. |
 | `fatal` | `report_path` | unset (`<exe path without extension>_fatal.txt`) | `NXRT_FATAL_REPORT_PATH` | `src/services/logfault.cpp` | Fatal-error report file. Once the key is set, even to empty, its value is used. Empty: no file is written. |
 | `fatal` | `terminate` | `true` | `NXRT_FATAL_TERMINATE` | `src/services/logfault.cpp` | `true` ends the process with exit code 5 after a fatal report. `false` returns. |
@@ -266,6 +266,7 @@ Rules:
 | `boot` | `max_seconds` | `0` | `NXRT_BOOT_MAX_SECONDS` | `game-build/src/mpr_main.cpp` | After this many seconds the process logs a state summary and ends with exit code 124, even if the game is still running. `0`: no limit. `--max-seconds` sets it. |
 | `boot` | `main_stack_kb` | `1024` | `NXRT_BOOT_MAIN_STACK_KB` | `game-build/src/mpr_main.cpp` | Stack of the game's main thread, in KiB. |
 | `boot` | `dump_killer` | `false` | `NXRT_BOOT_DUMP_KILLER` | `game-build/src/mpr_main.cpp` | Temporary debug hook (debug note 121). Logs two fixed memory slots on an access violation, and the thread stacks when one of them first fills. |
+| `boot` | `memory_per_run_gb` | `13` | `NXRT_BOOT_MEMORY_PER_RUN_GB` | `game-build/src/game_main.cpp` | Memory one run of the game needs (OoT: 13-16 GB of working set in the first 3D scene). Only while another process of the game exe runs (any build with the same file name), the start is refused with exit code 7 when the free physical memory, minus what the other runs will still grow by (this value minus each one's working set now), is below this value, or the same for the commit limit (private bytes). `0` turns the check off. A lone run is never refused. See "Named instances" below. |
 | `boot` | `trace_plt` | `false` | `NXRT_BOOT_TRACE_PLT` | `game-build/src/mpr_main.cpp` | Diagnostic: logs every lazy symbol binding of the game's loader (debug note 018). |
 | `time` | `zone` | `host` | `NXRT_TIME_ZONE` | `src/services/time.cpp` | `utc` (any case) sets UTC. Any other value uses the host time zone. |
 
@@ -392,6 +393,37 @@ These variables are read with `getenv`, outside the key lookup.
 | `NXRT_INI` | `src/core/runtime.cpp` | Ini file path. Used only when `InitOptions.ini_path` is null. |
 | `NXRT_LOG` | `src/diag/log.cpp` | Log file path. Overrides `[log] path`, `NXRT_LOG_PATH` and the path set in code. |
 | `NXRT_LOG_LEVEL` | `src/diag/log.cpp` | Log level. Overrides `[log] level`. It is also the variable for that key, listed above. |
+| `NXRT_INSTANCE` | `game-build/src/game_main.cpp` | Instance name, as `--instance NAME` (the command line wins). See "Named instances". |
+| `NXRT_INSTANCE_DIR` | `game-build/src/game_main.cpp` | Instance folder, as `--instance-dir DIR`. |
+| `NXRT_ALLOW_MULTIPLE` | `game-build/src/game_main.cpp` | Set: no single-run check at all (neither per game folder nor per instance folder). Test rigs only: two runs then write the same files. |
+
+## Named instances
+
+`--instance NAME [--instance-dir DIR]` (or `NXRT_INSTANCE` / `NXRT_INSTANCE_DIR`) runs the game as a named instance beside other runs. The
+instance folder is `DIR`, by default `<game folder>\instances\NAME`. Without an instance only one run per game folder may start; with one, only
+one run per instance folder. The window title ends in ` [NAME]`. The code is `runtime/src/core/instance.cpp` (`nxrt/instance.h`).
+
+What an instance changes, right after the configuration is loaded. A key set to an absolute path keeps it. A key set to a relative path moves into
+the instance folder. The keys below without a default stay off.
+
+| What | Default run | Instance |
+|---|---|---|
+| Log (`--log`) | `<game folder>\oot.log` | `<instance folder>\oot.log` |
+| Crash, freeze, fatal reports, memory-guard report | `<exe>_crash.txt` / `_freeze.txt` / `_fatal.txt` next to the exe | `<instance folder>\<exe stem>_crash.txt` ... |
+| `dump_threads` request file | next to the exe | `<instance folder>\dump_threads` (also `dump_threads.<pid>`) |
+| `[fs] save_dir` (saves, temporary storage) | `%APPDATA%\<save folder>\save` | `<instance folder>\save` (empty at first; copy a save in to start from it) |
+| `[play] controls` | `controls.ini` (game folder) | its own copy, made from the game folder's the first time |
+| `[nvn] pipeline_keys`, `[nvn] shader_order` | game folder | own copies, made from the game folder's the first time |
+| `[nvn] pipeline_cache` | `pipeline_cache.bin` beside the shader cache folder | `<instance folder>\pipeline_cache.bin`: a hard link to the shared file (a copy across volumes), renewed when the shared one is newer. The instance's first save writes its own file of the shared size (a full preparation: 2-4 GB) |
+| `[nvn] setup_on_start` | `true` | `false`: the "Preparing shaders" window writes the shared shader data. `--prepare-shaders` refuses `--instance` |
+| `[album] dir`, `[nvn] shot_dir`, `[test] out`, `[prof] sample_out` | relative to the game folder or exe | inside the instance folder |
+| `[test] shot_dir`, `[test] record`, `[diag] soak_csv`, `[prof] trace`, `[time] csv`, `[audio] wav_dump`, `[nvn] dump_missing`, `[nvn] dump_astc` | off unless set | inside the instance folder when set to a relative path |
+| Screenshots and texture dumps with relative paths (`[boot] screenshot_at`, `[nvn] trace_frame` PNGs, `gpu_fault_vendor.bin`) | working folder (game folder) | instance folder |
+
+Shared by every run: the game files (exefs, romfs), the shader cache (`[nvn] shader_cache`; the on-demand translator writes each `.spv` under a
+temporary name and moves it into place, and appends `results.tsv` rows under an exclusive-write open), the BC7 cache (`[nvn] bc7_cache`; temporary
+name and rename), `game_running.lock` (every run holds it, open for shared writing), and `programs.bin` / `prepare.state` (written only by the
+shader preparation).
 
 ## Sample nxrt.ini
 

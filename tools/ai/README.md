@@ -21,19 +21,40 @@ Start `claude` in the repo root and approve the project server `game` when asked
 |---|---|
 | `NXRT_AI_GAME` | `oot` (a folder under `recomp/games`) |
 | `NXRT_AI_EXE` | `game-build/build/release/<exe from game.toml>` (`launch` also takes `exe=`) |
-| `NXRT_AI_RUN_DIR` | `work/ai_run/<id>`: the log, stdout.txt/stderr.txt, script.nxs, testout/, shots/ of each launch |
+| `NXRT_AI_RUN_DIR` | `work/ai_run/<id>`: the log, stdout.txt/stderr.txt, script.nxs, testout/, shots/ of each launch; `<run dir>/<instance>` for a named instance |
+| `NXRT_BOOT_MEMORY_PER_RUN_GB` | `13`: what `launch` (and the exe) count for one run in the memory check; `0` turns it off |
 
 CLI, same tools, one process per call: `tools\.venv\Scripts\python tools\ai\mcp_server.py help`, `... status`, `... log tail=20 grep=error`,
-`... send_input steps='["key Return"]'`. A CLI call finds the game by the exe's file name.
+`... send_input steps='["key Return"]' instance=a8`. A CLI call finds the game by the exe's file name and command line (it started nothing
+itself, so `kill` needs `instance=`/`pid=` and `force=true` there).
+
+## Several runs at once (instances)
+
+Several sessions may run the game at the same time. Each run is an *instance*: `launch(instance="a8")` starts the exe with
+`--instance a8 --instance-dir <run dir>/a8`, and that run writes everything of its own into that folder (log, stdout/stderr, test output,
+screenshots, crash/freeze/fatal reports, saves and temporary storage, controls.ini, pipeline cache and key file), while the game files, the
+shader cache and the BC7 cache stay shared (`runtime/docs/CONFIG.md`, "Named instances"). The run without a name is `default` (the run dir
+itself, the shared saves and pipeline cache, reports next to the exe): only one default run per game folder can start.
+
+- Every tool except `launch` takes `instance=` or `pid=` (any process of the run: the exe, its translator child, the window's process). Without
+  them a tool uses the one run this server started, else the one game process running; with several it asks for a name. `status` always
+  lists every running game process (`instances`: name, pid, started by this server or not, memory, window title, log) and the free memory.
+- Runs this server did not start (other sessions') are found by the exe's file name; their instance, log and instance folder come from their
+  command line (`--instance`, `--log`, `--instance-dir`). They can be watched, captured and given input, but `launch` never replaces one
+  (an instance name in use is refused) and `kill` ends one only with `force=true`. `kill()` without arguments ends only this server's runs.
+- `launch` refuses to start (before the exe does) when the free memory minus what the other runs will still take would not hold one more
+  run (`settings={"boot.memory_per_run_gb": 0}` skips it). The exe repeats the check and refuses with exit code 7; a run that ends within
+  1.5 s comes back with its exit code and stderr.
+- Device-loss tests and fps measurements still need the machine to themselves (AGENTS.md, "Several runs at once").
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
-| `status` | One call: exe and build time, processes (uptime, CPU s, memory), exit code, window (size, focused, minimised, hung), log (seconds since last write, recent errors/warnings, last lines), reports present, scripted-run result and last trace lines. |
-| `launch` | (Re)start the game (kills a running one): args, `settings` = runtime config keys as `NXRT_<SECTION>_<KEY>` (beat the ini), env, `headless`, `script` (test tooling, with `peek`/`poke` shorthands), `wait` for the exit and get the result. |
-| `restart` | Kill and launch again with the last launch's arguments. |
-| `kill` | End the game's process tree. |
+| `status` | One call: every running game process (instance, pid, own or not, memory, window title, log), free memory; for one run: processes (uptime, CPU s, memory), exit code, window (size, focused, minimised, hung), log (seconds since last write, recent errors/warnings, last lines), reports present, scripted-run result and last trace lines. |
+| `launch` | (Re)start a run (`instance` name, or the default run; replaces only this server's run of that instance): args, `settings` = runtime config keys as `NXRT_<SECTION>_<KEY>` (beat the ini), env, `headless`, `script` (test tooling, with `peek`/`poke` shorthands), `wait` for the exit and get the result. Memory check first. |
+| `restart` | Kill and launch again with the last launch's arguments (of `instance`, default the last launched). |
+| `kill` | End a run's process tree: this server's runs, or `instance`/`pid` (another session's only with `force`). |
 | `screenshot` | Client area of the game window (PrintWindow: works covered and unfocused, not minimised); returns the picture and a full-size PNG path; `crop`. |
 | `send_input` | Steps `key/down/up/text/click/rclick/mclick/move/wheel/rel/wait`; coordinates in pixels or fractions. `post` = window messages to the game window only (background); `send` = SendInput after bringing it to the front, refused if it is not in front. |
 | `wait_for` | Until `window`, `visible` (not black), `change`, `image` (SSIM against a reference), `log` (regex), `exit`, with a timeout. |
@@ -68,7 +89,10 @@ Launches `fake_window.py` through a `.cmd` posing as the exe: window search thro
 environment, capture while a topmost window of another process covers it, crop, post input (keys with scan codes and the extended bit,
 text, clicks at pixel and fraction coordinates, wheel), `wait_for` window/change/log/visible/image and the not-running stop, `compare`,
 `reports`, `kill`, a scripted run with `peek`/`poke` (the fake answers `@peek` like the runtime), `restart`, and the MCP protocol with
-a launch and a screenshot coming back as an image. `set AI_TEST_FOCUS=1` adds `send_input(method="send")` (takes the focus briefly).
+a launch and a screenshot coming back as an image. Instances: two named runs at once (own folders and arguments, input and capture reach
+only the one named by instance or pid, separate logs and reports, the error without a name, relaunch and kill of one), a run this server
+did not start (found by its command line; launch refuses its name, kill needs force), the memory check, an exe that refuses with exit code 7,
+and name validation. A real game running meanwhile is never touched. `set AI_TEST_FOCUS=1` adds `send_input(method="send")` (takes the focus briefly).
 
 ## Only checkable once the game boots
 

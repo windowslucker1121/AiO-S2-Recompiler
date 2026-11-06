@@ -29,6 +29,7 @@
 #include "nxrt/config.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gfx_tuning.h"
+#include "nxrt/instance.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
@@ -2294,7 +2295,8 @@ void trace_dump_prepared(Texture* t, const std::string& dir) {
         }
 }
 
-bool snapshot_write(int index, const std::string& path, std::string* stats) {
+bool snapshot_write(int index, const std::string& path_in, std::string* stats) {
+    const std::string path = instance_file(path_in);   // relative: the working folder, or the instance folder (nxrt/instance.h)
     if (index < 0 || index >= static_cast<int>(g_snaps.size())) return false;
     Snapshot& s = g_snaps[static_cast<size_t>(index)];
     if (!s.buf) return false;
@@ -2322,7 +2324,8 @@ bool snapshot_write(int index, const std::string& path, std::string* stats) {
     return ok;
 }
 
-bool dump_texture(Texture* t, const std::string& path, std::string* stats) {
+bool dump_texture(Texture* t, const std::string& path_in, std::string* stats) {
+    const std::string path = instance_file(path_in);   // relative: the working folder, or the instance folder (nxrt/instance.h)
     TexGpu* g = t ? t->gpu : nullptr;
     if (!g || g->failed || g->layout == VK_IMAGE_LAYOUT_UNDEFINED) return false;
     const VkFormat f = g->format;
