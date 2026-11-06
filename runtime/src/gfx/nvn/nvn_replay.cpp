@@ -1140,7 +1140,7 @@ int storage_slot_for(int nvn_stage, int c0_offset) {
         default: return 0;
     }
     if (c0_offset < base) return 0;
-    return (c0_offset - base) / 0x10;
+    return (c0_offset - base) / 0x10 ^ (nvn_stage != kCompute ? graphics_ssbo_slot_xor() : 0);
 }
 
 // ---- compute shadows: storage and texel buffers of a dispatch in device-local memory ---------------------------------------------

@@ -148,6 +148,29 @@ void vi_get_display_vsync_event(::Ctx* c) {
 
 void streamplay_native_window(::Ctx* c) { c->x[0] = reinterpret_cast<uint64_t>(g_native_window); }
 
+// Display queries of the stand-in display (the SDK answers vi OperationFailed 0x272 for a display that is not its own): an SDR screen.
+// nn::vi::QueryDisplayHdrStatus(bool* hdr_on, HdrOutputFormat* format, u16* value, const Display*): HDR off, format 0, value 0.
+void vi_query_hdr_status(::Ctx* c) {
+    static bool logged = false;
+    if (!logged) { logged = true; NXLOG_I("switch2", "nn::vi::QueryDisplayHdrStatus -> SDR (HDR off)"); }
+    if (c->x[0]) *reinterpret_cast<uint8_t*>(c->x[0]) = 0;
+    if (c->x[1]) *reinterpret_cast<uint32_t*>(c->x[1]) = 0;
+    if (c->x[2]) *reinterpret_cast<uint16_t*>(c->x[2]) = 0;
+    c->x[0] = 0;
+}
+// nn::vi::QueryDisplayHdrPaperWhite(u16* nits, const Display*): 203 nits (ITU-R BT.2408 reference white).
+void vi_query_paper_white(::Ctx* c) {
+    static bool logged = false;
+    if (!logged) { logged = true; NXLOG_I("switch2", "nn::vi::QueryDisplayHdrPaperWhite -> 203 nits"); }
+    if (c->x[0]) *reinterpret_cast<uint16_t*>(c->x[0]) = 203;
+    c->x[0] = 0;
+}
+// nn::vi::QueryDisplayVrrSupported(bool*, const Display*): no VRR.
+void vi_query_vrr(::Ctx* c) {
+    if (c->x[0]) *reinterpret_cast<uint8_t*>(c->x[0]) = 0;
+    c->x[0] = 0;
+}
+
 }  // namespace
 
 void install_switch2_hle() {
@@ -183,6 +206,9 @@ void install_switch2_hle() {
         {"_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE", vi_ok},
         {"_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE", vi_ok},
         {"_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE", vi_get_display_vsync_event},
+        {"_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", vi_query_hdr_status},
+        {"_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", vi_query_paper_white},
+        {"_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", vi_query_vrr},
         {"_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", vi_layer_extended_luminance},
         {"_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", vi_layer_standard_luminance},
     };

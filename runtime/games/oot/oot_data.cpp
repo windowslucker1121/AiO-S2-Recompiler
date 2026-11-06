@@ -34,7 +34,10 @@ const game::Info& data_info() {
             "upscaler_replace = f05596b94bbb7c5c\n"
             "upscaler_skip = 54ecc4b4d30b3e2c,4c60af1fa697e5f2,fea98fe719bc0348,f90d726d76bf9884\n"
             "upscaler_src = depth_rt\n"
-            "upscaler_dst = fs:c63c3b8f092e5d4c:tex0\n";
+            "upscaler_dst = fs:c63c3b8f092e5d4c:tex0\n"
+            // OoT's graphics stages find their storage buffers in c[0] with the slots swapped in pairs (n ^ 1); mapped straight, the material
+            // shaders read the cluster grid as the light list and the sky lighting from the wrong buffer: the scene was washed out white (A12).
+            "graphics_ssbo_slot_xor = 1\n";
         return g;
     }();
     return info;
