@@ -1494,6 +1494,58 @@ uint64_t usable_programs(const std::vector<ProgramHashes>& progs) {
     return n;
 }
 
+std::string prepare_rasters_setting() {
+    const std::string raw = config_get_str("nvn", "prepare_rasters", "0.1.1 0.0.1");
+    std::string out, cur;
+    auto flush = [&] {
+        unsigned p = 0, c = 0, n = 0;
+        if (cur.size() == 5 && std::sscanf(cur.c_str(), "%u.%u.%u", &p, &c, &n) == 3 && p <= 2 && c <= 1 && n <= 1) {
+            const std::string g = std::to_string(p) + "." + std::to_string(c) + "." + std::to_string(n);
+            if ((" " + out + " ").find(" " + g + " ") == std::string::npos) out += (out.empty() ? "" : " ") + g;
+        }
+        cur.clear();
+    };
+    for (char ch : raw) {
+        if (ch == ' ' || ch == ',' || ch == ';' || ch == '\t') flush();
+        else cur += ch;
+    }
+    flush();
+    return out.empty() ? "0.1.1" : out;
+}
+
+bool prepare_state_complete(const std::string& state_path, std::string* why) {
+    std::string tmp;
+    if (!why) why = &tmp;
+    std::ifstream f(state_path);
+    if (!f) { *why = "no state file"; return false; }
+    std::string l, cache;
+    bool done = false, scheme = false, rasters = false;
+    uint64_t cache_bytes = 0;
+    const std::string want_scheme = "key: scheme=" + std::to_string(kPrepareScheme) + " ";
+    const std::string want_rasters = "rasters: " + prepare_rasters_setting();
+    while (std::getline(f, l)) {
+        while (!l.empty() && l.back() == '\r') l.pop_back();
+        if (l == "complete: 1") done = true;
+        if (l.rfind(want_scheme, 0) == 0) scheme = true;
+        if (l == want_rasters) rasters = true;
+        if (l.rfind("cache: ", 0) == 0) cache = l.substr(7);
+        if (l.rfind("cache_bytes: ", 0) == 0) cache_bytes = std::strtoull(l.c_str() + 13, nullptr, 10);
+    }
+    if (!done) { *why = "not finished"; return false; }
+    if (!scheme) { *why = "made by an older version of the preparation"; return false; }
+    if (!rasters) { *why = "made for other raster flags than [nvn] prepare_rasters"; return false; }
+    if (!cache.empty() && cache_bytes) {
+        std::error_code ec;
+        const std::filesystem::path p(std::u8string(reinterpret_cast<const char8_t*>(cache.data()), cache.size()));
+        const uintmax_t have = std::filesystem::is_regular_file(p, ec) ? std::filesystem::file_size(p, ec) : 0;
+        if (ec || have < cache_bytes / 2) {
+            *why = "its pipeline cache " + cache + " is missing or lost most of its " + std::to_string(cache_bytes) + " bytes";
+            return false;
+        }
+    }
+    return true;
+}
+
 const std::string& ShaderCache::dir() const { return dir_; }
 
 // The folder of the running executable, or "" when it cannot be read.
@@ -1514,12 +1566,13 @@ std::string exe_folder_utf8() {
 }
 
 // Held open for the life of the process: the launcher's setup sees the game running (it cannot open the file for writing) and lowers its
-// own translation to idle priority. <cache dir>/../game_running.lock.
+// own translation to idle priority. <cache dir>/../game_running.lock. Shared for writing, so every run of the game on this cache holds it
+// (named instances: nxrt/instance.h), not only the first; the launcher's exclusive open still fails while any of them runs.
 void hold_game_lock(const std::string& cache_dir) {
     static HANDLE h = INVALID_HANDLE_VALUE;
     if (h != INVALID_HANDLE_VALUE) return;
     const std::wstring p = (std::filesystem::path(cache_dir).parent_path() / "game_running.lock").wstring();
-    h = CreateFileW(p.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    h = CreateFileW(p.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 }
 
 // A cache folder without results.tsv: with a translator the cache starts empty and fills while the game runs (header only, the format

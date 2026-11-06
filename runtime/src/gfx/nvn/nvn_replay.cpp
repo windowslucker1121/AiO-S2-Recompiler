@@ -830,6 +830,15 @@ TexResolved resolve_image(const BindingDesc& d) {
     return r;
 }
 
+// The texture object behind a texture or image handle the game bound (texture pool id in the low bits), or null.
+Texture* pool_texture(uint64_t handle) {
+    const uint32_t tid = handle_texture_id(handle);
+    if (!S.tpool || static_cast<int>(tid) >= S.tpool->count) return nullptr;
+    std::shared_lock<std::shared_mutex> lk(S.tpool->lock);
+    const TexturePool::Entry& e = S.tpool->entries[tid];
+    return e.used ? e.tex.get() : nullptr;
+}
+
 // True when two texture objects are the same image: the object itself, or another object over the same storage (S4f: objects over one piece of
 // memory share one image, so the one the pass renders to and the one a shader samples can be two objects).
 bool shares_image(Texture* a, const Texture* b) {
@@ -2241,6 +2250,8 @@ void note_pending_skip(bool dispatch) {
     g_pending_log_at = now;
 }
 
+void upscaler_note_draw(const ShaderInfo* fs);
+
 bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* topo_out) {
     if (g_gfx_pending) { note_pending_skip(false); return false; }
     const ShaderInfo* vs = S.stage[kVertex];
@@ -2248,6 +2259,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (!S.render_enable) return false;
     ++g_draw_idx;
     if (S.stage[kFragment] && skip_fs_draw(S.stage[kFragment]->hash)) return false;
+    upscaler_note_draw(S.stage[kFragment]);   // [nvn] upscaler_dst = fs:...: where the replaced upscaler writes
     {   // [nvn] trace_fs_draws = PREFIX (NXRT_NVN_TRACE_FS_DRAWS): trace the draws with this fragment shader where they happen, in any frame, at
         // most [nvn] trace_fs_draws_max (default 8): the bindings and uniform words of a draw that takes the GPU down in the frame it first appears in.
         static const std::string trace_fs = nxrt::config_get_str("nvn", "trace_fs_draws", "");
@@ -2877,12 +2889,131 @@ void do_draw_xfb(const P_DrawXfb& p) {
     trace_snap_after_draw();
 }
 
-std::string g_cs_missing;   // trace: the untranslated block(s) of the bound compute program ("cs -" dispatches)
+std::string g_cs_missing;   // the untranslated block(s) of the bound compute program ("cs -" dispatches in traces, the upscaler override)
+
+void do_copy_texture_texture(const P_CopyTexTex& p);
+
+// The game's own upscaler replaced on the PC (game modules set these as defaults, game::Info::config_defaults). OoT renders the 3D scene at a
+// low internal size and builds the output with a chain of compute dispatches, one of them a small neural network on the Switch 2's tensor
+// cores; on a PC GPU that is neither needed nor cheap to emulate, and the chain reads its resources through the per-program c[0] table the
+// runtime does not know (A10). [nvn] upscaler_skip = program hash prefixes (comma list): those dispatches are left out. [nvn] upscaler_replace
+// = the program whose dispatch starts the chain: it becomes a linearly filtered scaled copy from [nvn] upscaler_src to [nvn] upscaler_dst.
+// Source: texN / imgN (a compute binding; default tex0) or depth_rt = colour target 0 of the latest draw that had a depth target (the 3D
+// scene: OoT's last scene draw renders into the HDR target the network pass reads). Destination: imgN (a compute image binding) or
+// fs:<hash prefix>:texN = the texture the LAST draw of the previous frame with that fragment shader sampled at binding N (the frame's final
+// composite reads the upscaler's output; earlier draws with the same shader in a frame do not count). Empty upscaler_replace: off.
+struct UpscalerOverride {
+    std::vector<std::string> skip;
+    std::string replace, dst_fs;
+    bool src_img = false, src_depth_rt = false;
+    int src = 0, dst = 0;
+};
+
+const UpscalerOverride& upscaler_override() {
+    static const UpscalerOverride u = [] {
+        UpscalerOverride o;
+        o.replace = nxrt::config_get_str("nvn", "upscaler_replace", "");
+        std::string list = nxrt::config_get_str("nvn", "upscaler_skip", "");
+        for (size_t at = 0; at < list.size();) {
+            size_t end = list.find_first_of(", ", at);
+            if (end == std::string::npos) end = list.size();
+            if (end > at) o.skip.push_back(list.substr(at, end - at));
+            at = end + 1;
+        }
+        auto slot = [](const std::string& s, bool* img) {
+            if (img) *img = s.rfind("img", 0) == 0;
+            const size_t d = s.find_last_not_of("0123456789");
+            return d + 1 < s.size() ? std::atoi(s.c_str() + d + 1) : 0;
+        };
+        const std::string src = nxrt::config_get_str("nvn", "upscaler_src", "tex0");
+        o.src_depth_rt = src == "depth_rt";
+        o.src = slot(src, &o.src_img);
+        const std::string dst = nxrt::config_get_str("nvn", "upscaler_dst", "img0");
+        if (dst.rfind("fs:", 0) == 0) {
+            const size_t colon = dst.find(':', 3);
+            o.dst_fs = dst.substr(3, colon == std::string::npos ? std::string::npos : colon - 3);
+            o.dst = colon == std::string::npos ? 0 : slot(dst.substr(colon + 1), nullptr);
+        } else {
+            o.dst = slot(dst, nullptr);
+        }
+        if (!o.replace.empty())
+            NXLOG_I(kTag, "upscaler override: %zu pass(es) left out, %s becomes a scaled copy %s -> %s", o.skip.size(), o.replace.c_str(),
+                    src.c_str(), dst.c_str());
+        return o;
+    }();
+    return u;
+}
+
+uint64_t g_upscaler_dst_handle = 0;    // upscaler_dst = fs:...: what the last such draw of the previous frame sampled
+uint64_t g_upscaler_dst_pending = 0;   // ... and of this frame so far (promoted once a present has passed, upscaler_frame_check)
+uint64_t g_upscaler_pending_present = 0;
+Ref<Texture> g_last_depth_rt;          // upscaler_src = depth_rt: colour target 0 of the latest draw with a depth target
+
+// A present since the pending destination was noted: it becomes the destination of the frames that follow.
+void upscaler_frame_check() {
+    const uint64_t pr = counters().presents.load(std::memory_order_relaxed);
+    if (pr == g_upscaler_pending_present) return;
+    if (g_upscaler_dst_pending) g_upscaler_dst_handle = g_upscaler_dst_pending;
+    g_upscaler_dst_pending = 0;
+    g_upscaler_pending_present = pr;
+}
+
+// begin_draw: remember the scene target and the texture the upscaler's output goes to.
+void upscaler_note_draw(const ShaderInfo* fs) {
+    const UpscalerOverride& u = upscaler_override();
+    if (u.replace.empty()) return;
+    upscaler_frame_check();
+    if (u.src_depth_rt && S.depth_tex && S.color_tex[0] && S.color_tex[0].get() != g_last_depth_rt.get()) g_last_depth_rt = S.color_tex[0];
+    if (u.dst_fs.empty() || !fs || fs->hash.compare(0, u.dst_fs.size(), u.dst_fs) != 0) return;
+    if (const uint64_t h = S.tex[kFragment][u.dst & 63]) g_upscaler_dst_pending = h;
+}
+
+
+// True when the dispatch belongs to the replaced upscaler (and is handled: left out, or turned into the copy).
+bool upscaler_dispatch(const std::string& hash) {
+    const UpscalerOverride& u = upscaler_override();
+    if (u.replace.empty() || hash.empty()) return false;
+    auto matches = [&](const std::string& prefix) { return !prefix.empty() && hash.compare(0, prefix.size(), prefix) == 0; };
+    if (matches(u.replace)) {
+        upscaler_frame_check();
+        Texture* src = u.src_depth_rt ? g_last_depth_rt.get() : pool_texture(u.src_img ? S.img[kCompute][u.src & 15] : S.tex[kCompute][u.src & 63]);
+        Texture* dst = pool_texture(u.dst_fs.empty() ? S.img[kCompute][u.dst & 15] : g_upscaler_dst_handle);
+        if (!src || !dst || same_image(src, dst)) {
+            if (first_time_key("upscaler-unbound"))
+                NXLOG_W(kTag, "upscaler override: %s: no source or output yet (%p, %p): left out", hash.c_str(), static_cast<void*>(src), static_cast<void*>(dst));
+            return true;
+        }
+        P_CopyTexTex p = {};
+        p.src = src;
+        p.dst = dst;
+        p.flags = NVN_COPY_FLAGS_LINEAR_FILTER_BIT;
+        char a[96], b[96];
+        TRACE("    upscaler override: copy %s -> %s", tex_desc(src, a, sizeof a), tex_desc(dst, b, sizeof b));
+        if (first_time_key("upscaler-copy")) NXLOG_I(kTag, "upscaler override: first copy %s -> %s", tex_desc(src, a, sizeof a), tex_desc(dst, b, sizeof b));
+        do_copy_texture_texture(p);
+        return true;
+    }
+    for (const std::string& s : u.skip)
+        if (matches(s)) return true;
+    return false;
+}
 
 void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     const ShaderInfo* cs = S.stage[kCompute];
     TRACE("dispatch %u %u %u indirect %llx cs %s%s%s", x, y, z, static_cast<unsigned long long>(indirect), cs ? cs->hash.c_str() : "-",
           !cs && !g_cs_missing.empty() ? " missing " : "", !cs ? g_cs_missing.c_str() : "");
+    if (g_trace) {   // what the game bound for compute, by NVN slot (independent of how the shader finds it in c[0]): textures, images, storage
+        char a[96];
+        for (int k = 0; k < 64; ++k)
+            if (S.tex[kCompute][k]) TRACE("    cs bound tex%d %llx -> %s", k, static_cast<unsigned long long>(S.tex[kCompute][k]), tex_desc(pool_texture(S.tex[kCompute][k]), a, sizeof a));
+        for (int k = 0; k < 16; ++k)
+            if (S.img[kCompute][k]) TRACE("    cs bound img%d %llx -> %s", k, static_cast<unsigned long long>(S.img[kCompute][k]), tex_desc(pool_texture(S.img[kCompute][k]), a, sizeof a));
+        for (int k = 0; k < 16; ++k)
+            if (S.ssbo[kCompute][k].addr) TRACE("    cs bound ssbo%d %llx/%llu", k, static_cast<unsigned long long>(S.ssbo[kCompute][k].addr), static_cast<unsigned long long>(S.ssbo[kCompute][k].size));
+        for (int k = 0; k < 16; ++k)
+            if (S.ubo[kCompute][k].addr) TRACE("    cs bound ubo%d %llx/%llu", k, static_cast<unsigned long long>(S.ubo[kCompute][k].addr), static_cast<unsigned long long>(S.ubo[kCompute][k].size));
+    }
+    if (upscaler_dispatch(cs ? cs->hash : g_cs_missing)) return;   // [nvn] upscaler_replace: the game's upscaler, replaced
     if (g_cs_pending) { note_pending_skip(true); return; }
     if (!cs) return;
     static const bool debug_skip = config_get_bool("nvn", "debug_skip_compute", false);   // diagnosis: no dispatch runs
@@ -3398,7 +3529,7 @@ void apply_bind_program(const P_BindProgram& p) {
     if (p.stages & (1u << kCompute)) g_cs_pending = pending;
     for (int st = 0; st < 6; ++st)
         if (p.stages & (1u << st)) S.stage[st] = p.program ? p.program->stage[st] : nullptr;
-    if (g_trace && (p.stages & (1u << kCompute))) {
+    if (p.stages & (1u << kCompute)) {   // also outside traces: the upscaler override names untranslated passes by it
         g_cs_missing = (p.program && !p.program->stage[kCompute]) ? std::string(p.program->missing) : std::string();
         if (!g_cs_missing.empty()) TRACE("bind program: compute block(s) %s not in the shader cache", g_cs_missing.c_str());
     }

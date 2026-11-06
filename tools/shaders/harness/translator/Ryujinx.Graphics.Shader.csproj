@@ -43,11 +43,16 @@
     <ShaderPatch Include="spirv-g2s-c0-base.patch" File="Translation/Optimizations/GlobalToStorage.cs" />
     <!-- Ampere front end: bindless handles the draw determines (NVN2 material tables); see the patch header. -->
     <ShaderPatch Include="ampere-bindless-handle-expr.patch" File="Translation/Optimizations/BindlessElimination.cs" />
+    <!-- Goto elimination: a break/continue enclosed by a later do-while keeps its loop (OoT A8 endless loops); see the patch header. -->
+    <ShaderPatch Include="structured-goto-loop-exits.patch" File="StructuredIr/GotoElimination.cs" />
+    <!-- Structurizer check hooks (NXRT_HARNESS_CFG_CHECK, off by default): StructuredCfgCheck.cs. -->
+    <ShaderPatch Include="structured-program-cfg-check.patch" File="StructuredIr/StructuredProgram.cs" />
+    <ShaderPatch Include="structured-context-node-blocks.patch" File="StructuredIr/StructuredProgramContext.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Include="$(ShaderSrc)**/*.cs"
-             Exclude="$(ShaderSrc)bin/**;$(ShaderSrc)obj/**;$(ShaderSrc)CodeGen/Spirv/SpirvGenerator.cs;$(ShaderSrc)Instructions/InstEmitFloatArithmetic.cs;$(ShaderSrc)IntermediateRepresentation/IoVariable.cs;$(ShaderSrc)CodeGen/Spirv/IoMap.cs;$(ShaderSrc)CodeGen/Glsl/Instructions/IoMap.cs;$(ShaderSrc)CodeGen/Spirv/Declarations.cs;$(ShaderSrc)Instructions/InstEmit.cs;$(ShaderSrc)Decoders/RegisterConsts.cs;$(ShaderSrc)StructuredIr/AstOptimizer.cs;$(ShaderSrc)Translation/Optimizations/GlobalToStorage.cs;$(ShaderSrc)Translation/Optimizations/BindlessElimination.cs" />
+             Exclude="$(ShaderSrc)bin/**;$(ShaderSrc)obj/**;$(ShaderSrc)CodeGen/Spirv/SpirvGenerator.cs;$(ShaderSrc)Instructions/InstEmitFloatArithmetic.cs;$(ShaderSrc)IntermediateRepresentation/IoVariable.cs;$(ShaderSrc)CodeGen/Spirv/IoMap.cs;$(ShaderSrc)CodeGen/Glsl/Instructions/IoMap.cs;$(ShaderSrc)CodeGen/Spirv/Declarations.cs;$(ShaderSrc)Instructions/InstEmit.cs;$(ShaderSrc)Decoders/RegisterConsts.cs;$(ShaderSrc)StructuredIr/AstOptimizer.cs;$(ShaderSrc)Translation/Optimizations/GlobalToStorage.cs;$(ShaderSrc)Translation/Optimizations/BindlessElimination.cs;$(ShaderSrc)StructuredIr/GotoElimination.cs;$(ShaderSrc)StructuredIr/StructuredProgram.cs;$(ShaderSrc)StructuredIr/StructuredProgramContext.cs" />
     <Compile Include="$(PatchedDir)CodeGen/Spirv/SpirvGenerator.cs" />
     <Compile Include="$(PatchedDir)Instructions/InstEmitFloatArithmetic.cs" />
     <Compile Include="$(PatchedDir)IntermediateRepresentation/IoVariable.cs" />
@@ -59,6 +64,11 @@
     <Compile Include="$(PatchedDir)StructuredIr/AstOptimizer.cs" />
     <Compile Include="$(PatchedDir)Translation/Optimizations/GlobalToStorage.cs" />
     <Compile Include="$(PatchedDir)Translation/Optimizations/BindlessElimination.cs" />
+    <Compile Include="$(PatchedDir)StructuredIr/GotoElimination.cs" />
+    <Compile Include="$(PatchedDir)StructuredIr/StructuredProgram.cs" />
+    <Compile Include="$(PatchedDir)StructuredIr/StructuredProgramContext.cs" />
+    <!-- Structurizer check (NXRT_HARNESS_CFG_CHECK): random walks through the structured code against the block graph. -->
+    <Compile Include="$(MSBuildThisFileDirectory)StructuredCfgCheck.cs" />
     <!-- Ampere front end: SassInst -> Ryujinx IR (partial InstEmit and translator internals, hence in this assembly). -->
     <Compile Include="$(MSBuildThisFileDirectory)../../ampere/frontend/*.cs" />
     <EmbeddedResource Include="$(ShaderSrc)CodeGen/Glsl/HelperFunctions/*.glsl"

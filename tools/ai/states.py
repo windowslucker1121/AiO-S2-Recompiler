@@ -5,13 +5,14 @@ and Vulkan objects that cannot be written out and recreated). It is what the gam
   work/states/<game>/<name>/state.json   name, description, created, build (exe size/time/SHA-256, commit), settings, env, reach, ready
                            save/          the game's committed save data (copied from [fs] save_dir, never from or into the user's own)
                            shot.png       the window when the state was saved
-load_state copies save/ into <run dir>/save, launches the exe with [fs] save_dir there, then runs the reach steps (boot to the title,
+load_state copies save/ into the instance's save folder (<run dir>[/<instance>]/save), launches the exe with [fs] save_dir there, then runs the reach steps (boot to the title,
 load the save, wait until in game) and the ready check. Built-in states (no save of their own, e.g. a fresh New Game) and the routes
 come from recomp/games/<id>/ai_states.toml: the game knowledge stays in the game's folder.
 
 Bug bundles (runtime nxrt/bugcapture.h) are folders under work/bugs: the F9 hotkey in the game writes one, capture_bug asks the running
-game for one through a request file (<exe dir>/capture_bug.<pid>) and adds what only this side has (the window picture, the launch
-arguments, stdout/stderr); with no game running it writes the bundle itself from the last run's files.
+game for one through a request file (<request dir>/capture_bug.<pid>: the instance folder, or the exe's folder for the default run) and
+adds what only this side has (the launch arguments, stdout/stderr); with no game running it writes the bundle itself from the last run's
+files. States and bundles record the instance they came from (several runs at once, gamectl "Several runs at once").
 """
 import hashlib
 import io
@@ -104,7 +105,9 @@ def jpeg(path, width=1280):
 
 
 class StateTools:
-    """Methods of gamectl.Game (it sets self.id, self.exe, self.run_dir, self.last_launch, launch, wait_for, send_input, ...)."""
+    """Methods of gamectl.Game (it provides id, exe, run_dir, runs, _target, _run_dir, _log_path, _capture, launch, wait_for, ...).
+    Every tool takes instance= (and the ones acting on a running game pid=) like the rest of the server: a state or bundle records the
+    instance it came from, and load_state starts the same instance again unless told otherwise."""
 
     # ---- places -----------------------------------------------------------------------------------------------------------------------------
     def _root(self):
@@ -158,34 +161,53 @@ class StateTools:
                  checkout_dirty=bool(git(checkout, 'status', '--porcelain', '--untracked-files=no')))
         return b
 
-    def _log_build(self):
-        """The commit the running (or last) exe was built from, from its log line "boot: built from commit <sha>[ +changes]"."""
-        lp = self._log_path()
-        if lp.exists():
+    def _log_head(self, t, rx):
+        """The first match of rx in the first 400 lines of the target's log (the start-up lines), or None."""
+        lp = self._log_path(t)
+        if lp and lp.exists():
             with open(lp, encoding='utf-8', errors='replace') as f:
                 for i, ln in enumerate(f):
-                    if m := re.search(r'built from commit (\w*)( with uncommitted changes)?', ln):
-                        return {'commit': m.group(1), 'dirty': bool(m.group(2))}
+                    if m := rx.search(ln):
+                        return m
                     if i > 400:
                         break
-        return {}
+        return None
 
-    def _last_launch(self):
-        """The last launch's arguments: this object's, else <run dir>/launch.json (a CLI call is a new process)."""
-        return self.last_launch or read_json(self.run_dir / 'launch.json') or {}
+    def _log_build(self, t):
+        """The commit the target's exe was built from, from its log line "boot: built from commit <sha>[ with uncommitted changes]"."""
+        m = self._log_head(t, re.compile(r'built from commit (\w*)( with uncommitted changes)?'))
+        return {'commit': m.group(1), 'dirty': bool(m.group(2))} if m else {}
 
-    def _save_dir_in_use(self):
-        """The save folder of the running or last run: its log line "save data in '...'", else the launch settings, else <run dir>/save."""
-        lp = self._log_path()
-        if lp.exists():
-            with open(lp, encoding='utf-8', errors='replace') as f:
-                for i, ln in enumerate(f):
-                    if m := re.search(r"save data in '([^']+)'", ln):
-                        return Path(m.group(1))
-                    if i > 400:
-                        break
-        s = self._last_launch().get('settings') or {}
-        return Path(s['fs.save_dir']) if s.get('fs.save_dir') else self.run_dir / 'save'
+    def _inst(self, t, instance=None):
+        from gamectl import DEFAULT, instance_name
+        return t.instance if t else (instance_name(instance) or DEFAULT)
+
+    def _last_launch(self, t, instance=None):
+        """The launch arguments of the target's run: this server's, else <run dir of the instance>/launch.json (a CLI call is a new
+        process). Another session's run: {} (its launch is not known here)."""
+        if t and t.own and t.own.last_launch:
+            return t.own.last_launch
+        if t and not t.own:
+            return {}
+        return read_json(self._run_dir(self._inst(t, instance)) / 'launch.json') or {}
+
+    def _save_dir_in_use(self, t, instance=None):
+        """The target's save folder: its log line "save data in '...'", else its launch settings, else <run dir of the instance>/save."""
+        if m := self._log_head(t, re.compile(r"save data in '([^']+)'")):
+            return Path(m.group(1))
+        s = self._last_launch(t, instance).get('settings') or {}
+        return Path(s['fs.save_dir']) if s.get('fs.save_dir') else self._run_dir(self._inst(t, instance)) / 'save'
+
+    def _picture(self, t):
+        """The target's window as a picture (the game's own frame first), or None: never a black one."""
+        try:
+            if t and t.running and self._window(t, required=False):
+                img, how, _ = self._capture(t)
+                if not wincap_black(img):
+                    return img, how
+        except Exception:                                           # noqa: BLE001  (a picture is optional)
+            pass
+        return None
 
     # ---- states -----------------------------------------------------------------------------------------------------------------------------
     def _state(self, name):
@@ -200,11 +222,19 @@ class StateTools:
             raise ValueError(f'no state {name!r}: states() lists them')
         return {**b, 'name': name, 'kind': 'built-in', 'dir': str(self._root() / 'recomp' / 'games' / self.id), 'save': None}
 
+    def _has_state(self, name):
+        try:
+            self._state(name)
+            return True
+        except ValueError:
+            return False
+
     def states(self):
         """The states load_state can start from: saved ones (work/states/<game>/<name>: the game's save data + how to get back there) and
         built-in ones of the game (recomp/games/<id>/ai_states.toml: no save of their own, e.g. a fresh New Game up to the first scene).
-        Per state: description, reach (the route names run after the launch), ready check, save files, created, and whether the exe on disk
-        is the build it was saved with (same SHA-256). Also the routes the game defines."""
+        Per state: description, reach (the route names run after the launch), ready check, save files, created, the instance it was saved
+        from (load_state starts that instance unless told otherwise), and whether the exe on disk is the build it was saved with (same
+        SHA-256). Also the routes the game defines."""
         cur = self._build().get('sha256')
         out = []
         for name, b in (self._game_ai().get('state') or {}).items():
@@ -215,27 +245,29 @@ class StateTools:
             if not s:
                 continue
             out.append({'name': d.name, 'kind': 'saved', 'description': s.get('description', ''), 'created': s.get('created'),
-                        'reach': s.get('reach', []), 'save_files': count_files(d / 'save'), 'from_bug': s.get('from_bug'),
-                        'build_commit': (s.get('build') or {}).get('commit'), 'same_exe': (s.get('build') or {}).get('sha256') == cur,
-                        'shot': str(d / 'shot.png') if (d / 'shot.png').exists() else None})
+                        'instance': s.get('instance', 'default'), 'reach': s.get('reach', []), 'save_files': count_files(d / 'save'),
+                        'from_bug': s.get('from_bug'), 'build_commit': (s.get('build') or {}).get('commit'),
+                        'same_exe': (s.get('build') or {}).get('sha256') == cur, 'shot': str(d / 'shot.png') if (d / 'shot.png').exists() else None})
         routes = {k: v.get('description', '') for k, v in (self._game_ai().get('route') or {}).items()}
         return {'states_dir': str(sd), 'states': out, 'routes': routes}
 
     def save_state(self, name: str, description: str = '', reach: list = None, ready: dict = None, from_bug: str = None,
-                   save_dir: str = None, overwrite: bool = False):
-        """Save the game's current save data as a named state (work/states/<game>/<name>). The source is the save folder of the running or
-        last run (from its log), a bug bundle's save/ (from_bug = bundle id), or save_dir. Only committed files are copied: make the game
-        save first (in game), else the state only holds what the game saved last. reach: the route names (ai_states.toml) or step dicts that
-        bring a launch from boot back to this moment; default the game's [defaults] reach (title, then load the save). ready: wait_for
-        arguments that confirm the moment (default the game's). Records the build (exe SHA-256, commit), the launch's settings and env (shader
-        cache, test switches) and a screenshot when the window is up. overwrite: replace a state of that name."""
+                   save_dir: str = None, overwrite: bool = False, instance: str = None, pid: int = None):
+        """Save the game's current save data as a named state (work/states/<game>/<name>). The source is the save folder of a run
+        (instance= or pid= choose it, as in status; its log names the folder; a run that has ended still counts), a bug bundle's save/
+        (from_bug = bundle id), or save_dir. Only committed files are copied: make the game save first (in game), else the state only holds
+        what the game saved last. reach: the route names (ai_states.toml) or step dicts that bring a launch from boot back to this moment;
+        default the game's [defaults] reach (title, then load the save). ready: wait_for arguments that confirm the moment (default the
+        game's). Records the instance, the build (exe SHA-256, commit), the launch's settings and env (shader cache, test switches) and a
+        screenshot when the window is up. overwrite: replace a state of that name."""
         if not re.fullmatch(r'[\w.-]+', name):
             raise ValueError('name: letters, digits, "_", "-", "." only')
         dst = self._states_dir() / name
         if dst.exists() and not overwrite:
             raise RuntimeError(f'state {name!r} exists (overwrite=true replaces it)')
         bug = self._bug_dir(from_bug) if from_bug else None
-        src = Path(save_dir) if save_dir else bug / 'save' if bug else self._save_dir_in_use()
+        t = None if bug or save_dir else self._target(instance, pid, required=False)
+        src = Path(save_dir) if save_dir else bug / 'save' if bug else self._save_dir_in_use(t, instance)
         if not src.exists():
             raise RuntimeError(f'no save folder at {src}')
         ai = self._game_ai().get('defaults') or {}
@@ -243,49 +275,49 @@ class StateTools:
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True)
         files = copy_save(src, tmp / 'save')
-        ll = self._last_launch()
-        settings = {k: v for k, v in (ll.get('settings') or {}).items() if k not in ('fs.save_dir', 'bug.dir')}
-        env = {k: v for k, v in (ll.get('env') or {}).items() if not RUN_ONLY_ENV.match(k)}
-        if bug:
-            env = {**{k: v for k, v in self._bug_env(bug).items() if not RUN_ONLY_ENV.match(k)}, **env}
-        if bug:          # the build that ran when the bundle was made
-            bb = (read_json(bug / 'bug.json') or {}).get('build') or {}
+        if bug:          # the run the bundle came from: its environment, instance and build
+            meta = read_json(bug / 'bug.json') or {}
+            ll, inst = {}, meta.get('instance') or 'default'
+            env = {k: v for k, v in self._bug_env(bug).items() if not RUN_ONLY_ENV.match(k)}
+            bb = meta.get('build') or {}
             build = {'exe': bb.get('exe'), 'size': bb.get('exe_size'), 'modified': bb.get('exe_modified'), 'sha256': bb.get('exe_sha256'),
                      'commit': bb.get('commit'), 'dirty': bb.get('dirty')}
         else:
-            build = {**self._build(), **self._log_build()}
-        state = {'name': name, 'description': description, 'created': now_text(), 'game': self.id, 'reach': reach or ai.get('reach', []),
-                 'ready': ready or ai.get('ready'), 'settings': settings, 'env': env, 'args': ll.get('args') or [], 'build': build,
-                 'from_bug': from_bug, 'save_source': str(src), 'save_files': files}
+            ll, inst = self._last_launch(t, instance), self._inst(t, instance)
+            env = {k: v for k, v in (ll.get('env') or {}).items() if not RUN_ONLY_ENV.match(k)}
+            build = {**self._build(), **self._log_build(t)}
+        settings = {k: v for k, v in (ll.get('settings') or {}).items() if k not in ('fs.save_dir', 'bug.dir')}
+        state = {'name': name, 'description': description, 'created': now_text(), 'game': self.id, 'instance': inst,
+                 'reach': reach or ai.get('reach', []), 'ready': ready or ai.get('ready'), 'settings': settings, 'env': env,
+                 'args': ll.get('args') or [], 'build': build, 'from_bug': from_bug, 'save_source': str(src), 'save_files': files}
         shot = None
         if bug and (bug / 'screen.png').exists():
             shutil.copy2(bug / 'screen.png', tmp / 'shot.png')
             shot = tmp / 'shot.png'
-        elif self._window(required=False):
-            try:
-                img, _, _ = self._capture()
-                if not wincap_black(img):
-                    img.save(tmp / 'shot.png')
-                    shot = tmp / 'shot.png'
-            except Exception:                                       # noqa: BLE001  (a picture is optional)
-                pass
+        elif pic := self._picture(t):
+            pic[0].save(tmp / 'shot.png')
+            shot = tmp / 'shot.png'
         (tmp / 'state.json').write_text(json.dumps(state, indent=1), encoding='utf-8')
         if dst.exists():
             shutil.rmtree(dst)
         os.replace(tmp, dst)
-        return {'saved': str(dst), 'save_files': files, 'from': str(src), 'reach': state['reach'], 'shot': str(dst / 'shot.png') if shot else None,
+        return {'saved': str(dst), 'instance': inst, 'save_files': files, 'from': str(src), 'reach': state['reach'],
+                'shot': str(dst / 'shot.png') if shot else None,
                 'note': None if files else 'the save folder had no committed files: the game has not saved yet'}
 
     def load_state(self, name: str = None, bug: str = None, settings: dict = None, env: dict = None, args: list = None,
-                   reach: bool = True, route: list = None, timeout_s: float = 900):
-        """Start the game at a state: copies the state's save data (or a bug bundle's, bug = bundle id) into <run dir>/save, launches with
-        [fs] save_dir there (the user's own save is never read or written), then runs the state's reach steps (e.g. boot to the title, load
-        the save, wait until in game) and its ready check. Settings and env merge in this order, later wins: the game's defaults
-        (ai_states.toml: shader cache, test switches), the state's (or the bundle's env.txt), this call's. reach=false: launch only.
-        Returns ok, the step that failed (with the log tail) or the seconds each step took, a screenshot path, and a warning when the exe
-        is not the build the state was saved with. route: steps to run instead of the state's reach (route names or step dicts, see
-        save_state). A bundle's reach is that of the state its run was loaded from (bug.json "state"), else the game's default (load the
-        save). Takes minutes (boot ~45 s, loading ~70 s); timeout_s bounds the whole run."""
+                   reach: bool = True, route: list = None, timeout_s: float = 900, instance: str = None):
+        """Start the game at a state: copies the state's save data (or a bug bundle's, bug = bundle id) into the instance's own save folder
+        (<run dir>/save, or <run dir>/<instance>/save), launches with [fs] save_dir there (the player's own save is never read or written),
+        then runs the state's reach steps (e.g. boot to the title, load the save, wait until in game) and its ready check. instance: the
+        run to start (default: the instance the state or bundle came from); this server's previous run of it is ended first, another
+        session's run of that name is never touched (refused: pass another instance). Settings and env merge in this order, later wins:
+        the game's defaults (ai_states.toml: shader cache, test switches), the state's (or the bundle's env.txt), this call's. reach=false:
+        launch only. route: steps to run instead of the state's reach (route names or step dicts, see save_state). A bundle's reach is that
+        of the state its run was loaded from (bug.json "state"), else the game's default (load the save). Returns ok, the step that failed
+        (with the log tail) or the seconds each step took, a screenshot path, and a warning when the exe is not the build the state was
+        saved with. Takes a minute or more (boot, loading); timeout_s bounds the whole run."""
+        from gamectl import DEFAULT, instance_name
         if bool(name) == bool(bug):
             raise ValueError('give a state name or a bug bundle id (bugs() lists them)')
         t0 = time.time()
@@ -294,17 +326,20 @@ class StateTools:
             meta = read_json(b / 'bug.json') or {}
             base = self._state(meta['state']) if meta.get('state') and self._has_state(meta['state']) else {}
             st = {'name': f'bug:{b.name}', 'kind': 'bug', 'dir': str(b), 'save': str(b / 'save') if (b / 'save').exists() else None,
+                  'instance': meta.get('instance') or DEFAULT,
                   'reach': base.get('reach') or (self._game_ai().get('defaults') or {}).get('reach', []), 'ready': base.get('ready'),
                   'settings': base.get('settings') or {}, 'args': base.get('args') or [],
                   'env': {**(base.get('env') or {}), **{k: v for k, v in self._bug_env(b).items() if not RUN_ONLY_ENV.match(k)}},
                   'build': meta.get('build') or {}}
         else:
             st = self._state(name)
+        inst = instance_name(instance) or instance_name(st.get('instance')) or DEFAULT
         ai = self._game_ai().get('defaults') or {}
-        if others := self.others_running():
-            raise RuntimeError(f'another copy of the game runs ({others}): one at a time on this machine; wait for it')
-        self.kill()                                                 # a previous run of this exe may still have the save folder open
-        save = self.run_dir / 'save'
+        if clash := [x for x in self._running() if x.instance == inst and not x.own]:
+            raise RuntimeError(f'instance {inst} is already running as {clash[0].label()}: pass instance="<another name>"')
+        if (run := self.runs.get(inst)) and run.alive():
+            self._kill_run(run)                                     # it may still have the save folder open
+        save = self._run_dir(inst) / 'save'
         if save.exists():
             shutil.rmtree(save)                                     # this server's own copy from the previous load_state
         if st.get('save'):
@@ -314,50 +349,51 @@ class StateTools:
         s = {**(ai.get('settings') or {}), **(st.get('settings') or {}), **(settings or {}), 'fs.save_dir': str(save)}
         e = {**(ai.get('env') or {}), **(st.get('env') or {}), **(env or {}), 'NXRT_AI_STATE': st['name']}
         a = list(args if args is not None else st.get('args') or ai.get('args') or [])
+        a = [x for i, x in enumerate(a) if x not in ('--instance', '--instance-dir') and (i == 0 or a[i - 1] not in ('--instance', '--instance-dir'))]
         warn = None
         want = (st.get('build') or {}).get('sha256') or (st.get('build') or {}).get('exe_sha256')
         if want and self.exe.exists() and file_sha256(self.exe) != want:
             warn = f'the exe differs from the build this state was saved with (commit {(st.get("build") or {}).get("commit")})'
-        r = self.launch(args=a, settings=s, env=e)
-        out = {'state': st['name'], 'pid': r['pid'], 'log': r['log'], 'save_dir': str(save), 'save_files': count_files(save)}
+        r = self.launch(args=a, settings=s, env=e, instance=inst)
+        out = {'state': st['name'], 'instance': inst, 'pid': r['pid'], 'log': r['log'], 'save_dir': str(save), 'save_files': count_files(save)}
         if warn:
             out['warning'] = warn
+        if 'exit_code' in r:
+            return {**out, 'ok': False, 'failed': 'launch', 'exit_code': r['exit_code'], 'meaning': r.get('meaning'), 'stderr': r.get('stderr')}
         if not reach:
             return out
         deadline = t0 + timeout_s
-        res = self._run_steps(route if route is not None else st.get('reach') or [], Path(st['dir']), deadline)
+        res = self._run_steps(route if route is not None else st.get('reach') or [], Path(st['dir']), deadline, inst)
         if res['ok'] and st.get('ready'):
-            w = self.wait_for(**self._wait_args(st['ready'], Path(st['dir']), deadline))
+            w = self.wait_for(**self._wait_args(st['ready'], Path(st['dir']), deadline, inst))
             res['steps'].append({'step': 'ready', **w})
             res['ok'] = w['ok']
             if not w['ok']:
                 res['failed'] = 'ready'
         out.update(res)
         out['seconds'] = round(time.time() - t0, 1)
-        if self._window(required=False):
-            out['shot'] = self.screenshot(show=False)['path']
+        t = self._target(inst, required=False)
+        if pic := self._picture(t):
+            pic[0].save(p := self._shot_path(t, 'state'))
+            out['shot'] = str(p)
         if not res['ok']:
-            out['log_tail'] = self.log(25).get('lines')
+            out['log_tail'] = self.log(25, instance=inst).get('lines')
         return out
 
-    def _has_state(self, name):
-        try:
-            self._state(name)
-            return True
-        except ValueError:
-            return False
-
-    def _wait_args(self, w, base, deadline):
+    def _wait_args(self, w, base, deadline, inst):
         w = dict(w)
         if w.get('ref') and not Path(w['ref']).is_absolute():
             w['ref'] = str(base / w['ref'])
         w['timeout_s'] = max(1.0, min(float(w.get('timeout_s', 60)), deadline - time.time()))
+        w['instance'] = inst
         return w
 
-    def _run_steps(self, steps, base, deadline, depth=0):
-        """Runs reach steps. A step is a route name or a dict with one of: route = "<name>" (ai_states.toml [route.<name>].steps),
-        wait_for = {wait_for arguments}, input = [send_input steps] (posted to the window), sleep = seconds, shot = "<name>",
-        press_until = {input = [...], every_s = 3, until = {wait_for arguments}, timeout_s = 120}; optional = true lets it fail."""
+    def _run_steps(self, steps, base, deadline, inst, depth=0):
+        """Runs reach steps on the instance inst. A step is a route name or a dict with one of: route = "<name>" (ai_states.toml
+        [route.<name>].steps), wait_for = {wait_for arguments}, input = [send_input steps] (posted to the window), sleep = seconds,
+        shot = "<name>", press_until = {input = [...], every_s = 3, until = {wait_for arguments}, timeout_s = 120}; optional = true lets
+        it fail."""
+        from gamectl import _read_from
         routes = self._game_ai().get('route') or {}
         done = []
         for st in steps:
@@ -370,43 +406,42 @@ class StateTools:
             if kind == 'route':
                 if st['route'] not in routes or depth > 8:
                     raise ValueError(f'unknown route {st["route"]!r} (ai_states.toml [route.<name>])')
-                sub = self._run_steps(routes[st['route']].get('steps', []), base, deadline, depth + 1)
+                sub = self._run_steps(routes[st['route']].get('steps', []), base, deadline, inst, depth + 1)
                 ok, info = sub['ok'], {'steps': sub['steps'], **({'failed': sub['failed']} if not sub['ok'] else {})}
             elif kind == 'wait_for':
-                info = self.wait_for(**self._wait_args(st['wait_for'], base, deadline))
+                info = self.wait_for(**self._wait_args(st['wait_for'], base, deadline, inst))
                 ok = info['ok']
             elif kind == 'input':
-                info = self.send_input(st['input'])
+                info = self.send_input(st['input'], instance=inst)
             elif kind == 'sleep':
                 time.sleep(max(0.0, min(float(st['sleep']), deadline - time.time())))
             elif kind == 'shot':
-                info = self.screenshot(show=False, save=str(self.run_dir / 'shots' / f'{st["shot"]}.png'))
+                info = self.screenshot(show=False, save=str(self._run_dir(inst) / 'shots' / f'{st["shot"]}.png'), instance=inst)
             elif kind == 'press_until':
                 p = st['press_until']
                 end = min(deadline, time.time() + float(p.get('timeout_s', 120)))
-                from gamectl import _read_from as gamectl_read_from
-                ok, presses = False, 0
+                ok, presses, line = False, 0, None
                 until, every = dict(p['until']), float(p.get('every_s', 3))
                 rx = re.compile(until.get('pattern') or '.', re.I) if until.get('until') == 'log' else None
-                lp = self._log_path()
-                pos = lp.stat().st_size if lp.exists() else 0       # a log condition counts from the first press, not from each one
-                line = None
+                tg = self._target(inst)
+                lp = self._log_path(tg)
+                pos = lp.stat().st_size if lp and lp.exists() else 0     # a log condition counts from the first press, not from each one
                 while time.time() < end and not ok:
-                    if not self._pids():
+                    if not self._alive(tg):
                         info['why'] = 'the game is not running'
                         break
-                    self.send_input(p['input'])
+                    self.send_input(p['input'], instance=inst)
                     presses += 1
                     if rx:
                         t_press = time.time()
                         while not ok and time.time() - t_press < every and time.time() < end:
                             time.sleep(0.25)
-                            if lp.exists():
-                                lines, pos = gamectl_read_from(lp, pos)
+                            if lp and lp.exists():
+                                lines, pos = _read_from(lp, pos)
                                 line = next((ln for ln in lines if rx.search(ln)), None)
                                 ok = line is not None
                     else:
-                        ok = self.wait_for(**self._wait_args({**until, 'timeout_s': every}, base, end))['ok']
+                        ok = self.wait_for(**self._wait_args({**until, 'timeout_s': every}, base, end, inst))['ok']
                 info.update(presses=presses, **({'line': line} if line else {}))
             else:
                 raise ValueError(f'unknown step {st!r}: one of {", ".join(STEP_KINDS)}')
@@ -442,68 +477,72 @@ class StateTools:
                     env[k] = v
         return env
 
-    def capture_bug(self, note: str = '', trace: bool = False, name: str = None, timeout_s: float = 30):
-        """Save this moment as a bug bundle (work/bugs/<time>[-name]): the running game writes screen.png (the presented frame), log.txt,
-        config.txt (every setting read and its source), env.txt, threads.txt (all thread stacks), save/ (committed save data), reports/
-        (crash/freeze/fatal) and bug.json (build: exe SHA-256 and commit; frame, state); this side adds window.png (PrintWindow), mcp.json
-        (the launch: args, settings, env, run dir) and stdout/stderr. trace: also trace the next NVN frame into the log. With no game
-        running (or no answer within timeout_s) the bundle is made from the last run's files only. The player's F9 key in the game makes
-        the same bundle and asks for the note in a small window. bugs() lists them; load_state(bug=...) starts from one."""
+    def capture_bug(self, note: str = '', trace: bool = False, name: str = None, timeout_s: float = 30, instance: str = None, pid: int = None):
+        """Save this moment of a run (instance= or pid= choose it, as in status) as a bug bundle (work/bugs/<time>[-instance][-name]): the
+        running game writes screen.png (the presented frame), log.txt, config.txt (every setting read and its source), env.txt,
+        threads.txt (all thread stacks), save/ (committed save data), reports/ (crash/freeze/fatal) and bug.json (build: exe SHA-256 and
+        commit; instance, frame, state); this side adds window.png (only when the game gave no frame), mcp.json (the launch: args,
+        settings, env, run dir) and stdout/stderr. trace: also trace the next NVN frame into the log. With the run not running (or no answer
+        within timeout_s) the bundle is made from its last files only. The player's F9 key in the game makes the same bundle and asks for
+        the note in a small window. bugs() lists them; load_state(bug=...) starts from one (in the same instance)."""
+        t = self._target(instance, pid, required=False)
+        inst = self._inst(t, instance)
         bugs = self._bugs_dir()
         before = {p.name for p in bugs.iterdir()} if bugs.exists() else set()
-        pids = self._pids()
-        from gamectl import processes
-        names = {p: n for p, _, n in processes()}
-        targets = [p for p in pids if names.get(p, '').lower() == self.exe.name.lower()] or \
-                  [p for p in pids if names.get(p, '').lower() not in ('cmd.exe', 'conhost.exe')]
-        req_text = ''.join(['@trace\n' if trace else '', f'@name {name}\n' if name else '', '@origin mcp\n', note, '\n'])
-        reqs = []
         made, why = None, None
-        if targets:
+        if t and t.running and (d := self._request_dir(t)) and (targets := self._request_pids(t)):
+            from gamectl import _read_from
+            lp = self._log_path(t)
+            pos = lp.stat().st_size if lp and lp.exists() else 0
+            req_text = ''.join(['@trace\n' if trace else '', f'@name {name}\n' if name else '', '@origin mcp\n', note, '\n'])
+            reqs = []
             for p in targets:
-                r = self.exe.parent / f'capture_bug.{p}'
+                r = Path(d) / f'capture_bug.{p}'
                 r.write_text(req_text, encoding='utf-8')
                 reqs.append(r)
             end = time.time() + timeout_s
+            done_rx = re.compile(r'bug: bundle complete (.+?) \(\d+ save files')
             while time.time() < end and made is None:
                 time.sleep(0.25)
-                if bugs.exists():
+                if lp and lp.exists():                              # the run's own log names its bundle (it may use another bug folder)
+                    lines, pos = _read_from(lp, pos)
+                    if m := next((done_rx.search(ln) for ln in lines if done_rx.search(ln)), None):
+                        made = Path(m.group(1))
+                if made is None and bugs.exists():
                     new = sorted(p for p in bugs.iterdir() if p.is_dir() and p.name not in before and (p / 'bug.json').exists())
                     made = new[-1] if new else None
             for r in reqs:
-                r.unlink(missing_ok=True)                           # a target that did not take its request (a helper process)
+                r.unlink(missing_ok=True)                           # a target that did not take its request
             if made is None:
                 why = f'the game did not answer the request within {timeout_s:g} s (not a build with bug capture, or stuck)'
         else:
-            why = 'the game is not running'
+            why = f'instance {inst} is not running'
         if made is None:
-            made = self._outside_bundle(note, name, why)
+            made = self._outside_bundle(note, name, why, t, inst)
         extra = []
-        if not (made / 'screen.png').exists() and self._window(required=False):     # the game's own frame is better when it is there
-            try:
-                img, how, _ = self._capture()
-                if not wincap_black(img):
-                    img.save(made / 'window.png')
-                    extra.append(f'window.png ({how})')
-            except Exception as e:                                  # noqa: BLE001  (a picture is optional)
-                extra.append(f'window.png failed: {e}')
+        if not (made / 'screen.png').exists() and (pic := self._picture(t)):     # the game's own frame is better when it is there
+            pic[0].save(made / 'window.png')
+            extra.append(f'window.png ({pic[1]})')
+        rd = t.own.run_dir if t and t.own else self._run_dir(inst) if not t else None
         for f in ('stdout.txt', 'stderr.txt'):
-            if (self.run_dir / f).exists():
-                shutil.copy2(self.run_dir / f, made / f)
+            if rd and (rd / f).exists():
+                shutil.copy2(rd / f, made / f)
                 extra.append(f)
-        ll = self._last_launch()
-        mcp = {'time': now_text(), 'note': note, 'run_dir': str(self.run_dir), 'last_launch': ll, 'build': self._build(),
-               'running': bool(self._pids()), 'state': (ll.get('env') or {}).get('NXRT_AI_STATE')}
+        ll = self._last_launch(t, instance)
+        mcp = {'time': now_text(), 'note': note, 'instance': inst, 'pid': t.pid if t else None, 'run_dir': str(rd) if rd else None,
+               'last_launch': ll, 'build': self._build(), 'running': bool(t and t.running), 'state': (ll.get('env') or {}).get('NXRT_AI_STATE')}
         (made / 'mcp.json').write_text(json.dumps(mcp, indent=1, default=str), encoding='utf-8')
         if note and not (made / 'note.txt').exists():
             (made / 'note.txt').write_text(note + '\n', encoding='utf-8')
-        return {'bundle': str(made), 'id': made.name, 'by': 'game' if why is None else 'this server', **({'why': why} if why else {}),
-                'files': sorted(str(p.relative_to(made)).replace('\\', '/') for p in made.iterdir()), 'added': extra}
+        return {'bundle': str(made), 'id': made.name, 'instance': inst, 'by': 'game' if why is None else 'this server',
+                **({'why': why} if why else {}), 'files': sorted(str(p.relative_to(made)).replace('\\', '/') for p in made.iterdir()),
+                'added': extra}
 
-    def _outside_bundle(self, note, name, why):
-        """A bundle without the game's help: the last run's log, reports, save folder and launch."""
+    def _outside_bundle(self, note, name, why, t, inst):
+        """A bundle without the game's help: the run's last log, reports, save folder and launch."""
+        from gamectl import DEFAULT, _tail
         stamp = time.strftime('%Y%m%d-%H%M%S')
-        label = re.sub(r'[^\w-]+', '-', name or '').strip('-')[:40]
+        label = '-'.join(x for x in ([inst] if inst != DEFAULT else []) + [re.sub(r'[^\w-]+', '-', name or '').strip('-')[:40]] if x)
         d = self._bugs_dir() / (stamp + (f'-{label}' if label else ''))
         i = 2
         while d.exists():
@@ -514,46 +553,53 @@ class StateTools:
         if note:
             (d / 'note.txt').write_text(note + '\n', encoding='utf-8')
             files.append('note.txt')
-        lp = self._log_path()
-        if lp.exists():
-            from gamectl import _tail
+        if t is None:
+            t = self._target(inst, required=False)
+        lp = self._log_path(t) if t else self._run_dir(inst) / self.log_name
+        if lp and lp.exists():
             (d / 'log.txt').write_text('\n'.join(_tail(lp, 200000, 32 << 20)) + '\n', encoding='utf-8')
             files.append('log.txt')
-        for p in self._report_files():
+        for p in self._report_files(t) if t else []:
             (d / 'reports').mkdir(exist_ok=True)
             shutil.copy2(p, d / 'reports' / p.name)
             files.append(f'reports/{p.name}')
-        sv = self._save_dir_in_use()
+        sv = self._save_dir_in_use(t, inst)
         n = copy_save(sv, d / 'save') if sv.exists() else 0
         if n:
             files.append('save/')
-        ll = self._last_launch()
+        ll = self._last_launch(t, inst)
         env = dict(ll.get('env') or {})
         for k, v in (ll.get('settings') or {}).items():
             env['NXRT_' + re.sub(r'\W', '_', k.upper().replace('.', '_', 1))] = ('1' if v else '0') if isinstance(v, bool) else str(v)
         (d / 'env.txt').write_text(''.join(f'{k}={v}\n' for k, v in env.items() if k.startswith(('NXRT_', 'SDL_'))), encoding='utf-8')
         files.append('env.txt')
         b = self._build()
-        meta = {'format': 1, 'complete': True, 'time': now_text(), 'origin': 'mcp (no game)', 'why': why,
+        meta = {'format': 1, 'complete': True, 'time': now_text(), 'origin': 'mcp (no game)', 'why': why, 'instance': inst,
                 'build': {'exe': b.get('exe'), 'exe_size': b.get('size'), 'exe_modified': b.get('modified'), 'exe_sha256': b.get('sha256'),
-                          **self._log_build()},
+                          **self._log_build(t)},
                 'state': env.get('NXRT_AI_STATE', ''), 'save_dir': str(sv), 'save_files': n, 'log': str(lp), 'screenshot': False, 'files': files}
         (d / 'bug.json').write_text(json.dumps(meta, indent=1), encoding='utf-8')
         return d
 
-    def bugs(self, id: str = None, tail: int = 40, show: bool = True):
-        """Bug bundles (work/bugs), newest first: id (folder name), time, origin (hotkey = the player's F9, mcp, request), the note's first
-        line, the state the run was loaded from, screenshot and save files present, the build commit and whether the exe on disk is the same
-        build. With id (a folder name, part of one, or "latest"): the whole bug.json, the note, the files, the last `tail` lines of log.txt,
-        and (show) the screenshot. load_state(bug=id) starts the game from the bundle's save data with its settings."""
+    def bugs(self, id: str = None, tail: int = 40, show: bool = True, instance: str = None):
+        """Bug bundles (work/bugs), newest first: id (folder name), time, origin (hotkey = the player's F9, mcp, request), the instance it
+        came from, the note's first line, the state the run was loaded from, screenshot and save files present, the build commit and whether
+        the exe on disk is the same build; instance= keeps one instance's. With id (a folder name, part of one, or "latest"): the whole
+        bug.json, the note, the files, the last `tail` lines of log.txt, and (show) the screenshot. load_state(bug=id) starts the game from
+        the bundle's save data with its settings, in its instance."""
+        from gamectl import instance_name
         d = self._bugs_dir()
         if id is None:
+            want = instance_name(instance)
             cur = file_sha256(self.exe) if self.exe.exists() else None
             out = []
             for b in sorted((p for p in d.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True) if d.exists() else []:
                 m = read_json(b / 'bug.json') or {}
+                inst = m.get('instance') or 'default'
+                if want and inst != want:
+                    continue
                 note = (b / 'note.txt').read_text(encoding='utf-8', errors='replace').strip().splitlines() if (b / 'note.txt').exists() else []
-                out.append({'id': b.name, 'time': m.get('time'), 'origin': m.get('origin'), 'complete': bool(m.get('complete')),
+                out.append({'id': b.name, 'time': m.get('time'), 'origin': m.get('origin'), 'instance': inst, 'complete': bool(m.get('complete')),
                             'note': note[0][:200] if note else '', 'state': m.get('state') or None,
                             'screenshot': (b / 'screen.png').exists() or (b / 'window.png').exists(), 'save_files': count_files(b / 'save'),
                             'commit': (m.get('build') or {}).get('commit'), 'same_exe': (m.get('build') or {}).get('exe_sha256') == cur})

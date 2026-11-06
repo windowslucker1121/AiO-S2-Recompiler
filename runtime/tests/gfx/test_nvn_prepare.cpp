@@ -405,3 +405,47 @@ NXTEST(cancel_leaves_state_incomplete) {
     CHECK(state.find("complete: 1") == std::string::npos);
     app.shutdown();
 }
+
+// The state checks the setup makes before a start (no device): scheme, raster flags of [nvn] prepare_rasters and the pipeline cache file the
+// preparation wrote (missing, or under half of its bytes: prepare again). prepare_rasters_setting normalises the setting.
+NXTEST(state_needs_scheme_rasters_and_cache_file) {
+    namespace be = nxrt::nvn::be;
+    const std::string old = nxrt::config_get_str("nvn", "prepare_rasters", "0.1.1 0.0.1");   // put back as found (unset reads as the default)
+    nxrt::config_set("nvn", "prepare_rasters", "0.1.1, 0.0.1;0.0.1 9.9.9");
+    CHECK_EQ(be::prepare_rasters_setting(), std::string("0.1.1 0.0.1"));
+    TempDir td;
+    const fs::path state = td.path / "prepare.state", cache = td.path / "pipeline_cache.bin";
+    auto write_state = [&](int scheme, const std::string& rasters, uint64_t cache_bytes, bool complete) {
+        std::ofstream f(state, std::ios::trunc);
+        f << "key: scheme=" << scheme << " programs=6 gpu=x driver=1 api=1 cache=00 salt=\n" << "prepared: 6\n" << "rasters: " << rasters << "\n";
+        if (cache_bytes) f << "cache: " << cache.string() << "\n" << "cache_bytes: " << cache_bytes << "\n";
+        f << "complete: " << (complete ? 1 : 0) << "\n";
+    };
+    auto write_cache = [&](size_t bytes) {
+        std::ofstream f(cache, std::ios::binary | std::ios::trunc);
+        f << std::string(bytes, 'c');
+    };
+    std::string why;
+    CHECK(!be::prepare_state_complete(state.string(), &why));                        // no state file
+    write_cache(1000);
+    write_state(be::kPrepareScheme, "0.1.1 0.0.1", 1000, true);
+    CHECK(be::prepare_state_complete(state.string(), &why));
+    write_state(be::kPrepareScheme, "0.1.1 0.0.1", 1000, false);
+    CHECK(!be::prepare_state_complete(state.string(), &why));                        // not finished
+    write_state(1, "0.1.1 0.0.1", 1000, true);
+    CHECK(!be::prepare_state_complete(state.string(), &why));                        // older scheme
+    write_state(be::kPrepareScheme, "0.1.1", 1000, true);
+    CHECK(!be::prepare_state_complete(state.string(), &why));                        // other raster flags
+    write_state(be::kPrepareScheme, "0.1.1 0.0.1", 1000, true);
+    write_cache(600);                                                                // a later save may differ a little: still fine
+    CHECK(be::prepare_state_complete(state.string(), &why));
+    write_cache(400);                                                                // lost most of it (the old 2 GiB load failure)
+    CHECK(!be::prepare_state_complete(state.string(), &why));
+    std::printf("    %s\n", why.c_str());
+    std::error_code ec;
+    fs::remove(cache, ec);
+    CHECK(!be::prepare_state_complete(state.string(), &why));                        // gone
+    write_state(be::kPrepareScheme, "0.1.1 0.0.1", 0, true);                         // prepare_cache off: no file named, nothing to check
+    CHECK(be::prepare_state_complete(state.string(), &why));
+    nxrt::config_set("nvn", "prepare_rasters", old.c_str());
+}

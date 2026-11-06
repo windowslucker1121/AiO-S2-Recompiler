@@ -10,12 +10,16 @@ techniques, rules) and `DEVELOPMENT_SETUP.md` (what a development machine needs)
 | Boot, title screen | Works. Title movie (AV1 on dav1d), logo, menu text ("New Game", "Options / ZELDA NOTES Setting") without artifacts. |
 | Gamepad | Works (SDL gamepad path, checked with the test tooling's virtual Xbox pad: A starts the game, rumble reaches the pad). Keyboard bindings exist too. |
 | Audio | Opus decodes on libopus (not listened to). Two audio-renderer crashes on entering gameplay are fixed. |
-| Shaders | Second machine: 46,192 of the corpus's 47,203 blocks translated in a fresh batch run (`work\shaders\oot\spirv`; the first machine's cache also had on-demand and re-translated rows: 46,357 of 47,428). Pre-boot shader preparation done (39,327 of 39,363 programs, 36 without a shader) into `work\shaders\oot\pipeline_cache.bin` (2.2 GB on the RTX 4080). |
+| Shaders | Second machine: 46,192 of the corpus's 47,203 blocks translated in a fresh batch run (`work\shaders\oot\spirv`; the first machine's cache also had on-demand and re-translated rows: 46,357 of 47,428). Pre-boot shader preparation: 39,327 of 39,363 programs (36 without a shader), 2.3 GB of pipeline cache on the RTX 4080. The first game starts lost that file (32-bit `ftell`, fixed on `claude/zen-diffie-c78ae1`); `work\shaders\oot` now holds a 345 MB remnant and a scheme-1 state, so the next start with the fix prepares again (both depth-clamp variants, ~25 min). |
 | New Game | Title -> 5-minute intro movie (`Dm_Kokiri_0000.webm`, cannot be skipped) -> ~70 s loading -> first 3D scene. |
-| **First 3D scene** | **Blocked: `VK_ERROR_DEVICE_LOST` 1-7 s after its first frame, on every full run (A8, below).** |
+| **First 3D scene** | The device loss (A8) is fixed in the translator (branch `claude/busy-hamilton-0e62aa`): endless loops from Ryujinx's goto elimination in 14,692 pixel shaders. With a cache translated with the fix the scene ran 4 minutes without a loss (a control run with the three old A8 shaders put back lost the device 4 s into the scene, in the original draw); the scene is black (separate issue). `work\shaders\oot\spirv` still has the old shaders until it is re-translated and prepared again. |
 | FPS | Title well above 30 fps. In game unknown (blocked); with 1/16 of the fragment draws enabled the scene ran at 10-15 fps. |
 
-## The current problem: GPU device lost in the first scene (A8)
+## GPU device lost in the first scene (A8): fixed
+
+**Root cause (2026-11-06):** Ryujinx's goto elimination enclosed a loop's exit (`if (c) break;`) in a newer flag loop, so the break left only that
+loop and the shader's light loop never ended. Fix, offline check and numbers: `AGENTS.md` artifact A8 and `tools/shaders/README.md` ("Structurizer").
+The investigation below is kept as it was.
 
 Symptom: after "New Game" and the intro, the first scene presents one to three frames (the first takes 9-112 s to replay because of
 first-use texture uploads), then `vkQueueSubmit2 failed (-4): the device is lost or out of memory` in `oot.log` and the process ends.
@@ -137,6 +141,8 @@ Shaders (translator and runtime):
 Runtime:
 - **Shader preparation** re-runs only when more programs of `programs.bin` have usable translations than it prepared
   (`usable_programs` in `nvn_shaders.cpp`); the pipeline cache now defaults to the folder of `programs.bin` / `prepare.state`.
+  It also re-runs for an older `prepare.state` scheme, other `[nvn] prepare_rasters`, or a cache file that is missing or under half
+  of `cache_bytes`. A game start loads the whole cache (64-bit sizes), and saves never write less than was loaded (AGENTS.md).
 - **Movies**: dav1d chooses its own frame delay and gets half the cores (21 -> 37-63 pictures/s). `[media] video_max_pictures` ends
   every movie early for tests.
 - **Opus**: libopus via the repo-local vcpkg; the "Ex" open forms carry {rate, channels} in the raw request data.
@@ -155,6 +161,7 @@ Runtime:
 3. After translator changes: `dotnet build tools\shaders\harness\SpirvHarness.csproj -c Release`, re-translate what changed and merge
    it. The next start then runs the shader preparation window again if new programs became preparable (15-30 minutes).
 4. Start with A8 (step 1 of its list above), and use the MCP `game` tools (`launch`, `wait_for`, `screenshot`, `log`, `reports`) to
-   drive runs; crash reports are `game-build\build\release\oot_crash.txt`.
-5. Rules that still apply (from the user): one build or one `oot.exe` at a time; tools only in git-ignored repo folders from official
+   drive runs; crash reports are `game-build\build\release\oot_crash.txt` (a named instance: in its instance folder).
+5. Rules that still apply (from the user): one build at a time; a second `oot.exe` only as a named instance (`--instance NAME`, MCP
+   `launch(instance=...)`), never for device-loss tests or fps measurements (AGENTS.md, "Several runs at once"); tools only in git-ignored repo folders from official
    releases with checksum checks; never change system or security settings; keep `AGENTS.md` current; commit at milestones.

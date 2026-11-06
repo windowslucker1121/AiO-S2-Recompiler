@@ -16,7 +16,8 @@ without artifacts**; (2) **basic gamepad** (XInput / SDL gamepad drives the game
 (`[gfx] log_fps = 1`, hitch log, `[diag] soak_csv`), reach **30 fps in the main menu**, then in game **30 fps**.
 Standing instructions: keep going until blocked, then report; install tools only into git-ignored repo folders from official
 releases with checksum checks; never change system or security settings (give the user the command); when the permission check
-blocks fetching an external repository, give the user the exact PowerShell commands; one build or one `oot.exe` at a time; commit at milestones.
+blocks fetching an external repository, give the user the exact PowerShell commands; one build at a time; a second `oot.exe` only as a
+named instance and only by the rules of "Several runs at once" below; commit at milestones.
 
 Done: NUP extraction, ZBIC -> plain NSO, manifest, lift of all four modules (0 untranslated instructions), and all four module
 libraries compile with clang-cl (`work\build\oot\oot_{main,sdk,subsdk0,rtld}.lib`, main 427 MB). First build 25 min cold on 18
@@ -80,6 +81,18 @@ threads: black screen and 9-18 fps for minutes (boot 23). The preparation runs a
 `prepare.state`'s key now holds the size of the cache's `results.tsv`: shaders translated since (the bindless work made 10,000 more
 programs preparable) make the next start prepare again. Without that, the new shaders flooded the background part builder (350 s of
 worker CPU in two minutes) and starved the game (no frame for 10 s). Headless: `oot.exe --prepare-shaders --if-needed`.
+**Prepared cache lost / parts missed (fixed 2026-11-06, RTX 4080):** two causes. (1) `ensure_cache` sized the file with `ftell`, which
+is 32-bit on Windows (-1 from 2 GiB on): NVIDIA's prepared cache is 2.2-2.3 GB, so the first game start loaded nothing and its periodic
+save replaced the file with what it compiled itself (boot1: 2.2 GB -> 88 MB; oot_cap -> 170 MB). Sizes are 64-bit now, the log says what
+the driver holds after loading (NVIDIA returns every imported byte), and a save never writes less than that. (2) The preparation built
+pre-raster parts with depth clamp on only, while 1,061 of the 1,085 keys in `pipeline_keys.bin` draw with it off: `[nvn] prepare_rasters`
+(default both). `prepare.state` is scheme 2 (raster flags, cache file and `cache_bytes`); the setup prepares again for an older scheme or
+a cache file that is missing or under half its size. First scene, same loop-capped shaders: before 74.9 ms per background part (5,101
+parts, cache not loaded), overlay ~12,300 left; after 0.73 ms per prepared part (12,241) and 20 ms per new one (175), overlay 0 from
+12 s on (17 at most), cache 2,305,488,425 bytes loaded in 3.3 s and unchanged after the run. The log line `shader parts built: N the
+preparation made (x ms each), M new (y ms each); the overlay shows K left` tracks it. With the driver's disk cache warm the preparation
+took 25 min for 117,981 parts (both raster sets); a forced second one loads the file, rebuilds everything in 58 s and saves the same
+2,305,488,425 bytes. Test folder: `work\shaders\pcfix` (its `spirv` is a junction to `oot_cap\spirv`; runs `work\run\pcfix_*`).
 
 Hardware of this machine (since 2026-11-06, the second development machine): AMD Ryzen 7 5800X3D (8 cores, 16 threads), **NVIDIA
 GeForce RTX 4080** (discrete, 15.7 GiB, Vulkan 1.4.341, driver 610.88), 32 GB RAM, Windows 11 Pro 26200. Everything above that names
@@ -91,7 +104,7 @@ translation 2 min 49 s, shader preparation ~80 programs/s (was 34).
 ## Boot progress (`oot.exe --game game\oot\updates\131072 --log work\run\bootN\oot.log --max-seconds 60`)
 
 Each fix below moved the boot further; all are in the branch. Crash reports land next to the exe (`game-build\build\release\oot_crash.txt`,
-`oot_freeze.txt` from the watchdog after 10 s without a presented frame, `oot_fatal.txt`);
+`oot_freeze.txt` from the watchdog after 10 s without a presented frame, `oot_fatal.txt`; a named instance writes them into its own folder);
 `tools\.venv\Scripts\python tools\ai\symbolize.py <crash.txt | addr...>` names guest frames from the modules' exported symbols (main exports
 little: trust `main+off`, not the name next to it; sdk exports ~28,700 symbols, so sdk frames are named well). Logs of earlier boots:
 `work\run\boot1` ... `bootN`. Use absolute paths for `--game` and `--log`.
@@ -166,10 +179,11 @@ Open points besides the milestones:
 | A5 | setup window | blurry (DPI-virtualised) | fixed in code (per-monitor DPI), not yet seen |
 | A6 | all | Opus audio was silent: `hwopus` decoded silence. Now libopus 1.6.1 (vcpkg `opus:x64-windows-static`, repo-local); the Ex open forms carry {rate, channels} in the raw data (OoT: 48 kHz mono, was read from a buffer: 0/0 and "buffer too small") | fixed (not listened to) |
 | A7 | game (expected) | shadows of clustered (point/spot) lights are missing: 4,336 fragment shaders sample their shadow maps with TEX.SCR.B.DC through a handle read per pixel (light index from a storage loop), which the handle expressions cannot bind; the sample answers 1 (lit). Fix: pool-sized texture + sampler arrays in the runtime (Ryujinx GenerateBindlessAccess, harness QueryHostSupportsSeparateSampler true) | open |
-| A8 | first scene | **VK_ERROR_DEVICE_LOST** 1-7 s after the first gameplay frame, every full run (2026-11-06). Ruled out, one run each: a GPU timeout (no event 4101); compute (`[nvn] debug_skip_compute = 1`: still lost); the handle-expression fragment shaders and the other newly translated fragment shaders (`[nvn] skip_fs_file` lists: still lost); memory pressure (handheld mode + `[nvn] tex_prep_mb = 128` + no pipeline cache: still lost); texture upgrades (`[gfx] astc_quality = fast`: still lost); the allocation count (limit 2,342,492). Skipping every draw with a fragment shader (skip_fs_file with 0..f) avoids it, and so does running any single 1/16 hash slice (8, 90-97, 98-9b, 9c-9d, 9e-9f; gameplay then runs for minutes at 10-15 fps), but 8+9 together faults: not one bad shader, more likely an interaction (a pass reading what another wrote) or an amount. `[gfx] robust_access = 1` would tell out-of-range accesses apart but misses the prepared pipeline cache (30+ min of compiles). Next: a per-draw submit-and-wait debug mode to find the faulting draw, or the Vulkan validation layer with GPU-assisted validation (needs the Vulkan SDK: the user decides). **Also on the NVIDIA RTX 4080** (driver 610.88): the first scene's frame (13,072 draws) replayed in 55.7 s, was presented at ~141 s, device lost at 143.4 s; on NVIDIA the process then keeps running with every submit failing. **Narrowed on NVIDIA with the new device-loss diagnostics** (`[gfx] device_diagnostics = 1`; runs `work\run\a8_nv2`..`a8_nv5`): the GPU dies inside one draw near the end of the first scene frame (draw ~12,615-12,679 of ~13,050; both pipeline stages last reached the checkpoint just before it): indexed triangles, vs `f16b4a89c5478c05`, fs `dcfaa938040cb593` (31 KB Ampere code, 215 KB SPIR-V), every run. Skipping that fs (`skip_fs_file`) moves the loss to another draw of the same kind (vs `43f6c7bfb202dfdf`, fs `8ba27a98e540767c`): a family of material/lighting shaders, which is why the Arc bisection saw "8 and 9 together". The fault report has no faulting memory address, only 4-156 warps at shader instruction pointers inside one ~4.4 KB window, and the NVIDIA driver logs System event 153 (nvlddmkm) at each loss: most likely a shader that never finishes and the driver's timeout, not a bad memory access. The shader's light loop is not it (`min(s2[cluster], c6[113].x) + 1` with c6[113].x = 1000, the cluster grid in c3[148..149] is 1x1x1 and s2[0] = 0 on this frame: one iteration; `[nvn] trace_fs_draws`). Suspect: the loop nest Ryujinx's structurizer builds around the shader's `switch`, compiled to a jump-table branch (BRX) whose targets come from the block's constant data in c1 (`c1[min(type - 100, 4)]`, the 5 words 0x4e90 0x5b20 0x54f0 0x5b20 0x5b20 at code +0x7800; the GLSL tests `temp_878 == 0x4E90/0x5B20/0x54F0` and loops `while (temp_879 \|\| temp_880 \|\| temp_879)` inside six `while (temp_736)` levels). **Confirmed: endless loops in translated shaders.** The translator now has a diagnosis switch, `NXRT_HARNESS_LOOP_CAP=N` (`tools/shaders/harness/translator/spirv-else-if.patch`; off by default): every loop leaves once the function's back edges reach N per invocation. Capping the two shaders above moved the loss to a third of the family (vs `4c0ee9ad79883cac`, fs `ab5959d4f145c6fd`); the whole corpus translated with `NXRT_HARNESS_LOOP_CAP=1024` into the test cache `work\shaders\oot_cap\spirv` (prepared, its own `pipeline_cache.bin`) ran the first scene for two minutes with no device loss (`work\run\a8_capall`, 13-22 fps while in-game pipeline builds ran). The original code is a plain bounded loop: the light loop at 0x39d0-0x64d0 with `@P1 CALL.REL.NOINC 0x64e0` as its exit (the front end treats it as a jump) and `BRX R32 -0x4e90` inside (front end lowering checked: targets and value use the same base). So the endless loop comes from the structured form Ryujinx builds (goto elimination: the `temp_879`/`temp_880`/`temp_736` flag loops) or from something it reads. Next: find the flag path that never clears, fix it in the translator, re-translate, re-prepare; until then the capped cache is a workaround for tests (`NXRT_NVN_SHADER_CACHE=...\work\shaders\oot_cap\spirv` plus `NXRT_HARNESS_LOOP_CAP=1024` for on-demand translations). `spirv_harness <code> <ctrl> --glsl -o x.glsl` (ctrl file named by the control hash, `corpus\manifest.tsv` column 10) gives the GLSL; `nvdisasm -b SM86 -raw` on the code block from offset 0x80 gives the SASS | open |
+| A8 | first scene | **VK_ERROR_DEVICE_LOST** 1-7 s after the first gameplay frame, every full run (2026-11-06), on the Arc iGPU and the RTX 4080. **Root cause: endless loops that Ryujinx's goto elimination built into ~14,700 translated pixel shaders.** The faulting draws used fs `dcfaa938040cb593` (then, skipped or capped, `8ba27a98e540767c`, then `ab5959d4f145c6fd`): a material/lighting family with a light loop (0x39d0-0x64d0, back edge `BRA 0x39d0`, exit `@P1 CALL.REL.NOINC 0x64e0`) and a jump-table switch inside it (`BRX R32 -0x4e90`, targets from c1; every case jumps to the switch end 0x60e0). `GotoElimination` works through the gotos last to first: the loop exit became `if (exit) break;` first, then the switch's gotos wrapped the statements around it in new `do { } while (flag)` loops (EncloseDoWhile / Lift: the six `while (temp_736)` and the `while (temp_879 \|\| temp_880 \|\| temp_879)` loops), so the break left only the innermost new loop and the light loop's `while (true)` never ended (GLSL: `if (temp_991) break;` inside the inner loop). **Fixed** in `tools/shaders/harness/translator/structured-goto-loop-exits.patch`: a new do-while forwards the breaks/continues of outer loops it encloses through a flag (`if (flag) { flag = false; break; }` after it; the flag is cleared at the function start, because a later goto may guard the statements before the loop). **Offline check** (`NXRT_HARNESS_CFG_CHECK=N`, `translator/StructuredCfgCheck.cs`; `tools/shaders/README.md`): random walks through the structured code, every block entry checked against the IR block graph. The three shaders fail at the first walk without the fix (after the exit block the code returns to the loop head) and pass 10,000 walks with it, every block and edge reached; the whole corpus (100 walks) has 14,684 failing blocks before and none after. The fix changes the SPIR-V of 14,692 corpus blocks (all pixel shaders; the 8 not in the failing list fail after 101-107 walks; resources and statuses unchanged); 17,094 blocks contain a BRX/BRXU or CALL.REL.NOINC (16,610 / 16,944). **On the RTX 4080** (cache translated with the fix, `.claude/worktrees/busy-hamilton-0e62aa/work/shaders/oot_a8fix`, not prepared, no loop cap; run `work/run/a8fix1` there): the first scene (13,040 draws) came at 62 s and ran to the 300 s deadline with no device loss (13-22 fps while ~15,000 changed pipelines built in game); the screen stays black there, as in the capped runs (separate issue). Control in the same setup with only the three shaders' old SPIR-V put back (run `work/run/a8ctl1`): scene at 64.6 s, device lost at 68.7 s in draw 12,607 (vs `f16b4a89c5478c05`, fs `dcfaa938040cb593`, the original A8 draw), exit code 4. Before the root cause was found, ruled out one run each: compute, the handle-expression and other new fragment shaders as a group, memory pressure, texture upgrades, the allocation count; `[gfx] device_diagnostics = 1` (checkpoints, fault report, NVIDIA event 153) named the draw. `NXRT_HARNESS_LOOP_CAP=N` (`spirv-else-if.patch`, off by default) stays as a diagnosis switch: every loop leaves after N back edges per invocation. To use the fix in `work\shaders\oot\spirv`: rebuild the harness, translate the corpus (or the changed blocks via the subset route) and merge, then prepare again (delete `prepare.state`: the number of usable programs does not change) | fixed |
 | A9 | game | foliage/terrain use **mesh shaders** (`nvnCommandBufferDrawMeshTasks`, unknown proc; the 800 stage 6/7 blocks "without code"): nothing is drawn for them | open |
 | A10 | game | **compute shaders read their resources from c[0] at offsets the runtime does not map**: storage buffers at c0 bytes 0xC0, 0xD0, 0x100, 0x110, 0x120, 0x150, 0x160 (Pokopia: 0x210 uniforms-as-storage, 0x310 storage) and texture/image handles at c0 words 8-142; the same word is a storage descriptor in one shader and an image handle in another, so it is a per-program table (GLSLC reflection was not extracted for the corpus). Dispatches whose storage buffers map to nothing are skipped (`[nvn] skip_unmapped_dispatch`) | open |
 | A11 | intro movie | voice lines overlap, starting about a second apart (heard by the user on the RTX 4080 machine, 2026-11-06). Seen with `[media] video_max_pictures = 120`, which ends the intro's video in 0.5 s while the game keeps starting its voice lines (Opus, separate from the video-only webm): possibly only that test setting. Check with a normal-speed intro (no `video_max_pictures`) | open |
+| A12 | first scene | **3D scene black** (only subtitles and UI; seen once A8 was out of the way with the loop-capped cache). The scene renders fine at a low internal size (854x480 or 960x540: G-buffer, lighting, HDR targets all have content in a `[nvn] trace_sec` frame trace with targets), but the 2560x1440 HDR target `t486` that the final composite (fs `c63c3b8f`) samples is only cleared and blended with a solid-colour overlay (fs `5223ec5a`, a fade). The game's upscaler fills it: a chain of compute passes, all broken here: `f05596b9` (storage at c[0] 0x110/0x120 unmapped, A10, skipped), `54ecc4b4` (TLD4.SCR.R/G.PTP: not translated), `4c60af1f` (runs, but its textures and output image come from c[0] words, A10: nothing bound), `fea98fe7` / `f90d726d` (the tensor-core network, HMMA plus TEX.SCR.F16.RN: not translated). The compute passes get their textures and their output **image** from per-program c[0] words; no image is bound through nvnCommandBufferBindImages. Translator fixed for TEX .F16(.RN) (Rd = packHalf2x16(c0, c1), Rd2 = (c2, c3); confirmed by the shader's use of the halves) and TLD4.PTP (Maxwell layout: 8 signed 6-bit offsets in 8-bit lanes of two Rb registers; textureGatherOffsets); `fea98fe7` translates to 4.8 MB of SPIR-V. Instead of emulating the network, the upscaler is **replaced** on the PC (user's decision): `[nvn] upscaler_replace/skip/src/dst` (OoT defaults in `runtime/games/oot/oot_data.cpp` through the new `game::Info::config_defaults`): the chain's first pass becomes a scaled copy of the scene into the texture the composite samples (`upscaler_src = depth_rt`: colour target 0 of the latest draw with depth; `upscaler_dst = fs:c63c3b8f:tex0`, taken from the previous frame's last composite), the other passes are left out. Untranslated blocks from `main` can be dumped with `[nvn] dump_missing` (`code_<hash>.bin` + `ctrl_<hash>.bin`; compute code starts at byte 0). **Result: the scene reaches the screen but washed out white** (`work\run\upscale3`): the chain is the game's whole final post-process, not only an upscaler. The composite `c63c3b8f` has one texture and no uniforms (it only converts to 8 bits), so the chain writes an exposed, tone-mapped, composited image; the latest depth draw's target is a near-white layer (values 0.25-1, mean 0.98: haze or fog), the HDR scene is another target (`t10348`: up to 25, mean ~1), and the network pass reads several of these. A faithful replacement would have to redo exposure, tone mapping and compositing; the proper fix is running the chain, which needs A10 (session "Implement the NVN2 compute c[0] resource table", 2026-11-06). The stopgap stays until then; switch it off with `NXRT_NVN_UPSCALER_REPLACE=` (empty) | open |
 
 **Movies** (`romfs/Event/Movie/*.webm`, 26 files, 1.6 GB) are **AV1** in WebM (mime `video/av01`), decoded by nn::codec on the host: libvpx
 (VP9/VP8) and **dav1d 1.5.4** (AV1), both static from the repo-local vcpkg (`tools\vcpkg`, git-ignored; the user ran the bootstrap and
@@ -217,7 +231,8 @@ every storage buffer of a dispatch to device-local memory and back (40 GB in 10 
   `settings {"diag.watchdog_seconds": -1}`), then look the thunk address up in a debug log (`nvnDeviceGetProcAddress("...") -> 0x74...`).
 - Trace a frame range: `NXRT_NVN_TRACE_FRAME=1560-1700` (ranges now work; slow: every traced frame writes its targets as PNG into the
   game folder); `NXRT_NVN_TRACE_TEX_EVENTS=2` logs init/upload/render-target events of every sparse texture.
-- Thread dumps of a running game: create the file `game-build\build\release\dump_threads` (the watchdog writes all stacks to the log).
+- Thread dumps of a running game: create the file `game-build\build\release\dump_threads` (the watchdog writes all stacks to the log; a
+  named instance looks in its instance folder; `dump_threads.<pid>` reaches one process only).
 
 - Name an import of main: lifted stub `void f_<plt>(Ctx*) { host_import(c, NX_IMPORT_ID(0, N)); }` -> N is the index into main's
   `img.symbols()` (`nxrecomp.program.open_image`); demangle with `tools\llvm\bin\llvm-cxxfilt.exe` (absolute path).
@@ -243,25 +258,64 @@ works when covered), `send_input` (posted messages in the background, or SendInp
 `tools\.venv\Scripts\python tools\ai\tests\test_gamectl.py`. Names come from `game.toml` (`NXRT_AI_GAME`, default `oot`).
 Verified only against a stand-in window: whether PrintWindow sees the Vulkan swapchain and whether the SDL window takes posted
 input while unfocused is known only once `oot.exe` runs. `launch` sets `test.frame_source=tick` for scripts (OoT has no frame hook).
+Several runs: `launch(instance="<name>")`, then `instance=` or `pid=` on every other tool; `status` lists every running game process,
+other sessions' included (next section).
+
+## Several runs at once (named instances, since 2026-11-06)
+
+Parallel sessions no longer queue for one game window: `oot.exe --instance NAME [--instance-dir DIR]` (or `NXRT_INSTANCE`) is a run of its
+own beside others. It writes everything of its own into its folder (default `<game folder>\instances\NAME`; the MCP server uses
+`work\ai_run\oot\NAME`): log, crash / freeze / fatal reports, `dump_threads`, saves and temporary storage (empty at first), `controls.ini`,
+`pipeline_keys.bin`, `shader_order.txt` (copied from the game folder the first time), `pipeline_cache.bin` (a hard link to the shared prepared
+cache, renewed when that one is newer; the instance's first save writes its own file of the shared one's size, which happened at the
+title already: ~3,000 shader parts built ahead), screenshots, test output and the outputs of
+diagnostic keys given as relative paths. Shared: the game files, the shader cache (the translator's writes are atomic) and the BC7 cache
+(temporary name + rename). The full list: `runtime/docs/CONFIG.md`, "Named instances"; code: `runtime/src/core/instance.cpp`.
+The window title ends in ` [NAME]`. One run per game folder without a name (as before), one per instance folder with one.
+
+Rules for agents:
+- With the MCP tools: `launch(instance="<your session's short name>")` whenever another session may run the game; pass the same `instance=`
+  (or `pid=`) to `screenshot`, `send_input`, `wait_for`, `log`, `reports`, `kill`. Check `status` first: it lists every running game process,
+  whose it is, its memory and the free memory. From a shell: `tasklist /FI "IMAGENAME eq oot.exe"`, and start yours with `--instance`.
+- Never end a run you did not start. `kill()` without arguments ends only the MCP server's own runs; another session's needs `force=true`.
+- **Memory: at most two runs on this machine, and two in-game runs do not fit.** A run at the title holds ~5.5 GB, one in the first 3D
+  scene 13-16 GB of working set and 18-20 GB of private bytes (measured 2026-11-06); the machine has 32 GB, of which ~18 GB were free with no
+  game running (a WSL VM, `vmmemWSL`, held 24 GB of commit; with one game in its first scene under 1 GB of commit was left, so even a build
+  could fail). Beside another run the exe refuses to start (exit code 7) when the free physical memory or commit, minus what the other runs
+  will still grow by, is below `[boot] memory_per_run_gb` (default 13); the MCP `launch` checks the same before starting. A lone run is never
+  refused. With the default a second run is refused here (18 GB free minus the first run's remaining ~8-12 GB of growth). Runs that stay in
+  the menus (title, options, input tests) may pass `settings={"boot.memory_per_run_gb": 6}` to both; then neither may enter the 3D scene.
+  Ask the user before assuming the machine has room.
+- **Alone, with no other `oot.exe` running:** device-loss tests (A8: a GPU timeout can reset the whole adapter and kill the other run's
+  Vulkan device too; once, on 2026-11-06, an A8 loss in one instance left the other at the title running, but do not rely on it), fps and
+  frame-time measurements (the other run takes GPU, CPU and memory bandwidth), the shader preparation
+  (`--prepare-shaders` refuses `--instance`; the "Preparing shaders" window is off for instances: it writes the shared shader data), and
+  anything meant to write the shared pipeline cache or the default run's saves.
+- A build beside a running game is fine if memory allows; still only one build in `work\build\oot` at a time.
+- Checked live on 2026-11-06 (RTX 4080): two instances to the title through the MCP server; Enter to one reached only that one, each wrote
+  only its folder, the game folder's `controls.ini`, `pipeline_keys.bin`, `shader_order.txt`, the shared `pipeline_cache.bin`, `prepare.state`
+  and the default save stayed untouched; a second start of a running instance and the memory guard both exit 7.
 
 **States and bug bundles (2026-11-06)**: tools `states`, `save_state`, `load_state`, `capture_bug`, `bugs` (`tools/ai/states.py`, README
 "States" and "Bug bundles"). **No process snapshot** (guest threads live on host stacks of lifted frames, plus kernel/service/Vulkan
 objects; nothing can write that out and recreate it). A state = the game's committed save data (`work/states/oot/<name>/save`) + reach
 steps from `recomp/games/oot/ai_states.toml` (routes `title`, `new_game`, `continue`, `in_game`; built-in states `title`,
-`first_scene`) + build/settings/env. `load_state` copies the save into `<run dir>/save` and launches with `[fs] save_dir` there: the
-player's `%APPDATA%\OcarinaRecompPC\save` is never touched. The routes default to the loop-capped shader cache and
-`[media] video_max_pictures = 120` (see A8). OoT has an auto-save manager (`AutoSaveMgr`, `TriggerRequestAutoSave` in main's strings),
+`first_scene`) + build/settings/env + the instance it came from. `load_state` copies the save into the save folder of the instance it
+starts (`work\ai_run\oot\save`, or `work\ai_run\oot\<instance>\save`) and launches with `[fs] save_dir` there: the player's
+`%APPDATA%\OcarinaRecompPC\save` is never touched. A state or bundle starts the instance it came from again unless `instance=` says
+otherwise (pass one while another session may use that name). The routes default to the loop-capped shader cache (until
+`work\shaders\oot\spirv` is re-translated with the A8 fix) and `[media] video_max_pictures = 120`. OoT has an auto-save manager (`AutoSaveMgr`, `TriggerRequestAutoSave` in main's strings),
 so states made right after an autosave are exact. Bug bundles: the player presses **F9** in game (note prompt follows; `[bug]` keys in
-`runtime/docs/CONFIG.md`), or `capture_bug` (request file `<exe dir>\capture_bug.<pid>`); they land in `work\bugs\<time>[-name]` of the
-checkout the exe was built in; `load_state(bug=<id>)` starts from one. Every exe now logs `boot: built from commit <sha>` (gen/build_id.h,
-rewritten at each build only when the commit or the dirty state changes). `launch` refuses while another copy of `oot.exe` (another
-worktree's) runs and `kill` only ends processes of the same exe path (before, a CLI `kill`/`launch` ended every `oot.exe` on the machine).
+`runtime/docs/CONFIG.md`), or `capture_bug(instance=...)` (request file `capture_bug.<pid>` in the run's request folder: the instance
+folder, or the exe's folder for the default run); they land in `work\bugs\<time>[-instance][-name]` of the checkout the exe was built in,
+with the instance in `bug.json`; `load_state(bug=<id>)` starts from one. Every exe now logs `boot: built from commit <sha>`
+(gen/build_id.h, rewritten at each build only when the commit or the dirty state changes).
 Seen on the real game (RTX 4080): posted keys reach the covered, unfocused window (Enter = A on the title, F9); **PrintWindow/BitBlt
-give black for the Vulkan swapchain**, so `screenshot` asks the runtime for its next presented frame (`<exe dir>\screenshot.<pid>`)
-and never falls back to the screen by itself. `load_state("first_scene")` took 57 s (A taken at 27 s, 13,049 draws at 51 s). After
-that the intro's timeline (German subtitles, voices) runs on over a black picture for minutes even though its video ended, and in
-eight minutes the game wrote no slot (only the 320-byte slot index `account.sav`); `+` showed no menu. So a state past a real save,
-and the `continue` route, are still unchecked: first get the scene to show (rendering, A8) and the game to save. Checked end to end
+give black for the Vulkan swapchain**, so `screenshot` asks the runtime for its next presented frame (`screenshot.<pid>` in the
+request folder) and never falls back to the screen by itself. `load_state("first_scene")` took 57 s (A taken at 27 s, 13,049 draws at 51 s). After
+that the intro's timeline (German subtitles, voices) runs on over a black picture (A12) for minutes even though its video ended, and
+in eight minutes the game wrote no slot (only the 320-byte slot index `account.sav`); `+` showed no menu. So a state past a real save,
+and the `continue` route, are still unchecked: first get the scene to show (A12) and the game to save. Checked end to end
 through the MCP protocol: `load_state("first_scene")` -> `save_state("after_intro")` -> `capture_bug` -> `kill` -> `load_state("after_intro")`
 (29 s) -> `load_state(bug=...)` (24 s). Pitfall: a Git Bash `tail -f` on the run log (also one left behind by a stopped monitor) blocks
 the log rotation of the next `launch`.
@@ -399,7 +453,8 @@ modules first (~3 min).
 
 ## Rules
 
-- Do not run two builds in `work\build\oot` at the same time, nor two copies of `oot.exe`. Background jobs die with the session.
+- Do not run two builds in `work\build\oot` at the same time. Two copies of `oot.exe` only as named instances, by the rules of "Several
+  runs at once" (device-loss tests and fps measurements alone). Background jobs die with the session.
 - Changing Windows Defender exclusions (for `work\`, `tools\llvm\`) would likely speed builds, but it is a security setting: only the
   user changes it.
 - Keep `recomp/nxrecomp` changes game independent; game knowledge goes in `recomp/games/<id>/` and `runtime/games/<id>/`.

@@ -102,10 +102,12 @@ bool small_dynamic_fsr();
 VkPipelineCache pipeline_cache_handle();
 void note_pipeline_created(double ms, const char* what);   // counters and the dirty flag of the cache file
 
-// Pipeline cache on disk ([nvn] pipeline_cache): written by a background thread while new pipelines appear and at shutdown.
+// Pipeline cache on disk ([nvn] pipeline_cache): written by a background thread while new pipelines appear and at shutdown. A save never
+// writes fewer bytes than the driver held right after loading the file, and a file that could not be read is never overwritten.
 bool pipeline_cache_dirty();
-void pipeline_cache_save();
+uint64_t pipeline_cache_save();              // bytes written (0: nothing written)
 void pipeline_cache_flush();
+std::string pipeline_cache_path();           // the file in use ("" = none); loads the cache first
 
 // ---- prewarm (nvn_prewarm.cpp) ----------------------------------------------------------------------------------------------
 // Every pipeline that had to be created at a draw is recorded in a key file ([nvn] pipeline_keys). The next run compiles the recorded
@@ -164,8 +166,11 @@ void gpl_take_upgrade(VkPipeline& current, VkPipeline& alt, std::shared_ptr<Pipe
 void gpl_program(const ShaderInfo* const stages[6], bool covered);   // a program got its shaders: queue its shader parts (covered: the key file has pipelines for it, skip)
 void gpl_program_bound(const ShaderInfo* const stages[6]);           // a command buffer was recorded with the program bound: its parts go first
 // The parts (all four) of a pipeline the key file holds, built on the background threads. `resolve` runs there and gives the key and layout
-// (false: nothing to build). front = ahead of the other key-file jobs (the game just set one of its shaders).
-void gpl_prebuild(std::function<bool(GraphicsKey&, const ProgLayout*&)> resolve, bool front);
+// (false: nothing to build). front = ahead of the other key-file jobs (the game just set one of its shaders). prepared: gpl_prepared_parts.
+void gpl_prebuild(std::function<bool(GraphicsKey&, const ProgLayout*&)> resolve, bool front, uint8_t prepared = 0);
+// Which shader parts of a key a finished shader preparation built (bit 0 the pre-raster part with these raster flags, bit 1 the fragment
+// part): hashes = the code hashes of vertex, fragment, geometry shader (0 = none). Those come from the pipeline cache file.
+uint8_t gpl_prepared_parts(const uint64_t hashes[3], uint8_t polygon_mode, uint8_t depth_clamp, uint8_t depth_neg_one);
 // True when the draw can link this key now: eligible, and its two shader parts are built.
 bool gpl_ready(const GraphicsKey& key, const ProgLayout& layout);
 void gpl_progress_log();                                             // one log line when something changed since the last call
@@ -180,6 +185,8 @@ struct GplStats {
     uint64_t draws_deferred = 0, parts_async = 0;    // [nvn] gpl_async: draws skipped while their parts compiled, parts compiled for them
     uint64_t prog_single = 0;                        // programs with only one of vertex and fragment shader (Pokopia sets them apart): nothing to queue per program
     uint64_t prebuild_jobs = 0, prebuild_run = 0;    // key-file keys whose parts were queued, run
+    uint64_t shader_parts_prepared = 0, shader_parts_new = 0;   // shader parts built on the background threads: ones a shader preparation made, the rest
+    double prepared_ms = 0, new_ms = 0;                         // their build times (a prepared part comes from the pipeline cache: about 1 ms)
     double link_ms = 0, draw_part_ms = 0, wait_ms = 0, worker_ms = 0;
 };
 GplStats gpl_stats();

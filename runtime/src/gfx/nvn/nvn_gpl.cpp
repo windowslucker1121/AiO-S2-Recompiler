@@ -70,7 +70,8 @@ struct Job {
     const ShaderInfo* st[3] = {};
     RasterKey r;
     bool fragment = false;      // the fragment shader part (r unused) instead of the pre-raster part
-    };
+    bool prepared = false;      // the shader preparation built this part: it comes from the pipeline cache file (not counted by the overlay)
+};
 
 struct Entry {
     int state = 0;              // 1 building, 2 done (pipe may be null: the build failed)
@@ -90,7 +91,11 @@ std::unordered_map<std::string, Entry> g_libs;             // node based: a refe
 std::deque<std::function<void()>> g_exact_q;   // [nvn] gpl_async: parts a deferred draw needs, exactly as it needs them (first in line)
 std::unordered_set<std::string> g_exact_pending;
 std::atomic<int64_t> g_frame_seen_ns{0};      // when the replay last saw the present count move
-std::deque<std::function<void()>> g_pre_q;     // parts of the key file's pipelines (gpl_prebuild): after the hot programs, before the cold ones
+struct PreJob {
+    std::function<void()> fn;
+    bool prepared = false;      // the key's two shader parts are in the prepared pipeline cache
+};
+std::deque<PreJob> g_pre_q;    // parts of the key file's pipelines (gpl_prebuild): after the hot programs, before the cold ones
 std::deque<Job> g_hot_q, g_cold_q;    // hot: programs a command buffer was recorded with (oldest first); cold: set but not yet bound (newest first)
 std::vector<RasterKey> g_rasters;
 std::deque<std::array<const ShaderInfo*, 3>> g_programs;   // the most recent programs, for the raster flags that show up later
@@ -115,9 +120,107 @@ GplStats g_stats;
 uint64_t g_logged_sig = 0;
 int g_fail_streak = 0;
 int g_running = 0;                         // jobs being built by the workers right now
+// What a finished shader preparation covers (prepare.state complete for this GPU and driver): the programs of its list, as program_id of
+// their code hashes, and the raster flags their pre-raster parts were built with. Those parts are in the pipeline cache file and take about
+// a millisecond; the overlay counts only the others. Filled once by init_once, read under g_mu.
+std::unordered_set<uint64_t> g_prepared;
+std::vector<RasterKey> g_prepared_rasters;
+size_t g_prepared_queued = 0;              // jobs in g_hot_q, g_cold_q and g_pre_q that are prepared
+int g_prepared_running = 0;                // of g_running
 
-// Tells the overlay how much shader work is waiting (queued + running). Caller holds g_mu.
-void publish_backlog_locked() { nxrt::gfx::set_shader_backlog(static_cast<int>(g_exact_q.size() + g_hot_q.size() + g_pre_q.size() + g_cold_q.size() + g_up_q.size()) + g_running + g_up_running); }
+// Tells the overlay how much shader work is waiting (queued + running), leaving out the parts the preparation built. Caller holds g_mu.
+void publish_backlog_locked() {
+    const size_t all = g_exact_q.size() + g_hot_q.size() + g_pre_q.size() + g_cold_q.size() + g_up_q.size() + static_cast<size_t>(g_running + g_up_running);
+    const size_t prepared = g_prepared_queued + static_cast<size_t>(g_prepared_running);
+    nxrt::gfx::set_shader_backlog(static_cast<int>(all > prepared ? all - prepared : 0));
+}
+
+uint64_t parse_hash16(const std::string& hex) {
+    uint64_t v = 0;
+    for (char ch : hex) {
+        uint64_t d;
+        if (ch >= '0' && ch <= '9') d = static_cast<uint64_t>(ch - '0');
+        else if (ch >= 'a' && ch <= 'f') d = static_cast<uint64_t>(ch - 'a' + 10);
+        else if (ch >= 'A' && ch <= 'F') d = static_cast<uint64_t>(ch - 'A' + 10);
+        else return 0;
+        v = (v << 4) | d;
+    }
+    return v;
+}
+uint64_t program_id(uint64_t vs, uint64_t fs, uint64_t gs) {
+    uint64_t h = 1469598103934665603ull;
+    for (uint64_t w : {vs, fs, gs})
+        for (int k = 0; k < 8; ++k) h = (h ^ ((w >> (8 * k)) & 0xff)) * 1099511628211ull;
+    return h;
+}
+// g_mu held. Whether the preparation built this part (fragment: the program's fragment part; else its pre-raster part with raster flags r).
+bool prepared_locked(const ShaderInfo* const st[3], bool fragment, const RasterKey& r) {
+    if (g_prepared.empty() || !st[0] || !st[1]) return false;
+    if (!g_prepared.count(program_id(parse_hash16(st[0]->hash), parse_hash16(st[1]->hash), st[2] ? parse_hash16(st[2]->hash) : 0))) return false;
+    if (fragment) return true;
+    for (const RasterKey& k : g_prepared_rasters)
+        if (k == r) return true;
+    return false;
+}
+void push_job_locked(std::deque<Job>& q, Job j) {
+    j.prepared = prepared_locked(j.st, j.fragment, j.r);
+    if (j.prepared) ++g_prepared_queued;
+    q.push_back(j);
+}
+
+// The raster flag sets of [nvn] prepare_rasters ("p.c.n" groups, see prepare_rasters_setting).
+std::vector<RasterKey> rasters_of_setting(const std::string& text) {
+    std::vector<RasterKey> out;
+    for (size_t at = 0; at + 5 <= text.size(); at += 6) {
+        RasterKey r;
+        r.poly = static_cast<uint8_t>(text[at] - '0');
+        r.clamp = static_cast<uint8_t>(text[at + 2] - '0');
+        r.neg = static_cast<uint8_t>(text[at + 4] - '0');
+        out.push_back(r);
+    }
+    if (out.empty()) out.push_back(RasterKey{});
+    return out;
+}
+
+}  // namespace
+std::string prepare_key(uint64_t programs);   // the preparation's GPU/driver key, below
+namespace {
+
+// Game side (init_once): what a finished preparation for this GPU and driver covers, from <shader cache>/../programs.bin and its prepare.state.
+// Only a complete state of this scheme whose GPU/driver key and raster flags match counts; otherwise every part counts as new.
+void load_prepared_locked() {
+    g_prepared.clear();
+    g_prepared_rasters.clear();
+    if (!shader_cache().is_open()) return;
+    const std::filesystem::path base = std::filesystem::path(shader_cache().dir()).parent_path();
+    const std::string state = (base / "prepare.state").string();
+    std::vector<ProgramHashes> progs;
+    std::string why;
+    if (!read_programs_file((base / "programs.bin").string(), &progs, &why)) return;
+    if (!prepare_state_complete(state, &why)) {
+        NXLOG_I(kTag, "shader preparation in %s not usable (%s): every shader part counts as new", base.string().c_str(), why.c_str());
+        return;
+    }
+    {
+        std::ifstream f(state);
+        std::string l;
+        bool key_ok = false;
+        const std::string want = "key: " + prepare_key(progs.size());
+        while (std::getline(f, l)) {
+            while (!l.empty() && l.back() == '\r') l.pop_back();
+            if (l == want) key_ok = true;
+        }
+        if (!key_ok) {
+            NXLOG_I(kTag, "shader preparation in %s was made for another GPU, driver or program list: every shader part counts as new", base.string().c_str());
+            return;
+        }
+    }
+    g_prepared.reserve(progs.size());
+    for (const ProgramHashes& p : progs) g_prepared.insert(program_id(p.vs, p.fs, p.gs));
+    g_prepared_rasters = rasters_of_setting(prepare_rasters_setting());
+    NXLOG_I(kTag, "shader preparation found: %zu programs with raster flags %s; their parts come from the pipeline cache and the overlay leaves them out",
+            g_prepared.size(), prepare_rasters_setting().c_str());
+}
 
 thread_local const GraphicsKey* t_link_key = nullptr;      // the draw being linked on this thread, for the log line of a slow part
 
@@ -365,7 +468,7 @@ void* self_handle() { return nullptr; }
 // ---- the part cache -------------------------------------------------------------------------------------------------------------
 // The part for `key`: from the cache, from a build in flight (waits for it) or built here. `render` = called by a draw (counted apart from
 // the workers' builds). A part that failed to build is cached as null so it is not retried at every draw.
-VkPipeline get_part(const std::string& key, bool render, const std::function<VkPipeline()>& build) {
+VkPipeline get_part(const std::string& key, bool render, const std::function<VkPipeline()>& build, bool prepared = false) {
     std::unique_lock<std::mutex> lk(g_mu);
     auto it = g_libs.find(key);
     if (it != g_libs.end()) {
@@ -429,6 +532,10 @@ VkPipeline get_part(const std::string& key, bool render, const std::function<VkP
         ++g_stats.parts_ahead;
         g_stats.worker_ms += ms;
     }
+    if (key[0] == 'P' || key[0] == 'F') {          // the shader parts, apart: ones the preparation built (expected from the cache) and the rest
+        if (prepared) { ++g_stats.shader_parts_prepared; g_stats.prepared_ms += ms; }
+        else { ++g_stats.shader_parts_new; g_stats.new_ms += ms; }
+    }
     g_cv.notify_all();
     return p;
 }
@@ -481,9 +588,9 @@ void run_job(const Job& j) {
         ++g_stats.jobs_run;
     }
     if (j.fragment) {
-        get_part(fs_key(sm, *pl), false, [&] { return build_fs(sm.m[1], *pl); });
+        get_part(fs_key(sm, *pl), false, [&] { return build_fs(sm.m[1], *pl); }, j.prepared);
     } else {
-        get_part(pre_key(sm, *pl, j.r), false, [&] { return build_pre(sm.m[0], sm.m[2], *pl, j.r); });
+        get_part(pre_key(sm, *pl, j.r), false, [&] { return build_pre(sm.m[0], sm.m[2], *pl, j.r); }, j.prepared);
     }
 }
 
@@ -505,15 +612,24 @@ void worker_main() {
                 }
             }
             if (!g_exact_q.empty() || (g_hot_q.empty() && !g_pre_q.empty())) {
-                auto& q = !g_exact_q.empty() ? g_exact_q : g_pre_q;
-                std::function<void()> fn = std::move(q.front());
-                q.pop_front();
+                std::function<void()> fn;
+                bool prepared = false;
+                if (!g_exact_q.empty()) {
+                    fn = std::move(g_exact_q.front());
+                    g_exact_q.pop_front();
+                } else {
+                    fn = std::move(g_pre_q.front().fn);
+                    prepared = g_pre_q.front().prepared;
+                    g_pre_q.pop_front();
+                    if (prepared) { --g_prepared_queued; ++g_prepared_running; }
+                }
                 ++g_running;
                 publish_backlog_locked();
                 lk.unlock();
                 fn();
                 lk.lock();
                 --g_running;
+                if (prepared) --g_prepared_running;
                 publish_backlog_locked();
                 continue;
             }
@@ -525,12 +641,14 @@ void worker_main() {
                 g_cold_q.pop_back();
             }
             ++g_running;
+            if (j.prepared) { --g_prepared_queued; ++g_prepared_running; }
             publish_backlog_locked();
         }
         run_job(j);
         {
             std::lock_guard<std::mutex> lk(g_mu);
             --g_running;
+            if (j.prepared) --g_prepared_running;
             publish_backlog_locked();
         }
     }
@@ -597,7 +715,11 @@ void init_once() {
         NXLOG_I(kTag, "pipeline libraries off (%s)", device().features().graphics_pipeline_library ? "[nvn] gpl is false" : "the GPU or driver does not support them");
         return;
     }
-    g_rasters.assign(1, RasterKey{});
+    // Pre-raster parts are queued for every raster flag set seen so far. With a finished preparation that starts as the sets it built (so the
+    // game asks for exactly the parts in the cache file); without one, as the console's default, and the draws teach the others.
+    load_prepared_locked();
+    if (!g_prepared.empty()) g_rasters = g_prepared_rasters;
+    else g_rasters.assign(1, RasterKey{});
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     const int64_t want = config_get_int("nvn", "gpl_threads", std::clamp<int64_t>(hw / 6, 1, 4));
     for (int64_t i = 0; i < want; ++i) g_workers.emplace_back(worker_main);
@@ -619,7 +741,7 @@ void learn_raster(const RasterKey& r) {
         Job j;
         for (int i = 0; i < 3; ++i) j.st[i] = p[i];
         j.r = r;
-        g_cold_q.push_back(j);
+        push_job_locked(g_cold_q, j);
         ++g_stats.jobs;
     }
     publish_backlog_locked();
@@ -676,7 +798,7 @@ static void queue_program(const std::array<const ShaderInfo*, 3>& prog, bool fro
     }
     g_stats.jobs += jobs.size();
     auto& q = front ? g_hot_q : g_cold_q;
-    q.insert(q.end(), jobs.begin(), jobs.end());
+    for (const Job& j : jobs) push_job_locked(q, j);
     publish_backlog_locked();
     g_cv.notify_all();
 }
@@ -845,8 +967,9 @@ RasterKey raster_of(const GraphicsKey& key) {
     r.neg = key.depth_neg_one;
     return r;
 }
-// Background thread: the four parts of a key, each unless it is built, being built or queued for a draw already.
-void prebuild_parts(const GraphicsKey& key, const ProgLayout& pl) {
+// Background thread: the four parts of a key, each unless it is built, being built or queued for a draw already. prepared: bit 0 the
+// pre-raster part, bit 1 the fragment part are in the prepared pipeline cache (for the statistics).
+void prebuild_parts(const GraphicsKey& key, const ProgLayout& pl, uint8_t prepared) {
     if (!link_eligible(key)) return;
     StageModules sm;
     if (!resolve_stage_modules(key, &sm) || !sm.m[0] || !sm.m[1]) {
@@ -865,7 +988,7 @@ void prebuild_parts(const GraphicsKey& key, const ProgLayout& pl) {
             if (g_stop) return;
             if (g_libs.count(keys[i]) || g_exact_pending.count(keys[i])) continue;
         }
-        get_part(keys[i], false, builds[i]);
+        get_part(keys[i], false, builds[i], i < 2 && (prepared >> i) & 1);
     }
     std::lock_guard<std::mutex> lk(g_mu);
     bool known = false;                       // the raster flags join the set later programs get ahead
@@ -874,12 +997,13 @@ void prebuild_parts(const GraphicsKey& key, const ProgLayout& pl) {
 }
 }  // namespace
 
-void gpl_prebuild(std::function<bool(GraphicsKey&, const ProgLayout*&)> resolve, bool front) {
+void gpl_prebuild(std::function<bool(GraphicsKey&, const ProgLayout*&)> resolve, bool front, uint8_t prepared) {
     if (!gpl_active()) return;
     std::lock_guard<std::mutex> lk(g_mu);
     if (g_stop) return;
     if (!front) ++g_stats.prebuild_jobs;
-    auto fn = [resolve = std::move(resolve)] {
+    PreJob j;
+    j.fn = [resolve = std::move(resolve), prepared] {
         GraphicsKey k;
         const ProgLayout* pl = nullptr;
         if (!resolve(k, pl) || !pl) return;
@@ -887,12 +1011,26 @@ void gpl_prebuild(std::function<bool(GraphicsKey&, const ProgLayout*&)> resolve,
             std::lock_guard<std::mutex> lk2(g_mu);
             ++g_stats.prebuild_run;
         }
-        prebuild_parts(k, *pl);
+        prebuild_parts(k, *pl, prepared);
     };
-    if (front) g_pre_q.push_front(std::move(fn));
-    else g_pre_q.push_back(std::move(fn));
+    j.prepared = prepared == 3;              // both shader parts come from the cache; the vertex input and output parts are cheap
+    if (j.prepared) ++g_prepared_queued;
+    if (front) g_pre_q.push_front(std::move(j));
+    else g_pre_q.push_back(std::move(j));
     publish_backlog_locked();
     g_cv.notify_one();
+}
+
+uint8_t gpl_prepared_parts(const uint64_t hashes[3], uint8_t polygon_mode, uint8_t depth_clamp, uint8_t depth_neg_one) {
+    if (!gpl_active()) return 0;
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (g_prepared.empty() || !hashes[0] || !hashes[1] || !g_prepared.count(program_id(hashes[0], hashes[1], hashes[2]))) return 0;
+    RasterKey r;
+    r.poly = polygon_mode; r.clamp = depth_clamp; r.neg = depth_neg_one;
+    uint8_t m = 2;
+    for (const RasterKey& k : g_prepared_rasters)
+        if (k == r) m |= 1;
+    return m;
 }
 
 bool gpl_ready(const GraphicsKey& key, const ProgLayout& layout) {
@@ -948,6 +1086,10 @@ void gpl_progress_log() {
             s.draw_part_ms, static_cast<unsigned long long>(s.parts_waited), s.wait_ms, static_cast<unsigned long long>(s.parts_hit), static_cast<unsigned long long>(s.link_failed),
             static_cast<unsigned long long>(s.upgrades_queued), static_cast<unsigned long long>(s.upgrades_done), s.upgrade_ms, static_cast<unsigned long long>(s.upgrades_taken),
             static_cast<unsigned long long>(s.upgrades_failed));
+    NXLOG_I(kTag, "shader parts built: %llu the preparation made (%.2f ms each), %llu new (%.1f ms each); the overlay shows %d left",
+            static_cast<unsigned long long>(s.shader_parts_prepared), s.shader_parts_prepared ? s.prepared_ms / static_cast<double>(s.shader_parts_prepared) : 0.0,
+            static_cast<unsigned long long>(s.shader_parts_new), s.shader_parts_new ? s.new_ms / static_cast<double>(s.shader_parts_new) : 0.0,
+            nxrt::gfx::shader_backlog());
     NXLOG_I(kTag, "libraries ahead: programs set %llu (covered by the key file %llu, new %llu), bound %llu (new %llu); jobs queued %llu, run %llu, "
                   "no layout %llu, no modules %llu; draws deferred %llu for %llu parts; single-stage programs %llu; key-file keys queued %llu, run %llu",
             static_cast<unsigned long long>(s.prog_set), static_cast<unsigned long long>(s.prog_covered), static_cast<unsigned long long>(s.prog_new),
@@ -980,6 +1122,7 @@ void gpl_stop() {
         g_exact_q.clear();
         g_exact_pending.clear();
         g_up_q.clear();
+        g_prepared_queued = 0;
         publish_backlog_locked();
     }
     g_cv.notify_all();
@@ -1000,9 +1143,9 @@ std::string hex16(uint64_t h) {
 }  // namespace
 
 // The state file next to the program list: which GPU and driver the preparation ran on and whether it finished. The key changes with the
-// GPU, the driver version, the pipeline cache UUID (a driver update changes it) and the version of the part scheme in this file. Shaders
-// translated since are checked apart (usable_programs against the state's counts).
-constexpr int kPrepareScheme = 1;
+// GPU, the driver version, the pipeline cache UUID (a driver update changes it) and the version of the part scheme (kPrepareScheme,
+// nvn_shaders.h). Shaders translated since are checked apart (usable_programs against the state's counts); the raster flags and the pipeline
+// cache file it wrote by prepare_state_complete.
 std::string prepare_key(uint64_t programs) {
     const VkPhysicalDeviceProperties& p = device().properties();
     char uuid[40];
@@ -1013,28 +1156,37 @@ std::string prepare_key(uint64_t programs) {
     return b;
 }
 
-// Finished on this GPU and driver, and no program has become preparable since (usable_now: usable_programs of the list).
+// Finished on this GPU and driver with the current raster flags, its pipeline cache file still there, and no program has become preparable
+// since (usable_now: usable_programs of the list).
 bool prepare_state_ready(const std::string& path, const std::string& key, uint64_t usable_now) {
+    std::string why;
+    if (!prepare_state_complete(path, &why)) {
+        NXLOG_I(kTag, "shader preparation needed: %s (%s)", why.c_str(), path.c_str());
+        return false;
+    }
     std::ifstream f(path);
     if (!f) return false;
     std::string l;
-    bool key_ok = false, done = false;
+    bool key_ok = false;
     uint64_t covered = 0;
     while (std::getline(f, l)) {
         while (!l.empty() && l.back() == '\r') l.pop_back();
         if (l == "key: " + key) key_ok = true;
-        if (l == "complete: 1") done = true;
         if (l.rfind("prepared: ", 0) == 0 || l.rfind("failed: ", 0) == 0) covered += std::strtoull(l.c_str() + l.find(' ') + 1, nullptr, 10);
     }
-    return key_ok && done && usable_now <= covered;
+    if (!key_ok) NXLOG_I(kTag, "shader preparation needed: made for another GPU, driver or program list (%s)", path.c_str());
+    return key_ok && usable_now <= covered;
 }
 
-void write_prepare_state(const std::string& path, const std::string& key, const PrepareResult& r) {
+// cache / cache_bytes: the pipeline cache file the preparation wrote and its size, so that a later start sees when it went missing.
+void write_prepare_state(const std::string& path, const std::string& key, const PrepareResult& r, bool complete, const std::string& cache, uint64_t cache_bytes) {
     std::ofstream f(path, std::ios::trunc);
     if (!f) return;
     const char nl = 10;
     f << "key: " << key << nl << "programs: " << r.programs << nl << "prepared: " << r.prepared << nl << "missing: " << r.missing_shaders << nl
-      << "failed: " << r.failed << nl << "seconds: " << r.seconds << nl << "complete: " << (r.cancelled ? 0 : 1) << nl;
+      << "failed: " << r.failed << nl << "seconds: " << r.seconds << nl << "rasters: " << prepare_rasters_setting() << nl;
+    if (!cache.empty() && cache_bytes) f << "cache: " << cache << nl << "cache_bytes: " << cache_bytes << nl;
+    f << "complete: " << (complete ? 1 : 0) << nl;
 }
 
 bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
@@ -1062,7 +1214,7 @@ bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
     const int threads = o.threads > 0 ? o.threads : static_cast<int>(hw > 3 ? hw - 2 : 1);
     {
         std::lock_guard<std::mutex> lk(g_mu);
-        g_rasters.assign(1, RasterKey{});
+        g_rasters = rasters_of_setting(prepare_rasters_setting());     // each program's pre-raster part once per raster flag set the game draws with
         g_stop = false;
     }
     g_prep_fast.store(0);
@@ -1140,14 +1292,25 @@ bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
         for (const ShaderInfo* si : used) shader_cache().release_stub_spirv(si);
     }
     g_discard.store(false);
-    if (g_prepare_cache.load() && !cancel.load()) pipeline_cache_save();
+    // Kept also when stopped: a resumed preparation then finds what this one compiled in the cache.
+    uint64_t cache_bytes = 0;
+    std::string cache_file;
+    if (g_prepare_cache.load()) {
+        cache_file = pipeline_cache_path();
+        cache_bytes = pipeline_cache_save();
+        if (!cache_bytes) NXLOG_W(kTag, "shader preparation: the pipeline cache file %s was not written", cache_file.c_str());
+    }
     if (o.progress) o.progress(done.load(), r.programs);
     r.fast_parts = g_prep_fast.load();
     r.prepared = prepared.load(); r.missing_shaders = missing.load(); r.failed = failed.load(); r.parts = parts.load();
     r.cancelled = cancel.load();
     r.seconds = ms_since(t0) / 1000.0;
-    if (!r.cancelled && r.failed == 0) write_prepare_state(state_path, key, r);
-    else if (r.cancelled) write_prepare_state(state_path, key, r);
+    // complete only with the cache file written (when it is wanted): otherwise the next start would trust parts that are nowhere
+    const bool complete = !r.cancelled && r.failed == 0 && (!g_prepare_cache.load() || cache_bytes);
+    if (complete || r.cancelled || !cache_bytes) write_prepare_state(state_path, key, r, complete, cache_file, cache_bytes);
+    NXLOG_I(kTag, "shader preparation: %llu programs, %llu parts (%llu under 2 ms), raster flags %s, %.1f s; pipeline cache %llu bytes%s",
+            static_cast<unsigned long long>(r.programs), static_cast<unsigned long long>(r.parts), static_cast<unsigned long long>(r.fast_parts),
+            prepare_rasters_setting().c_str(), r.seconds, static_cast<unsigned long long>(cache_bytes), complete ? "" : "; not complete");
     return true;
 }
 

@@ -17,6 +17,7 @@
 
 #include "nxrt/config.h"
 #include "nxrt/gauge.h"
+#include "nxrt/instance.h"
 #include "nxrt/memguard.h"
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
@@ -868,10 +869,11 @@ bool Device::report_device_lost(const char* where) {
                 NXLOG_E(kTag, "  vendor record %u: \"%s\" code 0x%llx data 0x%llx", i, vendors[i].description,
                         static_cast<unsigned long long>(vendors[i].vendorFaultCode), static_cast<unsigned long long>(vendors[i].vendorFaultData));
             if (!blob.empty() && counts.vendorBinarySize) {   // NVIDIA: readable with Nsight Aftermath tools
-                if (std::FILE* f = std::fopen("gpu_fault_vendor.bin", "wb")) {
+                const std::string vendor_file = instance_file("gpu_fault_vendor.bin");    // the working folder, or the instance folder
+                if (std::FILE* f = std::fopen(vendor_file.c_str(), "wb")) {
                     std::fwrite(blob.data(), 1, static_cast<size_t>(counts.vendorBinarySize), f);
                     std::fclose(f);
-                    NXLOG_E(kTag, "  vendor binary written to gpu_fault_vendor.bin (working directory)");
+                    NXLOG_E(kTag, "  vendor binary written to %s", vendor_file.c_str());
                 }
             }
         } else {

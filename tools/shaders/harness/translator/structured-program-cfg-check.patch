@@ -1,0 +1,29 @@
+Ryujinx shader translator, StructuredProgram: passes StructuredProgramContext.NewTemp to GotoElimination.Eliminate
+(the flags of structured-goto-loop-exits.patch), and runs the structurizer check translator/StructuredCfgCheck.cs after
+goto elimination when NXRT_HARNESS_CFG_CHECK=N is set (N random walks per function, each checked against the basic
+block graph; off by default, then nothing changes). The Ryujinx code in the context lines is MIT.
+--- a/StructuredIr/StructuredProgram.cs
++++ b/StructuredIr/StructuredProgram.cs
+@@ -45,6 +45,8 @@
+ 
+                 context.EnterFunction(blocks.Length, function.Name, returnType, inArguments, outArguments);
+ 
++                context.NodeBlocks = StructuredCfgCheck.Enabled ? new List<(IAstNode, int)>() : null;
++
+                 PhiFunctions.Remove(blocks);
+ 
+                 for (int blkIndex = 0; blkIndex < blocks.Length; blkIndex++)
+@@ -68,7 +70,12 @@
+                     }
+                 }
+ 
+-                GotoElimination.Eliminate(context.GetGotos());
++                GotoElimination.Eliminate(context.GetGotos(), context.NewTemp);
++
++                if (context.NodeBlocks != null)
++                {
++                    StructuredCfgCheck.Run(blocks, context.CurrentFunction, context.NodeBlocks, context.GetOperand);
++                }
+ 
+                 AstOptimizer.Optimize(context);
+ 

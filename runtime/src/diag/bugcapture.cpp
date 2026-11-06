@@ -21,6 +21,7 @@
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
 #include "nxrt/game.h"
+#include "nxrt/instance.h"
 #include "nxrt/log.h"
 #include "nxrt/services.h"
 
@@ -72,6 +73,8 @@ std::wstring exe_path_w() {
 }
 
 stdfs::path exe_dir() { return stdfs::path(exe_path_w()).parent_path(); }
+// Where request files are looked for: the instance folder of a named run, the exe's folder for the default run (nxrt/instance.h).
+stdfs::path request_dir() { return stdfs::u8path(instance_request_dir()); }
 
 std::string json_str(const std::string& s) {
     std::string o = "\"";
@@ -267,10 +270,9 @@ void fill(const stdfs::path dir, const Moment m) {
     if (stdfs::exists(dir / "save")) files.push_back("save/");
     const stdfs::path exe = exe_path_w();
     {
-        std::string stem = u8(exe.stem());
         std::error_code ec;
-        for (const char* k : {"crash", "freeze", "fatal"}) {
-            const stdfs::path rep = exe.parent_path() / stdfs::u8path(stem + "_" + k + ".txt");
+        for (const char* k : {"_crash.txt", "_freeze.txt", "_fatal.txt"}) {
+            const stdfs::path rep = stdfs::u8path(instance_report_path(k));   // next to the exe, or in the instance folder
             if (!stdfs::exists(rep, ec)) continue;
             stdfs::create_directories(dir / "reports", ec);
             stdfs::copy_file(rep, dir / "reports" / rep.filename(), stdfs::copy_options::overwrite_existing, ec);
@@ -321,7 +323,8 @@ void fill(const stdfs::path dir, const Moment m) {
       << ", \"exe_modified\": " << json_str(file_time(exe)) << ", \"exe_sha256\": " << json_str(exe_sha256()) << ", \"commit\": " << json_str(commit)
       << ", \"dirty\": " << (dirty ? "true" : "false") << "},\n \"process\": {\"pid\": " << pid << ", \"command_line\": " << json_str(narrow(GetCommandLineW()))
       << ", \"cwd\": " << json_str(narrow(cwd)) << ", \"uptime_s\": " << m.uptime_s << ", \"frame\": " << m.frame << "},\n \"state\": "
-      << json_str(env_value("NXRT_AI_STATE")) << ",\n \"save_dir\": " << json_str(save) << ",\n \"save_files\": " << save_files
+      << json_str(env_value("NXRT_AI_STATE")) << ",\n \"instance\": " << json_str(instance_active() ? instance_name() : "default")
+      << ",\n \"save_dir\": " << json_str(save) << ",\n \"save_files\": " << save_files
       << (save_why.empty() ? "" : ",\n \"save_missing\": " + json_str(save_why)) << ",\n \"log\": " << json_str(logp)
       << ",\n \"screenshot\": " << (shot_ok ? "true" : "false") << ",\n \"trace_frame\": " << (m.trace ? "true" : "false") << ",\n \"files\": [";
     for (size_t i = 0; i < files.size(); ++i) j << (i ? ", " : "") << json_str(files[i]);
@@ -336,9 +339,9 @@ void poll_loop() {
     log_set_thread_name("bug-requests");
     const uint32_t poll_ms = static_cast<uint32_t>(config_get_int("bug", "poll_ms", 250));
     const stdfs::path own = stdfs::u8path(request_path(true)), any = stdfs::u8path(request_path(false));
-    const stdfs::path taken = exe_dir() / ("capture_bug.taken." + std::to_string(GetCurrentProcessId()));
+    const stdfs::path taken = request_dir() / ("capture_bug.taken." + std::to_string(GetCurrentProcessId()));
     const stdfs::path shot_own = stdfs::u8path(screenshot_request_path(true)), shot_any = stdfs::u8path(screenshot_request_path(false));
-    const stdfs::path shot_taken = exe_dir() / ("screenshot.taken." + std::to_string(GetCurrentProcessId()));
+    const stdfs::path shot_taken = request_dir() / ("screenshot.taken." + std::to_string(GetCurrentProcessId()));
     for (;;) {
         {
             std::unique_lock<std::mutex> lk(g().pmu);
@@ -393,13 +396,13 @@ std::string root() {
 }
 
 std::string request_path(bool own_process) {
-    std::string p = u8(exe_dir() / "capture_bug");
+    std::string p = u8(request_dir() / "capture_bug");
     if (own_process) p += "." + std::to_string(GetCurrentProcessId());
     return p;
 }
 
 std::string screenshot_request_path(bool own_process) {
-    std::string p = u8(exe_dir() / "screenshot");
+    std::string p = u8(request_dir() / "screenshot");
     if (own_process) p += "." + std::to_string(GetCurrentProcessId());
     return p;
 }
@@ -413,6 +416,7 @@ std::string capture(const Request& r) {
     char stamp[32];
     std::snprintf(stamp, sizeof stamp, "%04u%02u%02u-%02u%02u%02u", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
     std::string name = stamp;
+    if (instance_active()) name += "-" + sanitize(instance_name());   // several runs at once: whose bundle it is
     if (const std::string l = sanitize(r.label); !l.empty()) name += "-" + l;
     stdfs::path dir;
     ScreenshotFn shot;

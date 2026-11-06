@@ -5,6 +5,7 @@
 
 #include "nxrt/bugcapture.h"
 #include "nxrt/config.h"
+#include "nxrt/instance.h"
 
 #include <windows.h>
 
@@ -158,4 +159,23 @@ NXTEST(screenshot_request_writes_the_named_png) {
     CHECK_MSG(wait_for([&] { return !stdfs::exists(req); }, 2000), "the request file was not taken");
     CHECK_EQ(read(png), std::string("PNG stand-in"));
     nxrt::bug::stop_requests();
+}
+
+NXTEST(named_instance_uses_its_request_folder_and_name) {
+    Fixture f;
+    const stdfs::path inst = f.dir / "inst_t1";
+    nxrt::instance_set("t1", inst.string());
+    const std::string req = nxrt::bug::request_path(true), shot = nxrt::bug::screenshot_request_path(false);
+    CHECK_MSG(stdfs::u8path(req).parent_path() == inst, "the request file is not in the instance folder");
+    CHECK(stdfs::u8path(shot).parent_path() == inst);
+    nxrt::bug::Request r;
+    r.origin = "test";
+    r.label = "door";
+    r.thread_dump = false;
+    const std::string d = nxrt::bug::capture(r);
+    CHECK_MSG(has(d, "-t1-door"), "the instance is not in the folder name");
+    CHECK(nxrt::bug::wait_complete(d, 15000));
+    CHECK(has(read(stdfs::u8path(d) / "bug.json"), "\"instance\": \"t1\""));
+    nxrt::instance_set("", "");
+    CHECK(has(nxrt::bug::request_path(false), "capture_bug") && stdfs::u8path(nxrt::bug::request_path(false)).parent_path() != inst);
 }

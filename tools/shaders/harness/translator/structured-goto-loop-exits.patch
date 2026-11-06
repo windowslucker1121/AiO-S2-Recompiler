@@ -1,0 +1,182 @@
+Ryujinx shader translator, goto elimination: a break or continue that an earlier step of goto elimination put in
+place (MoveOutward: "if (c) break;" where a goto leaves a loop) could end up inside a do-while that a later goto
+creates around it (EncloseDoWhile, also through Lift). Gotos are eliminated last to first, so the exit of a loop is
+handled before the gotos in its body; when one of those encloses the exit in a new loop, the break leaves only the new
+loop and control falls back into the old one. If it was that loop's only exit, the shader never ends: OoT A8, the light
+loop of a family of material shaders (BRA back edge, CALL.REL.NOINC exit, a BRX switch inside whose cases jump to the
+switch's end): the GPU was lost after the driver's timeout (AGENTS.md, artifact A8). Now a newly created do-while
+checks what it encloses: a break or continue that is not inside a loop nested in it sets a flag and leaves the new
+loop, and right after it "if (flag) { flag = false; break; }" (or continue) repeats the exit for the loop it was made
+for (the flag is also cleared at the start of the function). Eliminate takes a function that declares the flags as locals
+(structured-program-cfg-check.patch passes StructuredProgramContext.NewTemp). Checked with NXRT_HARNESS_CFG_CHECK
+(translator/StructuredCfgCheck.cs). The Ryujinx code in the context lines is MIT.
+--- a/StructuredIr/GotoElimination.cs
++++ b/StructuredIr/GotoElimination.cs
+@@ -1,4 +1,5 @@
+ using Ryujinx.Graphics.Shader.IntermediateRepresentation;
++using Ryujinx.Graphics.Shader.Translation;
+ using System;
+ using System.Collections.Generic;
+ using static Ryujinx.Graphics.Shader.StructuredIr.AstHelper;
+@@ -9,7 +10,8 @@
+     {
+         // This is a modified version of the algorithm presented on the paper
+         // "Taming Control Flow: A Structured Approach to Eliminating Goto Statements".
+-        public static void Eliminate(GotoStatement[] gotos)
++        // newTemp declares a local of the function (the flags RetargetLoopExits needs).
++        public static void Eliminate(GotoStatement[] gotos, Func<AggregateType, AstOperand> newTemp)
+         {
+             for (int index = gotos.Length - 1; index >= 0; index--)
+             {
+@@ -67,7 +69,7 @@
+                     {
+                         if (stmt.IsLoop)
+                         {
+-                            Lift(stmt);
++                            Lift(stmt, newTemp);
+                         }
+ 
+                         MoveInward(stmt);
+@@ -78,7 +80,7 @@
+ 
+                 if (stmt.IsLoop)
+                 {
+-                    EncloseDoWhile(stmt, gBlock, stmt.Label);
++                    EncloseDoWhile(stmt, gBlock, stmt.Label, newTemp);
+                 }
+                 else
+                 {
+@@ -137,7 +139,7 @@
+             return false;
+         }
+ 
+-        private static void Lift(GotoStatement stmt)
++        private static void Lift(GotoStatement stmt, Func<AggregateType, AstOperand> newTemp)
+         {
+             AstBlock block = ParentBlock(stmt.Goto);
+ 
+@@ -155,7 +157,7 @@
+                 }
+             }
+ 
+-            AstBlock newBlock = EncloseDoWhile(stmt, block, loopFirstStmt);
++            AstBlock newBlock = EncloseDoWhile(stmt, block, loopFirstStmt, newTemp);
+ 
+             block.Remove(stmt.Goto);
+ 
+@@ -304,7 +306,7 @@
+             return false;
+         }
+ 
+-        private static AstBlock EncloseDoWhile(GotoStatement stmt, AstBlock block, IAstNode first)
++        private static AstBlock EncloseDoWhile(GotoStatement stmt, AstBlock block, IAstNode first, Func<AggregateType, AstOperand> newTemp)
+         {
+             if (block.Type == AstBlockType.DoWhile && first == block.First)
+             {
+@@ -324,7 +326,105 @@
+                 return block;
+             }
+ 
+-            return Enclose(block, AstBlockType.DoWhile, stmt.Condition, first, stmt.Goto);
++            AstBlock loop = Enclose(block, AstBlockType.DoWhile, stmt.Condition, first, stmt.Goto);
++
++            if (loop != null && loop != first)
++            {
++                RetargetLoopExits(loop, newTemp);
++            }
++
++            return loop;
++        }
++
++        // Gotos are eliminated last to first, so a goto that left a loop earlier (MoveOutward: "if (c) break;" before
++        // the loop's end, the goto moved after the loop) may already sit in the statements a later goto encloses in a
++        // new do-while. That break (or continue) would then leave (or restart) the new loop instead of the loop it was
++        // made for, and control falls back into the old loop: an endless loop when it was the loop's only exit (OoT A8,
++        // the light loop of the material shaders). Exits that belong to an outer loop leave the new loop with a flag
++        // set, and the flag repeats them right after it ("if (flag) { flag = false; break; }"). The flag is cleared at
++        // the start of the function and where it is used, not before the new loop: later gotos may put an "if (!c)"
++        // around the statements before the loop (MoveInward), and a cleared-there flag would then be stale or undefined.
++        private static void RetargetLoopExits(AstBlock loop, Func<AggregateType, AstOperand> newTemp)
++        {
++            List<AstOperation> exits = [];
++
++            CollectLoopExits(loop, exits);
++
++            if (exits.Count == 0)
++            {
++                return;
++            }
++
++            AstBlock parent = loop.Parent;
++            AstBlock mainBlock = parent;
++
++            while (mainBlock.Parent != null)
++            {
++                mainBlock = mainBlock.Parent;
++            }
++
++            AstOperand breakFlag = null;
++            AstOperand continueFlag = null;
++
++            foreach (AstOperation exit in exits)
++            {
++                AstBlock exitBlock = exit.Parent;
++
++                if (exit.Inst == Instruction.LoopBreak)
++                {
++                    breakFlag ??= newTemp(AggregateType.Bool);
++
++                    exitBlock.AddBefore(exit, Assign(breakFlag, Const(IrConsts.True)));
++                }
++                else
++                {
++                    continueFlag ??= newTemp(AggregateType.Bool);
++
++                    exitBlock.AddBefore(exit, Assign(continueFlag, Const(IrConsts.True)));
++                    exitBlock.AddBefore(exit, new AstOperation(Instruction.LoopBreak));
++                    exitBlock.Remove(exit);
++                }
++            }
++
++            IAstNode last = loop;
++
++            foreach ((AstOperand flag, Instruction inst) in new[] { (breakFlag, Instruction.LoopBreak), (continueFlag, Instruction.LoopContinue) })
++            {
++                if (flag == null)
++                {
++                    continue;
++                }
++
++                mainBlock.AddFirst(Assign(flag, Const(IrConsts.False)));
++
++                AstBlock repeat = new(AstBlockType.If, flag);
++
++                repeat.Add(Assign(flag, Const(IrConsts.False)));
++                repeat.Add(new AstOperation(inst));
++
++                parent.AddAfter(last, repeat);
++
++                last = repeat;
++            }
++        }
++
++        // Breaks and continues in the block that are not inside a loop nested in it.
++        private static void CollectLoopExits(AstBlock block, List<AstOperation> exits)
++        {
++            foreach (IAstNode node in block)
++            {
++                if (node is AstBlock child)
++                {
++                    if (child.Type != AstBlockType.DoWhile && child.Type != AstBlockType.While)
++                    {
++                        CollectLoopExits(child, exits);
++                    }
++                }
++                else if (node is AstOperation operation && (operation.Inst == Instruction.LoopBreak || operation.Inst == Instruction.LoopContinue))
++                {
++                    exits.Add(operation);
++                }
++            }
+         }
+ 
+         private static void EncloseSingleInst(GotoStatement stmt, Instruction inst)
