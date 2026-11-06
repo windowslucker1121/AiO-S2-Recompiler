@@ -35,6 +35,8 @@
 #include <utility>
 #include <vector>
 
+#include "build_id.h"   // gen/: GAME_BUILD_COMMIT, GAME_BUILD_DIRTY (cmake/build_id.cmake)
+#include "nxrt/bugcapture.h"
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
 #include "nxrt/dispatch.h"
@@ -417,7 +419,11 @@ int main(int argc, char** argv) {
     dev_default("nvn", "shader_cache", GAME_DEV_ROOT "/work/shaders/" GAME_ID "/spirv");
     dev_default("nvn", "shader_corpus", GAME_DEV_ROOT "/work/shaders/" GAME_ID "/corpus");
     dev_default("nvn", "shader_translator", GAME_DEV_ROOT "/tools/shaders/build/bin/Release/net10.0/spirv_harness.exe");
+    // Bug capture bundles (F9, capture_bug request files) go to the checkout's workugs, where tools/ai lists them.
+    if (!nxrt::config_has("bug", "dir")) nxrt::config_set("bug", "dir", GAME_DEV_ROOT "/work/bugs");
 #endif
+    nxrt::bug::set_build_info(GAME_BUILD_COMMIT, GAME_BUILD_DIRTY != 0);
+    NXLOG_I("boot", "built from commit %s%s", *GAME_BUILD_COMMIT ? GAME_BUILD_COMMIT : "(unknown)", GAME_BUILD_DIRTY ? " with uncommitted changes" : "");
     NXLOG_I("boot", GAME_ID " %s (%s PC port)", GAME_RELEASE_VERSION, GAME_TITLE);
     NXLOG_I("boot", "%s %s: exefs '%s'", GAME_TITLE, nxrt::game::info().version, exefs.c_str());
 

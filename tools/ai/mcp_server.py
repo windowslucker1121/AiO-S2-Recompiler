@@ -25,7 +25,7 @@ def tool_schema(name):
     props, required = {}, []
     for p in list(inspect.signature(fn).parameters.values())[1:]:
         t = typing.get_origin(p.annotation) or p.annotation
-        props[p.name] = {'type': JSON_TYPES[t]} | ({'items': {'type': 'string'}} if t is list else {})
+        props[p.name] = {'type': JSON_TYPES[t]} | ({'items': {} if p.name in gamectl.ANY_ITEMS else {'type': 'string'}} if t is list else {})
         if p.default is inspect.Parameter.empty:
             required.append(p.name)
         elif p.default is not None:
@@ -56,7 +56,9 @@ def serve():
                                'serverInfo': {'name': 'game', 'version': '1'},
                                'instructions': 'Drives the game exe of this repo (game id from NXRT_AI_GAME, default oot). Start with status. '
                                                'The exe has no live control channel: the runtime test tooling (pad scripts, peek/poke, probes) '
-                                               'runs through launch(script=...); live input is send_input to the game window.'}
+                                               'runs through launch(script=...); live input is send_input to the game window. '
+                                               'states / load_state start the game at a saved moment (save data + a scripted way back, not a '
+                                               'process snapshot); capture_bug / bugs are bundles of a moment (the player presses F9 in game).'}
         elif method == 'ping':
             reply['result'] = {}
         elif method == 'tools/list':

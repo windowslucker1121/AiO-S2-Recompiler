@@ -7,6 +7,7 @@ mcp_server.py serves every name in TOOLS (methods of Game, the docstring is the 
 The running exe has no live control channel (no pipe, socket or command file). The runtime's test tooling (scripts, pad and vpad input,
 @peek/@poke, game probes) is configured at start through NXRT_TEST_* and answers through files (result.json, trace.jsonl, shots/), so it is
 reached through launch(script=...). Live control is window messages or SendInput to the game window.
+Saved states and bug bundles (states, save_state, load_state, capture_bug, bugs) are in states.py, a mixin of Game.
 """
 import collections
 import ctypes
@@ -28,7 +29,13 @@ import imgdiff  # noqa: E402  (tools/test: perceptual image diff)
 import wincap  # noqa: E402  (tools/test: window enumeration and capture; makes this process DPI aware)
 from PIL import Image  # noqa: E402
 
-TOOLS = ['status', 'launch', 'restart', 'kill', 'screenshot', 'send_input', 'wait_for', 'compare', 'log', 'reports']
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import states  # noqa: E402  (tools/ai/states.py: saved states and bug bundles)
+
+TOOLS = ['status', 'launch', 'restart', 'kill', 'screenshot', 'send_input', 'wait_for', 'compare', 'log', 'reports',
+         'states', 'save_state', 'load_state', 'capture_bug', 'bugs']
+# list parameters whose items are not only strings (route names or step dicts): the MCP schema leaves their items open
+ANY_ITEMS = {'reach', 'route'}
 # The game exe's exit codes (game_main.cpp, the test tooling's contract in tt.h, crash handler, watchdog, fatal).
 EXIT = {0: 'pass / normal exit', 1: 'script failed or start-up error', 2: 'usage or script parse error', 3: 'crash', 4: 'crash',
         5: 'freeze or fatal error', 6: 'process ended before the script finished', 124: 'deadline (--max-seconds / wall_timeout_s)'}
@@ -193,7 +200,7 @@ def _xy(tx, ty, size):
     return [min(int(float(t) * n), n - 1) if '.' in t else int(t) for t, n in zip((tx, ty), size)]
 
 
-class Game:
+class Game(states.StateTools):
     def __init__(self, game_id=None, exe=None, run_dir=None):
         self.id = game_id or os.environ.get('NXRT_AI_GAME', 'oot')
         manifest = tomllib.loads((ROOT / 'recomp' / 'games' / self.id / 'game.toml').read_text(encoding='utf-8'))
@@ -297,6 +304,8 @@ class Game:
         wait: block until the game exits (killed after timeout_s) and return exit code, scripted-run result, peeks and the log tail."""
         self.last_launch = {k: v for k, v in locals().items() if k != 'self'}
         self.kill()
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        (self.run_dir / 'launch.json').write_text(json.dumps(self.last_launch, indent=1, default=str), encoding='utf-8')
         if exe:
             self.exe = Path(exe).resolve()
         if not self.exe.exists():
@@ -314,7 +323,8 @@ class Game:
             os.replace(log, log.with_name(log.name + '.prev'))
         if headless:
             args.append('--headless')
-        e = dict(os.environ, SDL_WINDOW_ACTIVATE_WHEN_SHOWN='0', NXRT_TEST_OUT=str(out), NXRT_TEST_FRAME_SOURCE='tick')
+        e = dict(os.environ, SDL_WINDOW_ACTIVATE_WHEN_SHOWN='0', NXRT_TEST_OUT=str(out), NXRT_TEST_FRAME_SOURCE='tick',
+                 NXRT_BUG_DIR=str(self._bugs_dir()))       # bug bundles where bugs() looks (settings {"bug.dir": ...} beats it)
         for k, v in (settings or {}).items():                    # CONFIG.md: NXRT_ + SECTION + _ + KEY, non-alphanumerics as _
             e['NXRT_' + re.sub(r'\W', '_', k.upper().replace('.', '_', 1))] = ('1' if v else '0') if isinstance(v, bool) else str(v)
         self.peeks = []
@@ -359,10 +369,11 @@ class Game:
         return p
 
     def restart(self):
-        """Kill the game and start it again with the arguments of the last launch."""
-        if not self.last_launch:
-            raise RuntimeError('nothing launched yet by this server: use launch')
-        return self.launch(**self.last_launch)
+        """Kill the game and start it again with the arguments of the last launch (also of one made by an earlier CLI call: launch.json)."""
+        last = self._last_launch()
+        if not last:
+            raise RuntimeError('nothing launched yet: use launch')
+        return self.launch(**last)
 
     def kill(self):
         """End the game: the process tree this server started, or every running process with the exe's file name."""
@@ -490,18 +501,20 @@ class Game:
                 raise ValueError(f'unknown step {st!r}')
         return {'window': title, 'steps': len(steps), 'method': method}
 
-    def wait_for(self, until: str, timeout_s: float = 60, pattern: str = None, ref: str = None, min_ssim: float = 0.9, mask: str = None):
+    def wait_for(self, until: str, timeout_s: float = 60, pattern: str = None, ref: str = None, min_ssim: float = 0.9, mask: str = None,
+                 new: bool = False):
         """Block until a condition holds or timeout_s runs out. until:
           window   the game window exists            visible   the window shows a picture that is not black
           change   the picture differs from the one at the call
           image    the picture matches the reference PNG ref (SSIM >= min_ssim; mask as in compare)
-          log      a line of this run's log matches the regex pattern (case-insensitive)
+          log      a line of this run's log matches the regex pattern (case-insensitive); new: only lines written after this call
           exit     the game process has ended
         Returns ok, the seconds waited, the matching log line or the last capture's path; stops early when the game is not running."""
         if until not in ('window', 'visible', 'change', 'image', 'log', 'exit'):
             raise ValueError(f'unknown condition {until!r}')
         rx = re.compile(pattern or '.', re.I)
-        lp, pos, base, img, t0 = self._log_path(), 0, None, None, time.time()
+        lp, base, img, t0 = self._log_path(), None, None, time.time()
+        pos = lp.stat().st_size if new and lp.exists() else 0
         masks = [imgdiff._mask_arg(mask)] if mask else None
         while True:
             alive = bool(self._pids())

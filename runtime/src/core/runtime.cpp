@@ -5,6 +5,7 @@
 #include <mutex>
 
 #include "nxrt/audio_sink.h"
+#include "nxrt/bugcapture.h"
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
 #include "nxrt/dispatch.h"
@@ -68,6 +69,7 @@ bool init(const InitOptions& opt) {
     }
     if (opt.memguard) memguard_start();
     if (opt.watchdog) watchdog_start();
+    bug::start_requests();      // bug capture request files <exe dir>\capture_bug[.<pid>] ([bug] requests; nxrt/bugcapture.h)
     config_log_effective();
     hitch_start();              // frame summary every 10 s and a line per frame over 50 ms ([diag] hitch_log / hitch_summary_s / hitch_ms); on by default
     soak_start();               // gauge sampler ([diag] soak_csv); a no-op when unset
@@ -116,6 +118,7 @@ void shutdown() {
     soak_stop();
     hitch_stop();
     watchdog_stop();
+    bug::stop_requests();
     kernel::starvation_guard_stop();
     memguard_stop();
     log_flush();
