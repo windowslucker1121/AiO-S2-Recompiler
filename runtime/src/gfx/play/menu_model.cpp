@@ -95,7 +95,7 @@ struct Builder {
 };
 
 std::string fps_label(int fps) {
-    if (fps < 0) return "&Refresh rate of the display";
+    if (fps < 0) return "&Auto (the game's own rate, or the display's)";
     if (fps == 0) return "&Unlimited";
     return std::to_string(fps) + " fps";
 }

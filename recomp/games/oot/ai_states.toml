@@ -15,7 +15,7 @@ settings = { "diag.watchdog_seconds" = -1, "media.video_max_pictures" = 120 }
 env = { NXRT_NVN_SHADER_CACHE = "{data}/work/shaders/oot/spirv", NXRT_NVN_SHADER_CORPUS = "{data}/work/shaders/oot/corpus", NXRT_NVN_SHADER_TRANSLATOR = "{data}/tools/shaders/build/bin/Release/net10.0/spirv_harness.exe" }
 # what save_state records when it is not told: boot to the title, load the save, wait for the scene
 reach = ["title", "continue", "in_game"]
-ready = { until = "log", pattern = "pacing on \\(present \\d+, \\d{4,} draws\\)", timeout_s = 300 }
+ready = { until = "log", pattern = "(3D scene|pacing on) \\(present \\d+, \\d{4,} draws\\)", timeout_s = 300 }
 
 [route.title]
 description = "boot to the title screen (the title movie loops; the menu takes A from about 45 s)"
@@ -39,7 +39,7 @@ steps = [
 [route.in_game]
 description = "wait for the first frame of a 3D scene (thousands of draws; the first visit replays it for a minute or two)"
 steps = [
-  { wait_for = { until = "log", pattern = "pacing on \\(present \\d+, \\d{4,} draws\\)", timeout_s = 600 } },
+  { wait_for = { until = "log", pattern = "(3D scene|pacing on) \\(present \\d+, \\d{4,} draws\\)", timeout_s = 600 } },
   { sleep = 5 },
 ]
 

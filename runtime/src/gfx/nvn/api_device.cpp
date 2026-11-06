@@ -442,6 +442,7 @@ NVNboolean nvnWindowInitialize(NVNwindow* window, const NVNwindowBuilder* builde
         if (t) w->textures.push_back(be::Ref<be::Texture>::share(t));
     }
     w->present_interval = info.present_interval;
+    NXLOG_I(kTag, "nvnWindowInitialize: present interval %d", info.present_interval);
     w->native_window = info.native_window;
     w->hdr = info.hdr;
     if (w->hdr.color_space >= 0 || w->hdr.has_display || w->hdr.has_content)   // the game asks for an HDR window: tell the HDR output
@@ -479,6 +480,10 @@ void nvnWindowSetPresentInterval(NVNwindow* window, int interval) {
     be::Window* w = be::host_of<be::Window>(window);
     if (!w) return;
     std::lock_guard<std::mutex> lk(w->lock);
+    if (w->present_interval != interval) {
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1) < 64) NXLOG_I(kTag, "nvnWindowSetPresentInterval: %d -> %d", w->present_interval, interval);
+    }
     w->present_interval = interval;
 }
 

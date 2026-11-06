@@ -7,6 +7,7 @@
 // (MIT). Command ids and layouts were also checked against https://switchbrew.org/wiki/NV_services and Display_services.
 //
 // Not here, left to the GPU back end: nvhost channel submission (SUBMIT_GPFIFO only answers success), fences beyond success, presentation.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -18,6 +19,13 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
@@ -159,14 +167,40 @@ ViState& vi() {
 }
 
 // The display's vsync: a host thread signals the event at 60 Hz. Started by the first GetDisplayVsyncEvent, stopped by vi_nv_reset().
+// The vsync runs on an absolute 60 Hz schedule (start + n / 60 s). A relative wait_for(16667 us) became a 16 ms (or 15.6 ms) wait on
+// Windows, so the event came at 62-64 Hz: OoT, which waits two vsyncs per frame, ran at 32 fps, and its movies and their voice lines
+// 6 % fast (A11). After a stall it skips to the next slot instead of firing the missed ones in a burst.
 void vsync_main() {
     ViState& s = vi();
+    using clk = std::chrono::steady_clock;
+    constexpr auto kPeriod = std::chrono::duration_cast<clk::duration>(std::chrono::duration<double>(1.0 / 60.0));
+#ifdef _WIN32
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+#endif
+    auto next = clk::now() + kPeriod;
     std::unique_lock<std::mutex> lk(s.mu);
     while (!s.vsync_stop) {
-        s.cv.wait_for(lk, std::chrono::microseconds(16667), [&] { return s.vsync_stop; });
-        if (s.vsync_stop) break;
+        auto now = clk::now();
+        if (now < next) {
+#ifdef _WIN32
+            lk.unlock();
+            LARGE_INTEGER due;
+            due.QuadPart = -std::max<int64_t>(1, std::chrono::duration_cast<std::chrono::nanoseconds>(next - now).count() / 100);
+            if (!timer || !SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE) || WaitForSingleObject(timer, 100) != WAIT_OBJECT_0)
+                std::this_thread::sleep_until(next);
+            lk.lock();
+#else
+            s.cv.wait_until(lk, next, [&] { return s.vsync_stop; });
+#endif
+            continue;   // re-check the stop flag and the time (a wait can end a little early)
+        }
         s.vsync.signal();
+        next += kPeriod;
+        if (now - next > kPeriod) next = now + kPeriod;   // stalled: resume on the next slot, no burst of missed vsyncs
     }
+#ifdef _WIN32
+    if (timer) CloseHandle(timer);
+#endif
 }
 
 void vsync_stop_and_join() {

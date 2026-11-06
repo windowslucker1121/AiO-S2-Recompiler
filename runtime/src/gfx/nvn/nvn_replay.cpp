@@ -26,6 +26,7 @@
 #include "nxrt/gauge.h"
 #include "nxrt/gfx_tuning.h"
 #include "nxrt/log.h"
+#include "nxrt/video_codec.h"
 #include "nvn_decoded.h"
 #include "nvn_devcmd.h"
 #include "nvn_enums.h"
@@ -4158,6 +4159,9 @@ void run_list(const CmdList& list, int depth) {
 // presented frame. Loading = presented frames with fewer than 16 draws (boot's black screen draws 3: exposure, bloom, tone map; the
 // loading screen a few more) AND the game still stalling: a present gap over 100 ms in the last 1.5 s. A light screen that presents
 // steadily (the title screen, a menu) is paced again within 1.5 s, so it does not run at 1000 fps; so is any frame with 16+ draws.
+// A movie is never loading: while the game reads decoded pictures (nn::codec, last read under 1 s ago) the frames stay paced. A movie
+// frame draws only a few quads, and OoT's players advance one picture per presented frame: unpaced, the 5-minute intro ran at ~250
+// pictures/s for 20 s (and for 1.5 s after each stall) while its voice lines, started along the movie's timeline, piled up (A11).
 void note_frame_for_pacing() {
     static const bool on = nxrt::config_get_bool("display", "unpaced_loading", true);
     if (!on) return;
@@ -4174,7 +4178,14 @@ void note_frame_for_pacing() {
     last_d = d;
     if (last_present == clk::time_point{} || now - last_present > std::chrono::milliseconds(100)) last_stall = now;
     last_present = now;
-    low = per < 16 ? low + 1 : 0;
+    static uint64_t movie_read = 0;
+    static clk::time_point movie_seen{};
+    if (const uint64_t r = nxrt::media::video_codec_stats().frames_read; r != movie_read) {
+        movie_read = r;
+        movie_seen = now;
+    }
+    const bool movie = movie_seen != clk::time_point{} && now - movie_seen < std::chrono::seconds(1);
+    low = per < 16 && !movie ? low + 1 : 0;
     if (low == 1) low_since = now;
     // A loading screen presents steadily but its loading still advances once per frame (Pokopia: 14 s at 60 fps before the title), so a
     // run of light frames stays unpaced for up to [display] unpaced_loading_s (20) seconds even without stalls.
@@ -4184,8 +4195,18 @@ void note_frame_for_pacing() {
     if (want != nxrt::frame_limiter_unpaced()) {
         nxrt::frame_limiter_set_unpaced(want);
         ft::mark(want ? "pace.loading" : "pace.playing", static_cast<uint32_t>(per));
-        NXLOG_I(kTag, "pacing %s (present %llu, %llu draws)", want ? "off: loading" : "on", static_cast<unsigned long long>(p),
+        NXLOG_I(kTag, "pacing %s (present %llu, %llu draws)", want ? "off: loading" : movie ? "on: movie" : "on", static_cast<unsigned long long>(p),
                 static_cast<unsigned long long>(per));
+    }
+    // A 3D scene starts: the first frame with 1000+ draws after 60 lighter ones (tests wait for this line; the pacing lines above only
+    // come on a change, and a scene that follows a movie is paced already).
+    static uint64_t light = 0;
+    if (per >= 1000) {
+        if (light >= 60)
+            NXLOG_I(kTag, "3D scene (present %llu, %llu draws)", static_cast<unsigned long long>(p), static_cast<unsigned long long>(per));
+        light = 0;
+    } else {
+        light++;
     }
     static bool full = false;
     if (!full && per >= 16) {

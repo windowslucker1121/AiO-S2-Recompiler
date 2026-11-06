@@ -326,9 +326,17 @@ void apply_frame_cap(const Settings& s) {
     G& st = g();
     double cap = s.display.fps_cap;
     if (cap < 0) {
-        // fps_limit = auto: the display's refresh rate (no limit while it is unknown, e.g. headless runs)
-        const float hz = st.window ? platform::display_refresh_hz() : 0.f;
-        cap = hz > 0 ? static_cast<double>(hz) : 0;
+        // fps_limit = auto: the display's refresh rate (no limit while it is unknown, e.g. headless runs) for a game whose frame step
+        // follows real time (timestep sites). A game without them advances one fixed 1/60 s step per frame, as on the console, where the
+        // 60 Hz display paces it: there auto means 60, whatever the monitor runs at. OoT on a Remote Desktop display (32 Hz) ran at 32 fps,
+        // its 60 fps movies at half speed against their voice lines (A11); a 144 Hz monitor would have run it 2.4 times too fast.
+        const timestep::Sites* ts = game::info().timestep;
+        if (ts && ts->frame_update) {
+            const float hz = st.window ? platform::display_refresh_hz() : 0.f;
+            cap = hz > 0 ? static_cast<double>(hz) : 0;
+        } else {
+            cap = config_get_double("display", "console_fps", 60.0);
+        }
     }
     if (s.display.vsync && s.display.fps_cap == 0) {
         cap = 0;     // uncapped with vsync: mailbox presents, no limiter
@@ -340,6 +348,9 @@ void apply_frame_cap(const Settings& s) {
         static const bool vsync_cap = config_get_bool("latency", "vsync_cap", true);
         if (cap <= 0 || (hz > 0 && cap >= hz)) cap = (vsync_cap && hz > 0) ? static_cast<double>(hz) * 0.9995 : 0;
     }
+    if (cap != st.limiter.target_fps())
+        NXLOG_I(kTag, "frame cap: %.2f fps (fps_limit %d, vsync %d, display %.2f Hz)", cap, s.display.fps_cap, s.display.vsync ? 1 : 0,
+                st.window ? static_cast<double>(platform::display_refresh_hz()) : 0.0);
     st.limiter.set_target_fps(cap);
     extras::lowlat_note_cap(cap);     // Reflex / Anti-Lag pace to the same cap (remembered for a renderer that is created later)
 }
