@@ -54,18 +54,21 @@ std::vector<std::string> corpus_hashes(const std::string& corpus) {
 
 // Finished, and no program of the list has become preparable since (translations added later, e.g. a re-run of the batch translation;
 // usable_programs against the state's prepared + failed counts).
+// Also not finished: made by an older scheme or for other raster flags, or its pipeline cache file is gone or lost most of its bytes.
 bool prepare_finished(const std::filesystem::path& state, const std::filesystem::path& programs) {
     // ponytail: the state's GPU/driver key is not checked here (that needs a device); after a driver update the game links parts at run time
+    std::string why;
+    if (!be::prepare_state_complete(state.string(), &why)) {
+        NXLOG_I("setup", "shader preparation needed: %s", why.c_str());
+        return false;
+    }
     std::ifstream f(state);
     std::string l;
-    bool done = false;
     uint64_t covered = 0;
     while (std::getline(f, l)) {
         while (!l.empty() && l.back() == 13) l.pop_back();
-        if (l.rfind("complete: 1", 0) == 0) done = true;
         if (l.rfind("prepared: ", 0) == 0 || l.rfind("failed: ", 0) == 0) covered += std::strtoull(l.c_str() + l.find(' ') + 1, nullptr, 10);
     }
-    if (!done) return false;
     std::vector<be::ProgramHashes> progs;
     std::string error;
     return !be::read_programs_file(programs.string(), &progs, &error) || be::usable_programs(progs) <= covered;
