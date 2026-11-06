@@ -1516,6 +1516,7 @@ bool host_readable(uint64_t addr, uint64_t n) {
 
 // The work-group counts of the dispatch being recorded (do_dispatch), for the c[0] header.
 uint32_t g_dispatch_groups[3] = {1, 1, 1};
+VkDescriptorBufferInfo g_c0_made = {};   // the c[0] header compute_c0 made for the dispatch being recorded (buffer null: none)
 
 // c[0] of an NVN2 compute program, as the driver lays it out per dispatch (apply_nvn2_compute_table): a 0x10-byte header (word 0 zero, words 1-3
 // the dispatch's work-group counts x, y, z), the push constant area (ShaderControl::c0_push bytes of SmallState::push_cs), the uniform block and
@@ -1550,6 +1551,7 @@ bool compute_c0(const ShaderInfo& s, VkDescriptorBufferInfo& bi) {
     UploadAlloc u = F->upload(kComputeC0Bytes, std::max<VkDeviceSize>(align, 256));
     if (!u || !fill_compute_c0(s.control, u.ptr, static_cast<size_t>(kComputeC0Bytes))) return false;
     bi = {u.buffer, u.offset, kComputeC0Bytes};
+    g_c0_made = bi;   // do_dispatch: an indirect dispatch's GPU-written counts are copied into words 1-3 of this header
     return true;
 }
 
@@ -3006,6 +3008,16 @@ void do_draw_mesh(const P_DrawMesh& p) {
             off = u.offset;
             vstride = 12;
         }
+        if (g_trace) {   // a traced frame: the source records and what the draw reads (snapm_d<draw>_<address>_src/_draw.bin)
+            end_pass();
+            char nm[96];
+            const int rs = snapshot_record_buffer(ib.buffer, ib.offset, std::min<uint64_t>(64, ib.avail), *F);
+            std::snprintf(nm, sizeof nm, "snapm_d%d_%llx_src.bin", g_trace_n + 1, static_cast<unsigned long long>(p.indirect));
+            if (rs >= 0) g_trace_snaps.push_back({rs, g_trace_n + 1, nm, "raw"});
+            const int rd = snapshot_record_buffer(buf, off, 12ull * n, *F);
+            std::snprintf(nm, sizeof nm, "snapm_d%d_%llx_draw.bin", g_trace_n + 1, static_cast<unsigned long long>(p.indirect));
+            if (rd >= 0) g_trace_snaps.push_back({rd, g_trace_n + 1, nm, "raw"});
+        }
         if (!begin_draw(NVN_DRAW_PRIMITIVE_TRIANGLES, false, 0, &topo, true)) { counters().draws_skipped.fetch_add(1); return; }
         TRACE("    mesh indirect draw: kind %u, %u record(s) at %llx stride %llu%s (task %s mesh %s)", p.kind, n, static_cast<unsigned long long>(p.indirect),
               static_cast<unsigned long long>(stride), p.count_address ? ", count from the GPU" : "", S.stage[kTask] ? S.stage[kTask]->hash.c_str() : "-", S.stage[kMesh]->hash.c_str());
@@ -3253,7 +3265,17 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
         if (host_readable(indirect, 12)) std::memcpy(g_dispatch_groups, host_ptr(indirect), 12);
         else g_dispatch_groups[0] = g_dispatch_groups[1] = g_dispatch_groups[2] = 1;
     }
+    g_c0_made = {};
     bind_sets(*pl, VK_PIPELINE_BIND_POINT_COMPUTE);
+    if (indirect && g_c0_made.buffer && ind.ok) {
+        // The CPU's copy of the arguments is stale when a dispatch of this frame wrote them (GPU-driven culling chains: OoT's mesh draws are
+        // counted by compute 328a6c18, which is itself dispatched indirectly): the header gets the counts the GPU dispatches with.
+        end_pass();
+        memory_barrier(F->cb);
+        const VkBufferCopy rg = {ind.offset, g_c0_made.offset + 4, 12};
+        vkCmdCopyBuffer(F->cb, ind.buffer, g_c0_made.buffer, 1, &rg);
+        memory_barrier(F->cb);
+    }
     if (g_sh_copied) {
         memory_barrier(F->cb);     // the copies into the shadows before the dispatch reads them
         gstamp("shadow in");
@@ -3262,6 +3284,13 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
         char t[128];
         std::snprintf(t, sizeof t, "dispatch cs %s %ux%ux%u%s", cs->hash.c_str(), x, y, z, indirect ? " indirect" : "");
         checkpoint(*F, t);
+    }
+    if (indirect && g_trace && ind.ok) {   // a traced frame: the arguments as the GPU dispatches them (snapd_<n>_<cs>.bin)
+        static int nd = 0;
+        const int ri = snapshot_record_buffer(ind.buffer, ind.offset, 12, *F);
+        char nm[96];
+        std::snprintf(nm, sizeof nm, "snapd_%03d_%s.bin", nd++, cs->hash.substr(0, 8).c_str());
+        if (ri >= 0) g_trace_snaps.push_back({ri, g_trace_n, nm, "raw"});
     }
     if (indirect) {
         vkCmdDispatchIndirect(F->cb, ind.buffer, ind.offset);
