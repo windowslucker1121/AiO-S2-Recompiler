@@ -2,6 +2,7 @@
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/ReverbCommand.cs (Ryubing fork, MIT). Scalar path (no SIMD in the C# file).
 // The C# static int[] index tables are kept verbatim as static constexpr arrays; the C# Span<T> parameters become Span<const int32_t>.
 #pragma once
+#include <new>
 #include <vector>
 
 #include "../../Constants.h"
@@ -101,10 +102,12 @@ class ReverbCommand : public ICommand {
         ReverbState& state = State[0];
 
         if (IsEffectEnabled) {
-            // Also when the state was never built: an effect first processed while disabled and enabled later without passing through
-            // Invalid again had empty delay lines (OoT's first scene: null DecayDelays read at 0x20 on the audio thread).
+            // Also when the state was never built (an effect enabled after its Invalid pass). Built in place, not assigned: the slot
+            // (EffectStateSlot) starts as zeroed bytes, and an assignment never sets the vtable pointers of the DelayLine members, so the
+            // first PreDelayLine call went through a null vtable (OoT's first scene: read at 0x20 on the audio thread).
             if (_parameter.status == UsageState::Invalid || state.FdnDelayLines.empty()) {
-                state = ReverbState(_parameter, WorkBuffer, IsLongSizePreDelaySupported);
+                state.~ReverbState();
+                new (&state) ReverbState(_parameter, WorkBuffer, IsLongSizePreDelaySupported);
             } else if (_parameter.status == UsageState::New) {
                 state.UpdateParameter(_parameter);
             }
