@@ -77,7 +77,8 @@ class DelayCommand : public ICommand {
         DelayState& state = State[0];
 
         if (IsEffectEnabled) {
-            if (_parameter.status == UsageState::Invalid) {
+            // also when never built (enabled later without passing through Invalid again; see ReverbCommand)
+            if (_parameter.status == UsageState::Invalid || state.DelayLines.empty()) {
                 state = DelayState(_parameter, WorkBuffer);
             } else if (_parameter.status == UsageState::New) {
                 state.UpdateParameter(_parameter);

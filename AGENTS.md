@@ -156,11 +156,14 @@ Open points besides the milestones:
 |---|---|---|---|
 | A1 | title, intro | UI text invisible, then garbled. Two causes: the glyph pass picks its glyph records with instance + c[0][0x644] (NVN base instance, never written by the runtime; the harness now answers QueryHasConstantBufferDrawParameters true, so Ryujinx reads gl_BaseInstance), and the menu text is CPU-rendered into R8 textures with NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET, which the layout code untiled as block-linear (64-texel bands; found by re-tiling a dump and decoding it pitch-linear: "New Game"). Both fixed; the title reads "New Game" and "Options / ZELDA NOTES Setting" | fixed |
 | A2 | title | black background: the title is a movie. Fixed: AV1 on dav1d (below) and the NDVE model hidden | fixed |
-| A3 | title | faint vertical stripes in the logo/smoke area (x 340-940), seen over the black background; not seen over the movie, not seen on 2026-11-06 | not seen again |
+| A3 | title | faint vertical stripes in the logo/smoke area (x 340-940) over the black background (when the title movie is not behind it; with `[media] video_max_pictures` the movie ends and they show again on 2026-11-06) | open |
 | A4 | title -> A | the screen stayed black after A: the game waited for the title movie (no video decoder). Fixed with A2; A now leads into the intro (tapestry movie) | fixed |
 | A5 | setup window | blurry (DPI-virtualised) | fixed in code (per-monitor DPI), not yet seen |
-| A6 | all | Opus audio is silent: `hwopus` (IHardwareOpusDecoder) "decodes silence" (no Opus decoder in the runtime). vcpkg `opus:x64-windows-static` would give one | open |
+| A6 | all | Opus audio was silent: `hwopus` decoded silence. Now libopus 1.6.1 (vcpkg `opus:x64-windows-static`, repo-local); the Ex open forms carry {rate, channels} in the raw data (OoT: 48 kHz mono, was read from a buffer: 0/0 and "buffer too small") | fixed (not listened to) |
 | A7 | game (expected) | shadows of clustered (point/spot) lights are missing: 4,336 fragment shaders sample their shadow maps with TEX.SCR.B.DC through a handle read per pixel (light index from a storage loop), which the handle expressions cannot bind; the sample answers 1 (lit). Fix: pool-sized texture + sampler arrays in the runtime (Ryujinx GenerateBindlessAccess, harness QueryHostSupportsSeparateSampler true) | open |
+| A8 | first scene | **VK_ERROR_DEVICE_LOST** a few frames into the first gameplay scene, every run (2026-11-06). No display-driver timeout event (4101), so a GPU fault, most likely an out-of-range access (robustBufferAccess is off for speed). Not the compute shaders with unmapped storage buffers (skipped now, still lost). `[gfx] robust_access = 1` changes the driver's pipeline keys, so the prepared cache misses and everything recompiles (black screen for 30+ min): not usable as a quick test | open |
+| A9 | game | foliage/terrain use **mesh shaders** (`nvnCommandBufferDrawMeshTasks`, unknown proc; the 800 stage 6/7 blocks "without code"): nothing is drawn for them | open |
+| A10 | game | **compute shaders read their resources from c[0] at offsets the runtime does not map**: storage buffers at c0 bytes 0xC0, 0xD0, 0x100, 0x110, 0x120, 0x150, 0x160 (Pokopia: 0x210 uniforms-as-storage, 0x310 storage) and texture/image handles at c0 words 8-142; the same word is a storage descriptor in one shader and an image handle in another, so it is a per-program table (GLSLC reflection was not extracted for the corpus). Dispatches whose storage buffers map to nothing are skipped (`[nvn] skip_unmapped_dispatch`) | open |
 
 **Movies** (`romfs/Event/Movie/*.webm`, 26 files, 1.6 GB) are **AV1** in WebM (mime `video/av01`), decoded by nn::codec on the host: libvpx
 (VP9/VP8) and **dav1d 1.5.4** (AV1), both static from the repo-local vcpkg (`tools\vcpkg`, git-ignored; the user ran the bootstrap and
@@ -177,6 +180,8 @@ delay is dav1d's own choice and `[media] video_decoder_threads` defaults to half
 Flow after the title: A -> `Dm_Kokiri_0000.webm` (the intro, **5 minutes**, no skip with A/B/+ presses or 3 s holds), then the first
 scene. Hiding the intro file makes the game wait forever on a black loading screen. For tests, `[media] video_max_pictures = 120` ends
 every movie stream after 120 pictures (the title movie then restarts every 4 s).
+
+**First gameplay frame (2026-11-06):** after the intro the first scene's frame has ~13,100 draws and took 85-112 s to replay: 850 MB of texture uploads with ~100 ASTC->BC7 transcodes on the render thread (first use; stand-ins exist but most waited), 3,000 pipelines linked, 460-650 memory pool imports. Later starts find the BC7 entries on disk. Pipeline parts come from the prepared cache (9,000 parts in 12 s of worker time instead of 350 s).
 
 **Play mode / frame hook:** OoT's frame update is main+0x3b4ea90 (entryhook in `main.sites`; the framework's per-frame virtual, vtable
 0x4c63f80 +224, called by the endless loop main+0x9467b0; the base class's +224 0x346c8d0 is never called). `runtime/games/oot/oot_game.cpp`

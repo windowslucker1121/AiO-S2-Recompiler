@@ -101,7 +101,9 @@ class ReverbCommand : public ICommand {
         ReverbState& state = State[0];
 
         if (IsEffectEnabled) {
-            if (_parameter.status == UsageState::Invalid) {
+            // Also when the state was never built: an effect first processed while disabled and enabled later without passing through
+            // Invalid again had empty delay lines (OoT's first scene: null DecayDelays read at 0x20 on the audio thread).
+            if (_parameter.status == UsageState::Invalid || state.FdnDelayLines.empty()) {
                 state = ReverbState(_parameter, WorkBuffer, IsLongSizePreDelaySupported);
             } else if (_parameter.status == UsageState::New) {
                 state.UpdateParameter(_parameter);

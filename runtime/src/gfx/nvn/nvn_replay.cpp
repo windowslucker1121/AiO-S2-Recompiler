@@ -2846,9 +2846,25 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
           !cs && !g_cs_missing.empty() ? " missing " : "", !cs ? g_cs_missing.c_str() : "");
     if (g_cs_pending) { note_pending_skip(true); return; }
     if (!cs) return;
+    static const bool debug_skip = config_get_bool("nvn", "debug_skip_compute", false);   // diagnosis: no dispatch runs
+    if (debug_skip) return;
     const ShaderInfo* stages[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, cs};
     const ProgLayout* pl = prog_layout(stages);
     if (!pl) return;
+    // A storage buffer whose c[0] descriptor maps to no NVN binding would be the shared 64 KiB dummy, which the shader may write (it also
+    // holds the default vertex attributes) or index out of range: OoT's compute shaders keep theirs at c[0] offsets the table of
+    // set_c0_offset does not know (0xC0, 0x100, 0x150 ...), and running them hung the GPU (VK_ERROR_DEVICE_LOST after the first scene).
+    // [nvn] skip_unmapped_dispatch (default on) leaves such dispatches out.
+    static const bool skip_unmapped = config_get_bool("nvn", "skip_unmapped_dispatch", true);
+    if (skip_unmapped)
+        for (const BindingDesc& d : pl->bindings)
+            if (d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && d.shader->refl.bindings[d.index].nvn.source == NvnSource::Unknown) {
+                if (first_time_key("unmapped-dispatch " + cs->hash))
+                    NXLOG_W(kTag, "compute shader %s: storage buffer %s (c0 offset 0x%x) maps to no NVN binding: its dispatches are left out", cs->hash.c_str(),
+                            d.shader->refl.bindings[d.index].name.c_str(), d.shader->refl.bindings[d.index].nvn.c0_offset);
+                note_unsupported("dispatch with an unmapped storage buffer");
+                return;
+            }
     prepare_textures(*pl);
     end_pass();
     if (g_trace) {   // the compute bindings: buffers (source, slot, address), texel buffers and textures, and the first words of each uniform block
