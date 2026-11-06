@@ -1140,7 +1140,7 @@ int storage_slot_for(int nvn_stage, int c0_offset) {
         default: return 0;
     }
     if (c0_offset < base) return 0;
-    return (c0_offset - base) / 0x10;
+    return (c0_offset - base) / 0x10 ^ (nvn_stage != kCompute ? graphics_ssbo_slot_xor() : 0);
 }
 
 // ---- compute shadows: storage and texel buffers of a dispatch in device-local memory ---------------------------------------------
@@ -1625,7 +1625,10 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                     if (slot >= 0 && slot < 16 && S.ssbo[d.nvn_stage][slot].addr) {
                         const GState::Bind& bind = S.ssbo[d.nvn_stage][slot];
                         BufRef br = resolve_buffer(bind.addr, bind.size);
-                        bi = {br.buffer, br.offset, std::min<VkDeviceSize>(bind.size ? bind.size : br.avail, br.avail)};
+                        // The console's storage access is a raw load at the descriptor's address: nothing stops a shader at the bound size.
+                        // [nvn] storage_min_range (bytes) widens small bindings to that much of the memory behind them (diagnosis switch).
+                        static const VkDeviceSize min_range = static_cast<VkDeviceSize>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "storage_min_range", 0)));
+                        bi = {br.buffer, br.offset, std::min<VkDeviceSize>(std::max<VkDeviceSize>(bind.size ? bind.size : br.avail, min_range), br.avail)};
                         if (!g_shadowing && br.ok && out_lazy() && out_overlaps(bind.addr, bi.range)) {   // a draw over a held compute result: the copy
                             const BufRef hb = held_or_pool(bind.addr, bi.range, kOutStorageXfb, false);
                             if (hb.buffer != br.buffer) {
@@ -2399,7 +2402,8 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         TRACE("    poly mode %d offset %x factor %g units %g clamp %g | depth mode %d origin %d clamp %d", S.poly.polygon_mode, S.poly.offset_enables, S.bias_factor, S.bias_units,
               S.bias_clamp, S.depth_mode, S.window_origin, S.depth_clamp ? 1 : 0);
         if (S.color.blend_enable_mask)
-            TRACE("    blend rt0 rgb %d,%d,%d a %d,%d,%d (nvn enums src,dst,eq)", S.blend[0].src_rgb, S.blend[0].dst_rgb, S.blend[0].eq_rgb, S.blend[0].src_a, S.blend[0].dst_a, S.blend[0].eq_a);
+            TRACE("    blend rt0 rgb %d,%d,%d a %d,%d,%d (nvn enums src,dst,eq) constant %g %g %g %g", S.blend[0].src_rgb, S.blend[0].dst_rgb, S.blend[0].eq_rgb, S.blend[0].src_a,
+                  S.blend[0].dst_a, S.blend[0].eq_a, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]);
         // [nvn] trace_ubo_bytes = N (NXRT_NVN_TRACE_UBO_BYTES, default 768, at most 65536): how many leading bytes of each uniform block the trace prints
         static const uint64_t ubo_bytes = static_cast<uint64_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "trace_ubo_bytes", 768), 16, 65536));
         for (int stg = kVertex; stg <= kFragment; ++stg)
@@ -3192,7 +3196,8 @@ VkClearRect full_rect() {
 }
 
 void do_clear_color(const P_ClearColor& p) {
-    if (g_trace) {   // the value (as floats for kind 0, else as words) and the rectangle the clear covers (the scissor when one is set)
+    if (g_trace) {   // the value (as floats for kind 0, else as words); "rect" is taken before the clear's pass opens, clamped to the previous pass's
+                     // extent (a 854x480 target after a 240x135 pass shows 240x135): the "clear applied" line after it has the rectangle really cleared
         char a[96], v[96];
         if (p.kind == 0) {
             float f[4];
@@ -3231,6 +3236,9 @@ void do_clear_color(const P_ClearColor& p) {
     ca.colorAttachment = p.target;
     std::memcpy(ca.clearValue.color.uint32, p.value, 16);
     VkClearRect r = full_rect();
+    // the rectangle the clear covers in the pass it opened (the "rect" of the line above is taken before that pass, with the old extent)
+    TRACE("    clear applied: rect %d %d %u %u of %ux%u (scissor %d %d %d %d, %u set)", r.rect.offset.x, r.rect.offset.y, r.rect.extent.width, r.rect.extent.height,
+          P.extent.width, P.extent.height, S.sc[0][0], S.sc[0][1], S.sc[0][2], S.sc[0][3], S.nsc);
     vkCmdClearAttachments(F->cb, 1, &ca, 1, &r);
     counters().clears.fetch_add(1, std::memory_order_relaxed);
 }

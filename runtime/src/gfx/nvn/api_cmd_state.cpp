@@ -15,7 +15,18 @@
 //   * BindCoverageModulationTable has no fields of its own: its record carries a zero P_U32 payload and the 16 floats as blob.
 // The layouts of the state objects are not read here, so no smo-recomp file was consulted for this family.
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "nxrt/config.h"
+#include "nxrt/eh.h"
+#include "nxrt/kernel.h"
+#include "nxrt/log.h"
 
 #include "nvn_cmd.h"
 #include "nvn_gpu.h"
@@ -65,8 +76,44 @@ void emit_f32(NVNcommandBuffer* c, Op op, float v) {
 }
 
 // Buffer bindings: kind and stage, then `count` ranges (address, size) as blob.
+// [nvn] ubo_backtrace = "<word>=<hex>,..." (diagnosis): a uniform buffer bound with words matching all pairs (read from guest memory at the
+// bind) logs the guest backtrace of the binding thread, three times at most. Finds the code that fills a block (A12: the tone mapping's).
+void ubo_backtrace_check(uint32_t stage, int slot, NVNbufferAddress addr, size_t size) {
+    static const std::vector<std::pair<uint32_t, uint32_t>> want = [] {
+        std::vector<std::pair<uint32_t, uint32_t>> w;
+        const std::string spec = nxrt::config_get_str("nvn", "ubo_backtrace", "");
+        for (size_t at = 0; at < spec.size();) {
+            size_t end = spec.find(',', at);
+            if (end == std::string::npos) end = spec.size();
+            const std::string item = spec.substr(at, end - at);
+            const size_t eq = item.find('=');
+            if (eq != std::string::npos) w.emplace_back(static_cast<uint32_t>(std::strtoul(item.c_str(), nullptr, 0)), static_cast<uint32_t>(std::strtoul(item.c_str() + eq + 1, nullptr, 16)));
+            at = end + 1;
+        }
+        return w;
+    }();
+    static std::atomic<int> logged{0};
+    if (want.empty() || logged.load() >= 3 || !addr) return;
+    uint32_t top = 0;
+    for (const auto& [k, v] : want) top = std::max(top, k + 1);
+    if (size < top * 4ull) return;
+    const PoolHit h = pool_lookup(addr);
+    if (!h.pool || h.pool->is_virtual || !h.pool->base || h.offset + top * 4ull > h.pool->size) return;
+    const uint32_t* w = reinterpret_cast<const uint32_t*>(static_cast<uintptr_t>(addr));
+    for (const auto& [k, v] : want)
+        if (w[k] != v) return;
+    if (logged.fetch_add(1) >= 3) return;
+    std::string words;
+    for (uint32_t i = 0; i < 16 && i * 4 < size; ++i) { char t[12]; std::snprintf(t, sizeof t, " %08x", w[i]); words += t; }
+    const ::Ctx* g = nxrt::kernel::current_ctx();
+    NXLOG_I("nvn", "ubo_backtrace: stage %u slot %d block 0x%llx/%zu:%s\nguest backtrace:\n%s", stage, slot, static_cast<unsigned long long>(addr), size, words.c_str(),
+            g ? nxrt::eh::guest_backtrace(g, 24).c_str() : "(no guest context)");
+}
+
 void emit_buffers(NVNcommandBuffer* c, uint32_t kind, uint32_t stage, int first, int count, const NVNbufferRange* ranges) {
     if (count <= 0 || !ranges) return;
+    if (kind == kBufUniform)
+        for (int i = 0; i < count; ++i) ubo_backtrace_check(stage, first + i, ranges[i].address, ranges[i].size);
     const P_BindBuffers p{kind, stage, static_cast<uint32_t>(first), static_cast<uint32_t>(count)};
     const uint32_t bytes = static_cast<uint32_t>(count) * static_cast<uint32_t>(sizeof(NVNbufferRange));
     with_rec(c, [&](CmdList& l) { l.emit(Op::BindBuffers, p, ranges, bytes); });

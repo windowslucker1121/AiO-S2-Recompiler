@@ -270,6 +270,9 @@ struct ShaderInfo {
 // block's results.tsv resources column, or null (storage buffer c[0] offsets then stay -1).
 // `pre_refl`: the reflection of these words with the resources record already applied (the boot preload made it); then neither
 // is done again and `resources` is not read.
+// 1 when the graphics stages' c[0] storage buffer descriptors hold the slots in pairs swapped ([nvn] graphics_ssbo_slot_xor, OoT), else 0.
+int graphics_ssbo_slot_xor();
+
 bool make_shader_info(const uint8_t* code, const uint8_t* control, std::vector<uint32_t> spirv,
                       const std::string* resources, ShaderInfo& out, std::string* error = nullptr,
                       const ShaderReflection* pre_refl = nullptr);

@@ -222,6 +222,17 @@ void support_buffer_set_viewport(SupportBuffer& sb, float width, float height, b
 
 // ---- SPIR-V reflection (from nvn_spirv_reflect.cpp) -----------------------------------------------------------------
 
+// [nvn] graphics_ssbo_slot_xor (default 0; OoT 1): the graphics stages' storage buffer descriptors in c[0] hold the bound slots in pairs swapped,
+// slot n at base + 0x10 * (n ^ 1). Measured on OoT's first scene (A12, AGENTS.md): its material shaders read 96-byte light records through
+// fragment 0x520 and a cluster index through 0x510, while the game binds the light list (records with the type at +16) at slot 0 and the
+// 9.9 MB GPU-built cluster grid at slot 1; 0x530 holds the sky lighting written by compute 16a42858 (slot 3) and 0x540 a 64-byte per-material
+// table (slot 2). Mapped straight, the scene was lit roughly 20x too brightly and washed out white; swapped (vertex and fragment: the fragment
+// stage alone left it white) it renders as expected. Pokopia's measurements (0x510 = slot 0) keep the default.
+int graphics_ssbo_slot_xor() {
+    static const int x = static_cast<int>(nxrt::config_get_int("nvn", "graphics_ssbo_slot_xor", 0)) & 1;
+    return x;
+}
+
 namespace {
 
 // The handful of SPIR-V opcodes, decorations and storage classes reflection needs (SPIR-V 1.x unified spec).
@@ -326,8 +337,9 @@ void set_c0_offset(NvnMeaning& m, ShaderStage stage, int byte_offset) {
                          : stage == ShaderStage::Geometry ? 3 : stage == ShaderStage::Fragment ? 4 : -1;
     if (graphics_index < 0) return;
     int base = 0x110 + 0x100 * graphics_index;
-    if (in(base, 16)) m.source = NvnSource::StorageBuffer, m.index = (byte_offset - base) / 0x10;
+    if (in(base, 16)) m.source = NvnSource::StorageBuffer, m.index = ((byte_offset - base) / 0x10) ^ graphics_ssbo_slot_xor();
 }
+
 
 void set_texture_handle(NvnMeaning& m, bool image, int bank, int word) {
     m.default_bank = bank < 0;
@@ -1186,6 +1198,15 @@ const ShaderInfo* ShaderCache::find(const uint8_t* code, const uint8_t* control,
         return nullptr;
     }
     std::string hash = shader_hash(code, c.code_size);  // a pass over the block: outside the lock
+    {   // [nvn] dump_shader: hash prefixes whose blocks go to [nvn] dump_missing even when translated (blocks built into main are in no corpus)
+        static const std::string list = nxrt::config_get_str("nvn", "dump_shader", "");
+        for (size_t at = 0; !list.empty() && at < list.size();) {
+            size_t end = list.find(',', at);
+            if (end == std::string::npos) end = list.size();
+            if (end > at && hash.compare(0, end - at, list, at, end - at) == 0) dump_missing_block(hash, code, control, c.code_size);
+            at = end + 1;
+        }
+    }
     std::string record;
     bool have_record = false, is_open;
     {
