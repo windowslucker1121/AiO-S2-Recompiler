@@ -2,6 +2,8 @@
 
 What a new agent needs to know before working here. Keep it current: add what you learn, remove what stops being true.
 Repository basics are in `README.md`, the recompiler in `recomp/README.md`, the game boundary in `runtime/docs/GAME_BOUNDARY.md`.
+**Start with `OOT_HANDOFF.md`** (status, the current blocker, next steps, where to pick up) and `DEVELOPMENT_SETUP.md` (everything a
+development machine needs). Keep both current together with this file.
 
 ## State (branch `oot-nup`, 2026-11-06)
 
@@ -14,8 +16,7 @@ without artifacts**; (2) **basic gamepad** (XInput / SDL gamepad drives the game
 (`[gfx] log_fps = 1`, hitch log, `[diag] soak_csv`), reach **30 fps in the main menu**, then in game **30 fps**.
 Standing instructions: keep going until blocked, then report; install tools only into git-ignored repo folders from official
 releases with checksum checks; never change system or security settings (give the user the command); when the permission check
-blocks fetching an external repository, give the user the exact PowerShell commands; one build or one `oot.exe` at a time; never
-commit without asking.
+blocks fetching an external repository, give the user the exact PowerShell commands; one build or one `oot.exe` at a time; commit at milestones.
 
 Done: NUP extraction, ZBIC -> plain NSO, manifest, lift of all four modules (0 untranslated instructions), and all four module
 libraries compile with clang-cl (`work\build\oot\oot_{main,sdk,subsdk0,rtld}.lib`, main 427 MB). First build 25 min cold on 18
