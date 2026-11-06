@@ -2944,6 +2944,7 @@ const UpscalerOverride& upscaler_override() {
     return u;
 }
 
+std::atomic<bool> g_upscaler_on{true};  // the F1 menu's live switch (nvn_backend.h set_upscaler_replace_enabled); off: the game's own passes run
 uint64_t g_upscaler_dst_handle = 0;    // upscaler_dst = fs:...: what the last such draw of the previous frame sampled
 uint64_t g_upscaler_dst_pending = 0;   // ... and of this frame so far (promoted once a present has passed, upscaler_frame_check)
 uint64_t g_upscaler_pending_present = 0;
@@ -2961,7 +2962,7 @@ void upscaler_frame_check() {
 // begin_draw: remember the scene target and the texture the upscaler's output goes to.
 void upscaler_note_draw(const ShaderInfo* fs) {
     const UpscalerOverride& u = upscaler_override();
-    if (u.replace.empty()) return;
+    if (u.replace.empty() || !g_upscaler_on.load(std::memory_order_relaxed)) return;
     upscaler_frame_check();
     if (u.src_depth_rt && S.depth_tex && S.color_tex[0] && S.color_tex[0].get() != g_last_depth_rt.get()) g_last_depth_rt = S.color_tex[0];
     if (u.dst_fs.empty() || !fs || fs->hash.compare(0, u.dst_fs.size(), u.dst_fs) != 0) return;
@@ -2972,7 +2973,7 @@ void upscaler_note_draw(const ShaderInfo* fs) {
 // True when the dispatch belongs to the replaced upscaler (and is handled: left out, or turned into the copy).
 bool upscaler_dispatch(const std::string& hash) {
     const UpscalerOverride& u = upscaler_override();
-    if (u.replace.empty() || hash.empty()) return false;
+    if (u.replace.empty() || hash.empty() || !g_upscaler_on.load(std::memory_order_relaxed)) return false;
     auto matches = [&](const std::string& prefix) { return !prefix.empty() && hash.compare(0, prefix.size(), prefix) == 0; };
     if (matches(u.replace)) {
         upscaler_frame_check();
@@ -4319,3 +4320,12 @@ ReplayGauges g_replay_gauges;
 }  // namespace
 
 }  // namespace nxrt::nvn::be::gpu
+
+namespace nxrt::nvn {
+bool upscaler_replace_configured() { return !be::gpu::upscaler_override().replace.empty(); }
+void set_upscaler_replace_enabled(bool on) {
+    if (be::gpu::g_upscaler_on.exchange(on) != on && upscaler_replace_configured())
+        NXLOG_I("nvn", "upscaler override %s (the game's own upscaler passes %s)", on ? "on" : "off", on ? "are replaced" : "run again");
+}
+bool upscaler_replace_enabled() { return be::gpu::g_upscaler_on.load(std::memory_order_relaxed); }
+}  // namespace nxrt::nvn

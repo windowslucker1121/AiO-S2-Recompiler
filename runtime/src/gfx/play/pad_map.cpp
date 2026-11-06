@@ -125,6 +125,59 @@ uint64_t pad_default_buttons(PadSrc src, bool label_abxy) {
     return 0;
 }
 
+uint64_t pad_effective_buttons(PadSrc src, const PadSettings& cfg) {
+    const int i = static_cast<int>(src);
+    if (i < 0 || i >= kPadSrcCount) return 0;
+    const uint64_t r = cfg.remap[i];
+    return r == kPadDefault ? pad_default_buttons(src, cfg.label_abxy) : r;
+}
+
+bool pad_src_of_sdl_button(int sdl_button, PadSrc* out) {
+    if (sdl_button >= kSdlSouth && sdl_button <= kSdlNorth) {
+        *out = static_cast<PadSrc>(sdl_button);   // SOUTH EAST WEST NORTH are 0..3 in both
+        return true;
+    }
+    for (const ButtonMap& m : kOtherButtons) {
+        if (m.sdl == sdl_button) {
+            *out = m.src;
+            return true;
+        }
+    }
+    return false;
+}
+
+uint32_t pad_sources_pressed(const platform::GamepadRaw& raw, double trigger_threshold) {
+    uint32_t bits = 0;
+    for (int b = 0; b < 16; ++b) {
+        PadSrc s;
+        if ((raw.buttons & (1u << b)) && pad_src_of_sdl_button(b, &s)) bits |= 1u << static_cast<int>(s);
+    }
+    if (raw.axes[kAxisLeftTrigger] / 32767.0 >= trigger_threshold) bits |= 1u << static_cast<int>(PadSrc::LeftTrigger);
+    if (raw.axes[kAxisRightTrigger] / 32767.0 >= trigger_threshold) bits |= 1u << static_cast<int>(PadSrc::RightTrigger);
+    return bits;
+}
+
+bool pad_assign(PadSettings* cfg, PadSrc src, uint64_t target) {
+    const int si = static_cast<int>(src);
+    if (si < 0 || si >= kPadSrcCount) return false;
+    uint64_t now[kPadSrcCount];
+    for (int i = 0; i < kPadSrcCount; ++i) now[i] = pad_effective_buttons(static_cast<PadSrc>(i), *cfg);
+    if (now[si] == target) return false;
+    const uint64_t old = now[si];
+    now[si] = target;
+    for (int i = 0; i < kPadSrcCount; ++i)
+        if (i != si && now[i] == target && target != 0) now[i] = old;
+    bool changed = false;
+    for (int i = 0; i < kPadSrcCount; ++i) {
+        const uint64_t v = now[i] == pad_default_buttons(static_cast<PadSrc>(i), cfg->label_abxy) ? kPadDefault : now[i];
+        if (cfg->remap[i] != v) {
+            cfg->remap[i] = v;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 void map_sensors(const float accel_sdl[3], const float gyro_sdl[3], const PadSettings& cfg, hid::SixAxisSample* out) {
     constexpr double kGravity = 9.80665;
     constexpr double kTwoPi = 6.283185307179586;

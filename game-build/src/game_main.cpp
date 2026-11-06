@@ -302,7 +302,8 @@ void apply_game_config_defaults(const char* text) {
         const size_t eq = line.find('=');
         if (eq == std::string::npos || section.empty()) continue;
         const std::string key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
-        if (!key.empty() && !nxrt::config_has(section.c_str(), key.c_str())) nxrt::config_set(section.c_str(), key.c_str(), value.c_str());
+        // a default, not a user setting: the player's controls.ini [config] may still replace it (play::load, config_user_set)
+        if (!key.empty() && !nxrt::config_has(section.c_str(), key.c_str())) nxrt::config_set_default(section.c_str(), key.c_str(), value.c_str());
     }
 }
 
@@ -353,14 +354,17 @@ void parse_presses(const std::string& spec) {
 // [boot] screenshot_at = N (seconds after start, repeatable through screenshot_every): the renderer writes work/run/shot_<n>.png of the presented frame.
 DWORD WINAPI shot_thread(LPVOID) {
     const int64_t first = nxrt::config_get_int("boot", "screenshot_at", 0), every = nxrt::config_get_int("boot", "screenshot_every", 0);
+    std::string dir = nxrt::config_get_str("boot", "screenshot_dir", "");   // empty: the working directory
+    if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') dir += '/';
     int n = 0;
     Sleep(static_cast<DWORD>(first * 1000));
     for (;;) {
         if (g_gfx_renderer) {
-            char path[64];
-            std::snprintf(path, sizeof path, "shot_%d.png", n++);
+            char name[64];
+            std::snprintf(name, sizeof name, "shot_%d.png", n++);
+            const std::string path = dir + name;
             g_gfx_renderer->request_screenshot(path);
-            NXLOG_I("boot", "screenshot requested: %s", path);
+            NXLOG_I("boot", "screenshot requested: %s", path.c_str());
         }
         if (every <= 0) break;
         Sleep(static_cast<DWORD>(every * 1000));

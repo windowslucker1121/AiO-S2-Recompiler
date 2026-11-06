@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
@@ -228,4 +229,25 @@ NXTEST(diag_threads_dup_handles_survive_unregister) {
     nxrt::diag_threads_release(recs);
     CHECK(recs.empty());
     t.join();
+}
+
+// The Debug page's numbers: frame_time_stats over the frame ring and the hitch lines (none in a test run without slow frames logged).
+NXTEST(frame_time_stats_from_the_frame_ring) {
+    for (int i = 0; i < 40; ++i) {
+        nxrt::diag_frame_tick();
+        Sleep(2);
+    }
+    std::vector<float> graph;
+    const nxrt::FrameTimeStats s = nxrt::frame_time_stats(60.0, &graph, 16);
+    CHECK(s.total_frames >= 40);
+    CHECK(s.frames >= 30);
+    CHECK(s.mean_fps > 0 && s.worst_ms >= s.median_ms && s.median_ms > 0);
+    CHECK(s.last_age_s >= 0 && s.last_age_s < 30);
+    CHECK(graph.size() == 16);
+    for (float v : graph) CHECK(v >= 0 && v < 5000);
+    uint64_t total = 1;
+    double thr = -1;
+    const std::vector<std::string> lines = nxrt::hitch_recent(5, &total, &thr);
+    CHECK(lines.size() <= 5);
+    CHECK(thr >= 0);
 }

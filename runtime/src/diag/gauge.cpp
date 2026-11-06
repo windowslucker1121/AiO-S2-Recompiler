@@ -78,6 +78,10 @@ struct HitchEvent {
 };
 std::mutex g_ev_mu;                               // taken by the presenting thread only for a frame over the limit
 std::vector<HitchEvent> g_pending;
+std::atomic<uint64_t> g_hitch_total{0};           // frames over the limit since start
+std::mutex g_recent_mu;                           // the logged hitch lines, for hitch_recent (the monitor thread writes, the menu reads)
+std::vector<std::string> g_recent;
+constexpr size_t kRecentMax = 64;
 
 // Called for every presented frame at tick t (previous frame's tick prev_t, 0 for the first), frame number n.
 void hitch_on_frame(uint64_t t, uint64_t prev_t, uint64_t n) {
@@ -97,6 +101,7 @@ void hitch_on_frame(uint64_t t, uint64_t prev_t, uint64_t n) {
         for (size_t i = 0; i < ns; i++) ev.val[i] = g_src[i].counter ? (int64_t)(cur[i] - g_prev_val[i]) : (int64_t)cur[i];
         for (int i = 0; i < kHpCount; i++) ev.phase[i] = curp[i] - g_prev_phase[i];
         ev.game_gap = gap;
+        g_hitch_total.fetch_add(1, std::memory_order_relaxed);
         std::lock_guard<std::mutex> lk(g_ev_mu);
         if (g_pending.size() < 256) g_pending.push_back(ev);
     }
@@ -228,8 +233,12 @@ void monitor_run(double summary_s) {
                 g_pending.clear();
             }
             if (cnt) {
-                NXLOG_W("hitch", "%s", format_event(worst, cnt - 1).c_str());
+                std::string text = format_event(worst, cnt - 1);
+                NXLOG_W("hitch", "%s", text.c_str());
                 last_line = now;
+                std::lock_guard<std::mutex> lk(g_recent_mu);
+                if (g_recent.size() >= kRecentMax) g_recent.erase(g_recent.begin());
+                g_recent.push_back(std::move(text));
             }
         }
         if (summary_s > 0 && now >= next_summary) {
@@ -495,6 +504,47 @@ std::string frame_times_summary(double window_s) {
     for (size_t i = 0; i < frames.size() && i < 6; i++) { snprintf(b, sizeof b, " %.1f@-%.1f", frames[i].ms, frames[i].ago); out += b; }
     out += "\n";
     return out;
+}
+
+FrameTimeStats frame_time_stats(double window_s, std::vector<float>* recent_ms, size_t max_points) {
+    FrameTimeStats r;
+    if (recent_ms) recent_ms->clear();
+    if (!(window_s > 0)) window_s = 10.0;
+    const uint64_t now = qpc();
+    const uint64_t n = g_ring_n.load(std::memory_order_acquire);
+    r.total_frames = n;
+    if (n == 0) return r;
+    r.last_age_s = (double)(now - g_ring[(n - 1) % kRing].load(std::memory_order_relaxed)) / qpc_freq();
+    const uint64_t win_ticks = (uint64_t)(window_s * qpc_freq());
+    std::vector<double> dt;
+    uint64_t newer = 0;
+    for (uint64_t k = 0; k < n && k < kRing - 1; k++) {
+        const uint64_t t = g_ring[(n - 1 - k) % kRing].load(std::memory_order_relaxed);
+        if (t > now || now - t > win_ticks) break;
+        if (newer && newer > t) dt.push_back((double)(newer - t) * 1000.0 / qpc_freq());
+        newer = t;
+    }
+    std::reverse(dt.begin(), dt.end());     // oldest first
+    if (recent_ms) {
+        const size_t from = dt.size() > max_points ? dt.size() - max_points : 0;
+        for (size_t i = from; i < dt.size(); i++) recent_ms->push_back((float)dt[i]);
+    }
+    const FrameStats st = stats_of(dt);
+    r.frames = st.frames;
+    r.mean_fps = st.mean_fps;
+    r.low1_fps = st.low1_fps;
+    r.worst_ms = st.worst_ms;
+    r.median_ms = st.median_ms;
+    r.over2x = st.over2x;
+    return r;
+}
+
+std::vector<std::string> hitch_recent(size_t max, uint64_t* total, double* threshold_ms) {
+    if (total) *total = g_hitch_total.load(std::memory_order_relaxed);
+    if (threshold_ms) *threshold_ms = g_hitch_on.load(std::memory_order_relaxed) ? (double)g_hitch_ticks.load(std::memory_order_relaxed) * 1000.0 / qpc_freq() : 0.0;
+    std::lock_guard<std::mutex> lk(g_recent_mu);
+    const size_t from = g_recent.size() > max ? g_recent.size() - max : 0;
+    return std::vector<std::string>(g_recent.begin() + (std::ptrdiff_t)from, g_recent.end());
 }
 
 void soak_start() {

@@ -82,4 +82,23 @@ BackendStats backend_stats();
 // Operations that were skipped because they are not implemented, with how often (for the log and docs/S4d.md).
 std::string backend_unsupported_report();
 
+// Shader and pipeline work for the F1 menu's Debug page: what the shader preparation left (prepare.state) and what the game has built since start.
+struct ShaderStats {
+    bool pipelines_ahead = false;       // the background pipeline-part builder is on ([nvn] gpl and the device supports it)
+    std::string prepare_status;         // what the start found of the shader preparation ("found: 39327 programs ..." or why it is not used)
+    uint64_t prepared_programs = 0;     // programs a finished preparation covers
+    uint64_t parts_prepared = 0, parts_new = 0;      // shader parts built in the background: ones the preparation had made, new ones
+    double prepared_ms = 0, new_ms = 0;               // their build times in all
+    uint64_t linked = 0, link_failed = 0, parts_at_draw = 0, parts_waited = 0, draws_deferred = 0, jobs_pending = 0;
+    double link_ms = 0, draw_part_ms = 0, wait_ms = 0;
+    int backlog = 0;                    // what the overlay's "Preparing shaders" note shows
+};
+ShaderStats shader_stats();
+
+// The game's own upscaler replaced on the PC ([nvn] upscaler_replace, a game module's default; OoT). configured: the configuration names a
+// program to replace. The switch is live (any thread): off lets the game's own passes run again, for comparison.
+bool upscaler_replace_configured();
+void set_upscaler_replace_enabled(bool on);
+bool upscaler_replace_enabled();
+
 }  // namespace nxrt::nvn

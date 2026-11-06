@@ -107,4 +107,19 @@ bool hitch_on_game_present_thread();
 // frames and the age of the last one). Allocates; never takes a lock another thread could hold: for the crash, freeze and memory reports.
 std::string frame_times_summary(double window_s = 30.0);
 
+// The same numbers as data, for the F1 menu's Debug page: the presented frames of the last `window_s` seconds. When `recent_ms` is given it
+// receives the newest frame intervals (ms), oldest first, at most `max_points`. Lock-free (reads the ring); allocates only for the sort.
+struct FrameTimeStats {
+    uint64_t total_frames = 0;       // presented since start
+    size_t frames = 0;               // intervals inside the window
+    double mean_fps = 0, low1_fps = 0, worst_ms = 0, median_ms = 0;
+    size_t over2x = 0;               // intervals over twice the median
+    double last_age_s = -1;          // seconds since the last presented frame (-1: none yet)
+};
+FrameTimeStats frame_time_stats(double window_s, std::vector<float>* recent_ms = nullptr, size_t max_points = 240);
+
+// The hitch lines the monitor logged (the worst slow frame of each second, as in the log), newest last, at most `max`. *total = slow frames
+// over [diag] hitch_ms since start (counted, not only the logged ones), *threshold_ms = that limit (0: off).
+std::vector<std::string> hitch_recent(size_t max, uint64_t* total = nullptr, double* threshold_ms = nullptr);
+
 }  // namespace nxrt

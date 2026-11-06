@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace nxrt {
@@ -29,6 +30,8 @@ struct Seen {
 std::mutex g_mu;
 // canonical id ("section" 0x1F "key", lower-case) -> value. config_set values live here too (source "ini").
 std::unordered_map<std::string, std::string> g_ini;
+// ids whose g_ini value came from config_set_default (a game module's default), not from the ini or config_set.
+std::unordered_set<std::string> g_soft;
 // every key read so far, keyed by canonical id, ordered for a stable dump.
 std::map<std::string, Seen> g_seen;
 // the file the last config_load_file read ("" when none was read)
@@ -199,6 +202,7 @@ void replace_ini(const std::string& text) {
     auto parsed = parse_ini(text);  // parse outside the lock
     std::lock_guard<std::mutex> g(g_mu);
     g_ini = std::move(parsed);
+    g_soft.clear();
 }
 
 std::string fmt_double(double v) {
@@ -238,11 +242,28 @@ void config_load_string(const char* text) { replace_ini(S(text)); }
 void config_clear() {
     std::lock_guard<std::mutex> g(g_mu);
     g_ini.clear();
+    g_soft.clear();
 }
 
 void config_set(const char* section, const char* key, const char* value) {
     std::lock_guard<std::mutex> g(g_mu);
-    g_ini[canon_id(S(section), S(key))] = S(value);
+    const std::string id = canon_id(S(section), S(key));
+    g_ini[id] = S(value);
+    g_soft.erase(id);
+}
+
+void config_set_default(const char* section, const char* key, const char* value) {
+    std::lock_guard<std::mutex> g(g_mu);
+    const std::string id = canon_id(S(section), S(key));
+    g_ini[id] = S(value);
+    g_soft.insert(id);
+}
+
+bool config_user_set(const char* section, const char* key) {
+    if (std::getenv(config_env_name(section, key).c_str())) return true;
+    std::lock_guard<std::mutex> g(g_mu);
+    const std::string id = canon_id(S(section), S(key));
+    return g_ini.count(id) != 0 && g_soft.count(id) == 0;
 }
 
 std::string config_get_str(const char* section, const char* key, const char* def) {

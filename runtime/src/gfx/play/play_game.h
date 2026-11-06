@@ -55,8 +55,8 @@ struct GameStatus {
     double pitch_rad = 0;            // the view pitch the aim holds
 };
 
-// The display options only a game's own hooks can honour (the F1 settings page lists them only when the game says it has them). Dynamic
-// resolution, the render size, anisotropy and LOD bias work for every game and are always listed.
+// The display options only a game's own hooks (or a feature verified for that game) can honour: the F1 menu lists them only when the game says it
+// has them. Anisotropy, LOD bias, the colour controls and the output pass's spatial upscalers work for every game and are always listed.
 enum : unsigned {
     kDisplayOptFov = 1u << 0,        // [display] fov_offset
     kDisplayOptAspect = 1u << 1,     // [display] aspect
@@ -64,6 +64,9 @@ enum : unsigned {
     kDisplayOptChromatic = 1u << 3,  // [display] chromatic_aberration
     kDisplayOptAll = kDisplayOptFov | kDisplayOptAspect | kDisplayOptBloom | kDisplayOptChromatic,
     kDisplayOptQuality = 1u << 4,    // [display] quality_preset, view_distance (the game's quality hooks; GamePlay::quality_preset)
+    kDisplayOptRenderSize = 1u << 5, // [display] render_scale, render_width, render_height (the game resizes its targets, or the NVN back end does for it)
+    kDisplayOptDynRes = 1u << 6,     // [display] dynamic_resolution (the game's own dynamic resolution, through its hooks)
+    kDisplayOptHdr = 1u << 7,        // [hdr], [upscale] scene_scale and the temporal upscalers: the HDR scene pipeline matched the game's tone-map shader
 };
 
 struct GamePlay {

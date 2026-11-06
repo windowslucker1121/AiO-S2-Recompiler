@@ -5,6 +5,8 @@
 #pragma once
 #include <cstdarg>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace nxrt {
 
@@ -35,6 +37,16 @@ const char* log_level_name(LogLevel l);
 
 // Counters since log_init, for tests and the end-of-run summary.
 uint64_t log_count(LogLevel l);        // lines written at exactly this level
+// The last lines written (every level that passed the filter), kept in memory for the F1 menu's log view: at most kLogTailLines lines of at most
+// 2000 bytes each. log_tail copies up to `max` of the newest, oldest first, and returns the number of lines written since log_init (a line's
+// sequence number is that count minus its distance from the end), so a caller can tell whether anything new arrived.
+constexpr unsigned kLogTailLines = 512;
+struct LogTailLine {
+    LogLevel level = LogLevel::Info;
+    std::string text;
+};
+uint64_t log_tail(std::vector<LogTailLine>* out, size_t max);
+
 // Test hook: every formatted line (without the trailing newline) is also passed to the sink. Null removes it.
 using LogSink = void (*)(LogLevel level, const char* line, void* user);
 void log_set_sink(LogSink sink, void* user);

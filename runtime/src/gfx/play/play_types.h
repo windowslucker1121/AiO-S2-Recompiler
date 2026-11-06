@@ -14,6 +14,7 @@
 // A binding says "in this context, this input drives this action with this trigger".
 #pragma once
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -189,7 +190,21 @@ struct DisplaySettings {
     std::string astc_quality = "high";   // ASTC texture quality on this GPU: fast, high or uncompressed (RGBA8, lots of video memory); becomes [gfx] astc_quality at the next start unless the ini or the environment set it
     // The display the window lives on, 1-based in the system's order; 0 = automatic (wherever the window opens). Applied live (the window moves).
     int monitor = 0;
+    // The game's own upscaler replaced by a scaled copy ([nvn] upscaler_replace, set by game modules whose upscaler the runtime cannot run: OoT).
+    // Live: off lets the game's own passes run again (for comparison). Nothing happens for a game that names no replacement.
+    bool upscaler_replace = true;
 };
+
+// ---- the F1 menu itself ------------------------------------------------------------------------------------------------------------
+struct MenuSettings {
+    bool auto_apply = true;        // [menu] auto_apply: a change takes effect (and is saved) as soon as the control is let go; off: the Apply button
+};
+
+// ---- restart-only runtime options ([config]) -------------------------------------------------------------------------------------
+// "section.key" = value lines: at the next start each becomes the runtime configuration key [section] key (docs/CONFIG.md), unless the game ini or
+// an NXRT_* environment variable sets that key. The F1 menu writes the ones it offers (docked or handheld, the device-loss diagnostics ...).
+// Names are lower case, section and key of [a-z0-9_]; an empty value is kept (it sets the key to the empty string).
+bool config_entry_name_ok(const std::string& name);    // "gfx.device_diagnostics": a section, a dot, a key
 
 // ---- audio -------------------------------------------------------------------------------------------------------------------------
 struct AudioSettings {
@@ -252,6 +267,8 @@ struct Settings {
     PromptSettings prompts;
     FpsSettings fps;
     FastbootSettings fastboot;     // [tweaks] skip_intro skip_boot_logos fast_menus menu_speed (play_fastboot.h, S46)
+    MenuSettings menu;             // [menu]
+    std::map<std::string, std::string> config;   // [config] "section.key" -> value (restart-only runtime keys, see above)
     Output out[kActCount];         // the [switch] table; defaulted from ActInfo::default_out
     std::vector<Binding> bindings;
     // [meta] defaults_rev: the factory-defaults revision the file was written with (0 when the file has no [meta]). When a file with
@@ -339,8 +356,10 @@ const char* key_alt_sens();
 //   [timing]   tap_ms hold_ms double_ms pulse_ms
 //   [display]  window_mode vsync fps_limit (number, 0 = unlimited, auto = refresh rate; fps_cap is read too) width height keep_aspect render_scale render_width render_height aspect fov_offset
 //              dynamic_resolution anisotropy lod_bias bloom chromatic_aberration fast_gpu_memory fewer_gpu_waits shader_prewarm astc_quality (fast high uncompressed)
-//              monitor (auto or the display's number, 1 = the first)
-//   [hdr]      mode (off auto on) format (auto hdr10 scrgb) peak_nits (0 = auto, else 200..10000) paper_white_nits (0 = auto, else
+//              monitor (auto or the display's number, 1 = the first) upscaler_replace (1/0)
+//   [menu]     auto_apply (1/0)
+//   [config]   <section>.<key> = <value>   (restart-only runtime keys: at the start they become [section] key unless the ini or the environment set it)
+//   [hdr]     mode (off auto on) format (auto hdr10 scrgb) peak_nits (0 = auto, else 200..10000) paper_white_nits (0 = auto, else
 //              80..500) highlight_boost (0..2)
 //   [upscale]  mode (off fsr1 nis, and fsr3 dlss xess kept but not used; spatial = fsr1) sharpness (0..1) fsr_dll dlss_dll xess_dll (paths, kept verbatim)
 //              frame_generation (1/0)

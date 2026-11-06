@@ -150,7 +150,7 @@ Settings builtin_settings() {
     return s;
 }
 
-enum class Sec { None, Unknown, Meta, Mouse, Pad, PadMap, Timing, Display, Audio, Hdr, Upscale, Latency, Picture, Prompts, Fps, Switch, Aim, Camera, Tweaks, Bindings };
+enum class Sec { None, Unknown, Meta, Mouse, Pad, PadMap, Timing, Display, Audio, Hdr, Upscale, Latency, Picture, Prompts, Fps, Switch, Aim, Camera, Tweaks, Menu, Config, Bindings };
 
 // The factory-defaults revision this build writes ([meta] defaults_rev) and the factory bindings an older controls.ini does not have: the
 // game's (play_types.h GameDefaults).
@@ -178,6 +178,8 @@ const char* sec_label(Sec s) {
         case Sec::Aim: return "[aim]";
         case Sec::Camera: return "[camera]";
         case Sec::Tweaks: return "[tweaks]";
+        case Sec::Menu: return "[menu]";
+        case Sec::Config: return "[config]";
         default: return "";
     }
 }
@@ -466,7 +468,18 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
                 if (lower(v) == "auto") { s->display.monitor = 0; return true; }
                 return set_int(0, 32, &s->display.monitor);
             }
+            if (k == "upscaler_replace") return set_bool(&s->display.upscaler_replace);
             break;
+        case Sec::Menu:
+            if (k == "auto_apply") return set_bool(&s->menu.auto_apply);
+            break;
+        case Sec::Config:
+            if (!config_entry_name_ok(k)) {
+                *msg = "'" + k + "' is not a runtime key: write section.key (for example gfx.device_diagnostics)";
+                return false;
+            }
+            s->config[k] = v;
+            return true;
         case Sec::Audio:
             if (k == "volume") return set_real(0.0, 1.0, &s->audio.volume);
             if (k == "mute_unfocused") return set_bool(&s->audio.mute_unfocused);
@@ -591,6 +604,8 @@ Sec fixed_sec(const std::string& key) {
     if (key == "aim") return Sec::Aim;
     if (key == "camera") return Sec::Camera;
     if (key == "tweaks") return Sec::Tweaks;
+    if (key == "menu") return Sec::Menu;
+    if (key == "config") return Sec::Config;
     if (key == "switch") return Sec::Switch;
     return Sec::Unknown;
 }
@@ -794,6 +809,14 @@ bool parse_onto(const std::string& text, Settings* s, std::string* err, std::vec
 
 }  // namespace
 
+bool config_entry_name_ok(const std::string& name) {
+    const size_t dot = name.find('.');
+    if (dot == std::string::npos || dot == 0 || dot + 1 >= name.size() || name.find('.', dot + 1) != std::string::npos) return false;
+    for (char c : name)
+        if (c != '.' && c != '_' && !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9')) return false;
+    return true;
+}
+
 // [aim] lock_mode names. Case-insensitive, no trimming (the file parser has already trimmed the value).
 const char* lock_mode_name(LockMode m) { return m == LockMode::Free ? "free" : "classic"; }
 
@@ -918,6 +941,14 @@ std::string format_settings(const Settings& s) {
     kv("shader_prewarm", flag(s.display.shader_prewarm));
     kv("astc_quality", s.display.astc_quality);
     kv("monitor", s.display.monitor <= 0 ? std::string("auto") : std::to_string(s.display.monitor));
+    kv("upscaler_replace", flag(s.display.upscaler_replace));
+
+    o += "\n[menu]\n";
+    kv("auto_apply", flag(s.menu.auto_apply));
+
+    // Restart-only runtime keys ([section] key of docs/CONFIG.md) the menu sets; the game ini and NXRT_* variables win over them.
+    o += "\n[config]\n";
+    for (const auto& e : s.config) kv(e.first.c_str(), e.second);
 
     o += "\n[audio]\n";
     kv("volume", num_exact(s.audio.volume));

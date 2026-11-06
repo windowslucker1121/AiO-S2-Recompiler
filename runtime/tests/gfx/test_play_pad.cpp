@@ -476,3 +476,58 @@ NXTEST(look_stick_sens_clamped_to_range) {
     CHECK_EQ(d.x, 3000);
     CHECK_EQ(d.y, -3000);
 }
+
+// ---- press-to-rebind (the F1 menu's Gamepad tab) ----------------------------------------------------------------------------------------------
+
+NXTEST(sdl_buttons_name_their_sources) {
+    play::PadSrc s;
+    CHECK(play::pad_src_of_sdl_button(kSouth, &s) && s == play::PadSrc::South);
+    CHECK(play::pad_src_of_sdl_button(kNorth, &s) && s == play::PadSrc::North);
+    CHECK(play::pad_src_of_sdl_button(kBack, &s) && s == play::PadSrc::Back);
+    CHECK(play::pad_src_of_sdl_button(kStart, &s) && s == play::PadSrc::Start);
+    CHECK(play::pad_src_of_sdl_button(kLeftShoulder, &s) && s == play::PadSrc::LeftShoulder);
+    CHECK(play::pad_src_of_sdl_button(kDpadRight, &s) && s == play::PadSrc::DpadRight);
+    CHECK(!play::pad_src_of_sdl_button(kGuide, &s));
+    CHECK(!play::pad_src_of_sdl_button(kMisc1, &s));
+    CHECK(!play::pad_src_of_sdl_button(40, &s));
+}
+
+NXTEST(pressed_sources_include_the_triggers_at_the_threshold) {
+    platform::GamepadRaw raw = pad_buttons((1u << kSouth) | (1u << kDpadUp));
+    raw.axes[4] = 32767 / 2;   // left trigger half way
+    raw.axes[5] = 32767;       // right trigger full
+    const uint32_t b = play::pad_sources_pressed(raw, 0.6);
+    CHECK(b & (1u << static_cast<int>(play::PadSrc::South)));
+    CHECK(b & (1u << static_cast<int>(play::PadSrc::DpadUp)));
+    CHECK(!(b & (1u << static_cast<int>(play::PadSrc::LeftTrigger))));
+    CHECK(b & (1u << static_cast<int>(play::PadSrc::RightTrigger)));
+    CHECK(play::pad_sources_pressed(raw, 0.4) & (1u << static_cast<int>(play::PadSrc::LeftTrigger)));
+}
+
+NXTEST(assign_swaps_with_the_button_that_had_the_job) {
+    play::PadSettings cfg;   // by label: South A, East B
+    const uint64_t a = hid::btn(hid::kBtnA), b = hid::btn(hid::kBtnB);
+    CHECK(play::pad_effective_buttons(play::PadSrc::South, cfg) == a);
+    CHECK(play::pad_assign(&cfg, play::PadSrc::South, b));    // South now presses B ...
+    CHECK(play::pad_effective_buttons(play::PadSrc::South, cfg) == b);
+    CHECK(play::pad_effective_buttons(play::PadSrc::East, cfg) == a);   // ... and East takes over South's old job
+    CHECK(run(pad_buttons(1u << kSouth), cfg).buttons == b);
+    CHECK(run(pad_buttons(1u << kEast), cfg).buttons == a);
+    CHECK(!play::pad_assign(&cfg, play::PadSrc::South, b));   // nothing to change
+    CHECK(play::pad_assign(&cfg, play::PadSrc::South, a));    // back: both are the built-in mapping again, stored as default
+    CHECK(cfg.remap[static_cast<int>(play::PadSrc::South)] == play::kPadDefault);
+    CHECK(cfg.remap[static_cast<int>(play::PadSrc::East)] == play::kPadDefault);
+}
+
+NXTEST(assign_to_a_trigger_and_a_combination) {
+    play::PadSettings cfg;
+    const uint64_t zr = hid::btn(hid::kBtnZR), x = hid::btn(hid::kBtnX);
+    CHECK(play::pad_assign(&cfg, play::PadSrc::LeftShoulder, zr));   // LB presses ZR; RT takes over the L of LB
+    CHECK(play::pad_effective_buttons(play::PadSrc::LeftShoulder, cfg) == zr);
+    CHECK(play::pad_effective_buttons(play::PadSrc::RightTrigger, cfg) == hid::btn(hid::kBtnL));
+    // a source that pressed a combination is not the one that had the job of a single button: it keeps its combination
+    cfg.remap[static_cast<int>(play::PadSrc::Back)] = x | zr;
+    CHECK(play::pad_assign(&cfg, play::PadSrc::North, x));
+    CHECK(cfg.remap[static_cast<int>(play::PadSrc::Back)] == (x | zr));
+    CHECK(play::pad_effective_buttons(play::PadSrc::West, cfg) == hid::btn(hid::kBtnY));   // West (X) got the Y of North
+}

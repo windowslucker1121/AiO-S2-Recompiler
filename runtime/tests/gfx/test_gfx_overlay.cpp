@@ -89,6 +89,15 @@ input::Event key(int scancode, bool down, bool repeat = false) {
     return e;
 }
 
+input::Event padbtn(uint32_t id, uint8_t button, bool down) {
+    input::Event e;
+    e.type = down ? input::EventType::GamepadButtonDown : input::EventType::GamepadButtonUp;
+    e.u.gpbutton.id = id;
+    e.u.gpbutton.button = button;
+    return e;
+}
+constexpr uint8_t kPadSouth = 0, kPadBack = 4, kPadStart = 6, kPadDown = 12;
+
 input::Event motion(float x, float y) {
     input::Event e;
     e.type = input::EventType::MouseMotion;
@@ -229,5 +238,71 @@ NXTEST(menu_changes_are_applied_between_frames) {
     const uint64_t creates = rig.rend->stats().swapchain_creates;
     o.apply_pending();   // nothing pending: nothing happens
     CHECK_EQ(rig.rend->stats().swapchain_creates, creates);
+    CHECK_EQ(rig.dev->validation_stats().errors, 0ull);
+}
+
+// The gamepad opens and closes the menu (View + Menu) and drives it while it is up; its events reach nothing else then.
+NXTEST(pad_chord_toggles_and_the_pads_navigate_the_menu) {
+    _putenv_s("NXRT_GFX_OVERLAY_PAD_CHORD", "");
+    Rig rig;
+    REQUIRE(rig.make(false));
+    Overlay& o = *rig.overlay;
+    CHECK_EQ(o.pad_chord(), (1u << kPadBack) | (1u << kPadStart));
+    CHECK(!o.handle_event(padbtn(7, kPadSouth, true)));   // hidden: a pad press is the game's
+    CHECK(!o.handle_event(padbtn(7, kPadSouth, false)));
+    CHECK(!o.handle_event(padbtn(7, kPadBack, true)));    // half the chord: still the game's
+    CHECK(!o.visible());
+    CHECK(o.handle_event(padbtn(7, kPadStart, true)));    // the chord
+    CHECK(o.visible());
+    CHECK(o.handle_event(padbtn(7, kPadStart, false)));   // while visible every pad event is the menu's
+    CHECK(o.handle_event(padbtn(7, kPadBack, false)));
+    CHECK(o.handle_event(padbtn(7, kPadDown, true)));
+    CHECK(o.handle_event(padbtn(7, kPadDown, false)));
+    rig.frame();
+    const uint64_t hides = o.hide_count();
+    CHECK(o.handle_event(padbtn(7, kPadStart, true)));    // Start alone closes it
+    CHECK(!o.visible());
+    CHECK_EQ(o.hide_count(), hides + 1);
+    CHECK(!o.handle_event(padbtn(7, kPadStart, false)));
+    // another pad holds its own buttons: half a chord on each of two pads is no chord
+    CHECK(!o.handle_event(padbtn(8, kPadBack, true)));
+    CHECK(!o.handle_event(padbtn(9, kPadStart, true)));
+    CHECK(!o.visible());
+    CHECK_EQ(rig.dev->validation_stats().errors, 0ull);
+}
+
+NXTEST(pad_chord_names) {
+    uint32_t b = 0;
+    CHECK(parse_pad_chord("back+start", &b) && b == ((1u << 4) | (1u << 6)));
+    CHECK(parse_pad_chord("View + Menu", &b) && b == ((1u << 4) | (1u << 6)));
+    CHECK(parse_pad_chord("l3+r3", &b) && b == ((1u << 7) | (1u << 8)));
+    CHECK(parse_pad_chord("guide", &b) && b == (1u << 5));
+    CHECK(parse_pad_chord("none", &b) && b == 0);
+    CHECK(parse_pad_chord("", &b) && b == 0);
+    CHECK(!parse_pad_chord("back+jump", &b));
+}
+
+NXTEST(menu_without_the_diagnostics_window_draws_its_panel) {
+    Rig rig;
+    REQUIRE(rig.make(false));
+    // a second overlay context as play mode makes it: no stand-alone Diagnostics window, the panel shows the debug page itself
+    rig.overlay.reset();
+    Overlay::Context oc;
+    oc.device = rig.dev.get();
+    oc.renderer = rig.rend.get();
+    oc.limiter = &rig.limiter;
+    oc.has_window = false;
+    oc.diagnostics_window = false;
+    rig.overlay = Overlay::create(oc);
+    REQUIRE(rig.overlay != nullptr);
+    rig.overlay->install_on_renderer();
+    int runs = 0;
+    rig.overlay->add_panel("menu", [&] {
+        ++runs;
+        draw_debug_page(oc);
+    });
+    rig.overlay->set_visible(true);
+    for (int i = 0; i < 4; ++i) rig.frame();
+    CHECK_EQ(runs, 4);
     CHECK_EQ(rig.dev->validation_stats().errors, 0ull);
 }

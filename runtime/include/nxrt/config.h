@@ -20,6 +20,11 @@ void config_load_string(const char* text);
 void config_clear();
 // Programmatic override, as if it were in the ini (tests, command-line options). Env still wins over it.
 void config_set(const char* section, const char* key, const char* value);
+// A default set in code (a game module's own defaults, game::Info::config_defaults): read like an ini value, but config_user_set() says false
+// for it, so a later choice of the player (controls.ini [config]) may replace it with config_set. Env wins over it.
+void config_set_default(const char* section, const char* key, const char* value);
+// The environment, the ini file or config_set gives the key (a config_set_default value or no value: false).
+bool config_user_set(const char* section, const char* key);
 
 std::string config_get_str(const char* section, const char* key, const char* def = "");
 int64_t config_get_int(const char* section, const char* key, int64_t def = 0);      // decimal, 0x hex, optional k/m/g suffix not supported

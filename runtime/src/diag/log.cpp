@@ -39,6 +39,14 @@ long long g_t0 = 0;         // QueryPerformanceCounter at log_init
 
 thread_local char t_name[64] = {};
 
+// The tail kept in memory (log_tail): a ring of the last kLogTailLines lines; the strings keep their capacity, so a full ring stops allocating.
+struct TailSlot {
+    LogLevel level = LogLevel::Info;
+    std::string text;
+};
+TailSlot g_tail[kLogTailLines];
+uint64_t g_tail_n = 0;      // lines put in the ring since log_init
+
 struct Resolved {
     std::string path;
     LogLevel level;
@@ -93,6 +101,7 @@ void apply(const Resolved& r, bool only_if_uninit) {
     g_stderr_all = r.stderr_all;
     std::memset(g_counts, 0, sizeof g_counts);
     g_since_flush = 0;
+    g_tail_n = 0;
 
     LARGE_INTEGER freq{}, now{};
     QueryPerformanceFrequency(&freq);
@@ -196,6 +205,21 @@ uint64_t log_count(LogLevel l) {
     return g_counts[i];
 }
 
+uint64_t log_tail(std::vector<LogTailLine>* out, size_t max) {
+    std::lock_guard<std::recursive_mutex> g(g_mu);
+    if (out) {
+        out->clear();
+        const uint64_t have = g_tail_n < kLogTailLines ? g_tail_n : kLogTailLines;
+        const uint64_t n = have < max ? have : max;
+        out->reserve(static_cast<size_t>(n));
+        for (uint64_t i = g_tail_n - n; i < g_tail_n; ++i) {
+            const TailSlot& t = g_tail[i % kLogTailLines];
+            out->push_back(LogTailLine{t.level, t.text});
+        }
+    }
+    return g_tail_n;
+}
+
 void log_set_sink(LogSink sink, void* user) {
     std::lock_guard<std::recursive_mutex> g(g_mu);
     g_sink = sink;
@@ -234,6 +258,12 @@ void logv(LogLevel l, const char* tag, const char* fmt, va_list ap) {
     line += msg;
 
     g_counts[li]++;
+    {
+        TailSlot& t = g_tail[g_tail_n % kLogTailLines];
+        t.level = l;
+        t.text.assign(line);
+        ++g_tail_n;
+    }
     if (g_file) {
         std::fwrite(line.data(), 1, line.size(), g_file);
         std::fputc('\n', g_file);

@@ -217,6 +217,18 @@ game folder is rewritten from the factory text.
 **Gamepad verified** (2026-11-06) with the test tooling's virtual SDL pad: script `keydown vpad attach xbox`, `keydown vpad button south 1`
 / `0` (MCP `launch` script lines): A on the pad starts the game from the title, and the intro's rumble reaches the pad (`vpad rumble` log
 lines). A real XInput pad goes through the same SDL gamepad path.
+**Game window menu** (2026-11-06, `runtime/docs/MENU.md`; the user asked for real Windows menus, not an in-game window): a native menu bar
+(Game, Input, Graphics, Audio, Debug, Help; `src/gfx/play/win_menu.cpp` from the data model `menu_model.cpp`) and modeless native dialogs on
+their own thread (Gamepad with press-to-rebind, Keyboard and mouse bindings, More graphics settings, Debug info, Log). Changes apply at once
+and are saved in `controls.ini`; "(next start)" entries are runtime keys in `controls.ini [config]` (`section.key = value`, applied at start
+unless the ini or `NXRT_*` set them; game-module defaults give way via `config_set_default`). The bar is hidden in fullscreen; there the ImGui
+window (F1, View + Menu) is the menu (`[gfx] overlay_menu`). Alt alone and F10 stay game keys. **An open drop-down holds the game's frame**
+(Windows' modal menu loop runs on the game thread that pumps the window; audio continues, the watchdog is fed); dialogs do not. Checked as
+named instances on the title screen (`workun
+m1`..`nm3` of the menu branch): bar and client size 1280x720, fullscreen round trip, each dialog,
+a menu toggle saved, a 12 s drop-down without a freeze report, press-to-rebind with the virtual pad from the native dialog. Native UI is
+driven and captured without the mouse through ctypes (`PostMessage WM_COMMAND`, `SC_KEYMENU`, `PrintWindow`): boot screenshots and `@shot`
+contain only the Vulkan frame. Posted mouse clicks miss in the game window (SDL reads the real cursor).
 
 **Performance notes so far:** the lifted code is built for baseline x86-64, so every FMADD is a CRT `fmaf` call (software FMA): a worker
 spent its time in `fmaf` in main+0x370a5a0. `/arch:AVX2`-style flags (FMA3) would need a full rebuild. `[nvn] compute_shadows` copies

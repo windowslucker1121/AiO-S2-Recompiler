@@ -29,6 +29,21 @@ hid::StickValue adjust_look_stick(hid::StickValue right, const PadSettings& cfg)
 // LEFT_TRIGGER -> ZL, RIGHT_TRIGGER -> ZR, the other sources as in map_pad. Returns 0 for kCount.
 uint64_t pad_default_buttons(PadSrc src, bool label_abxy);
 
+// What a source presses with these settings: its remap, or the built-in buttons when it has none.
+uint64_t pad_effective_buttons(PadSrc src, const PadSettings& cfg);
+
+// The source of an SDL_GamepadButton number (platform.h GamepadRaw::buttons bit numbers). False for GUIDE, MISC1 and anything unknown:
+// those are never bound.
+bool pad_src_of_sdl_button(int sdl_button, PadSrc* out);
+
+// The sources pressed in a raw state, as bits (1 << PadSrc): the buttons and the two triggers at the threshold.
+uint32_t pad_sources_pressed(const platform::GamepadRaw& raw, double trigger_threshold);
+
+// Press-to-rebind: makes `src` press the Switch buttons `target` (hid::btn bits). Every other source that pressed exactly `target` before
+// takes over what `src` pressed before (a swap), so no Switch button is left without a pad button. A source whose result equals its built-in
+// mapping is stored as kPadDefault. Returns true when anything changed.
+bool pad_assign(PadSettings* cfg, PadSrc src, uint64_t target);
+
 // Gyro and accelerometer in SDL axes (m/s^2, rad/s) to the six-axis sample the hid service stores (G, revolutions per second), the
 // mapping that smo-recomp uses: accel = (-ax, ay, -az) / 9.80665, gyro = (-gx, gy, -gz) / (2 pi) * cfg.gyro_scale. A pad lying still, face up
 // (SDL accel (0, 0, +9.80665)) gives accel (0, 0, -1). at_rest = |gyro| < 0.01 rev/s on every axis. cfg.gyro = false gives the rest sample
