@@ -37,3 +37,15 @@ if(NXRT_LIBVPX_INCLUDE AND NXRT_LIBVPX_LIB AND NXRT_DAV1D_INCLUDE AND NXRT_DAV1D
 else()
     target_compile_definitions(nxrt PRIVATE NXRT_HAVE_DAV1D=0)
 endif()
+# libopus (BSD-3-Clause) for hwopus (src/services/misc.cpp, IHardwareOpusDecoder), from the same vcpkg install: vcpkg install opus:x64-windows-static.
+# Without it the Opus decoders decode silence (OoT's movie and menu sounds are Opus).
+find_path(NXRT_OPUS_INCLUDE opus/opus.h PATHS ${_nxrt_vpx_inc} NO_DEFAULT_PATH)
+find_library(NXRT_OPUS_LIB NAMES opus PATHS ${_nxrt_vpx_lib} NO_DEFAULT_PATH)
+if(NXRT_OPUS_INCLUDE AND NXRT_OPUS_LIB)
+    message(STATUS "nxrt: libopus ${NXRT_OPUS_LIB} (hwopus)")
+    target_include_directories(nxrt SYSTEM PRIVATE "${NXRT_OPUS_INCLUDE}")
+    target_link_libraries(nxrt PUBLIC "${NXRT_OPUS_LIB}")
+    target_compile_definitions(nxrt PRIVATE NXRT_HAVE_OPUS=1)
+else()
+    target_compile_definitions(nxrt PRIVATE NXRT_HAVE_OPUS=0)
+endif()

@@ -993,7 +993,7 @@ bool ShaderCache::open(const std::string& dir) {
         return false;
     }
     results_ = std::move(text);
-    int resources_col = -1;
+    int resources_col = -1, status_col = -1;
     bool header = true;
     size_t pos = 0;
     while (pos < results_.size()) {
@@ -1007,8 +1007,9 @@ bool ShaderCache::open(const std::string& dir) {
             int col = 0;
             for (size_t start = 0;; col++) {
                 size_t tab = line.find('\t', start);
-                if (line.substr(start, tab == std::string_view::npos ? std::string_view::npos : tab - start) ==
-                    "resources") {
+                const std::string_view name = line.substr(start, tab == std::string_view::npos ? std::string_view::npos : tab - start);
+                if (name == "status") status_col = col;
+                if (name == "resources") {
                     resources_col = col;
                     break;
                 }
@@ -1027,6 +1028,7 @@ bool ShaderCache::open(const std::string& dir) {
         pos = next;
     }
     resources_col_ = resources_col;
+    status_col_ = status_col;
     dir_ = dir;
     open_ = true;
     NXLOG_I("nvn", "shader cache %s: %zu records", dir.c_str(), lines_.size());
@@ -1454,6 +1456,42 @@ bool ShaderCache::is_open() const {
 bool ShaderCache::has_record(const std::string& hash) const {
     std::lock_guard lk(lock_);
     return lines_.count(hash) != 0;
+}
+
+bool ShaderCache::usable(const std::string& hash) const {
+    std::lock_guard lk(lock_);
+    const auto it = lines_.find(hash);
+    if (it == lines_.end() || status_col_ < 0) return false;
+    const std::string status = column_text(std::string_view(results_.data() + it->second.first, it->second.second), status_col_);
+    return status == "ok" || status == "ok-retry";
+}
+
+bool read_programs_file(const std::string& path, std::vector<ProgramHashes>* out, std::string* error) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) { *error = "cannot open " + path; return false; }
+    char head[16];
+    bool ok = std::fread(head, 1, 16, f) == 16 && std::memcmp(head, "MPRPRG01", 8) == 0;
+    uint32_t count = 0;
+    if (ok) std::memcpy(&count, head + 8, 4);
+    if (ok) {
+        out->resize(count);
+        ok = count == 0 || std::fread(out->data(), sizeof(ProgramHashes), count, f) == count;
+    }
+    std::fclose(f);
+    if (!ok) *error = path + " is not a program list";
+    return ok;
+}
+
+uint64_t usable_programs(const std::vector<ProgramHashes>& progs) {
+    auto ok = [](uint64_t h) {
+        char b[20];
+        std::snprintf(b, sizeof b, "%016llx", static_cast<unsigned long long>(h));
+        return shader_cache().usable(b);
+    };
+    uint64_t n = 0;
+    for (const ProgramHashes& p : progs)
+        if (ok(p.vs) && ok(p.fs) && (!p.gs || ok(p.gs))) n++;
+    return n;
 }
 
 const std::string& ShaderCache::dir() const { return dir_; }

@@ -322,6 +322,7 @@ public:
     // corpus block queued for translation by its hash.
     const std::string& corpus_dir() const { return corpus_; }
     bool has_record(const std::string& hash) const;
+    bool usable(const std::string& hash) const;   // a record whose status is ok (or ok-retry)
     bool translate_corpus_block(const std::string& hash) { return worker_ && worker_->submit_corpus(hash); }
     size_t loaded() const;   // ShaderInfos built so far
     size_t missing() const;  // hashes asked for that have no usable .spv (or do not reflect)
@@ -373,6 +374,7 @@ private:
     bool open_ = false;
     std::string results_;                                                   // results.tsv, read once
     int resources_col_ = -1;                                                // column index of "resources"
+    int status_col_ = -1;                                                   // column index of "status"
     std::unordered_map<std::string, std::pair<size_t, size_t>> lines_;     // hash -> (offset, length) in results_
     std::unordered_map<std::string, std::unique_ptr<ShaderInfo>> by_hash_; // null: no usable .spv (logged once)
     std::unordered_set<uintptr_t> bad_controls_;                           // malformed control pointers (logged once)
@@ -384,5 +386,13 @@ private:
 // if that is empty, the first of ./shader_cache/spirv and <executable folder>/shader_cache/spirv that has a
 // results.tsv. A failed open is logged once and every find returns null.
 ShaderCache& shader_cache();
+
+// ---- program lists (MPRPRG01, tools/shaders/scripts/bnsh_programs.py): what the shader preparation compiles ----------------------------
+struct ProgramHashes { uint64_t vs, fs, gs; };   // gs 0 = none
+bool read_programs_file(const std::string& path, std::vector<ProgramHashes>* out, std::string* error);
+// Programs whose stages all have a usable translation in shader_cache() (the ones a preparation compiles). A preparation that finished is
+// still good while this is not above its "prepared" + "failed" counts (prepare.state): translations added since (the on-demand
+// translator, a re-run of the batch) only matter when they complete programs.
+uint64_t usable_programs(const std::vector<ProgramHashes>& progs);
 
 }  // namespace nxrt::nvn::be

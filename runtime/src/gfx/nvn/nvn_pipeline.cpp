@@ -97,7 +97,15 @@ void ensure_cache() {
     std::lock_guard<std::mutex> lk(g_cache_mu);       // the prewarm workers and the render thread may get here together
     if (g_cache_tried) return;
     g_cache_tried = true;
-    g_cache_path = config_get_str("nvn", "pipeline_cache", "pipeline_cache.bin");
+    // Default: next to the shader cache, where the shader preparation's programs.bin and prepare.state are (a path relative to the working
+    // folder put the prepared cache wherever the preparation was started); a file in the working folder is still used when that one is missing.
+    std::string def = "pipeline_cache.bin";
+    std::error_code ec;
+    if (shader_cache().is_open()) {
+        const std::filesystem::path p = std::filesystem::path(shader_cache().dir()).parent_path() / "pipeline_cache.bin";
+        if (std::filesystem::exists(p, ec) || !std::filesystem::exists(def, ec)) def = p.string();
+    }
+    g_cache_path = config_get_str("nvn", "pipeline_cache", def.c_str());
     std::vector<char> data;
     if (!g_cache_path.empty()) {
         if (FILE* f = std::fopen(g_cache_path.c_str(), "rb")) {          // one read: the file can be hundreds of MB after a shader preparation

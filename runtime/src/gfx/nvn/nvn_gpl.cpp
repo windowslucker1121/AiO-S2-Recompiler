@@ -990,23 +990,7 @@ void gpl_stop() {
 
 // ---- shader preparation ----------------------------------------------------------------------------------------------------------
 namespace {
-struct ProgHashes { uint64_t vs, fs, gs; };
-
-bool read_programs_file(const std::string& path, std::vector<ProgHashes>* out, std::string* error) {
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) { *error = "cannot open " + path; return false; }
-    char head[16];
-    bool ok = std::fread(head, 1, 16, f) == 16 && std::memcmp(head, "MPRPRG01", 8) == 0;
-    uint32_t count = 0;
-    if (ok) std::memcpy(&count, head + 8, 4);
-    if (ok) {
-        out->resize(count);
-        ok = count == 0 || std::fread(out->data(), sizeof(ProgHashes), count, f) == count;
-    }
-    std::fclose(f);
-    if (!ok) *error = path + " is not a program list";
-    return ok;
-}
+using ProgHashes = ProgramHashes;
 
 std::string hex16(uint64_t h) {
     char b[20];
@@ -1016,33 +1000,33 @@ std::string hex16(uint64_t h) {
 }  // namespace
 
 // The state file next to the program list: which GPU and driver the preparation ran on and whether it finished. The key changes with the
-// GPU, the driver version, the pipeline cache UUID (a driver update changes it), the version of the part scheme in this file and the size of
-// the shader cache's results.tsv (shaders translated since make more programs preparable; nvn_setup.cpp checks this one without a device).
+// GPU, the driver version, the pipeline cache UUID (a driver update changes it) and the version of the part scheme in this file. Shaders
+// translated since are checked apart (usable_programs against the state's counts).
 constexpr int kPrepareScheme = 1;
 std::string prepare_key(uint64_t programs) {
-    std::error_code ec;
-    const uintmax_t results = std::filesystem::file_size(std::filesystem::path(shader_cache().dir()) / "results.tsv", ec);
     const VkPhysicalDeviceProperties& p = device().properties();
     char uuid[40];
     for (int i = 0; i < 16; ++i) std::snprintf(uuid + 2 * i, 3, "%02x", p.pipelineCacheUUID[i]);
     char b[512];
-    std::snprintf(b, sizeof b, "scheme=%d programs=%llu gpu=%s driver=%u api=%u cache=%s salt=%s results=%llu", kPrepareScheme,
-                  static_cast<unsigned long long>(programs), p.deviceName, p.driverVersion, p.apiVersion, uuid, config_get_str("nvn", "spirv_salt", "").c_str(),
-                  static_cast<unsigned long long>(ec ? 0 : results));
+    std::snprintf(b, sizeof b, "scheme=%d programs=%llu gpu=%s driver=%u api=%u cache=%s salt=%s", kPrepareScheme, static_cast<unsigned long long>(programs),
+                  p.deviceName, p.driverVersion, p.apiVersion, uuid, config_get_str("nvn", "spirv_salt", "").c_str());
     return b;
 }
 
-bool prepare_state_ready(const std::string& path, const std::string& key) {
+// Finished on this GPU and driver, and no program has become preparable since (usable_now: usable_programs of the list).
+bool prepare_state_ready(const std::string& path, const std::string& key, uint64_t usable_now) {
     std::ifstream f(path);
     if (!f) return false;
     std::string l;
     bool key_ok = false, done = false;
+    uint64_t covered = 0;
     while (std::getline(f, l)) {
         while (!l.empty() && l.back() == '\r') l.pop_back();
         if (l == "key: " + key) key_ok = true;
         if (l == "complete: 1") done = true;
+        if (l.rfind("prepared: ", 0) == 0 || l.rfind("failed: ", 0) == 0) covered += std::strtoull(l.c_str() + l.find(' ') + 1, nullptr, 10);
     }
-    return key_ok && done;
+    return key_ok && done && usable_now <= covered;
 }
 
 void write_prepare_state(const std::string& path, const std::string& key, const PrepareResult& r) {
@@ -1066,7 +1050,7 @@ bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
     r.programs = progs.size();
     const std::string state_path = (std::filesystem::path(file).parent_path() / "prepare.state").string();
     const std::string key = prepare_key(r.programs);
-    if (o.only_if_needed && !o.force && prepare_state_ready(state_path, key)) {
+    if (o.only_if_needed && !o.force && prepare_state_ready(state_path, key, usable_programs(progs))) {
         r.already_ready = true;
         return true;
     }

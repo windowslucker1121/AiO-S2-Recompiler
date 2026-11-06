@@ -154,12 +154,13 @@ Open points besides the milestones:
 
 | # | Where | What | State |
 |---|---|---|---|
-| A1 | title, intro | UI text invisible ("press a button" plate, likely the intro subtitles). Layout2 text is rendered on the GPU into sparse (virtual-pool) render targets: glyph pass vs `a6e1624c` fs `2488ab4f` (font atlas R8 256x46 + 4x4 white) into RGBA8 (e.g. 242x40), then R8 passes (fs `1d8ac4b3`, `78ed7ef1`) into the R8 text texture the composite (fs `7c4fccd6`) samples. The glyph pass already writes (almost) nothing: its vs reads glyph data from two storage buffers (c0 words 0x74/0x5c = vertex bindings 12 and 6) and cb7. Next: check those storage buffers in a trace (`ssbo` lines, added) | open |
+| A1 | title, intro | UI text invisible, then garbled. Two causes: the glyph pass picks its glyph records with instance + c[0][0x644] (NVN base instance, never written by the runtime; the harness now answers QueryHasConstantBufferDrawParameters true, so Ryujinx reads gl_BaseInstance), and the menu text is CPU-rendered into R8 textures with NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET, which the layout code untiled as block-linear (64-texel bands; found by re-tiling a dump and decoding it pitch-linear: "New Game"). Both fixed; the title reads "New Game" and "Options / ZELDA NOTES Setting" | fixed |
 | A2 | title | black background: the title is a movie. Fixed: AV1 on dav1d (below) and the NDVE model hidden | fixed |
-| A3 | title | faint vertical stripes in the logo/smoke area (x 340-940), seen over the black background; not seen over the movie | check again |
+| A3 | title | faint vertical stripes in the logo/smoke area (x 340-940), seen over the black background; not seen over the movie, not seen on 2026-11-06 | not seen again |
 | A4 | title -> A | the screen stayed black after A: the game waited for the title movie (no video decoder). Fixed with A2; A now leads into the intro (tapestry movie) | fixed |
 | A5 | setup window | blurry (DPI-virtualised) | fixed in code (per-monitor DPI), not yet seen |
 | A6 | all | Opus audio is silent: `hwopus` (IHardwareOpusDecoder) "decodes silence" (no Opus decoder in the runtime). vcpkg `opus:x64-windows-static` would give one | open |
+| A7 | game (expected) | shadows of clustered (point/spot) lights are missing: 4,336 fragment shaders sample their shadow maps with TEX.SCR.B.DC through a handle read per pixel (light index from a storage loop), which the handle expressions cannot bind; the sample answers 1 (lit). Fix: pool-sized texture + sampler arrays in the runtime (Ryujinx GenerateBindlessAccess, harness QueryHostSupportsSeparateSampler true) | open |
 
 **Movies** (`romfs/Event/Movie/*.webm`, 26 files, 1.6 GB) are **AV1** in WebM (mime `video/av01`), decoded by nn::codec on the host: libvpx
 (VP9/VP8) and **dav1d 1.5.4** (AV1), both static from the repo-local vcpkg (`tools\vcpkg`, git-ignored; the user ran the bootstrap and

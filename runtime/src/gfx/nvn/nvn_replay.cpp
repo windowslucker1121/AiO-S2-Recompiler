@@ -1609,6 +1609,10 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                 }
                 default:
                     note_unsupported("shader buffer binding of an unknown NVN source");
+                    if (first_time_key("unknown-buffer " + d.shader->hash + " " + b.name))
+                        NXLOG_W(kTag, "shader %s binding %s (set %u binding %u, %s, c0 offset 0x%x, sb slot %d): unknown NVN source, the 64 KiB dummy buffer is bound",
+                                d.shader->hash.c_str(), b.name.c_str(), d.set, d.binding, d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ? "storage" : "uniform",
+                                b.nvn.c0_offset, b.nvn.sb_slot);
                     break;
             }
             binfo.push_back(bi);

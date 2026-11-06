@@ -597,8 +597,12 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     // the same chain, as it was filled in, enables everything that is available (minus robustness, which costs speed)
     a13.dynamicRendering = VK_TRUE;
     a13.synchronization2 = VK_TRUE;
-    a13.robustImageAccess = VK_FALSE;
-    avail.features.robustBufferAccess = VK_FALSE;
+    // [gfx] robust_access (diagnosis): out-of-range buffer and image accesses of the translated shaders read 0 instead of faulting the GPU
+    const bool robust = config_get_bool("gfx", "robust_access", false);
+    a13.robustImageAccess = robust ? a13.robustImageAccess : VK_FALSE;
+    avail.features.robustBufferAccess = robust ? avail.features.robustBufferAccess : VK_FALSE;
+    if (robust) NXLOG_I(kTag, "robust buffer access %s, robust image access %s ([gfx] robust_access)",
+                        avail.features.robustBufferAccess ? "on" : "not available", a13.robustImageAccess ? "on" : "not available");
     VkPhysicalDeviceFeatures2& en = avail;
     const VkPhysicalDeviceFeatures& af = avail.features;
     features_.bc = af.textureCompressionBC;
