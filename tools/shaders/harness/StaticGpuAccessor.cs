@@ -199,10 +199,13 @@ namespace SpirvHarness
             return false;
         }
 
+        // NVN keeps the draw's base vertex, base instance and draw index in c[0] at 0x640/0x644/0x648 and NVN2 shaders read them (OoT's
+        // UI glyph pass picks its glyph records with instance + c[0][0x644]); the runtime does not write them, so Ryujinx's
+        // DrawParametersReplace reads the Vulkan built-ins (gl_BaseVertex, gl_BaseInstance, gl_DrawID) instead.
         public bool QueryHasConstantBufferDrawParameters()
         {
             DrawTimeQueries.Add("drawParameters");
-            return false;
+            return true;
         }
 
         public int QueryComputeLocalSizeX() => _localX;

@@ -16,7 +16,7 @@
 //   * storage = layer stride * layers * samples. The layer stride is the untrimmed size of a layer: tegra trims the last
 //     level of a 3D texture, but the game's buffers are the untrimmed size (47 of 47 3D textures checked, SURVEY section 3).
 //   * alignment = 512 * level-0 block height in GOBs, at least 0x200 (Wonder's TILING.md; 0x200 is the minimum).
-//   * pitch-linear (NVN_TEXTURE_FLAGS_LINEAR): one level, pitch = builder stride, or the row size rounded up to 32 when the
+//   * pitch-linear (NVN_TEXTURE_FLAGS_LINEAR or LINEAR_RENDER_TARGET, as raw_storage_class): one level, pitch = builder stride, or the row size rounded up to 32 when the
 //     stride is 0; storage = pitch * rows * depth * layers * samples; alignment 0x1000.
 // The rules are cross-checked in tests/gfx/test_nvn_texture.cpp against an independent GOB formula, tegra::compute_layout,
 // and the survey's GPU buffer sizes. smo-recomp runtime/gfx/nvn_gl.c and tex_decode.h (GPL-3.0) were read for the packaged
@@ -177,7 +177,9 @@ TexLayout compute_texture_layout(const TextureBuilderInfo& b) {
     out.layers = layers;
 
     // ---- pitch-linear ----------------------------------------------------------------------------------------------------
-    out.block_linear = (b.flags & NVN_TEXTURE_FLAGS_LINEAR) == 0;
+    // LINEAR_RENDER_TARGET is pitch-linear too (OoT renders its menu text into such R8 textures on the CPU: "New Game" came out in
+    // 64-texel bands when untiled as block-linear)
+    out.block_linear = (b.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) == 0;
     if (!out.block_linear) {
         if (b.stride < 0 || (b.stride > 0 && static_cast<uint64_t>(b.stride) < blocks_x * bpb)) return out;
         out.levels = 1;   // pitch-linear textures have a single level

@@ -688,7 +688,7 @@ float attachment_scale(const Texture& t) {
         b.target != NVN_TEXTURE_TARGET_2D_MULTISAMPLE_ARRAY && b.target != NVN_TEXTURE_TARGET_RECTANGLE)
         return 1.0f;
     // not the IMAGE flag: the game sets it on every render target; storage use brings a scaled image back instead (tex_rescale)
-    if (b.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_VIDEO_DECODE)) return 1.0f;
+    if (b.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_VIDEO_DECODE)) return 1.0f;
     const int w = b.width, h = b.height;
     if (w < 32 || h < 32) return 1.0f;
     if (w == h && (w & (w - 1)) == 0) return 1.0f;
