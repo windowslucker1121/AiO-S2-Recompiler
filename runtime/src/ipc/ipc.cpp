@@ -17,6 +17,7 @@
 #include "nxrt/ipc.h"
 #include "nxrt/kernel.h"
 #include "nxrt/log.h"
+#include "nxrt/gaps.h"
 
 namespace nxrt::ipc {
 namespace detail {
@@ -301,6 +302,7 @@ uint32_t Service::handle(Request& req, Response& rsp) {
 
 namespace detail {
 uint64_t note_unhandled(Service& s, uint32_t cmd) {
+    nxrt::gap("ipc", "unhandled command", s.name() + " cmd " + std::to_string(cmd));
     std::lock_guard<std::recursive_mutex> lk(mu());
     s.unhandled[cmd]++;
     ServiceStats& st = stats_for(s.name());

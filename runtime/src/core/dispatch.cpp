@@ -18,6 +18,7 @@
 #include "nxrt/config.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
+#include "nxrt/gaps.h"
 
 namespace nxrt {
 namespace {
@@ -349,6 +350,7 @@ void dispatch_call(::Ctx* c, uint64_t addr) {
             // No handler: the console would fault on an unresolved import. A silent 0 is a fake answer, so say so (every
             // call up to 20, then every 1000th) and return 0.
             uint64_t n = t.calls.load(std::memory_order_relaxed);
+            nxrt::gap("import", "unimplemented import called", t.name);
             if (n <= 20 || n % 1000 == 0)
                 NXLOG_W("hle", "UNIMPLEMENTED import %s called (call #%llu, lr=0x%llx, x0=0x%llx x1=0x%llx): returning 0",
                         t.name.c_str(), static_cast<unsigned long long>(n), static_cast<unsigned long long>(lr(c)),

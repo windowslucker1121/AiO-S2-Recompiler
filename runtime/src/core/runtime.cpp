@@ -6,6 +6,7 @@
 
 #include "nxrt/audio_sink.h"
 #include "nxrt/bugcapture.h"
+#include "nxrt/gaps.h"
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
 #include "nxrt/dispatch.h"
@@ -107,6 +108,7 @@ std::string summary() {
     }
     s += "lifted functions: " + std::to_string(fn_count()) + ", modules: " + std::to_string(modules().size()) + ", live threads: " +
          std::to_string(kernel::thread_count_running()) + ", handles open: " + std::to_string(kernel::handle_count()) + "\n";
+    gaps_log(25);   // gaps.tsv next to the log (nxrt/gaps.h), the most frequent as log lines of their own (a log line is capped at ~2 KB)
     return s;
 }
 

@@ -20,6 +20,7 @@
 #include "nvn_gpu.h"
 #include "nvn_impl.h"
 #include "nvn_shaders.h"
+#include "nxrt/gaps.h"
 #include "nxrt/config.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
@@ -86,6 +87,7 @@ void report_missing(const uint8_t* code, const uint8_t* control) {
         return;
     }
     const std::string key = missing_key(code, control);
+    nxrt::gap("shader", "program set with an untranslated block", key);
     if (first_report(key)) NXLOG_W("nvn", "nvnProgramSetShaders: no translated shader for block %s; program not linked", key.c_str());
 }
 
