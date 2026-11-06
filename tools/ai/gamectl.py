@@ -13,7 +13,10 @@ their command line (--instance, --instance-dir, --log); kill ends them only with
 
 The running exe has no live control channel (no pipe, socket or command file). The runtime's test tooling (scripts, pad and vpad input,
 @peek/@poke, game probes) is configured at start through NXRT_TEST_* and answers through files (result.json, trace.jsonl, shots/), so it is
-reached through launch(script=...). Live control is window messages or SendInput to the game window.
+reached through launch(script=...). Live control is window messages or SendInput to the game window. Request files the runtime polls
+(nxrt/bugcapture.h) in the run's request folder (the instance folder, or the exe's folder for the default run) give two more: screenshot
+(the game's own presented frame) and capture_bug. Saved states and bug bundles (states, save_state, load_state, capture_bug, bugs) are in
+states.py, a mixin of Game; each records the instance it came from.
 """
 import collections
 import ctypes
@@ -35,7 +38,13 @@ import imgdiff  # noqa: E402  (tools/test: perceptual image diff)
 import wincap  # noqa: E402  (tools/test: window enumeration and capture; makes this process DPI aware)
 from PIL import Image  # noqa: E402
 
-TOOLS = ['status', 'launch', 'restart', 'kill', 'screenshot', 'send_input', 'wait_for', 'compare', 'log', 'reports']
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import states  # noqa: E402  (tools/ai/states.py: saved states and bug bundles)
+
+TOOLS = ['status', 'launch', 'restart', 'kill', 'screenshot', 'send_input', 'wait_for', 'compare', 'log', 'reports',
+         'states', 'save_state', 'load_state', 'capture_bug', 'bugs']
+# list parameters whose items are not only strings (route names or step dicts): the MCP schema leaves their items open
+ANY_ITEMS = {'reach', 'route'}
 # The game exe's exit codes (game_main.cpp, the test tooling's contract in tt.h, crash handler, watchdog, fatal).
 EXIT = {0: 'pass / normal exit', 1: 'script failed or start-up error', 2: 'usage or script parse error', 3: 'crash', 4: 'crash',
         5: 'freeze or fatal error', 6: 'process ended before the script finished',
@@ -312,7 +321,7 @@ class Target:
         return f'{self.instance} (pid {self.pid}{"" if self.own else ", not started by this server"})'
 
 
-class Game:
+class Game(states.StateTools):
     def __init__(self, game_id=None, exe=None, run_dir=None):
         self.id = game_id or os.environ.get('NXRT_AI_GAME', 'oot')
         manifest = tomllib.loads((ROOT / 'recomp' / 'games' / self.id / 'game.toml').read_text(encoding='utf-8'))
@@ -325,6 +334,7 @@ class Game:
         self.log_pos = {}                 # log path -> position of log(new=true)
         # launch's memory check (game_main.cpp check_memory): GB one run needs; launch(settings={"boot.memory_per_run_gb": ...}) wins
         self.memory_per_run_gb = float(os.environ.get('NXRT_BOOT_MEMORY_PER_RUN_GB', MEMORY_PER_RUN_GB))
+        self._no_game_shots = set()       # root pids that never answered a screenshot request (an older build, a stand-in)
 
     # ---- finding the game ----------------------------------------------------------------------------------------------------------------
     def _is_game(self, image_name, pid):
@@ -409,9 +419,64 @@ class Game:
     def _alive(self, t):
         return bool(self._pids(t))
 
+    def _request_dir(self, t):
+        """Where the target's runtime looks for request files (screenshot, capture_bug, dump_threads): its instance folder, or the
+        exe's folder for the default run (nxrt/instance.h instance_request_dir)."""
+        return self._report_dir(t)
+
+    def _request_pids(self, t):
+        """The processes of the target that poll request files: the game exe itself (not its translator helpers); a stand-in's interpreter."""
+        names = {p: n for p, _, n in processes()}
+        pids = self._pids(t)
+        return [p for p in pids if names.get(p, '').lower() == self.exe.name.lower()] or \
+               [p for p in pids if names.get(p, '').lower() not in ('cmd.exe', 'conhost.exe')]
+
+    def _game_shot(self, t, timeout_s=6.0):
+        """The game's own picture of its next presented frame: a request file <request dir>/screenshot.<pid> naming a PNG (the runtime's
+        request poller writes it, nxrt/bugcapture.h). None when the game does not answer (an older build, a stand-in, no frame)."""
+        d, targets = self._request_dir(t), self._request_pids(t)
+        if not d or not targets or set(targets) <= self._no_game_shots:
+            return None
+        out = self._shot_path(t, 'game')
+        reqs = []
+        for p in targets:
+            r = Path(d) / f'screenshot.{p}'
+            r.write_text(str(out) + '\n', encoding='utf-8')
+            reqs.append(r)
+        end, last, img = time.time() + timeout_s, -1, None
+        while time.time() < end:
+            time.sleep(0.15)
+            size = out.stat().st_size if out.exists() else 0
+            if size and size == last:                            # written on the renderer's worker: done once the size holds
+                try:
+                    img = Image.open(out).convert('RGB')
+                    img.load()
+                    break
+                except OSError:
+                    pass
+            last = size
+        for r in reqs:
+            r.unlink(missing_ok=True)
+        if img is None and not out.exists():
+            self._no_game_shots |= set(targets)                  # never answers: do not wait for it again
+        return img
+
     def _capture(self, t, method=None):
+        """(picture, method, window). method None: the game's own frame, then PrintWindow, then BitBlt. Never the screen unless asked
+        (method="screen" captures whatever covers the window: other people's windows)."""
         w = self._window(t)
-        img, how = wincap.capture_best(w[0], method)
+        if method in (None, 'game'):
+            if (img := self._game_shot(t)) is not None:
+                return img, 'game', w
+            if method == 'game':
+                raise RuntimeError('the game did not answer the screenshot request (a build without it, or no frame presented)')
+        if method:
+            return wincap.capture(w[0], method), method, w
+        img, how = None, None
+        for m in ('printwindow', 'bitblt'):
+            img, how = wincap.capture(w[0], m), m
+            if not wincap.is_black(img):
+                break
         return img, how, w
 
     def _shot_path(self, t, kind):
@@ -586,11 +651,20 @@ class Game:
         else:
             log = rd / self.log_name
             args = ['--log', str(log)] + args
-        if log.exists():
-            os.replace(log, log.with_name(log.name + '.prev'))
+        for _ in range(100):                                    # a killed game's helpers (or a tail -f) can hold the old log a while
+            try:
+                if log.exists():
+                    os.replace(log, log.with_name(log.name + '.prev'))
+                break
+            except PermissionError:
+                time.sleep(0.2)
+        else:
+            raise RuntimeError(f'{log} is still open in another process (a game that has not ended, or a tail -f on it)')
+        (rd / 'launch.json').write_text(json.dumps(params, indent=1, default=str), encoding='utf-8')   # for save_state from a CLI call
         if headless:
             args.append('--headless')
-        e = dict(os.environ, SDL_WINDOW_ACTIVATE_WHEN_SHOWN='0', NXRT_TEST_OUT=str(out), NXRT_TEST_FRAME_SOURCE='tick')
+        e = dict(os.environ, SDL_WINDOW_ACTIVATE_WHEN_SHOWN='0', NXRT_TEST_OUT=str(out), NXRT_TEST_FRAME_SOURCE='tick',
+                 NXRT_BUG_DIR=str(self._bugs_dir()))       # bug bundles where bugs() looks (settings {"bug.dir": ...} beats it)
         for k in ('NXRT_INSTANCE', 'NXRT_INSTANCE_DIR'):        # this server's own environment must not name an instance for every run
             e.pop(k, None)
         for k, v in (settings or {}).items():                    # CONFIG.md: NXRT_ + SECTION + _ + KEY, non-alphanumerics as _
@@ -664,7 +738,7 @@ class Game:
     def _end(self, root, pids):
         """taskkill /T of the root (its whole tree), then wait until none of pids runs."""
         subprocess.run(['taskkill', '/F', '/T', '/PID', str(root)], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        for _ in range(50):
+        for _ in range(600):                                    # a big game takes seconds to hand its memory back: up to a minute
             if not {p for p, _, _ in processes()} & set(pids):
                 break
             time.sleep(0.1)
@@ -695,8 +769,9 @@ class Game:
     def screenshot(self, show: bool = True, crop: str = None, save: str = None, method: str = None, instance: str = None, pid: int = None):
         """Capture a game window's client area (instance= or pid= choose the run, see status): works while it is covered or unfocused, not
         while minimised. Saves a full-size PNG (path in the result) and, with show, returns the picture (at most 1280 px wide). crop:
-        "x0,y0,x1,y1" in client pixels, or fractions when written with decimal points ("0,0,0.5,0.5" = top-left quarter). method:
-        printwindow | bitblt | screen (default printwindow, falling back to the others when the picture is black)."""
+        "x0,y0,x1,y1" in client pixels, or fractions when written with decimal points ("0,0,0.5,0.5" = top-left quarter). method: game |
+        printwindow | bitblt | screen. Default: the game's own next presented frame (a request file the runtime answers; PrintWindow does
+        not see the Vulkan swapchain), then PrintWindow, then BitBlt. screen is only used when asked: it shows whatever covers the window."""
         t = self._target(instance, pid)
         img, how, w = self._capture(t, method)
         if crop:
@@ -805,19 +880,20 @@ class Game:
         return {'instance': t.instance, 'pid': t.pid, 'window': title, 'steps': len(steps), 'method': method}
 
     def wait_for(self, until: str, timeout_s: float = 60, pattern: str = None, ref: str = None, min_ssim: float = 0.9, mask: str = None,
-                 instance: str = None, pid: int = None):
+                 new: bool = False, instance: str = None, pid: int = None):
         """Block until a condition holds for one run (instance= or pid= choose it, see status) or timeout_s runs out. until:
           window   the game window exists            visible   the window shows a picture that is not black
           change   the picture differs from the one at the call
           image    the picture matches the reference PNG ref (SSIM >= min_ssim; mask as in compare)
-          log      a line of this run's log matches the regex pattern (case-insensitive)
+          log      a line of this run's log matches the regex pattern (case-insensitive); new: only lines written after this call
           exit     the game process has ended
         Returns ok, the seconds waited, the matching log line or the last capture's path; stops early when the game is not running."""
         if until not in ('window', 'visible', 'change', 'image', 'log', 'exit'):
             raise ValueError(f'unknown condition {until!r}')
         t = self._target(instance, pid)
         rx = re.compile(pattern or '.', re.I)
-        lp, pos, base, img, t0 = self._log_path(t), 0, None, None, time.time()
+        lp, base, img, t0 = self._log_path(t), None, None, time.time()
+        pos = lp.stat().st_size if new and lp and lp.exists() else 0
         masks = [imgdiff._mask_arg(mask)] if mask else None
         while True:
             alive = self._alive(t)
@@ -831,7 +907,7 @@ class Game:
                     lines, pos = _read_from(lp, pos)
                     hit = next((ln for ln in lines if rx.search(ln)), None)
             elif alive and (w := self._window(t, required=False)) is not None:
-                img = wincap.capture_best(w[0])[0]
+                img = self._capture(t)[0]
                 if until == 'visible':
                     hit = not wincap.is_black(img)
                 elif until == 'change':

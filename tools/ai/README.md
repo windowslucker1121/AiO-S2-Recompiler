@@ -6,6 +6,7 @@ log, crash reports and the runtime's test tooling. Game independent: exe and log
 | File | What |
 |---|---|
 | `gamectl.py` | The tools (methods of `Game`; the docstrings are what the agent reads). Reuses `tools/test/wincap.py` and `imgdiff.py`. |
+| `states.py` | The state and bug tools (`states`, `save_state`, `load_state`, `capture_bug`, `bugs`), a mixin of `Game`. |
 | `mcp_server.py` | MCP over stdio (stdlib JSON-RPC, no SDK), and the same tools as a CLI. |
 | `tests/test_gamectl.py`, `tests/fake_window.py` | The check, against a real stand-in window. |
 | `../../.mcp.json` | Registers the server for Claude Code in this repo. |
@@ -55,12 +56,69 @@ itself, the shared saves and pipeline cache, reports next to the exe): only one 
 | `launch` | (Re)start a run (`instance` name, or the default run; replaces only this server's run of that instance): args, `settings` = runtime config keys as `NXRT_<SECTION>_<KEY>` (beat the ini), env, `headless`, `script` (test tooling, with `peek`/`poke` shorthands), `wait` for the exit and get the result. Memory check first. |
 | `restart` | Kill and launch again with the last launch's arguments (of `instance`, default the last launched). |
 | `kill` | End a run's process tree: this server's runs, or `instance`/`pid` (another session's only with `force`). |
-| `screenshot` | Client area of the game window (PrintWindow: works covered and unfocused, not minimised); returns the picture and a full-size PNG path; `crop`. |
+| `screenshot` | The game's own next presented frame (request file the runtime answers; works covered and unfocused), else PrintWindow/BitBlt of the window (never the screen unless `method="screen"`); returns the picture and a full-size PNG path; `crop`. |
 | `send_input` | Steps `key/down/up/text/click/rclick/mclick/move/wheel/rel/wait`; coordinates in pixels or fractions. `post` = window messages to the game window only (background); `send` = SendInput after bringing it to the front, refused if it is not in front. |
 | `wait_for` | Until `window`, `visible` (not black), `change`, `image` (SSIM against a reference), `log` (regex), `exit`, with a timeout. |
 | `compare` | imgdiff (SSIM, MAE, histogram, changed pixels, masks) of two PNGs or a reference against the window now; writes a diff picture. |
 | `log` | Tail, regex over the whole log, or only new lines since the last call. |
 | `reports` | `<exe stem>_crash.txt`, `_freeze.txt`, `_fatal.txt` next to the exe and the test output's `*.txt`, flagged new since the launch. |
+| `states` | Saved states (`work/states/<game>/<name>`) and the game's built-in ones and routes (`recomp/games/<id>/ai_states.toml`), with whether the exe on disk is the build a state was saved with. |
+| `save_state` | The game's committed save data of the running or last run (or of a bug bundle) as a named state, with the build, the launch's settings and env, the steps back (`reach`), a ready check and a screenshot. |
+| `load_state` | Start the game at a state or a bug bundle: its save data into the instance's own save folder (`[fs] save_dir`), the launch of that instance (default: the one it came from), then the reach steps and the ready check; the steps and their seconds, or the one that failed with the log tail. |
+| `capture_bug` | A bug bundle of a run's moment (`work/bugs/<time>[-instance][-name]`): the running game writes it (request file), this side adds the launch and stdout/stderr; with no game running it is made from the last run's files. |
+| `bugs` | The bundles, newest first (note, origin, instance, state, build; `instance=` filters), or one in full (bug.json, note, files, log tail, the screenshot). |
+
+## States: start at a moment instead of booting every time
+
+There is no process snapshot. A state is what the game itself can restore, its **save data**, plus the **steps that bring a fresh start
+back to the moment**. Why not a snapshot: the guest's threads run on host threads whose stacks hold lifted C++ frames (return addresses into
+the exe, host heap pointers), next to kernel and service objects in host memory, nn::os fibers on host fibers, and the GPU state in the
+Vulkan driver (devices, pipelines, memory that cannot be written out and re-created). Restoring that is a whole-process checkpoint/restore
+of a Windows process with a live GPU device; nothing in the runtime or Windows offers it, and guest memory alone (up to 12 GiB) is useless
+without the host frames that hold the threads' state.
+
+| Part | Where | What |
+|---|---|---|
+| `state.json` | `work/states/<game>/<name>/` | description, created, build (exe size, time, SHA-256; the commit from the exe's log line `built from commit`), settings, env and args of the launch it was saved from, `reach`, `ready` |
+| `save/` | same | the committed save data (no journal work folders `<key>.work.<pid>`, journals or commit markers): the runtime keeps uncommitted writes apart until the game commits (`runtime/src/services/fs_volume.h`) |
+| `shot.png` | same | the window when it was saved |
+| routes, built-in states, defaults | `recomp/games/<id>/ai_states.toml` | the game knowledge: how to reach the title, load a save, wait for a scene; the shader cache and test switches every `load_state` uses |
+
+`load_state` never touches the player's own save (`%APPDATA%\<save folder>\save`): it copies the state's `save/` into the save folder of
+the instance it starts (`<run dir>/save` for the default run, `<run dir>/<instance>/save` for a named one) and launches with `[fs] save_dir`
+there. A state records the instance it was saved from and `load_state` starts that instance again unless given `instance=`; a bug bundle
+starts in the instance it came from the same way, and `instance=` puts it beside the original. Settings and env merge, later wins: the game's `[defaults]`, the state's, the call's. A reach step is
+a route name or a dict with one of `route`, `wait_for` (the tool's arguments), `input` (send_input steps, posted), `sleep`, `shot`,
+`press_until` (`input`, `every_s`, `until` = wait_for arguments, `timeout_s`; a log condition counts from the first press); `optional`
+lets a step fail. The routes use log lines and the window, so they survive load times that vary by minutes.
+
+Limits: a state is only as close to the moment as the game's last save (OoT has an auto-save manager and a save in the menu; a state
+made right after an autosave or a save is exact, later ones restart from that save); everything after the save (position, enemies, what
+the game does not store) comes back as the game restores it. Before the first save a state is its route: `first_scene` and a state saved
+there replay New Game every time. A state made with another build still loads; the result says so. On 2026-11-06 the game wrote no slot
+in the first eight minutes after New Game (the first scene's picture stayed black behind the intro's subtitles, the pause key showed
+nothing), so the `continue` route (A on the first title entry, meant to continue a save) is not checked against a real slot yet.
+
+## Bug bundles
+
+The player presses **F9** in the game window (`[bug] key`): the runtime writes a bundle at once (screenshot of the presented frame, log,
+effective config, environment, thread dump, committed save data, crash/freeze/fatal reports, `bug.json` with the exe's SHA-256 and the
+commit it was built from) and a small window asks for a note (Enter saves it; the game keeps running). `capture_bug` asks the running
+game (`instance=`/`pid=` choose the run) for the same bundle through `capture_bug.<pid>` in the run's request folder (the instance folder,
+or the exe's folder for the default run) and adds `mcp.json` (instance, launch arguments, settings, env, run dir), stdout/stderr and, only
+when the game gave no frame, `window.png`. A named instance's bundle has the instance in its folder name and in `bug.json`. Keys and the bundle layout: `runtime/include/nxrt/bugcapture.h`, `[bug]` in
+`runtime/docs/CONFIG.md`. Bundles go to `work/bugs` of the checkout the exe was built in (`launch` passes `NXRT_BUG_DIR`, so bundles
+of runs this server starts land where `bugs` looks).
+
+Reproducing one: `bugs()` (newest first), `bugs(id=...)` (note, build, log tail, screenshot), then `load_state(bug=...)`: the bundle's save
+data and environment, and the reach of the state its run was loaded from (`bug.json` `state`; the game's default otherwise).
+`save_state(name, from_bug=...)` keeps it as a named state.
+
+| Variable | Default |
+|---|---|
+| `NXRT_AI_STATES_DIR` | `work/states/<id>` |
+| `NXRT_AI_BUGS_DIR` | `work/bugs` |
+| `NXRT_AI_STATES_TOML` | `recomp/games/<id>/ai_states.toml` |
 
 ## What the running exe offers (and what it does not)
 
@@ -77,6 +135,8 @@ There is no live control channel into a running game: no pipe, socket, command f
   the in-files and return the bytes), and game probes. Output in `<run dir>/testout`: `result.json` at the end, `trace.jsonl` written while
   it runs (the probes' state per frame), `shots/`. `settings={"test.enabled": 1}` gives the trace without a script.
   `launch` sets `test.frame_source=tick` unless told otherwise, because the default `hook` needs game hooks.
+- Request files in the run's request folder (`runtime/include/nxrt/bugcapture.h`): `screenshot.<pid>` naming a PNG (the presented frame is
+  written there: `screenshot`'s default) and `capture_bug.<pid>` (a bug bundle: `capture_bug`); `dump_threads` (the watchdog's thread dump).
 - Live, from outside: window messages or SendInput to the game window (`send_input`), PrintWindow capture, process and log watching.
   A live gamepad from outside would need a virtual-controller driver (ViGEmBus); not done. Guest memory of a running game is reachable
   only through a script's `@peek`/`@poke`.
@@ -92,13 +152,27 @@ text, clicks at pixel and fraction coordinates, wheel), `wait_for` window/change
 a launch and a screenshot coming back as an image. Instances: two named runs at once (own folders and arguments, input and capture reach
 only the one named by instance or pid, separate logs and reports, the error without a name, relaunch and kill of one), a run this server
 did not start (found by its command line; launch refuses its name, kill needs force), the memory check, an exe that refuses with exit code 7,
-and name validation. A real game running meanwhile is never touched. `set AI_TEST_FOCUS=1` adds `send_input(method="send")` (takes the focus briefly).
+and name validation. States and bundles (the fake logs its save folder, saves a slot on S with an uncommitted work folder beside it,
+loads it on Enter and answers screenshot and bug request files in its request folder like the runtime): `load_state` of a built-in state in
+an instance with the routes of a test `ai_states.toml`, `save_state` (committed files only, instance, build, settings), `states`,
+`load_state` of the saved state in a new process of the same instance, `capture_bug` from the running game and with none running, `bugs`
+(list, filter by instance, one in full with its picture), `load_state(bug=...)` in its own instance and beside it in another,
+`save_state(from_bug=...)`, the default run's save folder; and every game's checked-in `ai_states.toml` names only known routes and step
+kinds. The runtime side (bundle contents, committed-only save copy, request files, a named instance's folder and name):
+`runtime\build\release\nxrt_tests.exe bugcapture`. A real game running meanwhile is never touched. `set AI_TEST_FOCUS=1` adds `send_input(method="send")` (takes the focus briefly).
 
-## Only checkable once the game boots
+## Seen on the real game (oot.exe, RTX 4080, 2026-11-06)
 
-- Whether the SDL window takes posted key/mouse messages while unfocused and the play layer acts on them (else use `method="send"`),
-  and whether the window really opens without taking the focus (`SW_SHOWNOACTIVATE` + `SDL_WINDOW_ACTIVATE_WHEN_SHOWN=0`).
-- Whether PrintWindow captures the Vulkan swapchain (else `method="screen"` with the window in front, or the game's own `@shot` /
-  `boot.screenshot_at`).
-- Raw mouse look with `rel`, scripted runs on the real exe (`frame_source=tick` delivering frames, the exit codes, `result.json`,
-  `@peek`/`@poke`), and Ocarina of Time probes (there is no `runtime/games/oot` yet, so the trace has only frame, hash and time).
+- The window opens without taking the focus, and posted key messages reach the play layer while it is covered and unfocused: Enter
+  posted by `send_input` is A on the title menu, Escape is +, F9 the bug hotkey.
+- **PrintWindow and BitBlt do not see the Vulkan swapchain** (black), and `method="screen"` shows whatever covers the window (another
+  application on the desktop). `screenshot` therefore asks the game for its own next presented frame first (request file
+  `screenshot.<pid>` in the run's request folder, answered by the runtime's request poller); bundles and states never keep a black or screen picture.
+- `load_state("first_scene")`: boot to the title movie 17 s, A taken on the second press at 27 s (the title movie's decoder finalized
+  after 26 pictures), the first frame with 13,049 draws at 51 s; 57 s in all.
+- Through the MCP protocol: `load_state("first_scene")` 30 s with warm caches, `save_state("after_intro")`, `capture_bug` (answered by
+  the game), `kill`, `load_state("after_intro")` in a new process 29 s, `bugs`, `load_state(bug=...)` 24 s.
+- A Git Bash `tail -f` on the run's log keeps it from being renamed (`launch` keeps the previous log as `<log>.prev`): `launch` waits
+  20 s and then says the log is still open. A `tail` started by a stopped Claude Code monitor can survive it; end that `tail.exe`.
+- Still open: raw mouse look with `rel`, scripted runs on the real exe (`frame_source=tick`, `result.json`, `@peek`/`@poke`), and Ocarina
+  of Time probes (`runtime/games/oot` has no `tt::GameProbes`, so the trace has only frame, hash and time).

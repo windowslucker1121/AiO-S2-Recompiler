@@ -296,6 +296,30 @@ Rules for agents:
   only its folder, the game folder's `controls.ini`, `pipeline_keys.bin`, `shader_order.txt`, the shared `pipeline_cache.bin`, `prepare.state`
   and the default save stayed untouched; a second start of a running instance and the memory guard both exit 7.
 
+**States and bug bundles (2026-11-06)**: tools `states`, `save_state`, `load_state`, `capture_bug`, `bugs` (`tools/ai/states.py`, README
+"States" and "Bug bundles"). **No process snapshot** (guest threads live on host stacks of lifted frames, plus kernel/service/Vulkan
+objects; nothing can write that out and recreate it). A state = the game's committed save data (`work/states/oot/<name>/save`) + reach
+steps from `recomp/games/oot/ai_states.toml` (routes `title`, `new_game`, `continue`, `in_game`; built-in states `title`,
+`first_scene`) + build/settings/env + the instance it came from. `load_state` copies the save into the save folder of the instance it
+starts (`work\ai_run\oot\save`, or `work\ai_run\oot\<instance>\save`) and launches with `[fs] save_dir` there: the player's
+`%APPDATA%\OcarinaRecompPC\save` is never touched. A state or bundle starts the instance it came from again unless `instance=` says
+otherwise (pass one while another session may use that name). The routes default to the loop-capped shader cache (until
+`work\shaders\oot\spirv` is re-translated with the A8 fix) and `[media] video_max_pictures = 120`. OoT has an auto-save manager (`AutoSaveMgr`, `TriggerRequestAutoSave` in main's strings),
+so states made right after an autosave are exact. Bug bundles: the player presses **F9** in game (note prompt follows; `[bug]` keys in
+`runtime/docs/CONFIG.md`), or `capture_bug(instance=...)` (request file `capture_bug.<pid>` in the run's request folder: the instance
+folder, or the exe's folder for the default run); they land in `work\bugs\<time>[-instance][-name]` of the checkout the exe was built in,
+with the instance in `bug.json`; `load_state(bug=<id>)` starts from one. Every exe now logs `boot: built from commit <sha>`
+(gen/build_id.h, rewritten at each build only when the commit or the dirty state changes).
+Seen on the real game (RTX 4080): posted keys reach the covered, unfocused window (Enter = A on the title, F9); **PrintWindow/BitBlt
+give black for the Vulkan swapchain**, so `screenshot` asks the runtime for its next presented frame (`screenshot.<pid>` in the
+request folder) and never falls back to the screen by itself. `load_state("first_scene")` took 57 s (A taken at 27 s, 13,049 draws at 51 s). After
+that the intro's timeline (German subtitles, voices) runs on over a black picture (A12) for minutes even though its video ended, and
+in eight minutes the game wrote no slot (only the 320-byte slot index `account.sav`); `+` showed no menu. So a state past a real save,
+and the `continue` route, are still unchecked: first get the scene to show (A12) and the game to save. Checked end to end
+through the MCP protocol: `load_state("first_scene")` -> `save_state("after_intro")` -> `capture_bug` -> `kill` -> `load_state("after_intro")`
+(29 s) -> `load_state(bug=...)` (24 s). Pitfall: a Git Bash `tail -f` on the run log (also one left behind by a stopped monitor) blocks
+the log rotation of the next `launch`.
+
 ## Machine setup (this checkout, Windows 11)
 
 | Tool | Where | Notes |
