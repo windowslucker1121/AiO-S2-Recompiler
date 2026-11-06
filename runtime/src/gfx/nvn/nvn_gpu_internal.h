@@ -297,6 +297,7 @@ bool snapshot_write(int index, const std::string& png_path, std::string* stats);
 // [nvn] trace_dump_tex = <dir>: writes the data prepare_texture builds for t (raw blocks of every level and layer) as t<id>.bin with a t<id>.txt describing it, once per texture.
 void trace_dump_prepared(Texture* t, const std::string& dir);
 int snapshot_record_raw(Texture* t, Frame& f);   // block-compressed level 0 as the GPU holds it; snapshot_write writes the bytes
+int snapshot_record_buffer(VkBuffer src, VkDeviceSize offset, VkDeviceSize size, Frame& f);   // a buffer range as it is (trace_snap_ssbo)
 void tex_destroy(TexGpu* g);      // render thread
 void tex_shutdown();              // frees samplers and dummy resources (device idle)
 // Image formats chosen: bool descriptor for tests and logs

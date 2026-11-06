@@ -2274,6 +2274,22 @@ int snapshot_record_raw(Texture* t, Frame& fr) {
     return static_cast<int>(g_snaps.size()) - 1;
 }
 
+// A buffer range as the GPU holds it at this point of the command stream (trace_snap_ssbo): written as it is by snapshot_write.
+int snapshot_record_buffer(VkBuffer src, VkDeviceSize offset, VkDeviceSize size, Frame& fr) {
+    if (!src || !size) return -1;
+    Snapshot s;
+    s.raw = true;
+    s.e = {static_cast<uint32_t>(size), 1, 1};
+    if (device().create_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, gfx::MemoryUse::Readback, &s.buf, "nvn buffer snapshot") != VK_SUCCESS) return -1;
+    memory_barrier(fr.cb);   // the shader writes before the copy
+    const VkBufferCopy r = {offset, 0, size};
+    vkCmdCopyBuffer(fr.cb, src, s.buf.buffer, 1, &r);
+    memory_barrier(fr.cb);
+    g_snaps.push_back(std::move(s));
+    g_gauge_texture_snapshots.add(1);
+    return static_cast<int>(g_snaps.size()) - 1;
+}
+
 void trace_dump_prepared(Texture* t, const std::string& dir) {
     static std::unordered_set<uint32_t> done;
     if (!t || !done.insert(t->id).second) return;
@@ -2321,7 +2337,8 @@ bool snapshot_write(int index, const std::string& path_in, std::string* stats) {
     const bool ok = convert_png_impl(static_cast<const uint8_t*>(s.buf.mapped), s.format, s.e, s.bpp, s.aspect, path, stats);
     // depth, 16-bit and float colour: the texel bytes too (<path>.bin), an 8-bit PNG loses the precision (and clamps HDR values at 1)
     if ((s.aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || s.format == VK_FORMAT_R16G16B16A16_UNORM || s.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 ||
-        s.format == VK_FORMAT_R16G16B16A16_SFLOAT || s.format == VK_FORMAT_R32_SFLOAT || s.format == VK_FORMAT_R32G32B32A32_SFLOAT) {
+        s.format == VK_FORMAT_R16G16B16A16_SFLOAT || s.format == VK_FORMAT_R32_SFLOAT || s.format == VK_FORMAT_R32G32B32A32_SFLOAT ||
+        s.format == VK_FORMAT_R16_SFLOAT || s.format == VK_FORMAT_R16G16_SFLOAT || s.format == VK_FORMAT_R32G32_SFLOAT) {
         if (FILE* f = std::fopen((path + ".bin").c_str(), "wb")) {
             std::fwrite(s.buf.mapped, 1, static_cast<size_t>(s.e.width) * s.e.height * s.bpp, f);
             std::fclose(f);

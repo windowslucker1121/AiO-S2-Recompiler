@@ -1490,11 +1490,6 @@ bool tsr_jitter(uint32_t* words, size_t n_words) {
     return extras::temporal_jitter_block(words, n_words, e.width, e.height, g_tsr_frame);
 }
 
-// c[0] of an NVN2 compute program, as the driver lays it out per dispatch (apply_nvn2_compute_table): a 0x10-byte header (zero: no shader
-// reads it), the push constant area (ShaderControl::c0_push bytes of SmallState::push_cs), the uniform block and storage buffer descriptors
-// {address, size} of the bound compute slots, then their texture and image handles. The shader reaches the descriptors and handles through
-// its bindings (the translator maps them); the copy keeps any plain read of those words right. Only programs with push constants need it:
-// the others read nothing from c[0] but descriptor bases and keep the shared driver-constant buffer. False: not such a program, or no room.
 // True when `n` bytes at `addr` lie in a memory pool backed by host memory, so a trace may print them: a virtual (sparse) pool's addresses
 // (0x2000_0000_0000 and up in OoT: storage buffer 8 of compute 54ecc4b4) are not mapped on the host, and reading them faulted.
 bool host_readable(uint64_t addr, uint64_t n) {
@@ -1502,11 +1497,22 @@ bool host_readable(uint64_t addr, uint64_t n) {
     return h.pool && !h.pool->is_virtual && h.pool->base && h.offset + n <= h.pool->size;
 }
 
+// The work-group counts of the dispatch being recorded (do_dispatch), for the c[0] header.
+uint32_t g_dispatch_groups[3] = {1, 1, 1};
+
+// c[0] of an NVN2 compute program, as the driver lays it out per dispatch (apply_nvn2_compute_table): a 0x10-byte header (word 0 zero, words 1-3
+// the dispatch's work-group counts x, y, z), the push constant area (ShaderControl::c0_push bytes of SmallState::push_cs), the uniform block and
+// storage buffer descriptors {address, size} of the bound compute slots, then their texture and image handles. The shader reaches the
+// descriptors and handles through its bindings (the translator maps them); the copy keeps any plain read of those words right.
+// The header words: OoT's sky-lighting pass 16a42858 (spherical harmonics of the sky panorama, dispatched 1x1x1 with 32x32 invocations) reads
+// c[0] 0x4 as the row width in groups and 0x4 * 0x8 as the sample count; left zero, it divided by zero, its inf/NaN went into the ambient term of
+// every material and whole frames came out white (A12). False: not an NVN2 compute program, or no room.
 constexpr VkDeviceSize kComputeC0Bytes = 0x1000;
 bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n) {
-    if (!c.nvn2 || c.stage != 5 || !c.c0_push || c.c0_table > n) return false;
+    if (!c.nvn2 || c.stage != 5 || c.c0_table > n) return false;
     std::memset(p, 0, n);
-    std::memcpy(p + 0x10, S.small.push_cs, std::min<uint32_t>(c.c0_push, kPushAreaBytes));
+    std::memcpy(p + 4, g_dispatch_groups, 12);
+    if (c.c0_push) std::memcpy(p + 0x10, S.small.push_cs, std::min<uint32_t>(c.c0_push, kPushAreaBytes));
     size_t off = 0x10 + c.c0_push;
     auto put64 = [&](uint64_t v) { std::memcpy(p + off, &v, 8); };
     auto desc = [&](const GState::Bind* b) {
@@ -1522,7 +1528,7 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n) {
     return true;
 }
 bool compute_c0(const ShaderInfo& s, VkDescriptorBufferInfo& bi) {
-    if (!s.control.nvn2 || s.control.stage != 5 || !s.control.c0_push) return false;
+    if (!s.control.nvn2 || s.control.stage != 5) return false;
     const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
     UploadAlloc u = F->upload(kComputeC0Bytes, std::max<VkDeviceSize>(align, 256));
     if (!u || !fill_compute_c0(s.control, u.ptr, static_cast<size_t>(kComputeC0Bytes))) return false;
@@ -2639,6 +2645,23 @@ void trace_snap_after_draw() {
     if (g_trace_snap_sampled) {
         for (Texture* t : g_trace_sampled) take(t);
     }
+    // [nvn] trace_snap_ssbo = 1: the storage buffers bound to the vertex and fragment stages too, as the GPU holds them after the draw
+    // (snapb_d<draw>_<stage>s<slot>_<address>.bin, at most 1 MiB each): buffers that compute passes write never reach the CPU's view.
+    static const bool snap_ssbo = nxrt::config_get_bool("nvn", "trace_snap_ssbo", false);
+    if (snap_ssbo)
+        for (int st : {kVertex, kFragment})
+            for (int k = 0; k < 16; ++k) {
+                const GState::Bind& b = S.ssbo[st][k];
+                if (!b.addr) continue;
+                const uint64_t n = std::min<uint64_t>(b.size ? b.size : 65536, 1u << 20);
+                const BufRef r = held_or_pool(b.addr, n, kOutStorageXfb, true);
+                if (!r.buffer) continue;
+                const int idx = snapshot_record_buffer(r.buffer, r.offset, std::min<VkDeviceSize>(n, r.avail ? r.avail : n), *F);
+                if (idx < 0) continue;
+                char name[96];
+                std::snprintf(name, sizeof name, "snapb_d%d_%cs%d_%llx.bin", g_trace_n, st == kVertex ? 'v' : 'f', k, static_cast<unsigned long long>(b.addr));
+                g_trace_snaps.push_back({idx, g_trace_n, name, "raw"});
+            }
 }
 
 // Counts a draw for the primitive counters, before the replay decides whether to skip it: the console generates the primitives of every
@@ -3136,6 +3159,13 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     g_shadowing = compute_shadows_on();
     g_shadow_uses.clear();
     g_sh_barrier = g_sh_copied = false;
+    // The work-group counts for the c[0] header (fill_compute_c0). An indirect dispatch's arguments as the CPU sees them (a dispatch
+    // that wrote them on the GPU this frame is not visible here: then the header holds the values of the last host copy, or 1s).
+    g_dispatch_groups[0] = x; g_dispatch_groups[1] = y; g_dispatch_groups[2] = z;
+    if (indirect) {
+        if (host_readable(indirect, 12)) std::memcpy(g_dispatch_groups, host_ptr(indirect), 12);
+        else g_dispatch_groups[0] = g_dispatch_groups[1] = g_dispatch_groups[2] = 1;
+    }
     bind_sets(*pl, VK_PIPELINE_BIND_POINT_COMPUTE);
     if (g_sh_copied) {
         memory_barrier(F->cb);     // the copies into the shadows before the dispatch reads them
