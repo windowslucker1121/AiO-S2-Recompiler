@@ -1,0 +1,54 @@
+# Ocarina of Time: game knowledge for the AI test tooling's states (tools/ai/states.py: states, save_state, load_state).
+# A state is the game's own save data plus the steps that bring a fresh start of the exe back to the moment (no process snapshot).
+# {data} = the checkout that has game/oot (this one, or the main checkout of a worktree); {root} = this checkout.
+# Step kinds: route = "<name>", wait_for = {wait_for arguments}, input = [send_input steps, posted to the window], sleep = seconds,
+# shot = "<name>", press_until = {input = [...], every_s, until = {wait_for arguments}, timeout_s}; optional = true lets a step fail.
+# Keyboard: Enter = A, Shift/Backspace = B, Escape = +, WASD = left stick, arrows = right stick (runtime/games/oot/oot_game.cpp).
+
+[defaults]
+# every load_state launch: the game data of the main checkout, no freeze watchdog (the first frame of a scene takes up to two minutes
+# to replay on a cold texture cache), movies cut after 120 pictures (the title loop restarts every few seconds, the 5-minute intro and
+# cutscene movies end at once; a call with settings {"media.video_max_pictures": 0} plays them whole, the routes then need longer), and
+# the loop-capped shader cache until work/shaders/oot/spirv is re-translated with the A8 fix (endless loops in translated shaders)
+args = ["--game", "{data}/game/oot/updates/131072"]
+settings = { "diag.watchdog_seconds" = -1, "media.video_max_pictures" = 120 }
+env = { NXRT_NVN_SHADER_CACHE = "{data}/work/shaders/oot_cap/spirv", NXRT_HARNESS_LOOP_CAP = "1024", NXRT_NVN_SHADER_CORPUS = "{data}/work/shaders/oot/corpus", NXRT_NVN_SHADER_TRANSLATOR = "{data}/tools/shaders/build/bin/Release/net10.0/spirv_harness.exe" }
+# what save_state records when it is not told: boot to the title, load the save, wait for the scene
+reach = ["title", "continue", "in_game"]
+ready = { until = "log", pattern = "pacing on \\(present \\d+, \\d{4,} draws\\)", timeout_s = 300 }
+
+[route.title]
+description = "boot to the title screen (the title movie loops; the menu takes A from about 45 s)"
+steps = [
+  { wait_for = { until = "log", pattern = "AV1 decoder 1 created", timeout_s = 240 } },
+]
+
+[route.new_game]
+description = "title: A on New Game until the title movie is cut (a decoder finalized after fewer than 120 pictures)"
+steps = [
+  { press_until = { input = ["key Return"], every_s = 3, until = { until = "log", pattern = "finalized after ([0-9]|[1-9][0-9]|1[01][0-9]) pictures" }, timeout_s = 120 } },
+]
+
+[route.continue]
+# not yet checked with a real slot (no run has reached a save so far): with a save the title may show a slot choice first
+description = "title: A on the first menu entry (with a save: continue it) until the title movie is cut"
+steps = [
+  { press_until = { input = ["key Return"], every_s = 3, until = { until = "log", pattern = "finalized after ([0-9]|[1-9][0-9]|1[01][0-9]) pictures" }, timeout_s = 120 } },
+]
+
+[route.in_game]
+description = "wait for the first frame of a 3D scene (thousands of draws; the first visit replays it for a minute or two)"
+steps = [
+  { wait_for = { until = "log", pattern = "pacing on \\(present \\d+, \\d{4,} draws\\)", timeout_s = 600 } },
+  { sleep = 5 },
+]
+
+[state.title]
+description = "the title screen, fresh save data"
+reach = ["title"]
+
+[state.first_scene]
+# 57 s on the RTX 4080 (2026-11-06): the title at 17 s, A taken at 27 s, 13,049 draws at 51 s. The intro's timeline (subtitles, voices)
+# still runs for minutes after its video ends; the picture of that scene was black in that run (A12).
+description = "New Game from fresh save data: the intro video cut short, the first 3D scene (thousands of draws) loaded behind it (~1 min)"
+reach = ["title", "new_game", "in_game"]

@@ -14,6 +14,7 @@
 #include "nxrt/config.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gfx.h"
+#include "nxrt/instance.h"
 #include "nxrt/log.h"
 #include "nxrt/lowlat.h"
 #include "nxrt/platform.h"
@@ -928,7 +929,7 @@ bool Renderer::headless() const { return impl_->headless; }
 
 void Renderer::request_screenshot(const std::string& png_path) {
     g_png_writes.fetch_add(1);   // until the worker has written the file (wait_screenshot_writes)
-    impl_->cap_path = png_path;
+    impl_->cap_path = instance_file(png_path);   // relative: the working folder, or the instance folder (nxrt/instance.h)
     impl_->cap_pending.store(true, std::memory_order_release);   // after the path is set: end_frame reads the path once it sees the flag
 }
 

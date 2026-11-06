@@ -25,6 +25,7 @@
 
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
+#include "nxrt/instance.h"
 #include "nxrt/ipc.h"
 #include "nxrt/log.h"
 #include "nxrt/services.h"
@@ -281,16 +282,8 @@ uint64_t rd64(const uint8_t* p, size_t off) {
     return v;
 }
 
-// <exe path without extension>_fatal.txt, the way the crash handler names its file.
-std::string default_report_path() {
-    char exe[1024] = {};
-    const DWORD n = GetModuleFileNameA(nullptr, exe, sizeof exe);
-    std::string p(exe, n < sizeof exe ? n : sizeof exe - 1);
-    const size_t slash = p.find_last_of("\\/");
-    const size_t dot = p.find_last_of('.');
-    if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) p.erase(dot);
-    return p + "_fatal.txt";
-}
+// <exe path without extension>_fatal.txt, the way the crash handler names its file (a named instance: in its folder, nxrt/instance.h).
+std::string default_report_path() { return instance_report_path("_fatal.txt"); }
 
 // [fatal] report_path when set (empty = no file), else the default.
 std::string report_path() {

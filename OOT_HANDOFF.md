@@ -161,6 +161,7 @@ Runtime:
 3. After translator changes: `dotnet build tools\shaders\harness\SpirvHarness.csproj -c Release`, re-translate what changed and merge
    it. The next start then runs the shader preparation window again if new programs became preparable (15-30 minutes).
 4. Start with A8 (step 1 of its list above), and use the MCP `game` tools (`launch`, `wait_for`, `screenshot`, `log`, `reports`) to
-   drive runs; crash reports are `game-build\build\release\oot_crash.txt`.
-5. Rules that still apply (from the user): one build or one `oot.exe` at a time; tools only in git-ignored repo folders from official
+   drive runs; crash reports are `game-build\build\release\oot_crash.txt` (a named instance: in its instance folder).
+5. Rules that still apply (from the user): one build at a time; a second `oot.exe` only as a named instance (`--instance NAME`, MCP
+   `launch(instance=...)`), never for device-loss tests or fps measurements (AGENTS.md, "Several runs at once"); tools only in git-ignored repo folders from official
    releases with checksum checks; never change system or security settings; keep `AGENTS.md` current; commit at milestones.

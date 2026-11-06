@@ -106,6 +106,13 @@ if(GAME_BUILD_RT_DLL)
 endif()
 
 add_executable(game_exe src/game_main.cpp "${GAME_GEN}/game.rc")
+# gen/build_id.h: the commit this exe is built from and whether tracked files had changes (bug capture bundles record it, nxrt/bugcapture.h).
+# Rewritten only when it changes, at every build.
+find_package(Git QUIET)
+set(_game_build_id_args "-DGIT=${GIT_EXECUTABLE}" "-DROOT=${GAME_ROOT}" "-DOUT=${GAME_GEN}/build_id.h" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_id.cmake")
+execute_process(COMMAND "${CMAKE_COMMAND}" ${_game_build_id_args})
+add_custom_target(game_build_id COMMAND "${CMAKE_COMMAND}" ${_game_build_id_args} BYPRODUCTS "${GAME_GEN}/build_id.h" VERBATIM)
+add_dependencies(game_exe game_build_id)
 set_target_properties(game_exe PROPERTIES OUTPUT_NAME "${GM_EXE_STEM}")
 set_source_files_properties(src/game_main.cpp PROPERTIES COMPILE_DEFINITIONS "GAME_RELEASE_VERSION=\"${GAME_VERSION}\"")
 set_source_files_properties("${GAME_GEN}/game.rc" PROPERTIES COMPILE_DEFINITIONS "GAME_VER_MAJOR=${GAME_VER_MAJOR};GAME_VER_MINOR=${GAME_VER_MINOR};GAME_VER_PATCH=${GAME_VER_PATCH};GAME_VER_TEXT=\"${GAME_VERSION}\""

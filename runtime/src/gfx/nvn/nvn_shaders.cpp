@@ -1575,12 +1575,13 @@ std::string exe_folder_utf8() {
 }
 
 // Held open for the life of the process: the launcher's setup sees the game running (it cannot open the file for writing) and lowers its
-// own translation to idle priority. <cache dir>/../game_running.lock.
+// own translation to idle priority. <cache dir>/../game_running.lock. Shared for writing, so every run of the game on this cache holds it
+// (named instances: nxrt/instance.h), not only the first; the launcher's exclusive open still fails while any of them runs.
 void hold_game_lock(const std::string& cache_dir) {
     static HANDLE h = INVALID_HANDLE_VALUE;
     if (h != INVALID_HANDLE_VALUE) return;
     const std::wstring p = (std::filesystem::path(cache_dir).parent_path() / "game_running.lock").wstring();
-    h = CreateFileW(p.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    h = CreateFileW(p.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 }
 
 // A cache folder without results.tsv: with a translator the cache starts empty and fills while the game runs (header only, the format
