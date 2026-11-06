@@ -52,13 +52,20 @@ std::vector<std::string> corpus_hashes(const std::string& corpus) {
     return out;
 }
 
-bool prepare_finished(const std::filesystem::path& state) {
+// Finished, and for the shader cache as it is now (its results.tsv size is in the key: new translations make more programs preparable).
+bool prepare_finished(const std::filesystem::path& state, const std::filesystem::path& results) {
     // ponytail: the state's GPU/driver key is not checked here (that needs a device); after a driver update the game links parts at run time
+    std::error_code ec;
+    const std::string size = " results=" + std::to_string(std::filesystem::file_size(results, ec));
     std::ifstream f(state);
     std::string l;
-    while (std::getline(f, l))
-        if (l.rfind("complete: 1", 0) == 0) return true;
-    return false;
+    bool done = false, same = false;
+    while (std::getline(f, l)) {
+        while (!l.empty() && l.back() == 13) l.pop_back();
+        if (l.rfind("complete: 1", 0) == 0) done = true;
+        if (l.rfind("key: ", 0) == 0 && l.size() >= size.size() && l.compare(l.size() - size.size(), size.size(), size) == 0) same = true;
+    }
+    return done && same;
 }
 
 std::wstring thousands(uint64_t v) {
@@ -185,7 +192,7 @@ bool shader_setup_before_start(const char* title, const ShaderSetupPrepare& prep
             if (!cache.has_record(h)) missing.push_back(std::move(h));
     const std::filesystem::path base = std::filesystem::path(cache.dir()).parent_path();
     std::error_code ec;
-    const bool want_prepare = prepare && std::filesystem::is_regular_file(base / "programs.bin", ec) && !prepare_finished(base / "prepare.state");
+    const bool want_prepare = prepare && std::filesystem::is_regular_file(base / "programs.bin", ec) && !prepare_finished(base / "prepare.state", std::filesystem::path(cache.dir()) / "results.tsv");
     if (missing.empty() && !want_prepare) return true;
 
     g.title.resize(static_cast<size_t>(MultiByteToWideChar(CP_UTF8, 0, title, -1, nullptr, 0)));

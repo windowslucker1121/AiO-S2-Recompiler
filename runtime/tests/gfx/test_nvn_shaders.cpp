@@ -102,6 +102,29 @@ NXTEST(harness_numbers_out_of_range) {
     CHECK(!parse_harness_resources("sb[c0+0x100000000]=s0b1", r));
 }
 
+// A texture whose handle the draw computes (translator/ampere-bindless-handle-expr.patch): the expression after '|' (it holds an "x" in
+// "xor", which is not the array length), parsed into a program that leaves one value.
+NXTEST(harness_handle_expression) {
+    std::vector<HarnessResource> r;
+    CHECK(parse_harness_resources("texTexture2D[c131072:2|c4.33,#c0000000,and,#80000000,ne,not,c5.187,#5,shl,#10,xor,#10,sel,#2,shr,s324]=s2b150", r));
+    CHECK_EQ(r.size(), size_t(1));
+    if (r.empty()) return;
+    CHECK_EQ(r[0].bank, kHandleExprBank);
+    CHECK_EQ(r[0].word, 2);
+    CHECK_EQ(r[0].array_length, 1);
+    std::vector<HandleExprOp> prog;
+    CHECK(parse_handle_expr(r[0].expr, prog));
+    CHECK_EQ(prog.size(), size_t(16));
+    if (prog.size() == 16) {
+        CHECK(prog[0].kind == HandleExprOp::Cbuf && prog[0].a == 4 && prog[0].b == 33);
+        CHECK(prog[1].kind == HandleExprOp::Const && prog[1].a == 0xc0000000u);
+        CHECK(prog[15].kind == HandleExprOp::Storage && prog[15].a == 324 * 4);
+    }
+    CHECK(!parse_handle_expr("c4.33,#1", prog));        // two values left
+    CHECK(!parse_handle_expr("add", prog));             // nothing to add
+    CHECK(!parse_handle_expr("c4.33,frob", prog));      // unknown token
+}
+
 NXTEST(shader_hash_is_sha1_prefix) {
     CHECK_EQ(shader_hash(reinterpret_cast<const uint8_t*>("abc"), 3), std::string("a9993e364706816a"));
 }

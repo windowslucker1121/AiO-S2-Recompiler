@@ -20,6 +20,13 @@ namespace Nx.Shaders.Ampere
         static void TexHandle(Ctx c, bool bindless)
         {
             if (bindless) return;
+            if ((c.Lo & 0xfff) == 0xf60)
+            {
+                // TEX with the handle in a uniform register pair [probe, nvdisasm 13.3]: URn at 40..45, then an 8-bit immediate at 46..53
+                // ("UR10, 0x0"); 54..59 do nothing. NVN2 shaders load URn = handle, URn+1 = handle >> 20 (the sampler index).
+                c.Add(c.UR(40), c.Hex(46, 8));
+                return;
+            }
             c.Add(c.Hex(54, 5), c.Imm((long)c.F(40, 14), SassText.Hex((long)c.F(40, 14))));
         }
 
@@ -67,6 +74,7 @@ namespace Nx.Shaders.Ampere
             Action<Ctx> txdMods = c => { c.Mod(c.B(76), "AOFFI"); };
             Op12(0xb60, c => TexCommon(c, "TEX", false, texMods));
             Op12(0x361, c => TexCommon(c, "TEX", true, texMods));
+            Op12(0xf60, c => TexCommon(c, "TEX", false, texMods));   // handle in URn (TexHandle); bit 91 set in every word seen
             Op12(0xb66, c => TexCommon(c, "TLD", false, tldMods, TexDimTld));
             Op12(0x367, c => TexCommon(c, "TLD", true, tldMods, TexDimTld));
             Op12(0xb63, c => TexCommon(c, "TLD4", false, tld4Mods));

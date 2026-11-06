@@ -1016,15 +1016,19 @@ std::string hex16(uint64_t h) {
 }  // namespace
 
 // The state file next to the program list: which GPU and driver the preparation ran on and whether it finished. The key changes with the
-// GPU, the driver version, the pipeline cache UUID (a driver update changes it) and the version of the part scheme in this file.
+// GPU, the driver version, the pipeline cache UUID (a driver update changes it), the version of the part scheme in this file and the size of
+// the shader cache's results.tsv (shaders translated since make more programs preparable; nvn_setup.cpp checks this one without a device).
 constexpr int kPrepareScheme = 1;
 std::string prepare_key(uint64_t programs) {
+    std::error_code ec;
+    const uintmax_t results = std::filesystem::file_size(std::filesystem::path(shader_cache().dir()) / "results.tsv", ec);
     const VkPhysicalDeviceProperties& p = device().properties();
     char uuid[40];
     for (int i = 0; i < 16; ++i) std::snprintf(uuid + 2 * i, 3, "%02x", p.pipelineCacheUUID[i]);
     char b[512];
-    std::snprintf(b, sizeof b, "scheme=%d programs=%llu gpu=%s driver=%u api=%u cache=%s salt=%s", kPrepareScheme, static_cast<unsigned long long>(programs),
-                  p.deviceName, p.driverVersion, p.apiVersion, uuid, config_get_str("nvn", "spirv_salt", "").c_str());
+    std::snprintf(b, sizeof b, "scheme=%d programs=%llu gpu=%s driver=%u api=%u cache=%s salt=%s results=%llu", kPrepareScheme,
+                  static_cast<unsigned long long>(programs), p.deviceName, p.driverVersion, p.apiVersion, uuid, config_get_str("nvn", "spirv_salt", "").c_str(),
+                  static_cast<unsigned long long>(ec ? 0 : results));
     return b;
 }
 

@@ -78,6 +78,7 @@ constexpr size_t kBacklog = 3;                            // decoded pictures wa
 constexpr size_t kPacketBacklog = 32;                     // packets not decoded yet (decoding waits for an output buffer) before the same
 
 bool g_log = false;
+uint64_t g_max_pictures = 0;   // [media] video_max_pictures (tests): a stream ends after this many pictures (0 = never)
 int g_threads = 4;
 std::atomic<bool> g_enabled{false};
 std::atomic<uint64_t> s_created{0}, s_destroyed{0}, s_packets{0}, s_decoded{0}, s_delivered{0}, s_read{0}, s_errors{0};
@@ -239,7 +240,9 @@ bool vpx_open(Decoder& d) {
         Dav1dSettings s;
         dav1d_default_settings(&s);
         s.n_threads = g_threads;
-        s.max_frame_delay = 1;   // a picture per packet, as the player expects of the console decoder
+        // max_frame_delay stays 0 (dav1d picks it from the thread count): frame threading needs several pictures in flight, and the
+        // player submits packets well ahead of the pictures it reads (kPacketBacklog), so pump() always has the next ones. With 1, dav1d
+        // only had tile threads and made ~21 pictures/s of OoT's 1080p intro on the Core Ultra 5.
         const int e = dav1d_open(&d.av1, &s);
         d.vpx_ok = e == 0;
         if (!d.vpx_ok) note_error("decoder %u: dav1d_open failed (%d)", d.id, e);
@@ -474,6 +477,11 @@ bool pump(Decoder& d) {
     while (!d.waiting.empty() && d.ready.empty() && !d.packets.empty()) {
         Packet p = std::move(d.packets.front());
         d.packets.pop_front();
+        if (g_max_pictures && d.pictures >= g_max_pictures) {   // the stream ends here (tests skip OoT's 5-minute intro this way)
+            d.packets.clear();
+            p.data.clear();
+            p.eos = true;
+        }
         if (!p.data.empty()) decode_into(d, p.data.data(), p.data.size(), p.pts);
         if (p.eos) {
             if (d.vpx_ok) decode_into(d, nullptr, 0, p.pts);   // drain
@@ -1084,7 +1092,9 @@ bool install_video_codec_hle() {
             return;
         }
         g_log = config_get_bool("media", "video_decoder_log", false);
-        g_threads = static_cast<int>(std::clamp<int64_t>(config_get_int("media", "video_decoder_threads", 4), 1, 16));
+        g_max_pictures = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("media", "video_max_pictures", 0)));
+        const int64_t hw = std::max(1u, std::thread::hardware_concurrency());
+        g_threads = static_cast<int>(std::clamp<int64_t>(config_get_int("media", "video_decoder_threads", std::clamp<int64_t>(hw / 2, 4, 8)), 1, 16));
         for (const Import& im : kImports) {
             hle_register(im.name, im.fn);
             module_override_symbol(im.name);

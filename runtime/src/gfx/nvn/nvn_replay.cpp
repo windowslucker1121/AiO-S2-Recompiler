@@ -674,6 +674,74 @@ uint32_t read_handle_word(int stage, int bank, int word) {
     return v;
 }
 
+int storage_slot_for(int nvn_stage, int c0_offset);
+
+// The handle of a HandleExpr texture (nvn_shaders.h HandleExprOp) from what the draw binds now. Words outside a buffer read 0.
+uint32_t eval_handle_expr(const BindingDesc& d, const std::vector<HandleExprOp>& prog) {
+    uint32_t st[64];
+    int n = 0;
+    for (const HandleExprOp& op : prog) {
+        if (n >= 64) return 0;
+        uint32_t v = 0;
+        switch (op.kind) {
+            case HandleExprOp::Const: v = op.a; break;
+            case HandleExprOp::Cbuf:
+                if (op.a == 1) {
+                    const std::vector<uint8_t>& k = d.shader->constants;
+                    if (static_cast<uint64_t>(op.b) * 4 + 4 <= k.size()) std::memcpy(&v, k.data() + static_cast<size_t>(op.b) * 4, 4);
+                } else {
+                    v = read_handle_word(d.nvn_stage, static_cast<int>(op.a), static_cast<int>(op.b));
+                }
+                break;
+            case HandleExprOp::Storage: {
+                const uint64_t idx = st[--n];
+                const int slot = storage_slot_for(d.nvn_stage, static_cast<int>(op.a));
+                const GState::Bind& sb = S.ssbo[d.nvn_stage][slot >= 0 && slot < 16 ? slot : 0];
+                if (slot >= 0 && slot < 16 && sb.addr && idx * 4 + 4 <= sb.size) std::memcpy(&v, host_ptr(sb.addr) + idx * 4, 4);
+                break;
+            }
+            case HandleExprOp::Inv: v = ~st[--n]; break;
+            case HandleExprOp::Not: v = st[--n] == 0; break;
+            case HandleExprOp::Sel: n -= 3; v = st[n] ? st[n + 1] : st[n + 2]; break;
+            default: {
+                const uint32_t y = st[--n], x = st[--n];
+                const int32_t sx = static_cast<int32_t>(x), sy = static_cast<int32_t>(y);
+                switch (op.kind) {
+                    case HandleExprOp::Add: v = x + y; break;
+                    case HandleExprOp::Sub: v = x - y; break;
+                    case HandleExprOp::Mul: v = x * y; break;
+                    case HandleExprOp::Shl: v = x << (y & 31); break;
+                    case HandleExprOp::Shr: v = x >> (y & 31); break;
+                    case HandleExprOp::Sar: v = static_cast<uint32_t>(sx >> (y & 31)); break;
+                    case HandleExprOp::And: v = x & y; break;
+                    case HandleExprOp::Or: v = x | y; break;
+                    case HandleExprOp::Xor: v = x ^ y; break;
+                    case HandleExprOp::Eq: v = x == y; break;
+                    case HandleExprOp::Ne: v = x != y; break;
+                    case HandleExprOp::Lt: v = sx < sy; break;
+                    case HandleExprOp::Ltu: v = x < y; break;
+                    case HandleExprOp::Le: v = sx <= sy; break;
+                    case HandleExprOp::Leu: v = x <= y; break;
+                    case HandleExprOp::Gt: v = sx > sy; break;
+                    case HandleExprOp::Gtu: v = x > y; break;
+                    case HandleExprOp::Ge: v = sx >= sy; break;
+                    case HandleExprOp::Geu: v = x >= y; break;
+                    case HandleExprOp::Min: v = static_cast<uint32_t>(std::min(sx, sy)); break;
+                    case HandleExprOp::Minu: v = std::min(x, y); break;
+                    case HandleExprOp::Max: v = static_cast<uint32_t>(std::max(sx, sy)); break;
+                    case HandleExprOp::Maxu: v = std::max(x, y); break;
+                    default: break;
+                }
+            }
+        }
+        st[n++] = v;
+    }
+    return n == 1 ? st[0] : 0;
+}
+
+// Textures resolve_texture finds: bound in c[2], a handle in a uniform block, a handle the draw computes.
+bool texture_source(NvnSource s) { return s == NvnSource::SamplerBinding || s == NvnSource::HandleInUniform || s == NvnSource::HandleExpr; }
+
 TexResolved resolve_texture(const BindingDesc& d) {
     TexResolved r;
     const DescriptorBinding& b = d.shader->refl.bindings[d.index];
@@ -683,6 +751,8 @@ TexResolved resolve_texture(const BindingDesc& d) {
         if (idx >= 0 && idx < 64) handle = S.tex[d.nvn_stage][idx];
     } else if (b.nvn.source == NvnSource::HandleInUniform) {
         handle = read_handle_word(d.nvn_stage, b.nvn.bank, b.nvn.word);
+    } else if (b.nvn.source == NvnSource::HandleExpr) {
+        handle = eval_handle_expr(d, b.nvn.expr);
     }
     const uint32_t tid = handle_texture_id(handle), sid = handle_sampler_id(handle);
     if (S.tpool && static_cast<int>(tid) < S.tpool->count) {
@@ -776,7 +846,7 @@ bool samples_depth_target(const ProgLayout& pl) {
     for (const BindingDesc& d : pl.bindings) {
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform) continue;
+        if (!texture_source(b.nvn.source)) continue;
         if (shares_image(resolve_texture(d).tex, S.depth_tex.get())) return true;
     }
     return false;
@@ -834,7 +904,7 @@ void feedback_prepare(const ProgLayout& pl) {
     for (const BindingDesc& d : pl.bindings) {
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform) continue;
+        if (!texture_source(b.nvn.source)) continue;
         const TexResolved r = resolve_texture(d);
         if (!r.tex || !tex_gpu(r.tex) || !is_color_feedback(r.tex) || r.tex->b.samples > 1 || g_fb_use.count(r.tex)) continue;
         any = true;
@@ -896,7 +966,7 @@ void vol3d_prepare(const ProgLayout& pl) {
     for (const BindingDesc& d : pl.bindings) {
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform) continue;
+        if (!texture_source(b.nvn.source)) continue;
         const TexResolved r = resolve_texture(d);
         if (!wants_vol3d(b, r) || g_vol3d_use.count(r.tex) || !tex_gpu(r.tex)) continue;
         const uint32_t layer = r.has_view && r.view.has_layers ? static_cast<uint32_t>(r.view.min_layer) : 0;
@@ -971,7 +1041,7 @@ void prepare_textures(const ProgLayout& pl) {
         }
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform) continue;
+        if (!texture_source(b.nvn.source)) continue;
         TexResolved r = resolve_texture(d);
         if (!r.tex) continue;
         if (!tex_gpu(r.tex)) continue;
@@ -1715,7 +1785,7 @@ void support_for_draw(const ProgLayout& pl, bool compute) {
         if (b.count != 1 || b.binding >= 640) continue;
         const bool is_fs = d.shader == fs;
         if (!is_fs && d.shader != vs) continue;
-        if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform) continue;
+        if (!texture_source(b.nvn.source)) continue;
         TexResolved r = resolve_texture(d);
         if (!r.tex) continue;
         const auto fb = g_fb_use.find(r.tex);
@@ -2003,7 +2073,7 @@ void temporal_for_draw(const ProgLayout& pl) {
     for (const BindingDesc& d : pl.bindings) {
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform) continue;
+        if (!texture_source(b.nvn.source)) continue;
         if (view_type_for(b) != VK_IMAGE_VIEW_TYPE_2D) continue;
         TexResolved r = resolve_texture(d);
         if (!r.tex || !tex_gpu(r.tex) || tex_is_depth(r.tex) || shares_image(r.tex, depth)) continue;
@@ -2054,7 +2124,7 @@ void scene_upscale_for_draw(const ProgLayout& pl) {
     for (const BindingDesc& d : pl.bindings) {
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform) continue;
+        if (!texture_source(b.nvn.source)) continue;
         if (view_type_for(b) != VK_IMAGE_VIEW_TYPE_2D) continue;
         TexResolved r = resolve_texture(d);
         if (!r.tex || !tex_gpu(r.tex) || shares_image(r.tex, S.depth_tex.get())) continue;

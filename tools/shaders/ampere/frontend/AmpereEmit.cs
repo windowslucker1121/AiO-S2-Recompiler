@@ -1459,6 +1459,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             Op d = i.Operands[0];
             string name = i.Operands[1].Text;
+            // the coarse shading rate of the pixel (variable-rate shading, 350 OoT fragment shaders): the host shades every pixel, so the
+            // rate is 1x1, 0 (inferred: no game word shows the encoding)
+            if (name == "SR_VARIABLE_RATE") { Dst(ctx, d, Const(0)); return; }
             if (!SRegs.TryGetValue(name, out SReg sr)) throw Unsup(name);
             if (sr is SReg.ClockLo or SReg.ClockHi) { Dst(ctx, d, Const(0)); return; }
             // Ryujinx's S2R on a transcoded Maxwell opcode, writing a scratch-free destination: use the Gpr directly when
@@ -1774,10 +1777,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
         };
 
         /// Splits the operands of TEX/TLD/TLD4/TXQ: Rd2, Rd, Ra, [Rb], bank, handle, [shape], [mask].
-        static (Op rd2, Op rd, Op ra, Op rb, int bank, int handle, string dim, int mask) TexOperands(SassInst i) => TexOperands(i, out _, false);
+        static (Op rd2, Op rd, Op ra, Op rb, int bank, int handle, string dim, int mask) TexOperands(SassInst i) => TexOperands(i, out _, false, out _, false);
 
         /// The same, optionally accepting the predicate destination after Rd (bit 81: the residency result of a sparse access).
         static (Op rd2, Op rd, Op ra, Op rb, int bank, int handle, string dim, int mask) TexOperands(SassInst i, out Op pred, bool allowPred)
+            => TexOperands(i, out pred, allowPred, out _, false);
+
+        /// allowHandles: also the forms without a bound handle, bank and handle -1 then: .B (the handle is the first register of Rb) and
+        /// the handle in a uniform register (0xf60, "URn, 0x0": ur = URn).
+        static (Op rd2, Op rd, Op ra, Op rb, int bank, int handle, string dim, int mask) TexOperands(SassInst i, out Op pred, bool allowPred, out Op ur, bool allowHandles)
         {
             IReadOnlyList<Op> o = i.Operands;
             int k = 0;
@@ -1797,6 +1805,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             List<Op> rest = o.Skip(k).ToList();
             List<Op> imms = rest.Where(x => x.Kind == OperandKind.Imm).ToList();
             string dim = rest.FirstOrDefault(x => x.Kind == OperandKind.Other)?.Text;
+            ur = rest.FirstOrDefault(x => x.Kind == OperandKind.UReg);
+            if ((ur != null || Has(i, "B")) && !allowHandles) throw Unsup("bindless or unknown handle form");
+            if (ur != null)
+            {
+                if (imms.Count < 1 || imms[0].ImmBits != 0) throw Unsup("uniform handle with an immediate");
+                return (regs[0], regs[1], regs[2], regs.Count > 3 ? regs[3] : null, -1, -1, dim, imms.Count > 1 ? (int)imms[1].ImmBits & 0xf : 0xf);
+            }
+            if (Has(i, "B"))
+                return (regs[0], regs[1], regs[2], regs.Count > 3 ? regs[3] : null, -1, -1, dim, imms.Count > 0 ? (int)imms[0].ImmBits & 0xf : 0xf);
             if (imms.Count < 2) throw Unsup("bindless or unknown handle form");
             int mask = imms.Count > 2 ? (int)imms[2].ImmBits & 0xf : 0xf;
             return (regs[0], regs[1], regs[2], regs.Count > 3 ? regs[3] : null, (int)imms[0].ImmBits, (int)imms[1].ImmBits, dim, mask);
@@ -1821,10 +1838,24 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         static void EmitTexAmpere(EmitterContext ctx, SassInst i, bool fetch)
         {
-            (Op rd2, Op rd, Op ra, Op rb, int bank, int handle, string dim, int mask) = TexOperands(i);
+            (Op rd2, Op rd, Op ra, Op rb, int bank, int handle, string dim, int mask) = TexOperands(i, out _, false, out Op ur, !fetch);
             if (rd.Reg >= 255 && rd2.Reg >= 255) return;
+            // Handles that are not in c[2] (NVN2 materials): Ryujinx's bindless sample, which BindlessElimination turns into a texture whose
+            // handle the runtime reads at draw time. URn holds the whole handle (the compiler puts handle >> 20, the sampler, in URn+1).
+            // .B: the handle is the first register of Rb, the other Rb parameters follow it (2a6233ad: "MOV R64, handle; R65 = depth
+            // reference; TEX.SCR.B.DC RZ, R104, R66(x, y), R64").
+            bool bindless = bank < 0;
+            IrOperand bindlessHandle = null;
+            if (ur != null) bindlessHandle = ctx.Copy(UGpr(ur.Reg));
+            else if (bindless)
+            {
+                if (rb == null || rb.Reg >= 255) throw Unsup("bindless handle in RZ");
+                bindlessHandle = ctx.Copy(Gpr(rb.Reg));
+                rb = rb with { Reg = rb.Reg + 1 };
+            }
             foreach (string m in i.Mods)
             {
+                if (m == "B" && bindless) continue;
                 if (m is not ("SCR" or "LZ" or "LL" or "LB" or "DC" or "AOFFI" or "NODEP" or "MS" or "NDV" or "EF" or "EL" or "LU" or "EU" or "NA")) throw Unsup($"modifier {m}");
             }
             bool scr = Has(i, "SCR");
@@ -1861,6 +1892,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 if (aoffi) all.Add("off");
                 if (ms) all.Add("ms");
                 int split = all.Count <= 2 ? 1 : 2;
+                // .B with two parameters: whether both stay in Ra once the handle takes Rb is not known (no such word seen)
+                if (bindless && ur == null && all.Count <= 2) throw Unsup("TEX.SCR.B with two parameters");
                 raList.AddRange(all.Take(split));
                 rbList.AddRange(all.Skip(split));
             }
@@ -1904,6 +1937,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (ms) { sources.Add(p["ms"]); type |= SamplerType.Multisample; }
             if (Has(i, "NDV") && !fetch) { /* no derivatives across the quad: plain sample on the host */ }
 
+            if (bindlessHandle != null)
+            {
+                sources.Insert(0, bindlessHandle);
+                ctx.TextureSample(type, flags | TextureFlags.Bindless, default, mask, TexDests(rd, rd2, mask), sources.ToArray());
+                return;
+            }
             SetBindingPair binding = ctx.ResourceManager.GetTextureOrImageBinding(Instruction.TextureSample, type, TextureFormat.Unknown, flags, CbufSlotOf(ctx, bank), handle);
             ctx.TextureSample(type, flags, binding, mask, TexDests(rd, rd2, mask), sources.ToArray());
         }

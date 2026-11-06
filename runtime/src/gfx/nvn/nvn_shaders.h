@@ -111,7 +111,22 @@ enum class NvnSource : uint8_t {
     SamplerBinding,   // texture whose handle is c[2] byte 0x20 + 8n: nvnCommandBufferBindTexture(stage, n)
     ImageBinding,     // image whose handle is c[2] byte 0x120 + 8n: nvnCommandBufferBindImage(stage, n) (inferred)
     HandleInUniform,  // texture whose handle the game wrote into uniform block `index` (c[bank]), at byte word * 4
+    HandleExpr,       // texture whose handle the draw computes with NvnMeaning::expr (bank kHandleExprBank, word = expression number)
 };
+
+// Handle expressions (HandleExpr; tools/shaders/harness/translator/ampere-bindless-handle-expr.patch): NVN2 materials load their texture
+// handles from a storage buffer table indexed from uniform blocks, which the translator writes as a postfix program over 32-bit integers.
+// Leaves: a constant, word b of c[a] (1 = the block's constant data, 3+ = uniform blocks), a storage buffer word (index popped; the buffer
+// whose descriptor is at byte a of c[0]). Comparisons give 1 or 0; and/or/xor serve the logical forms too.
+struct HandleExprOp {
+    enum Kind : uint8_t { Const, Cbuf, Storage, Add, Sub, Mul, Shl, Shr, Sar, And, Or, Xor, Inv, Eq, Ne, Lt, Ltu, Le, Leu, Gt, Gtu, Ge, Geu, Not,
+                          Min, Minu, Max, Maxu, Sel };
+    Kind kind = Const;
+    uint32_t a = 0, b = 0;
+};
+constexpr int kHandleExprBank = 0x20000;   // HandleExprSlot in the patch
+// False (and out cleared) on an unknown token or a program that does not leave exactly one value.
+bool parse_handle_expr(std::string_view text, std::vector<HandleExprOp>& out);
 
 struct NvnMeaning {
     NvnSource source = NvnSource::Unknown;
@@ -121,6 +136,8 @@ struct NvnMeaning {
     int sb_slot = -1;    // storage buffers: the translator's slot (order found), from the name "<stage>_s<slot>"
     int c0_offset = -1;  // storage buffers: byte offset of the descriptor in c[0]; -1 = not known (see apply_harness)
     bool default_bank = false;  // texture handle bank given by the translator as "the texture bank" (-1), i.e. c[2]
+    std::vector<HandleExprOp> expr;   // HandleExpr: the handle's program
+    std::string expr_text;            // HandleExpr: its text as the harness printed it
 };
 
 struct DescriptorBinding {
@@ -178,6 +195,7 @@ struct HarnessResource {
     int word = -1;           // storage: descriptor word in c[bank]; texture/image: handle word
     int array_length = 1;
     std::string type;        // Ryujinx SamplerType text, e.g. "Texture2D|Array|Shadow"
+    std::string expr;        // texture with bank kHandleExprBank: the handle expression after '|' ("tex<type>[c131072:<n>|<rpn>]")
 };
 
 bool parse_harness_resources(std::string_view text, std::vector<HarnessResource>& out);

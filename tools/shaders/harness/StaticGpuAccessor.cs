@@ -111,8 +111,22 @@ namespace SpirvHarness
 
         public void Log(string message)
         {
+            // "handle-expr n rpn" from the bindless patch (translator/ampere-bindless-handle-expr.patch): goes to the resource list
+            if (message.StartsWith("handle-expr ", StringComparison.Ordinal))
+            {
+                string[] f = message.Split(' ', 3);
+                lock (HandleExprs) HandleExprs[int.Parse(f[1])] = f[2];
+                return;
+            }
             lock (Messages) Messages.Add(message);
         }
+
+        /// The handle expressions of textures bound with constant buffer slot HandleExprSlot (0x20000), by handle number.
+        public readonly Dictionary<int, string> HandleExprs = new();
+
+        // No pool-sized texture and sampler arrays: the runtime binds one texture per binding, so a handle the draw does not determine
+        // (Ryujinx's GenerateBindlessAccess) is left out instead (the sample reads 0, a depth comparison 1).
+        public bool QueryHostSupportsSeparateSampler() => false;
 
         // "GPU addresses" are offsets in the code block: the harness passes the program start (0x30 or 0x100).
         public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize)

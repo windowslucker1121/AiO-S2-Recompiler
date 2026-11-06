@@ -338,6 +338,8 @@ void set_texture_handle(NvnMeaning& m, bool image, int bank, int word) {
             m.source = image ? NvnSource::ImageBinding : NvnSource::SamplerBinding;
             m.index = (word - first) / 2;
         }
+    } else if (m.bank == kHandleExprBank && !image) {
+        m.source = NvnSource::HandleExpr;   // the program comes from the harness record (apply_harness)
     } else if (m.bank >= 3 && !image) {
         m.source = NvnSource::HandleInUniform;
         m.index = m.bank - 3;
@@ -686,6 +688,10 @@ bool parse_harness_resources(std::string_view text, std::vector<HarnessResource>
             if (!parse_uint(neg ? bank.substr(1) : bank, 10, r.bank)) return false;
             if (neg) r.bank = -r.bank;
             std::string_view handle = lhs.substr(colon + 1, close - colon - 1);
+            if (size_t bar = handle.find('|'); bar != std::string_view::npos) {   // a handle expression (before 'x': "xor" is a token)
+                r.expr = std::string(handle.substr(bar + 1));
+                handle = handle.substr(0, bar);
+            }
             size_t x = handle.find('x');
             if (x != std::string_view::npos) {
                 if (!parse_uint(handle.substr(x + 1), 10, r.array_length)) return false;
@@ -728,6 +734,61 @@ size_t parse_results_tsv(std::string_view text, std::unordered_map<std::string, 
     return lines;
 }
 
+bool parse_handle_expr(std::string_view text, std::vector<HandleExprOp>& out) {
+    static const std::pair<std::string_view, HandleExprOp::Kind> kOps[] = {
+        {"add", HandleExprOp::Add}, {"sub", HandleExprOp::Sub}, {"mul", HandleExprOp::Mul}, {"shl", HandleExprOp::Shl}, {"shr", HandleExprOp::Shr},
+        {"sar", HandleExprOp::Sar}, {"and", HandleExprOp::And}, {"or", HandleExprOp::Or}, {"xor", HandleExprOp::Xor}, {"inv", HandleExprOp::Inv},
+        {"eq", HandleExprOp::Eq}, {"ne", HandleExprOp::Ne}, {"lt", HandleExprOp::Lt}, {"ltu", HandleExprOp::Ltu}, {"le", HandleExprOp::Le},
+        {"leu", HandleExprOp::Leu}, {"gt", HandleExprOp::Gt}, {"gtu", HandleExprOp::Gtu}, {"ge", HandleExprOp::Ge}, {"geu", HandleExprOp::Geu},
+        {"not", HandleExprOp::Not}, {"min", HandleExprOp::Min}, {"minu", HandleExprOp::Minu}, {"max", HandleExprOp::Max},
+        {"maxu", HandleExprOp::Maxu}, {"sel", HandleExprOp::Sel}};
+    auto u32 = [](std::string_view s, int base, uint32_t& out) {   // parse_uint stops at 0x7fffffff
+        uint64_t v = 0;
+        for (char ch : s) {
+            const int d = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : 99;
+            if (d >= base || (v = v * base + d) > 0xffffffffull) return false;
+        }
+        out = static_cast<uint32_t>(v);
+        return !s.empty();
+    };
+    out.clear();
+    int depth = 0;
+    while (!text.empty()) {
+        const size_t comma = text.find(',');
+        const std::string_view t = text.substr(0, comma);
+        text = comma == std::string_view::npos ? std::string_view{} : text.substr(comma + 1);
+        HandleExprOp op;
+        int pops = 0;
+        bool ok = true;
+        if (t.size() > 1 && t[0] == '#') {
+            op.kind = HandleExprOp::Const;
+            ok = u32(t.substr(1), 16, op.a);
+        } else if (t.size() > 1 && t[0] == 'c') {
+            const size_t dot = t.find('.');
+            op.kind = HandleExprOp::Cbuf;
+            ok = dot != std::string_view::npos && u32(t.substr(1, dot - 1), 10, op.a) && u32(t.substr(dot + 1), 10, op.b);
+        } else if (t.size() > 1 && t[0] == 's' && t[1] >= '0' && t[1] <= '9') {
+            op.kind = HandleExprOp::Storage;
+            ok = u32(t.substr(1), 10, op.a);
+            op.a *= 4;   // the harness prints the c[0] word
+            pops = 1;
+        } else {
+            ok = false;
+            for (const auto& [name, kind] : kOps)
+                if (t == name) op.kind = kind, ok = true;
+            pops = op.kind == HandleExprOp::Inv || op.kind == HandleExprOp::Not ? 1 : op.kind == HandleExprOp::Sel ? 3 : 2;
+        }
+        if (!ok || depth < pops) {
+            out.clear();
+            return false;
+        }
+        depth += 1 - pops;
+        out.push_back(op);
+    }
+    if (depth != 1) out.clear();
+    return depth == 1;
+}
+
 bool apply_harness(ShaderReflection& refl, const std::vector<HarnessResource>& resources) {
     bool ok = true;
     for (const HarnessResource& r : resources) {
@@ -749,6 +810,10 @@ bool apply_harness(ShaderReflection& refl, const std::vector<HarnessResource>& r
         case HarnessResource::Texture:
         case HarnessResource::Image:
             if (b->nvn.word < 0) set_texture_handle(b->nvn, r.kind == HarnessResource::Image, r.bank, r.word);
+            if (b->nvn.source == NvnSource::HandleExpr) {
+                b->nvn.expr_text = r.expr;
+                if (!parse_handle_expr(r.expr, b->nvn.expr)) ok = false;
+            }
             break;
         case HarnessResource::Uniform:
             break;  // name and binding already say it
@@ -787,9 +852,11 @@ std::string describe_like_harness(const ShaderReflection& refl) {
         default: {
             bool image = b.type == DescriptorType::StorageImage || b.type == DescriptorType::StorageTexelBuffer;
             std::string arr = b.count != 1 ? "x" + std::to_string(b.count) : "";
-            std::snprintf(tmp, sizeof tmp, "%s%s[c%d:%d%s]=s%ub%u", image ? "img" : "tex",
-                          sampler_type_text(b.image).c_str(), m.default_bank ? -1 : m.bank, m.word, arr.c_str(), b.set,
-                          b.binding);
+            const std::string word = std::to_string(m.word) + (m.source == NvnSource::HandleExpr ? "|" + m.expr_text : "");
+            out += out.empty() ? "" : " ";
+            out += std::string(image ? "img" : "tex") + sampler_type_text(b.image) + "[c" + std::to_string(m.default_bank ? -1 : m.bank) + ":" +
+                   word + arr + "]=s" + std::to_string(b.set) + "b" + std::to_string(b.binding);
+            continue;
         }
         }
         if (!tmp[0]) continue;
@@ -885,6 +952,7 @@ const char* source_name(NvnSource s) {
     case NvnSource::SamplerBinding: return "sampler binding";
     case NvnSource::ImageBinding: return "image binding";
     case NvnSource::HandleInUniform: return "handle in uniform block";
+    case NvnSource::HandleExpr: return "handle computed at the draw";
     default: return "unknown";
     }
 }

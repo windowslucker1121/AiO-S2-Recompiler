@@ -42,10 +42,29 @@ run the game with `NXRT_NVN_SHADER_CACHE=<repo>\work\shaders\oot\spirv`, `NXRT_N
 `NXRT_NVN_SHADER_TRANSLATOR=<repo>\tools\shaders\build\bin\Release\net10.0\spirv_harness.exe` (the MCP `launch` takes them as `env`).
 A few blocks the game uses are not in the corpus; the on-demand translator gets them.
 
-Batch translation (done, 262 s with `--jobs 16`, cache in `work\shaders\oot\spirv`): 37,576 of 47,203 blocks ok; 8,805 unsupported
-(fragment 8,514: `.UNKNOWN_f60` in 5,332 blocks = a TEX form with bit 10 set beside the decoded bound 0xb60, fields unknown without
-nvdisasm; `TEX.SCR.B.DC.NODEP` bindless handle form in 4,336; `S2R SR_VARIABLE_RATE` 350), 822 exceptions (815 stage 6/7 blocks "without
-code": Foliage/Terrain programs are stages {6, 7, 1}, probably task/mesh; 7 GotoElimination NullReference). Draws that need them are skipped.
+Batch translation (cache in `work\shaders\oot\spirv`): 46,357 of 47,428 rows ok (was 37,576 before the bindless work, 2026-11-06);
+236 unsupported (mostly "runtime"-group compute blocks whose range runs into ASCII names: `.UNKNOWN_656`, `e6e`, ... are text), 833
+exceptions (800 stage 6/7 blocks "without code": Foliage/Terrain programs are stages {6, 7, 1}, probably task/mesh). Draws that need a
+missing shader are skipped. What fixed the 8,600 (they were most of the game world's materials, all needed after the intro):
+- **`0xf60` = TEX with the handle in a uniform register** (`TEX.SCR RZ, R73, R76, R48, UR12, 0x0, ARRAY_2D, 0x1`): URn at bits 40..45, an
+  8-bit immediate at 46..53 (always 0 seen), bits 54..59 unused, the rest as the bound TEX 0xb60 (nvdisasm bit probe). The compiler loads
+  URn = handle and URn+1 = handle >> 20 (the sampler index); the emitter passes URn as a Ryujinx bindless handle.
+- **`TEX.SCR.B`**: the handle is the first register of Rb, the other Rb parameters follow it (2D + DC: Ra = x, y; Rb = handle, depth ref).
+- **The handles come from a storage buffer table indexed by uniform data** (`LDG [c0 storage base + (c4[34] & 0xfffff + c5[187]) * 32 +
+  0x10]`). `tools/shaders/harness/translator/ampere-bindless-handle-expr.patch` (Ryujinx `BindlessElimination`) turns a handle the draw
+  determines (constants, uniform words, storage words at such offsets, integer ops) into an ordinary texture binding with constant buffer
+  slot 0x20000 and writes the expression as postfix text; the harness prints it in the resource list (`tex<type>[c131072:<n>|<rpn>]`)
+  and the runtime evaluates it at each draw (`NvnSource::HandleExpr`, `eval_handle_expr` in `nvn_replay.cpp`). Per-pixel handles (the
+  4,336 `TEX.SCR.B.DC` blocks: clustered-light shadow maps, light index from another storage load in a loop) cannot be bound this way:
+  the sample is left out and a depth comparison answers 1 (lit). Ryujinx's pool-array fallback (`GenerateBindlessAccess`) is off in the
+  harness (`QueryHostSupportsSeparateSampler` false) because the runtime binds no texture arrays.
+- `S2R SR_VARIABLE_RATE` (350 fragment shaders) reads 0 (1x1 shading, inferred).
+Re-translating a subset: make a folder with a filtered `unique.tsv` and junctions to the corpus `code`, `ctrl`, `glslc`, run `--batch` on
+it, then `tools\shaders\scripts\merge_results.py <new out> work\shaders\oot\spirv` (ok rows and their .spv replace the cache's).
+**nvdisasm** (CUDA 13.3.1 redistributable, SHA-256 checked) is in the git-ignored `tools\nvdisasm\`:
+`tools\nvdisasm\cuda_nvdisasm-windows-x86_64-13.3.73-archive\bin\nvdisasm.exe -b SM86 -raw <file of 16-byte words>` (one word per file when a
+probe word is illegal: nvdisasm stops at the first). `sassdecode` (`dotnet build tools\shaders\ampere\decoder\tool\sassdecode.csproj -c
+Release`, then `dotnet tools\shaders\build\bin\Release\net10.0\sassdecode.dll --census <corpus> --out <tsv>`) gives the opcode census.
 
 **Shader compilation screen (user requirement: no shader-compile stutter in game)**: `nxrt::nvn::shader_setup_before_start`
 (`runtime/src/gfx/nvn/nvn_setup.cpp`, called from `game_main.cpp` before the game window opens): a Win32 "Preparing shaders" window that
@@ -57,6 +76,9 @@ process; the next start resumes. `[nvn] setup_on_start = false` skips it. The fr
 in Shader/, Layout2Shader/ (the UI), Effect/ (vsetb); records of one program are 0x40 apart; 39,363 vertex+fragment programs, 100 s).
 Without the preparation the game queues ~4,400 programs at boot and the Arc driver needs ~350 ms per pipeline part on the background
 threads: black screen and 9-18 fps for minutes (boot 23). The preparation runs at ~34 programs/s on this machine (~20 min).
+`prepare.state`'s key now holds the size of the cache's `results.tsv`: shaders translated since (the bindless work made 10,000 more
+programs preparable) make the next start prepare again. Without that, the new shaders flooded the background part builder (350 s of
+worker CPU in two minutes) and starved the game (no frame for 10 s). Headless: `oot.exe --prepare-shaders --if-needed`.
 
 Hardware of this machine: Intel Core Ultra 5 125H, integrated Intel Arc graphics (driver Vulkan 1.4.325, 8.8 GiB shared), 16 GB
 RAM shared with the GPU. Expect GPU-bound performance; the README's minimum is a Vulkan 1.3 GPU and 16 GB.
@@ -149,12 +171,20 @@ pictures otherwise). The movie player also runs **NDVE** (an NVIDIA video-enhanc
 parsed at main+0x20e4d20): it needs NVN2 device info 0x67 (=256; the runtime now answers 0x62-0xA9 with the sdk's constants, read from
 sdk+0x656210/0x648380) and then costs ~100 ms of GPU time per frame on this iGPU (8 fps). Without the file the player shows the decoded
 frames directly, so OoT's title profile hides it (`TitleProfile::romfs_hide`, `[title] romfs_hide`).
+dav1d ran with `max_frame_delay = 1` (no frame threading): ~21 pictures/s of the 1080p intro, the movie played slowly. Now the frame
+delay is dav1d's own choice and `[media] video_decoder_threads` defaults to half the logical cores (8 here): 37-63 pictures/s.
+Flow after the title: A -> `Dm_Kokiri_0000.webm` (the intro, **5 minutes**, no skip with A/B/+ presses or 3 s holds), then the first
+scene. Hiding the intro file makes the game wait forever on a black loading screen. For tests, `[media] video_max_pictures = 120` ends
+every movie stream after 120 pictures (the title movie then restarts every 4 s).
 
 **Play mode / frame hook:** OoT's frame update is main+0x3b4ea90 (entryhook in `main.sites`; the framework's per-frame virtual, vtable
 0x4c63f80 +224, called by the endless loop main+0x9467b0; the base class's +224 0x346c8d0 is never called). `runtime/games/oot/oot_game.cpp`
 registers it plus factory key bindings (WASD move, arrows camera, Enter/E/Space A, Shift/Backspace/left mouse B, Q ZL, F R, R/T X/Y,
 G ZR, Escape +); pads keep the console layout (the base engine maps SDL gamepads to a Pro Controller). A deleted `controls.ini` in the
 game folder is rewritten from the factory text.
+**Gamepad verified** (2026-11-06) with the test tooling's virtual SDL pad: script `keydown vpad attach xbox`, `keydown vpad button south 1`
+/ `0` (MCP `launch` script lines): A on the pad starts the game from the title, and the intro's rumble reaches the pad (`vpad rumble` log
+lines). A real XInput pad goes through the same SDL gamepad path.
 
 **Performance notes so far:** the lifted code is built for baseline x86-64, so every FMADD is a CRT `fmaf` call (software FMA): a worker
 spent its time in `fmaf` in main+0x370a5a0. `/arch:AVX2`-style flags (FMA3) would need a full rebuild. `[nvn] compute_shadows` copies

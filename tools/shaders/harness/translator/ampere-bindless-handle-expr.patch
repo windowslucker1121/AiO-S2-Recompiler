@@ -1,0 +1,209 @@
+Ampere front end (NVN2): a bindless texture whose handle the draw determines (constants, constant buffer words, storage buffer words at
+such offsets: the material texture tables of NVN2 games) becomes an ordinary texture binding with constant buffer slot HandleExprSlot
+(0x20000); the handle expression goes to the accessor log as "handle-expr n rpn" and the runtime evaluates it at each draw. Tried after
+the constant buffer patterns, before the pool array. A comparison sample that cannot be bound answers 1 (lit) instead of 0. The
+Ryujinx code in the context lines is MIT.
+--- a/Translation/Optimizations/BindlessElimination.cs	2026-11-06 02:16:40.342499500 +0100
++++ b/Translation/Optimizations/BindlessElimination.cs	2026-11-06 02:21:07.038417600 +0100
+@@ -3,6 +3,8 @@
+ using Ryujinx.Graphics.Shader.StructuredIr;
+ using System;
+ using System.Collections.Generic;
++using System.Runtime.CompilerServices;
++using System.Text;
+ 
+ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+ {
+@@ -33,6 +35,7 @@
+                 }
+ 
+                 if (!TryConvertBindless(block, resourceManager, gpuAccessor, texOp) &&
++                    !TryHandleExpression(resourceManager, gpuAccessor, texOp) &&
+                     !GenerateBindlessAccess(block, resourceManager, gpuAccessor, texOp, node))
+                 {
+                     // If we can't do bindless elimination, remove the texture operation.
+@@ -44,9 +47,12 @@
+ 
+                     gpuAccessor.Log($"Failed to find handle source for bindless access of type \"{typeName}\".");
+ 
++                    // A depth comparison answers 1 (passed: lit) rather than 0 (in shadow everywhere).
++                    Operand missing = (texOp.Type & SamplerType.Shadow) != 0 ? OperandHelper.ConstF(1f) : OperandHelper.Const(0);
++
+                     for (int destIndex = 0; destIndex < texOp.DestsCount; destIndex++)
+                     {
+-                        block.Operations.AddBefore(node, new Operation(Instruction.Copy, texOp.GetDest(destIndex), OperandHelper.Const(0)));
++                        block.Operations.AddBefore(node, new Operation(Instruction.Copy, texOp.GetDest(destIndex), missing));
+                     }
+ 
+                     Utils.DeleteNode(node, texOp);
+@@ -140,6 +146,170 @@
+ 
+             return true;
+         }
++
++        /// <summary>
++        /// Constant buffer slot of a texture whose handle the runtime computes at each draw from data the draw binds: NVN2 materials keep
++        /// their handles in a storage buffer table indexed from uniform blocks ("LDG R4, [UR10+idx*32+0x10]; R2UR UR6, R4; TEX ... UR6").
++        /// The handle offset numbers the expressions of the shader; each expression goes to the accessor's log once, as
++        /// "handle-expr n rpn" (the harness puts it in its resource list). rpn: comma separated, postfix, 32-bit integers:
++        /// #hex constant, c(slot).(word) constant buffer word, s(word) a storage buffer word (the index is popped; the buffer is the one
++        /// whose descriptor is at that word of c[0]), and the operators RpnOp names.
++        /// </summary>
++        public const int HandleExprSlot = 0x20000;
++
++        private static readonly ConditionalWeakTable<ResourceManager, Dictionary<string, int>> _handleExprs = new();
++
++        private static bool TryHandleExpression(ResourceManager resourceManager, IGpuAccessor gpuAccessor, TextureOperation texOp)
++        {
++            if (texOp.Inst != Instruction.TextureSample && !texOp.Inst.IsTextureQuery())
++            {
++                return false;
++            }
++
++            StringBuilder rpn = new();
++            int budget = 48;
++
++            if (!HandleRpn(texOp.GetSource(0), resourceManager, rpn, ref budget))
++            {
++                return false;
++            }
++
++            string text = rpn.ToString(0, rpn.Length - 1);
++            Dictionary<string, int> exprs = _handleExprs.GetOrCreateValue(resourceManager);
++
++            lock (exprs)
++            {
++                if (!exprs.TryGetValue(text, out int n))
++                {
++                    n = exprs.Count;
++                    exprs.Add(text, n);
++                    gpuAccessor.Log($"handle-expr {n} {text}");
++                }
++
++                SetHandle(resourceManager, gpuAccessor, texOp, n, HandleExprSlot, rewriteSamplerType: false, isImage: false);
++            }
++
++            return true;
++        }
++
++        private static string RpnOp(Instruction inst) => inst switch
++        {
++            Instruction.Add => "add",
++            Instruction.Subtract => "sub",
++            Instruction.Multiply => "mul",
++            Instruction.ShiftLeft => "shl",
++            Instruction.ShiftRightU32 => "shr",
++            Instruction.ShiftRightS32 => "sar",
++            Instruction.BitwiseAnd => "and",
++            Instruction.BitwiseOr => "or",
++            Instruction.BitwiseExclusiveOr => "xor",
++            Instruction.BitwiseNot => "inv",
++            Instruction.CompareEqual => "eq",
++            Instruction.CompareNotEqual => "ne",
++            Instruction.CompareLess => "lt",
++            Instruction.CompareLessU32 => "ltu",
++            Instruction.CompareLessOrEqual => "le",
++            Instruction.CompareLessOrEqualU32 => "leu",
++            Instruction.CompareGreater => "gt",
++            Instruction.CompareGreaterU32 => "gtu",
++            Instruction.CompareGreaterOrEqual => "ge",
++            Instruction.CompareGreaterOrEqualU32 => "geu",
++            Instruction.LogicalNot => "not",
++            Instruction.LogicalAnd => "and",
++            Instruction.LogicalOr => "or",
++            Instruction.LogicalExclusiveOr => "xor",
++            Instruction.Minimum => "min",
++            Instruction.MinimumU32 => "minu",
++            Instruction.Maximum => "max",
++            Instruction.MaximumU32 => "maxu",
++            Instruction.ConditionalSelect => "sel",
++            _ => null,
++        };
++
++        // Postfix text of a value the draw determines (constants, constant buffer words the runtime can read, storage buffer words at such
++        // offsets); false for anything that varies across the draw (inputs, phis, other memory). Booleans are 1 or 0.
++        private static bool HandleRpn(Operand op, ResourceManager resourceManager, StringBuilder rpn, ref int budget)
++        {
++            if (--budget < 0)
++            {
++                return false;
++            }
++
++            if (op.Type == OperandType.Constant)
++            {
++                rpn.Append('#').Append(((uint)op.Value).ToString("x")).Append(',');
++
++                return true;
++            }
++
++            if (op.Type == OperandType.ConstantBuffer)
++            {
++                // c[0] (driver constants) and c[2] (bound texture handles) are not game data the runtime reads as words
++                if (op.GetCbufSlot() is 0 or 2)
++                {
++                    return false;
++                }
++
++                rpn.Append('c').Append(op.GetCbufSlot()).Append('.').Append(op.GetCbufOffset()).Append(',');
++
++                return true;
++            }
++
++            if (op.AsgOp is not Operation o || (o.Inst & ~Instruction.Mask) != 0)
++            {
++                return false;
++            }
++
++            if (o.Inst == Instruction.Copy)
++            {
++                return HandleRpn(o.GetSource(0), resourceManager, rpn, ref budget);
++            }
++
++            if (o.Inst == Instruction.Load)
++            {
++                if (o.StorageKind != StorageKind.StorageBuffer || o.SourcesCount != 3 || o.GetSource(0).Type != OperandType.Constant ||
++                    o.GetSource(1).Type != OperandType.Constant || o.GetSource(1).Value != 0)
++                {
++                    return false;
++                }
++
++                foreach (BufferDescriptor sb in resourceManager.GetStorageBufferDescriptors())
++                {
++                    if (sb.Binding == o.GetSource(0).Value && sb.SbCbSlot == 0)
++                    {
++                        if (!HandleRpn(o.GetSource(2), resourceManager, rpn, ref budget))
++                        {
++                            return false;
++                        }
++
++                        rpn.Append('s').Append(sb.SbCbOffset).Append(',');
++
++                        return true;
++                    }
++                }
++
++                return false;
++            }
++
++            string name = RpnOp(o.Inst);
++
++            if (name == null)
++            {
++                return false;
++            }
++
++            for (int index = 0; index < o.SourcesCount; index++)
++            {
++                if (!HandleRpn(o.GetSource(index), resourceManager, rpn, ref budget))
++                {
++                    return false;
++                }
++            }
++
++            rpn.Append(name).Append(',');
++
++            return true;
++        }
+ 
+         private static bool IsBindlessAccessAllowed(Operand bindlessHandle)
+         {

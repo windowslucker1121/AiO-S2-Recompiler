@@ -198,7 +198,7 @@ namespace SpirvHarness
                     if (!glsl && spv != null) spv = AddMissingBuiltInCapabilities(spv);
                     r.SpvBytes = spv?.Length ?? 0;
                     r.Status = spv == null ? "no-output" : attempt == 1 ? "ok" : "ok-retry";
-                    r.Resources = DescribeResources(program.Info);
+                    r.Resources = DescribeResources(program.Info, gpu);
                 }
                 catch (Exception e)
                 {
@@ -270,7 +270,7 @@ namespace SpirvHarness
                         if (!glsl && spv != null) spv = AddMissingBuiltInCapabilities(spv);
                         r.SpvBytes = spv?.Length ?? 0;
                         r.Status = spv == null ? "no-output" : attempt == 1 ? "ok" : "ok-retry";
-                        r.Resources = DescribeResources(sp.Info);
+                        r.Resources = DescribeResources(sp.Info, gpu);
                         if (refl != null) lock (gpu.Messages) gpu.Messages.AddRange(refl.Check(nvnStage, sp.Info));
                     }
                 }
@@ -360,13 +360,19 @@ namespace SpirvHarness
         //   cb<slot>=s<set>b<binding>            constant buffer c[slot]
         //   sb[c<slot>+0x<off>]=s<set>b<binding> storage buffer whose address the shader loads from c[slot][off]
         //   tex<type>[c<slot>:<handle>]=s<set>b<binding>  texture whose handle is word <handle> of c[slot]
-        static string DescribeResources(ShaderProgramInfo info)
+        // A texture with constant buffer slot 0x20000 gets its handle expression after the handle number: tex<type>[c131072:<n>|<rpn>].
+        static string DescribeResources(ShaderProgramInfo info, StaticGpuAccessor gpu)
         {
+            string Handle(TextureDescriptor t)
+            {
+                if (t.CbufSlot == 0x20000) lock (gpu.HandleExprs) if (gpu.HandleExprs.TryGetValue(t.HandleIndex, out string e)) return $"{t.HandleIndex}|{e}";
+                return t.HandleIndex.ToString();
+            }
             List<string> parts = new();
             foreach (BufferDescriptor b in info.CBuffers) parts.Add($"cb{b.Slot}=s{b.Set}b{b.Binding}");
             foreach (BufferDescriptor b in info.SBuffers) parts.Add($"sb[c{b.SbCbSlot}+0x{b.SbCbOffset:x}]=s{b.Set}b{b.Binding}");
             foreach (TextureDescriptor t in info.Textures)
-                parts.Add($"tex{t.Type}[c{t.CbufSlot}:{t.HandleIndex}{(t.ArrayLength > 1 ? $"x{t.ArrayLength}" : "")}]=s{t.Set}b{t.Binding}");
+                parts.Add($"tex{t.Type}[c{t.CbufSlot}:{Handle(t)}{(t.ArrayLength > 1 ? $"x{t.ArrayLength}" : "")}]=s{t.Set}b{t.Binding}");
             foreach (TextureDescriptor t in info.Images)
                 parts.Add($"img{t.Type}[c{t.CbufSlot}:{t.HandleIndex}{(t.ArrayLength > 1 ? $"x{t.ArrayLength}" : "")}]=s{t.Set}b{t.Binding}");
             return string.Join(' ', parts).Replace(", ", "|");
