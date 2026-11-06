@@ -344,8 +344,10 @@ NXTEST(account_save_api) {
     CHECK_EQ(nxrt::services::fsapi::ensure_account_save(1, 2, &created), 0u);
     CHECK(!created);
     CHECK_EQ(nxrt::services::fsapi::account_save_size(1, 2, &size, &journal), 0u);
-    CHECK_EQ(size, 4ll << 20);
-    CHECK_EQ(journal, 1ll << 20);
+    // the title's sizes (control.nacp UserAccountSaveDataSize / JournalSize)
+    CHECK(nxrt::services::profile().account_save_size > 0);
+    CHECK_EQ(size, static_cast<int64_t>(nxrt::services::profile().account_save_size));
+    CHECK_EQ(journal, static_cast<int64_t>(nxrt::services::profile().account_save_journal));
     // the same save is then openable through fsp-srv with the attribute the SDK builds for MountSaveData
     Session s = open_fsp();
     CHECK(open_save(s, attr(1, 1, 2)).ok());

@@ -625,9 +625,24 @@ NXTEST(wait_for_address_conditions) {
     CHECK_EQ(ks::wait_for_address(a, 0, 5, 0), ks::kTimedOut);       // 4 < 5
     CHECK_EQ(ks::wait_for_address(a, 2, 4, 0), ks::kTimedOut);       // 4 == 4
     CHECK_EQ(w, 4u);                                                 // types 0 and 2 never write the word
-    // Invalid arbitration type.
-    CHECK_EQ(ks::wait_for_address(a, 3, 0, 0), ks::kInvalidEnum);
-    CHECK_EQ(ks::wait_for_address(a, 3, 0, 30 * kMs), ks::kInvalidEnum);
+    // Invalid arbitration type: 3 is WaitIfEqual64 (below), 4 is the first one past the table.
+    CHECK_EQ(ks::wait_for_address(a, 4, 0, 0), ks::kInvalidEnum);
+    CHECK_EQ(ks::wait_for_address(a, 4, 0, 30 * kMs), ks::kInvalidEnum);
+    end();
+}
+
+// ---- 10b: WaitIfEqual64 (type 3, SDK 22: nn::os::WaitForAddress behind std::atomic_wait) -------------------------------------------
+// The whole 64-bit x2 is compared with the doubleword at an 8-byte aligned address (mesosphere checks that alignment for this type only).
+NXTEST(wait_for_address_if_equal_64) {
+    begin();
+    alignas(8) uint64_t d[2] = {0x0000000100000005ull, 0};
+    const uint64_t a = addr_of(&d[0]);
+    CHECK_EQ(ks::wait_for_address(a, 3, 0x0000000200000005ll, 0), ks::kInvalidState);   // low halves equal, high halves differ
+    CHECK_EQ(ks::wait_for_address(a, 3, 0x0000000100000005ll, 0), ks::kTimedOut);       // all 64 bits equal, timeout 0
+    CHECK_EQ(ks::wait_for_address(a, 3, 0x0000000100000005ll, 30 * kMs), ks::kTimedOut);
+    CHECK_EQ(d[0], 0x0000000100000005ull);                                               // the doubleword is never written
+    CHECK_EQ(ks::wait_for_address(a + 4, 3, 0, 0), ks::kInvalidAddress);                // 4-byte aligned is not enough for type 3
+    CHECK_EQ(ks::wait_for_address(a + 4, 2, 1, 0), ks::kTimedOut);                      // ... but is for the 32-bit WaitIfEqual (the word there is 1)
     end();
 }
 

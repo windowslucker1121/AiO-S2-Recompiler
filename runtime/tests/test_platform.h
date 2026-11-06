@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Running test code under the Switch 2 platform profile. The test executables register the test game (a Switch 1 title), so
-// game::info().platform is Switch1 unless a test says otherwise.
+// Running test code under one platform profile. The test executables register the test game (CMakeLists.txt NXRT_TEST_GAME), so
+// game::info().platform is that game's: Switch 1 for the upstream mpr, Switch 2 for oot. A test whose expectations belong to one console
+// says so with ScopedPlatform (Switch1 or Switch2) instead of relying on the registered game.
 //   ScopedPlatform p(Platform::Switch2);   in-process, restored at scope end. Covers what reads game::info().platform on every call
 //                                          (core count, GetInfo CoreMask, RandomEntropy subtypes ...).
 //   use_platform_for_process(Platform::Switch2);   first thing in an NXTEST_CHILD body, for what caches the platform at its first use

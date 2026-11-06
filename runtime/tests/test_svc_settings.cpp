@@ -31,9 +31,19 @@ bool out_is_code(const nxsvc::Reply& r, const char* name) {
     return r.out.size() >= 8 && std::memcmp(r.out.data(), want, 8) == 0;
 }
 
-// No configuration overrides (the profile is the Metroid Prime Remastered defaults).
+// No configuration overrides: the registered title's defaults.
 void default_profile() {
     config_clear();
+    services::profile_reload();
+}
+
+// The title's defaults with two console facts pinned to what the hand-written expectations below are for: the language (with none set the
+// profile follows the player's pick or the Windows display language, which differs between machines) and firmware 12.1.0 (the one version
+// whose hash the service knows; the test game may name another, oot 22.0.0: set_sys_firmware_version_without_a_known_hash).
+void pinned_profile() {
+    config_clear();
+    config_set("system", "language", "AmericanEnglish");
+    config_set("system", "firmware", "12.1.0");
     services::profile_reload();
 }
 
@@ -61,12 +71,21 @@ void expected_firmware(uint8_t want[0x100]) {
 // set: the language code of the console (Japanese..BrazilianPortuguese), the 8-byte LanguageCode of a Language.
 NXTEST(set_get_language_code) {
     nxsvc::Env env;
-    default_profile();
+    pinned_profile();
     nxsvc::Session s = nxsvc::connect("set");
     REQUIRE(s.valid());
     nxsvc::Reply r = s.call(0);
     CHECK_EQ(r.result, 0u);
-    CHECK(out_is_code(r, "en-US"));   // the profile's default language, AmericanEnglish
+    CHECK(out_is_code(r, "en-US"));   // the profile's language, AmericanEnglish
+    // another language the title supports reaches the reply the same way
+    if (services::profile().supported_languages & (1u << static_cast<uint32_t>(services::Language::French))) {
+        config_set("system", "language", "French");
+        services::profile_reload();
+        r = s.call(0);
+        CHECK_EQ(r.result, 0u);
+        CHECK(out_is_code(r, "fr"));
+    }
+    default_profile();
 }
 
 // MakeLanguageCode(Language): index 0 is Japanese, 17 BrazilianPortuguese (10.1.0+); 18 is out of range.
@@ -206,7 +225,7 @@ NXTEST(set_get_device_nickname) {
 // GetFirmwareVersionForDebug (set cmd 10, 9.0.0+): the last 0x80 bytes of the firmware data (the display title half).
 NXTEST(set_get_firmware_version_for_debug) {
     nxsvc::Env env;
-    default_profile();
+    pinned_profile();
     nxsvc::Session s = nxsvc::connect("set");
     REQUIRE(s.valid());
     uint8_t want[0x100];
@@ -221,7 +240,7 @@ NXTEST(set_get_firmware_version_for_debug) {
 // set:sys GetFirmwareVersion (3) and GetFirmwareVersion2 (4): the 0x100-byte SystemVersion of 12.1.0-1.0 into a C buffer.
 NXTEST(set_sys_firmware_version) {
     nxsvc::Env env;
-    default_profile();
+    pinned_profile();
     nxsvc::Session s = nxsvc::connect("set:sys");
     REQUIRE(s.valid());
     uint8_t want[0x100];
@@ -236,6 +255,32 @@ NXTEST(set_sys_firmware_version) {
 }
 
 // set:sys GetColorSetId (23) and SetColorSetId (24): Basic White (0) by default; a value set on one session is seen on another.
+// Another firmware (22.0.0, what oot names: the lower bound its ZBIC-compressed main needs): the version bytes, display version and title
+// follow it; the hash stays empty (no source for it was checked, see settings.cpp).
+NXTEST(set_sys_firmware_version_without_a_known_hash) {
+    nxsvc::Env env;
+    config_clear();
+    config_set("system", "firmware", "22.0.0");
+    services::profile_reload();
+    nxsvc::Session s = nxsvc::connect("set:sys");
+    REQUIRE(s.valid());
+    uint8_t want[0x100];
+    std::memset(want, 0, sizeof want);
+    want[0] = 22;
+    want[4] = 1;   // revision 1.0
+    want[8] = 'N';
+    want[9] = 'X';
+    std::memcpy(&want[0x68], "22.0.0", 6);
+    const char title[] = "NintendoSDK Firmware for NX 22.0.0-1.0";
+    std::memcpy(&want[0x80], title, sizeof title - 1);
+    uint8_t buf[0x100];
+    std::memset(buf, 0xEE, sizeof buf);
+    nxsvc::Reply r = s.call(3, nxsvc::Args().buf_c(buf, sizeof buf));
+    CHECK_EQ(r.result, 0u);
+    CHECK(std::memcmp(buf, want, 0x100) == 0);
+    default_profile();
+}
+
 NXTEST(set_sys_color_set) {
     nxsvc::Env env;
     nxsvc::Session a = nxsvc::connect("set:sys");

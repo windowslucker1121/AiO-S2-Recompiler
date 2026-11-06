@@ -46,7 +46,7 @@ struct State {
     int exit_code = -1;
     std::string out, script, regions_file, trace_path, record_path, replay_path;
     uint64_t seed = 0x5EED5EEDull;
-    uint64_t step_ticks = 320000;            // 1/60 s at 19.2 MHz
+    uint64_t step_ticks = 320000;            // 1/60 s of system ticks (kernel::tick_hz: 19.2 MHz Switch 1, 31.25 MHz Switch 2), set by init()
     Source src = Source::Hook;
     uint32_t svc_n = 0;
     std::vector<Region> hash_regions;
@@ -57,10 +57,10 @@ struct State {
 
     std::atomic<uint64_t> frames{0};
     bool started = false;
-    std::atomic<uint64_t> vticks{0};         // virtual clock (19.2 MHz ticks)
+    std::atomic<uint64_t> vticks{0};         // virtual clock (system ticks at kernel::tick_hz)
     std::atomic<DWORD> frame_tid{0};         // the host thread that runs the frame boundary (the one whose sleeps move the clock)
     std::atomic<uint64_t> rng_ctr{0};
-    uint64_t vbase = 19200000ull * 100;      // the virtual clock starts at "100 seconds"
+    uint64_t vbase = 19200000ull * 100;      // the virtual clock starts at "100 seconds" (init: 100 * kernel::tick_hz)
     uint64_t chain = 0xcbf29ce484222325ull;
     uint64_t last_hash = 0;
     GameState gs;
@@ -394,6 +394,7 @@ bool init() {
     QueryPerformanceFrequency(&s.qpf);
     QueryPerformanceCounter(&s.t_start);
     s.t_last = s.t_start;
+    s.vbase = kernel::tick_hz() * 100;
     s.vticks = s.vbase;
     s.rng_ctr = 0;
 
@@ -536,7 +537,9 @@ bool virtual_tick(uint64_t* ticks) {
 bool virtual_sleep(int64_t ns) {
     State& s = S();
     if (!s.on || !s.det) return false;
-    const uint64_t add = ns > 0 ? static_cast<uint64_t>(ns) * 192 / 10000 : 0;
+    // nanoseconds to system ticks at the platform's rate (Switch 2 runs at 31.25 MHz: the 19.2 MHz factor made its sleeps 39% short)
+    const uint64_t hz = kernel::tick_hz();
+    const uint64_t add = ns > 0 ? static_cast<uint64_t>(ns) / 1000000000ull * hz + static_cast<uint64_t>(ns) % 1000000000ull * hz / 1000000000ull : 0;
     const DWORD ft = s.frame_tid.load(std::memory_order_relaxed);
     if (add == 0 || ft == 0 || ft == GetCurrentThreadId()) {
         if (add) s.vticks.fetch_add(add, std::memory_order_relaxed);
@@ -588,7 +591,10 @@ void rng_fill(void* p, size_t n) {
 
 uint64_t wall_filetime() {
     State& s = S();
-    if (s.on && s.det) return 133000000000000000ull + (s.vticks.load() - s.vbase) * 10000ull / 192ull;     // 100 ns units, fixed epoch
+    if (s.on && s.det) {   // 100 ns units, fixed epoch + the virtual time at the platform's tick rate
+        const uint64_t hz = kernel::tick_hz(), dt = s.vticks.load() - s.vbase;
+        return 133000000000000000ull + dt / hz * 10000000ull + dt % hz * 10000000ull / hz;
+    }
     FILETIME ft;
     GetSystemTimePreciseAsFileTime(&ft);
     return (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;

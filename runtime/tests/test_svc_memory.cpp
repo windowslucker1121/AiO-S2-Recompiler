@@ -6,6 +6,7 @@
 #include "nxrt/kernel.h"
 #include "nxrt/memory.h"
 #include "nxrt/svc.h"
+#include "test_platform.h"
 
 #include <windows.h>
 
@@ -161,9 +162,19 @@ NXTEST(set_heap_size_misaligned_gives_0xCA01) {
     teardown();
 }
 
+// Switch 1 kernels refuse a heap above 4 GiB. Switch 2 applications set heaps of several GiB: there only nxrt's heap region (mem::kHeapMax)
+// bounds the request. The platform is named because the test game may be either (oot is a Switch 2 title).
 NXTEST(set_heap_size_too_large_gives_0xD001) {
+    {
+        nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);
+        setup();
+        CHECK_EQ(svc(0x01, 0, 0x100000000ull + 0x200000ull).rc, kRcD001);
+        CHECK_EQ(nxrt::svc_current_heap_size(), 0ull);
+        teardown();
+    }
+    nxtest::ScopedPlatform sw2(nxrt::game::Platform::Switch2);
     setup();
-    CHECK_EQ(svc(0x01, 0, 0x100000000ull + 0x200000ull).rc, kRcD001);
+    CHECK_EQ(svc(0x01, 0, mem::kHeapMax + 0x200000ull).rc, kRcD001);
     CHECK_EQ(nxrt::svc_current_heap_size(), 0ull);
     teardown();
 }

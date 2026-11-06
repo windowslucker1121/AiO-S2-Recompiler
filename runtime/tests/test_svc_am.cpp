@@ -356,7 +356,10 @@ NXTEST(am_desired_language) {
     REQUIRE(proxy.valid());
     nxsvc::Session app = proxy.sub(proxy.call(20));
     REQUIRE(app.valid());
-    // The default language is AmericanEnglish: "en-US" as the little-endian u64 of its eight bytes (65 6E 2D 55 53 ...).
+    // The profile's language, AmericanEnglish (pinned: with none set it follows the Windows display language): "en-US" as the
+    // little-endian u64 of its eight bytes (65 6E 2D 55 53 ...).
+    config_set("system", "language", "AmericanEnglish");
+    services::profile_reload();
     CHECK_EQ(app.call(21).get<uint64_t>(0), 0x53552d6e65ull);
 
     // Japanese ("ja") when the game supports it.
@@ -380,12 +383,22 @@ NXTEST(am_application_functions_fixed_replies) {
     nxsvc::Session app = proxy.sub(proxy.call(20));
     REQUIRE(app.valid());
 
-    // GetDisplayVersion: "1.0.0", NUL-terminated, 16 bytes.
+    // GetDisplayVersion: the title's display version (control.nacp; oot "2.0.0"), NUL-terminated, 16 bytes.
     nxsvc::Reply dv = app.call(23);
     CHECK_EQ(dv.result, 0u);
     REQUIRE(dv.out.size() >= 16);
-    const uint8_t want_dv[16] = {'1', '.', '0', '.', '0', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint8_t want_dv[16] = {};
+    const std::string& version = services::profile().display_version;
+    REQUIRE(!version.empty() && version.size() < 16);
+    std::memcpy(want_dv, version.data(), version.size());
     CHECK(std::memcmp(dv.out.data(), want_dv, 16) == 0);
+    // ... and the one the ini names
+    config_set("title", "display_version", "1.0.0");
+    services::profile_reload();
+    dv = app.call(23);
+    const uint8_t want_100[16] = {'1', '.', '0', '.', '0', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    CHECK(dv.out.size() >= 16 && std::memcmp(dv.out.data(), want_100, 16) == 0);
+    clear_config();
 
     // NotifyRunning returns 1.
     CHECK_EQ(app.call(40).get<uint8_t>(0), 1u);
@@ -445,13 +458,17 @@ NXTEST(am_ensure_save_data) {
     nxsvc::Reply r = app.call(20, nxsvc::Args().u64(1).u64(2));
     CHECK_EQ(r.result, 0u);
     CHECK_EQ(r.get<uint64_t>(0), 0ull);
+    // the sizes are the title's (control.nacp UserAccountSaveDataSize / JournalSize; [title] account_save_size overrides)
+    const int64_t want_size = static_cast<int64_t>(services::profile().account_save_size);
+    const int64_t want_journal = static_cast<int64_t>(services::profile().account_save_journal);
+    CHECK(want_size > 0);
     CHECK_EQ(services::fsapi::account_save_size(1, 2, &size, &journal), 0u);
-    CHECK_EQ(size, 4ll << 20);
+    CHECK_EQ(size, want_size);
     // GetSaveDataSize(type 1 = account, Uid) -> normal, journal
     r = app.call(26, nxsvc::Args().u8(1).align(8).u64(1).u64(2));
     CHECK_EQ(r.result, 0u);
-    CHECK_EQ(r.get<int64_t>(0), 4ll << 20);
-    CHECK_EQ(r.get<int64_t>(8), 1ll << 20);
+    CHECK_EQ(r.get<int64_t>(0), want_size);
+    CHECK_EQ(r.get<int64_t>(8), want_journal);
     std::filesystem::remove_all(dir);
     clear_config();
 }

@@ -20,6 +20,7 @@
 #include "extras/hdr_math.h"
 #include "extras/output_pass.h"
 #include "nxrt/gfx.h"
+#include "validation_layer.h"
 
 NXTEST_GROUP(extras_output)
 
@@ -161,7 +162,7 @@ bool make_device(Rig& r) {
         std::printf("    device: %s\n", err.c_str());
         return false;
     }
-    CHECK(r.dev->validation_enabled());   // the zero counts below mean something only with the layer on
+    gfxtest::validation_layer_live(*r.dev);   // the zero counts below mean something only with the layer on
     CHECK(r.pass.init(*r.dev));
     return true;
 }

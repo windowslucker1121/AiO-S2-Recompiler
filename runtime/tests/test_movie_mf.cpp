@@ -29,6 +29,7 @@
 #include "nxrt/module.h"
 #include "nxrt/movie.h"
 #include "test_framework.h"
+#include "test_platform.h"
 
 #pragma comment(lib, "bcrypt.lib")
 
@@ -50,6 +51,14 @@ uint64_t call(const char* name, std::initializer_list<uint64_t> args) {
     return c.x[0];
 }
 uint64_t P(const void* p) { return reinterpret_cast<uint64_t>(p); }
+
+// movie:: on Media Foundation is the Switch 1 movie library's (Metroid Prime Remastered's subsdk0); on Switch 2 install_movie_hle() leaves
+// movie:: to the lifted library and answers false. The first call decides for the whole process (std::call_once), so it is made under the
+// Switch 1 profile whatever console the test game targets (oot is a Switch 2 title).
+bool install_switch1_movie_hle() {
+    nxtest::ScopedPlatform sw1(game::Platform::Switch1);
+    return media::install_movie_hle();
+}
 
 constexpr const char* kExtCtor = "_ZN5movie9ExtractorC1ENS_13ContainerTypeENS_9CacheSizeE";
 constexpr const char* kExtDtor = "_ZN5movie9ExtractorD1Ev";
@@ -165,7 +174,7 @@ struct DecoderSide {
 uint64_t new_md() { uint64_t* h = new uint64_t(0); call(kMdCtor, {P(h)}); return P(h); }
 void free_md(uint64_t h) { call(kMdDtor, {h}); delete reinterpret_cast<uint64_t*>(h); }
 
-Result play(const std::string& dir, const std::string& id, size_t frame_step, bool keep_pcm) {
+Result play_movie(const std::string& dir, const std::string& id, size_t frame_step, bool keep_pcm) {
     Result r;
     r.id = id;
     const auto t0 = std::chrono::steady_clock::now();
@@ -358,7 +367,7 @@ std::vector<std::string> load_lines(const std::string& path) {
 NXTEST(movie_loop_restart) {
     const char* dirv = std::getenv("NXRT_MOVIE_DIR");
     if (!dirv || !*dirv) { nxtest::skip("NXRT_MOVIE_DIR is not set (run tools/media/movie_oracle.py)"); return; }
-    REQUIRE(media::install_movie_hle());
+    REQUIRE(install_switch1_movie_hle());
     std::vector<Expected> all = load_expected(dirv);
     REQUIRE(!all.empty());
     const Expected* pick = &all[0];
@@ -408,7 +417,7 @@ NXTEST(movie_loop_restart) {
 }
 
 NXTEST(movie_import_table) {
-    CHECK(media::install_movie_hle());
+    CHECK(install_switch1_movie_hle());
     size_t n = 0;
     const char* const* names = media::movie_import_names(&n);
     CHECK_EQ(n, 41u);
@@ -419,7 +428,7 @@ NXTEST(movie_import_table) {
 }
 
 NXTEST(movie_mediadata_buffer) {
-    REQUIRE(media::install_movie_hle());
+    REQUIRE(install_switch1_movie_hle());
     uint64_t md = 0;
     call(kMdCtor, {P(&md)});
     REQUIRE(md != 0);
@@ -449,7 +458,7 @@ NXTEST(movie_mediadata_buffer) {
 NXTEST(movie_all_fmv) {
     const char* dirv = std::getenv("NXRT_MOVIE_DIR");
     if (!dirv || !*dirv) { nxtest::skip("NXRT_MOVIE_DIR is not set (run tools/media/movie_oracle.py)"); return; }
-    REQUIRE(media::install_movie_hle());
+    REQUIRE(install_switch1_movie_hle());
     const std::string dir = dirv;
     const char* outv = std::getenv("NXRT_MOVIE_OUT");
     const char* onlyv = std::getenv("NXRT_MOVIE_ONLY");
@@ -468,7 +477,7 @@ NXTEST(movie_all_fmv) {
     std::vector<std::thread> pool;
     for (unsigned t = 0; t < nthreads; t++) {
         pool.emplace_back([&] {
-            for (size_t i; (i = next.fetch_add(1)) < todo.size();) results[i] = play(dir, todo[i].id, step, outv != nullptr);
+            for (size_t i; (i = next.fetch_add(1)) < todo.size();) results[i] = play_movie(dir, todo[i].id, step, outv != nullptr);
         });
     }
     for (auto& t : pool) t.join();

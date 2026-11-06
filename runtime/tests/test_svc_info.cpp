@@ -11,6 +11,7 @@
 #include "nxrt/diag.h"
 #include "nxrt/kernel.h"
 #include "nxrt/memory.h"
+#include "nxrt/services.h"
 #include "nxrt/svc.h"
 #include "test_platform.h"
 NXTEST_GROUP(svc_info)
@@ -48,15 +49,21 @@ constexpr uint32_t kInfoThreadTickCountOld = 0xF0000002u;
 constexpr uint32_t kInfoThreadTickCount = 25;
 constexpr uint64_t kInvalidCombination = 0xE801;
 constexpr uint64_t kInvalidHandle = 0xE401;
-constexpr uint64_t kTotalMemory = 0xCD500000ull;
+constexpr uint64_t kTotalMemory = 0xCD500000ull;          // Switch 1 application (svc_info.cpp kTotalMemoryAvailable)
+constexpr uint64_t kTotalMemorySwitch2 = 0x2A0000000ull;  // Switch 2 application: 10.5 GiB
 constexpr uint64_t kGolden = 0x9E3779B97F4A7C15ull;
 constexpr uint64_t kAllCores = 0xFFFFFFFFFFFFFFFFull;
+
+// Used memory (GetInfo 7 and 22, GetSystemInfo 1): the heap plus the main thread's stack, which the kernel takes from the process's
+// memory (the title's main.npdm, services::TitleProfile::main_thread_stack), plus the mapped modules (none in these tests).
+uint64_t used_memory() { return nxrt::svc_current_heap_size() + nxrt::services::profile().main_thread_stack; }
 
 }  // namespace
 
 // GetInfo: InfoType 0 to 23 with their documented or chosen values.
 
 NXTEST(info_core_and_priority_masks) {
+    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);   // three application cores (the Switch 2 mask is checked below)
     Result r = call(kSvcGetInfo, 0);
     CHECK_EQ(r.rc, 0u);
     CHECK_EQ(r.x1, 0x7u);
@@ -81,10 +88,11 @@ NXTEST(info_alias_and_heap_regions) {
 }
 
 NXTEST(info_total_and_used_memory) {
+    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);   // the Switch 1 application size (Switch 2: info_switch2_total_memory)
     Result r = call(kSvcGetInfo, 6);
     CHECK_EQ(r.rc, 0u);
     CHECK_EQ(r.x1, kTotalMemory);
-    uint64_t used = nxrt::svc_current_heap_size() + 0x4000000ull;
+    uint64_t used = used_memory();
     r = call(kSvcGetInfo, 7);
     CHECK_EQ(r.rc, 0u);
     CHECK_EQ(r.x1, used);
@@ -94,6 +102,27 @@ NXTEST(info_total_and_used_memory) {
     r = call(kSvcGetInfo, 21);   // TotalNonSystemMemorySize is the same value
     CHECK_EQ(r.rc, 0u);
     CHECK_EQ(r.x1, kTotalMemory);
+}
+
+NXTEST(info_switch2_total_memory) {
+    nxtest::ScopedPlatform sw2(nxrt::game::Platform::Switch2);
+    CHECK_EQ(call(kSvcGetInfo, 6).x1, kTotalMemorySwitch2);
+    CHECK_EQ(call(kSvcGetInfo, 21).x1, kTotalMemorySwitch2);
+    CHECK_EQ(call(kSvcGetInfo, 7).x1, used_memory());
+}
+
+// The main thread's stack counts as used: a title whose stack differs from the default changes the used size by the difference.
+NXTEST(info_used_memory_follows_the_main_thread_stack) {
+    nxrt::config_set("title", "main_thread_stack", "0x200000");
+    nxrt::services::profile_reload();
+    const uint64_t a = call(kSvcGetInfo, 7).x1;
+    nxrt::config_set("title", "main_thread_stack", "0x600000");
+    nxrt::services::profile_reload();
+    const uint64_t b = call(kSvcGetInfo, 7).x1;
+    CHECK_EQ(b - a, 0x400000ull);
+    CHECK_EQ(b, nxrt::svc_current_heap_size() + 0x600000ull);
+    nxrt::config_clear();
+    nxrt::services::profile_reload();
 }
 
 NXTEST(info_debugger_resource_limit_idle_zero) {
@@ -122,6 +151,7 @@ NXTEST(info_random_entropy_subtypes_distinct_and_stable) {
 }
 
 NXTEST(info_random_entropy_bad_subtype) {
+    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);   // four subtypes on Switch 1, eight on Switch 2 (below)
     Result r = call(kSvcGetInfo, 11, 0, 4);
     CHECK_EQ(r.rc, kInvalidCombination);
     CHECK_EQ(r.x1, 0u);
@@ -163,9 +193,20 @@ NXTEST(info_aslr_and_stack_regions) {
 }
 
 NXTEST(info_system_resource_and_program_id_override) {
+    // SystemResourceSize is the title's (main.npdm; oot 0x3000000, which turns on nn::os's address manager), and 0 without one.
+    nxrt::config_clear();
+    nxrt::services::profile_reload();
     Result r = call(kSvcGetInfo, 16);
     CHECK_EQ(r.rc, 0u);
-    CHECK_EQ(r.x1, 0u);
+    CHECK_EQ(r.x1, nxrt::services::profile().system_resource_size);
+    nxrt::config_set("title", "system_resource_size", "0");
+    nxrt::services::profile_reload();
+    CHECK_EQ(call(kSvcGetInfo, 16).x1, 0u);
+    nxrt::config_set("title", "system_resource_size", "0x1000000");
+    nxrt::services::profile_reload();
+    CHECK_EQ(call(kSvcGetInfo, 16).x1, 0x1000000u);
+    nxrt::config_clear();
+    nxrt::services::profile_reload();
     r = call(kSvcGetInfo, 17);
     CHECK_EQ(r.rc, 0u);
     CHECK_EQ(r.x1, 0u);
@@ -277,7 +318,7 @@ NXTEST(system_info_total_physical_memory_per_pool) {
 }
 
 NXTEST(system_info_used_physical_memory_and_pid_range) {
-    uint64_t used = nxrt::svc_current_heap_size() + 0x4000000ull;
+    uint64_t used = used_memory();
     Result r = call(kSvcGetSystemInfo, 1, 0, 0);
     CHECK_EQ(r.rc, 0u);
     CHECK_EQ(r.x1, used);

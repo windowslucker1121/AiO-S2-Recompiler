@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // acc:u0 / acc:u1 and their IProfile, IManagerForApplication and IAsyncContext (S3c). Request bytes and expected replies are
 // written out from Switchbrew's acc tables and error list (0x287C = 124-20 ResultInvalidUserId, 0x407C = 124-32, 0xC87C = 124-100)
-// and from the layouts in docs/S3c.md; the single user is the default [account] uid, hi 1 and lo 0x4d50525265636f6d, whose bytes
-// are written here by hand (hi first, each little-endian; see the comment at the top of src/services/acc.cpp).
+// and from the layouts in docs/S3c.md; the single user is the default [account] uid of the registered title (services::TitleProfile
+// user_uid_hi / user_uid_lo; oot: hi 1, lo "OOTRecmp"), whose bytes are laid out here by hand (hi first, each little-endian; see the
+// comment at the top of src/services/acc.cpp).
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "nxrt/config.h"
@@ -16,8 +18,16 @@ using nxsvc::Args;
 
 namespace {
 
-// The local user's Uid as it sits in guest memory: hi (u64 = 1) then lo (u64 = 0x4d50525265636f6d).
-const uint8_t kLocalUid[16] = {0x01, 0, 0, 0, 0, 0, 0, 0, 0x6d, 0x6f, 0x63, 0x65, 0x52, 0x52, 0x50, 0x4d};
+// The local user's Uid as it sits in guest memory: hi then lo, each u64 little-endian, byte by byte (not a memcpy of the struct).
+const uint8_t* local_uid() {
+    static uint8_t b[16];
+    const services::TitleProfile& p = services::profile();
+    for (int i = 0; i < 8; ++i) {
+        b[i] = static_cast<uint8_t>(p.user_uid_hi >> (8 * i));
+        b[8 + i] = static_cast<uint8_t>(p.user_uid_lo >> (8 * i));
+    }
+    return b;
+}
 // hi 3, lo 3: not a user of the console.
 const uint8_t kOtherUid[16] = {0x03, 0, 0, 0, 0, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0, 0};
 const uint8_t kNullUid[16] = {};
@@ -31,14 +41,16 @@ void fresh_profile() {
     services::reset_all();
 }
 
-// The 0x38-byte ProfileBase the default user has: uid, timestamp, nickname "Samus" NUL padded to 0x20.
+// The 0x38-byte ProfileBase the default user has: uid, timestamp, the title's default nickname (oot "Player") NUL padded to 0x20.
 void check_profile_base(const nxsvc::Reply& r) {
     // the raw reply is padded to 16 bytes (hipc), so the layout is checked by offset, not by size
     CHECK(r.out.size() >= 0x38);
-    CHECK(r.out.size() >= 0x38 && std::memcmp(r.out.data(), kLocalUid, 16) == 0);
+    CHECK(r.out.size() >= 0x38 && std::memcmp(r.out.data(), local_uid(), 16) == 0);
     CHECK_EQ(r.get<uint64_t>(0x10), kLastEdit);
-    CHECK(r.str(0x18, 0x20) == "Samus");
-    for (size_t i = 0x18 + 5; i < 0x38 && i < r.out.size(); ++i) CHECK(r.out[i] == 0);
+    const std::string& nick = services::profile().user_nickname;
+    CHECK(!nick.empty() && nick.size() < 0x20);
+    CHECK(r.str(0x18, 0x20) == nick);
+    for (size_t i = 0x18 + nick.size(); i < 0x38 && i < r.out.size(); ++i) CHECK(r.out[i] == 0);
 }
 
 }  // namespace
@@ -54,7 +66,7 @@ NXTEST(acc_user_count_and_existence) {
     CHECK(r.out.size() >= 4);
     CHECK_EQ(r.get<int32_t>(0), 1);
     // GetUserExistence (1): Uid input; the local user yes, another uid no, the null uid no (not an error)
-    r = s.call(1, Args().bytes(kLocalUid, 16));
+    r = s.call(1, Args().bytes(local_uid(), 16));
     CHECK(r.ok());
     CHECK_EQ(r.get<uint8_t>(0), 1u);
     r = s.call(1, Args().bytes(kOtherUid, 16));
@@ -76,7 +88,7 @@ NXTEST(acc_list_users_writes_the_array) {
         std::memset(buf, 0xEE, sizeof buf);
         nxsvc::Reply r = s.call(cmd, Args().buf_c(buf, 0xA0));
         CHECK(r.ok());
-        CHECK(std::memcmp(buf, kLocalUid, 16) == 0);
+        CHECK(std::memcmp(buf, local_uid(), 16) == 0);
         bool rest_zero = true;
         for (size_t i = 16; i < sizeof buf; ++i) rest_zero = rest_zero && buf[i] == 0;
         CHECK(rest_zero);
@@ -91,7 +103,7 @@ NXTEST(acc_last_opened_user) {
     // GetLastOpenedUser (4): the Uid, 16 bytes
     nxsvc::Reply r = s.call(4);
     CHECK(r.ok());
-    CHECK(r.out.size() >= 16 && std::memcmp(r.out.data(), kLocalUid, 16) == 0);
+    CHECK(r.out.size() >= 16 && std::memcmp(r.out.data(), local_uid(), 16) == 0);
 }
 
 NXTEST(acc_get_profile_and_base) {
@@ -100,7 +112,7 @@ NXTEST(acc_get_profile_and_base) {
     nxsvc::Session s = nxsvc::connect("acc:u0");
     REQUIRE(s.valid());
     // GetProfile (5) of the local user: an IProfile as a move handle
-    nxsvc::Reply r = s.call(5, Args().bytes(kLocalUid, 16));
+    nxsvc::Reply r = s.call(5, Args().bytes(local_uid(), 16));
     CHECK(r.ok());
     REQUIRE(r.move.size() == 1);
     nxsvc::Session prof = s.sub(r);
@@ -124,7 +136,7 @@ NXTEST(acc_profile_image_is_empty) {
     fresh_profile();
     nxsvc::Session s = nxsvc::connect("acc:u0");
     REQUIRE(s.valid());
-    nxsvc::Reply r = s.call(5, Args().bytes(kLocalUid, 16));
+    nxsvc::Reply r = s.call(5, Args().bytes(local_uid(), 16));
     REQUIRE(r.ok() && r.move.size() == 1);
     nxsvc::Session prof = s.sub(r);
     // GetImageSize (10): 0 (no picture; see acc.cpp)
@@ -165,11 +177,11 @@ NXTEST(acc_try_select_without_interaction) {
     // TrySelectUserWithoutInteraction (52), input u8 bool 0 -> the one user
     nxsvc::Reply r = s.call(52, Args().u8(0));
     CHECK(r.ok());
-    CHECK(r.out.size() >= 16 && std::memcmp(r.out.data(), kLocalUid, 16) == 0);
+    CHECK(r.out.size() >= 16 && std::memcmp(r.out.data(), local_uid(), 16) == 0);
     // the deprecated id 51 with the network flag set: still the one user (ScarletNX and Ryujinx only log the flag)
     r = s.call(51, Args().u8(1));
     CHECK(r.ok());
-    CHECK(r.out.size() >= 16 && std::memcmp(r.out.data(), kLocalUid, 16) == 0);
+    CHECK(r.out.size() >= 16 && std::memcmp(r.out.data(), local_uid(), 16) == 0);
 }
 
 NXTEST(acc_registration_permitted_differs_by_service) {
@@ -197,7 +209,7 @@ NXTEST(acc_u1_list_qualified_users_is_140) {
     std::memset(buf, 0xEE, sizeof buf);
     nxsvc::Reply r = sys.call(140, Args().buf_c(buf, 0xA0));
     CHECK(r.ok());
-    CHECK(std::memcmp(buf, kLocalUid, 16) == 0);
+    CHECK(std::memcmp(buf, local_uid(), 16) == 0);
     // acc:u0 command 140 is InitializeApplicationInfo (pid + u64 placeholder, no output): accepted
     nxsvc::Session app = nxsvc::connect("acc:u0");
     REQUIRE(app.valid());
@@ -211,17 +223,17 @@ NXTEST(acc_store_and_clear_thumbnail) {
     nxsvc::Session s = nxsvc::connect("acc:u0");
     REQUIRE(s.valid());
     std::vector<uint8_t> thumb(0x24000, 0x55);   // 256x144 RGBA, Switchbrew's size for StoreSaveDataThumbnail
-    nxsvc::Reply r = s.call(110, Args().bytes(kLocalUid, 16).buf_a(thumb.data(), thumb.size()));
+    nxsvc::Reply r = s.call(110, Args().bytes(local_uid(), 16).buf_a(thumb.data(), thumb.size()));
     CHECK(r.ok());
     // a picture of another size: ResultInvalidArrayLength 124-32 = 0x407C
     std::vector<uint8_t> small(0x1000, 0x55);
-    r = s.call(110, Args().bytes(kLocalUid, 16).buf_a(small.data(), small.size()));
+    r = s.call(110, Args().bytes(local_uid(), 16).buf_a(small.data(), small.size()));
     CHECK_EQ(r.result, 0x407Cu);
     // null uid: ResultInvalidUserId 0x287C
     r = s.call(110, Args().bytes(kNullUid, 16).buf_a(thumb.data(), thumb.size()));
     CHECK_EQ(r.result, 0x287Cu);
     // ClearSaveDataThumbnail (111): the local user yes, null no
-    r = s.call(111, Args().bytes(kLocalUid, 16));
+    r = s.call(111, Args().bytes(local_uid(), 16));
     CHECK(r.ok());
     r = s.call(111, Args().bytes(kNullUid, 16));
     CHECK_EQ(r.result, 0x287Cu);
@@ -233,7 +245,7 @@ NXTEST(acc_manager_account_id_and_async_context) {
     nxsvc::Session s = nxsvc::connect("acc:u0");
     REQUIRE(s.valid());
     // GetBaasAccountManagerForApplication (101) of the local user: an IManagerForApplication
-    nxsvc::Reply r = s.call(101, Args().bytes(kLocalUid, 16));
+    nxsvc::Reply r = s.call(101, Args().bytes(local_uid(), 16));
     CHECK(r.ok());
     REQUIRE(r.move.size() == 1);
     nxsvc::Session mgr = s.sub(r);
@@ -245,10 +257,10 @@ NXTEST(acc_manager_account_id_and_async_context) {
     // CheckAvailability (0): ok
     r = mgr.call(0);
     CHECK(r.ok());
-    // GetAccountId (1): uid[0] ^ uid[1] (ScarletNX's id for a user; the local user has no network account): 0x4D50525265636F6C
+    // GetAccountId (1): uid[0] ^ uid[1] (ScarletNX's id for a user; the local user has no network account)
     r = mgr.call(1);
     CHECK(r.ok());
-    CHECK_EQ(r.get<uint64_t>(0), 0x4D50525265636F6Cull);
+    CHECK_EQ(r.get<uint64_t>(0), services::profile().user_uid_hi ^ services::profile().user_uid_lo);
     // EnsureIdTokenCacheAsync (2): an IAsyncContext that is done at once and failed with nifm's 110-300 (0x2586E), no network
     r = mgr.call(2);
     CHECK(r.ok());
@@ -271,6 +283,8 @@ NXTEST(acc_state_follows_profile_on_reset) {
     fresh_profile();
     nxsvc::Session s = nxsvc::connect("acc:u0");
     REQUIRE(s.valid());
+    uint8_t old_uid[16];
+    std::memcpy(old_uid, local_uid(), 16);   // the title's default user, before the profile changes
     // another profile uid (hi 2, lo 3); the open user is taken from the profile when the services are reset
     config_set("account", "uid", "00000000000000020000000000000003");
     services::profile_reload();
@@ -281,7 +295,7 @@ NXTEST(acc_state_follows_profile_on_reset) {
     CHECK(r.out.size() >= 16 && std::memcmp(r.out.data(), uid2, 16) == 0);
     r = s.call(1, Args().bytes(uid2, 16));   // GetUserExistence of the new user: yes
     CHECK_EQ(r.get<uint8_t>(0), 1u);
-    r = s.call(1, Args().bytes(kLocalUid, 16));   // the old one: no
+    r = s.call(1, Args().bytes(old_uid, 16));   // the old one: no
     CHECK_EQ(r.get<uint8_t>(0), 0u);
     fresh_profile();
 }

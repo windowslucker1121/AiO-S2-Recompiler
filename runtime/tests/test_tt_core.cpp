@@ -17,6 +17,7 @@
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
 #include "nxrt/dispatch.h"
+#include "nxrt/game.h"
 #include "nxrt/kernel.h"
 #include "nxrt/tt.h"
 
@@ -25,15 +26,76 @@ NXTEST_GROUP(tt_core)
 namespace {
 
 using namespace nxrt::tt;
+namespace game = nxrt::game;
 
 constexpr uint64_t kBase = 0x5000000000ull;          // the fake "main module" base: only a key for fn_register / hook addresses
 const char* kWorld = "4b5e8635-0f43-4ffb-9427-2e62186e517d";
 const char* kAreaA = "4ca69978-0000-4000-8000-000000000001";
 const char* kAreaB = "4ca69978-0000-4000-8000-000000000002";
 
+// The fake game below has Metroid Prime Remastered's memory shape (docs/S5.md), which that game's probes read (nxrt/game.h Info::probes,
+// games/mpr/mpr_tt_probe.cpp). That module is not in every checkout (this one registers oot, which has no probes): then the cases that only
+// need some probe readings (health, position, world and area for the script steps) get a stand-in probe table that reads the same shape, and
+// the cases that check those probes or the game's own warp sequence skip.
+bool mpr_probes_registered() { return game::info().probes && std::strcmp(game::info().id, "mpr") == 0; }
+
+ProbeLayout g_rig_layout;
+template <class T>
+T rig_at(uint64_t a) {
+    T v;
+    std::memcpy(&v, reinterpret_cast<const void*>(a), sizeof v);
+    return v;
+}
+bool rig_read_state(GameState* out) {
+    const ProbeLayout& l = g_rig_layout;
+    if (!l.game_state_global || !l.state_manager) return false;
+    *out = GameState{};
+    const uint64_t gs = rig_at<uint64_t>(l.game_state_global);
+    std::memcpy(out->world, reinterpret_cast<const void*>(gs), 16);
+    const int32_t count = rig_at<int32_t>(gs + 0x10);
+    const uint64_t worlds = rig_at<uint64_t>(gs + 0x18);
+    for (int32_t i = 0; i < count; ++i)
+        if (std::memcmp(reinterpret_cast<const void*>(worlds + 0x50 * i), out->world, 16) == 0) std::memcpy(out->area, reinterpret_cast<const void*>(worlds + 0x50 * i + 0x10), 16);
+    out->have_world = true;
+    out->hp = rig_at<float>(rig_at<uint64_t>(gs + 0x20) + 0xc);
+    out->have_hp = true;
+    const uint64_t cgs = rig_at<uint64_t>(rig_at<uint64_t>(l.state_manager + 8) + 8);
+    out->igt = rig_at<double>(cgs + 0xffb08);
+    out->have_igt = true;
+    const uint64_t player = rig_at<uint64_t>(rig_at<uint64_t>(l.state_manager + 0x4e0150) + 0x18);
+    const uint64_t xf = rig_at<uint64_t>(rig_at<uint64_t>(rig_at<uint64_t>(player + 8) + 0x20) + 0x40);
+    out->pos[0] = rig_at<float>(xf + 3 * 4);
+    out->pos[1] = rig_at<float>(xf + 7 * 4);
+    out->pos[2] = rig_at<float>(xf + 11 * 4);
+    out->have_player = true;
+    return true;
+}
+void rig_set_layout(const ProbeLayout& l) { g_rig_layout = l; }
+const GameProbes kRigProbes = [] {
+    GameProbes p;
+    p.read_state = &rig_read_state;
+    p.set_probe_layout = &rig_set_layout;
+    return p;
+}();
+
+// Registers the stand-in probes for one Rig's lifetime unless the registered game is Metroid Prime Remastered (restored in reverse order).
+struct RigProbes {
+    const game::Info* prev = game::current();
+    game::Info copy = game::info();
+    RigProbes() {
+        if (mpr_probes_registered()) return;
+        copy.probes = &kRigProbes;
+        game::set_current(&copy);
+    }
+    ~RigProbes() { game::set_current(prev); }
+    RigProbes(const RigProbes&) = delete;
+    RigProbes& operator=(const RigProbes&) = delete;
+};
+
 // A fake game whose memory has the shape the probes read: gpGameState -> CGameStateMP1 -> world array; CStateManager -> CGameState (igt),
 // GameLogic -> player -> transform. The toy simulation: UP walks +y, left stick strafes +x, A raises z, igt counts.
 struct Rig {
+    RigProbes probes_;
     alignas(16) uint8_t gs[0x40] = {};
     alignas(16) uint8_t worlds[2 * 0x50] = {};
     alignas(16) uint8_t pstate[0x20] = {};
@@ -198,6 +260,10 @@ const char* kSession =
 }  // namespace
 
 NXTEST(probes_read_the_fake_game) {
+    if (!mpr_probes_registered()) {   // this case checks those probes' offsets, not the stand-in that copies them
+        nxtest::skip("needs Metroid Prime Remastered's tt probes (games/mpr, not in this checkout)");
+        return;
+    }
     Rig r("probes");
     r.set_igt(12.5);
     r.xf[3] = 1.5f; r.xf[7] = -2.0f; r.xf[11] = 3.25f;
@@ -324,26 +390,29 @@ NXTEST(virtual_clock_steps_per_frame) {
     Rig r("clock");
     begin(r, {{"deterministic", "1"}, {"trace", "none"}});
     uint64_t t0 = 0, t1 = 0, t2 = 0;
+    // system ticks at the platform's rate: 19.2 MHz on Switch 1 (320000 per 1/60 s frame), 31.25 MHz on Switch 2 (the test game's console)
+    const uint64_t hz = nxrt::kernel::tick_hz(), frame_ticks = hz / 60, ms_ticks = hz / 1000;
     REQUIRE(virtual_tick(&t0));
     REQUIRE(virtual_tick(&t1));
     CHECK_EQ(t1, t0 + 1);                                  // every read advances time by one tick
     ::Ctx ctx{};
     for (int i = 0; i < 4; i++) frame_boundary(&ctx);      // frames 0..3
     REQUIRE(virtual_tick(&t2));
-    CHECK(t2 >= t0 + 3 * 320000);                          // three full steps since frame 0
-    CHECK(t2 < t0 + 4 * 320000);
+    CHECK(t2 >= t0 + 3 * frame_ticks);                     // three full steps since frame 0
+    CHECK(t2 < t0 + 4 * frame_ticks);
     const uint64_t before = t2;
-    virtual_sleep(1000000);                                // 1 ms = 19200 ticks, no real wait
+    virtual_sleep(1000000);                                // 1 ms of ticks, no real wait
     uint64_t t3 = 0;
     virtual_tick(&t3);
-    CHECK(t3 >= before + 19200);
+    CHECK(t3 >= before + ms_ticks);
+    CHECK(t3 < before + ms_ticks + 16);                    // exactly 1 ms (and the few reads in between), not 1 ms at another platform's rate
     // A sleep on another thread does not move the clock: it waits for the frames (here: none come) for at most its length of host time.
     uint64_t t4 = 0, t5 = 0;
     virtual_tick(&t4);
     std::thread other([] { for (int i = 0; i < 20; i++) virtual_sleep(1000000); });
     other.join();
     virtual_tick(&t5);
-    CHECK(t5 < t4 + 19200);                                // 20 sleeps of 1 ms on the other thread: less than 1 ms of virtual time
+    CHECK(t5 < t4 + ms_ticks);                             // 20 sleeps of 1 ms on the other thread: less than 1 ms of virtual time
     shutdown();
     CHECK(!virtual_tick(&t3));                             // off after shutdown / when not enabled
 }
@@ -364,6 +433,11 @@ NXTEST(rng_is_a_seeded_stream_in_deterministic_mode) {
     rng_fill(c, 24);
     CHECK(std::memcmp(a, c, 24) != 0);
     CHECK_EQ(wall_filetime(), wall_filetime() - 0 + 0);    // fixed epoch + virtual time: reads do not move wall time
+    // one second of virtual time is 10^7 units of wall time, at either platform's tick rate
+    const uint64_t w0 = wall_filetime();
+    virtual_sleep(1000000000);
+    const uint64_t w1 = wall_filetime();
+    CHECK(w1 - w0 >= 10000000ull && w1 - w0 < 10000100ull);
     shutdown();
 }
 
@@ -387,6 +461,10 @@ NXTEST(hash_regions_fold_memory_into_the_frame_hash) {
 }
 
 NXTEST(warp_runs_the_practice_mod_sequence) {
+    if (!mpr_probes_registered()) {   // the warp is the game's own function sequence (GameProbes::warp)
+        nxtest::skip("needs Metroid Prime Remastered's tt probes and warp (games/mpr, not in this checkout)");
+        return;
+    }
     Rig r("warp");
     nxrt::fn_register(kBase + 0xc838e4, fake_set_world);
     nxrt::fn_register(kBase + 0xc84478, fake_current_ws);
@@ -424,6 +502,10 @@ const char* kWarpScript = "2\n@warp frig frig_b\n@assert area == frig_b\n@pass\n
 
 // S42: @warp waits while the game's resource loader has work queued, and warps once it has been idle for 10 frames in a row.
 NXTEST(warp_waits_for_the_idle_resource_loader) {
+    if (!mpr_probes_registered()) {
+        nxtest::skip("needs Metroid Prime Remastered's tt probes and warp (games/mpr, not in this checkout)");
+        return;
+    }
     Rig r("warpgate");
     r.with_loader = true;
     r.set_loader_queue(3);
@@ -448,6 +530,10 @@ NXTEST(warp_waits_for_the_idle_resource_loader) {
 }
 
 NXTEST(warp_gate_can_be_turned_off_and_gives_up_after_its_limit) {
+    if (!mpr_probes_registered()) {
+        nxtest::skip("needs Metroid Prime Remastered's tt probes and warp (games/mpr, not in this checkout)");
+        return;
+    }
     for (int mode = 0; mode < 2; mode++) {
         Rig r(mode ? "warpgate_max" : "warpgate_off");
         r.with_loader = true;

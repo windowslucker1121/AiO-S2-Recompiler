@@ -28,6 +28,7 @@
 #include "nvn_texprep.h"
 #include "nvn_texture_layout.h"
 #include "nxrt/gfx.h"
+#include "validation_layer.h"
 #include "nxrt/gfx_tuning.h"
 #include "tegra_tiling.h"
 #include "test_framework.h"
@@ -190,7 +191,7 @@ bool bring_up(Rig& r) {
         std::printf("    device: %s\n", err.c_str());
         return false;
     }
-    CHECK(r.dev->validation_enabled());
+    gfxtest::validation_layer_live(*r.dev);   // the zero validation counts mean something only with the layer on
     r.baseline_allocs = r.dev->memory_stats().allocations;
     if (!gpu::init_for_test(*r.dev, nullptr)) {
         std::printf("    back end did not start\n");

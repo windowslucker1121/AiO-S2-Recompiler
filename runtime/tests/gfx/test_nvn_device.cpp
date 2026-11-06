@@ -9,6 +9,7 @@
 #include "nvn_gpu.h"
 #include "nvn_impl.h"
 #include "test_framework.h"
+#include "test_platform.h"
 NXTEST_GROUP(gfx_nvn_device)
 
 using namespace nxrt;
@@ -111,7 +112,9 @@ NXTEST(device_initialize_binds_and_finalize_unbinds) {
     CHECK(be::host_of<be::Device>(&dev) == nullptr);
 }
 
+// NVN1 (Switch 1): API 55.15 and the NVN1 table. The test game may be a Switch 2 title (oot), so the console is named; NVN2 is checked below.
 NXTEST(device_get_integer_known_and_unknown_values) {
+    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);
     setup();
     NVNdevice dev{};
     init_device(&dev, 0);
@@ -135,6 +138,33 @@ NXTEST(device_get_integer_known_and_unknown_values) {
     CHECK(v == 0);
     // a null out pointer is tolerated
     get(&dev, NVN_DEVICE_INFO_UNIFORM_BUFFER_ALIGNMENT, nullptr);
+    P<void(NVNdevice*)>("nvnDeviceFinalize")(&dev);
+}
+
+// NVN2 (Switch 2): API 231.40 (Ocarina of Time, SDK 22, needs minor >= 40; Pokopia >= 30), the NVN2-only values 0x62..0xA9 from the SDK 22
+// constant table (0x67 = 256: the movie enhancer aborts with 0), 0 past the table; the values NVN2 shares with NVN1 keep their numbering.
+NXTEST(device_get_integer_nvn2_values) {
+    nxtest::ScopedPlatform sw2(nxrt::game::Platform::Switch2);
+    setup();
+    NVNdevice dev{};
+    init_device(&dev, 0);
+    auto get = P<void(const NVNdevice*, NVNdeviceInfo, int*)>("nvnDeviceGetInteger");
+    int v = -1;
+    get(&dev, NVN_DEVICE_INFO_API_MAJOR_VERSION, &v);
+    CHECK_EQ(v, 231);
+    get(&dev, NVN_DEVICE_INFO_API_MINOR_VERSION, &v);
+    CHECK_EQ(v, 40);
+    get(&dev, NVN_DEVICE_INFO_UNIFORM_BUFFER_ALIGNMENT, &v);
+    CHECK_EQ(v, 256);
+    get(&dev, static_cast<NVNdeviceInfo>(0x62), &v);
+    CHECK_EQ(v, 32);
+    get(&dev, static_cast<NVNdeviceInfo>(0x67), &v);
+    CHECK_EQ(v, 256);
+    get(&dev, static_cast<NVNdeviceInfo>(0xA9), &v);
+    CHECK_EQ(v, 1);
+    v = 77;
+    get(&dev, static_cast<NVNdeviceInfo>(0xAA), &v);
+    CHECK_EQ(v, 0);
     P<void(NVNdevice*)>("nvnDeviceFinalize")(&dev);
 }
 

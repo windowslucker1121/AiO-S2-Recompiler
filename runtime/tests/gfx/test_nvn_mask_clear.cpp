@@ -17,6 +17,7 @@
 #include "nvn_mask_clear.h"
 #include "nxrt/gfx.h"
 #include "test_framework.h"
+#include "validation_layer.h"
 NXTEST_GROUP(gfx_nvn_mask_clear)
 
 using namespace nxrt;
@@ -130,7 +131,7 @@ bool make_rig(Rig& r) {
         std::printf("    device: %s\n", err.c_str());
         return false;
     }
-    CHECK(r.dev->validation_enabled());   // the zero counts below mean something only with the layer on
+    gfxtest::validation_layer_live(*r.dev);   // the zero counts below mean something only with the layer on
     return r.mc.init(*r.dev);
 }
 

@@ -4,6 +4,9 @@
 // the service under test.
 #include "svc_test_util.h"
 
+#include <chrono>
+#include <thread>
+
 NXTEST_GROUP(svc_network)
 
 using namespace nxrt;
@@ -49,20 +52,112 @@ NXTEST(nifm_no_connection) {
     for (uint32_t h : ev.copy) kernel::handle_close(h);
 }
 
-NXTEST(bsd_socket_enetdown) {
+// Sockets exist and do nothing (Ocarina of Time's gRPC probes IPv6 with a UDP socket and aborts when Socket fails): Socket hands out a
+// descriptor, the commands that would need a network fail with ENETDOWN, Close frees it once.
+NXTEST(bsd_socket_exists_but_has_no_network) {
     nxsvc::Env env;
     nxsvc::Session bsd = nxsvc::connect("bsd:u");
     REQUIRE(bsd.valid());
-    // Socket(i32 domain = AF_INET 2, i32 type = SOCK_STREAM 1, i32 protocol 0) -> (i32 ret, u32 errno): -1, ENETDOWN 100
+    // Socket(i32 domain = AF_INET 2, i32 type = SOCK_STREAM 1, i32 protocol 0) -> (i32 ret, u32 errno): a descriptor, errno 0
     nxsvc::Reply r = bsd.call(2, nxsvc::Args().i32(2).i32(1).i32(0));
     CHECK_EQ(r.result, 0u);
-    CHECK_EQ(r.get<int32_t>(0), -1);
-    CHECK_EQ(r.get<uint32_t>(4), 100u);
-    // Close(i32 fd) -> (i32 ret, u32 errno): accepted, (0, 0)
-    nxsvc::Reply c = bsd.call(26, nxsvc::Args().i32(3));
+    const int32_t fd = r.get<int32_t>(0);
+    CHECK(fd >= 3);                       // 0..2 are the standard streams on the console's bsd too
+    CHECK_EQ(r.get<uint32_t>(4), 0u);
+    // a second socket is another descriptor
+    nxsvc::Reply r2 = bsd.call(2, nxsvc::Args().i32(10).i32(2).i32(0));   // AF_INET6, SOCK_DGRAM
+    const int32_t fd2 = r2.get<int32_t>(0);
+    CHECK(fd2 >= 3 && fd2 != fd);
+    // Connect(i32 fd, sockaddr in an A buffer) -> (-1, ENETDOWN): there is no network
+    uint8_t addr[16] = {0x10, 2};
+    nxsvc::Reply cn = bsd.call(14, nxsvc::Args().i32(fd).buf_a(addr, sizeof addr));
+    CHECK_EQ(cn.result, 0u);
+    CHECK_EQ(cn.get<int32_t>(0), -1);
+    CHECK_EQ(cn.get<uint32_t>(4), 100u);
+    // Fcntl(fd, F_GETFL 3, 0) -> O_NONBLOCK (4)
+    nxsvc::Reply fl = bsd.call(20, nxsvc::Args().i32(fd).i32(3).i32(0));
+    CHECK_EQ(fl.get<int32_t>(0), 4);
+    CHECK_EQ(fl.get<uint32_t>(4), 0u);
+    // Close(i32 fd) -> (i32 ret, u32 errno): (0, 0), then the descriptor is gone: (-1, EBADF 9)
+    nxsvc::Reply c = bsd.call(26, nxsvc::Args().i32(fd));
     CHECK_EQ(c.result, 0u);
     CHECK_EQ(c.get<int32_t>(0), 0);
     CHECK_EQ(c.get<uint32_t>(4), 0u);
+    c = bsd.call(26, nxsvc::Args().i32(fd));
+    CHECK_EQ(c.get<int32_t>(0), -1);
+    CHECK_EQ(c.get<uint32_t>(4), 9u);
+    fl = bsd.call(20, nxsvc::Args().i32(fd).i32(3).i32(0));
+    CHECK_EQ(fl.get<int32_t>(0), -1);
+    CHECK_EQ(fl.get<uint32_t>(4), 9u);
+    CHECK_EQ(bsd.call(26, nxsvc::Args().i32(fd2)).get<int32_t>(0), 0);
+}
+
+// EventFd (31) is Linux's eventfd: Write adds the 8-byte value, Read returns the counter and clears it (EFD_SEMAPHORE: 1 at a time), an empty
+// one answers EAGAIN; Poll reports POLLIN once the counter is non-zero, a socket never, an unknown descriptor POLLNVAL.
+NXTEST(bsd_eventfd_and_poll) {
+    nxsvc::Env env;
+    nxsvc::Session bsd = nxsvc::connect("bsd:u");
+    REQUIRE(bsd.valid());
+    // EventFd(u64 initval = 0, u32 flags = 0) -> (fd, 0)
+    nxsvc::Reply e = bsd.call(31, nxsvc::Args().u64(0).u32(0));
+    CHECK_EQ(e.result, 0u);
+    const int32_t efd = e.get<int32_t>(0);
+    CHECK(efd >= 3);
+    CHECK_EQ(e.get<uint32_t>(4), 0u);
+    const int32_t sock = bsd.call(2, nxsvc::Args().i32(2).i32(2).i32(0)).get<int32_t>(0);
+    CHECK(sock >= 3 && sock != efd);
+    uint64_t v = 0xEEEEEEEEEEEEEEEEull;
+    // Read(fd) -> B buffer: empty -> (-1, EAGAIN 11), the buffer untouched
+    nxsvc::Reply rd = bsd.call(25, nxsvc::Args().i32(efd).buf_b(&v, 8));
+    CHECK_EQ(rd.get<int32_t>(0), -1);
+    CHECK_EQ(rd.get<uint32_t>(4), 11u);
+    CHECK_EQ(v, 0xEEEEEEEEEEEEEEEEull);
+    // Poll(u32 nfds, i32 timeout) with pollfd {i32 fd, i16 events, i16 revents} in an A buffer and back in a B buffer
+    struct PollFd { int32_t fd; int16_t events, revents; };
+    PollFd in[3] = {{efd, 0x1, 0}, {sock, 0x1, 0}, {0x7777, 0x1, 0}}, out[3] = {};
+    nxsvc::Reply p = bsd.call(6, nxsvc::Args().u32(2).i32(0).buf_a(in, 2 * sizeof(PollFd)).buf_b(out, 2 * sizeof(PollFd)));
+    CHECK_EQ(p.get<int32_t>(0), 0);       // nothing ready, timeout 0 returns at once
+    CHECK_EQ(out[0].revents, 0);
+    CHECK_EQ(out[1].revents, 0);
+    // Write(fd, 8 bytes = 2) -> (8, 0); then Poll: the eventfd is readable, the socket is not, the unknown descriptor is invalid
+    const uint64_t two = 2;
+    nxsvc::Reply wr = bsd.call(24, nxsvc::Args().i32(efd).buf_a(&two, 8));
+    CHECK_EQ(wr.get<int32_t>(0), 8);
+    CHECK_EQ(wr.get<uint32_t>(4), 0u);
+    p = bsd.call(6, nxsvc::Args().u32(3).i32(0).buf_a(in, sizeof in).buf_b(out, sizeof out));
+    CHECK_EQ(p.get<int32_t>(0), 2);
+    CHECK_EQ(out[0].revents, 0x1);        // POLLIN
+    CHECK_EQ(out[1].revents, 0);
+    CHECK_EQ(out[2].revents, 0x20);       // POLLNVAL
+    // Read takes the whole counter, then the eventfd is empty again
+    rd = bsd.call(25, nxsvc::Args().i32(efd).buf_b(&v, 8));
+    CHECK_EQ(rd.get<int32_t>(0), 8);
+    CHECK_EQ(v, 2ull);
+    rd = bsd.call(25, nxsvc::Args().i32(efd).buf_b(&v, 8));
+    CHECK_EQ(rd.get<uint32_t>(4), 11u);
+    // EFD_SEMAPHORE (1): each Read takes 1
+    const int32_t sem = bsd.call(31, nxsvc::Args().u64(2).u32(1)).get<int32_t>(0);
+    CHECK(sem >= 3);
+    for (int i = 0; i < 2; ++i) {
+        rd = bsd.call(25, nxsvc::Args().i32(sem).buf_b(&v, 8));
+        CHECK_EQ(rd.get<int32_t>(0), 8);
+        CHECK_EQ(v, 1ull);
+    }
+    CHECK_EQ(bsd.call(25, nxsvc::Args().i32(sem).buf_b(&v, 8)).get<uint32_t>(4), 11u);
+    // a Poll with a timeout returns when a Write comes from another thread, not at the end of the timeout
+    std::thread writer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        nxsvc::Session b2 = nxsvc::connect("bsd:u");
+        b2.call(24, nxsvc::Args().i32(efd).buf_a(&two, 8));
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    p = bsd.call(6, nxsvc::Args().u32(1).i32(5000).buf_a(in, sizeof(PollFd)).buf_b(out, sizeof(PollFd)));
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    writer.join();
+    CHECK_EQ(p.get<int32_t>(0), 1);
+    CHECK_EQ(out[0].revents, 0x1);
+    CHECK_MSG(ms < 4000.0, "Poll waited for its whole timeout although a Write came");
+    for (int32_t fd : {efd, sock, sem}) CHECK_EQ(bsd.call(26, nxsvc::Args().i32(fd)).get<int32_t>(0), 0);
 }
 
 NXTEST(ssl_context_connection_fails) {

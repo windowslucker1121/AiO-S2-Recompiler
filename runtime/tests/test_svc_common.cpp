@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "nxrt/config.h"
+#include "nxrt/game.h"
 
 NXTEST_GROUP(svc_common)
 
@@ -54,19 +55,46 @@ NXTEST(common_shared_memory_map) {
     kernel::handle_close(h);
 }
 
+// With nothing in the ini the profile is the registered title's facts (nxrt/game.h Info and its title_defaults: main.npdm, control.nacp).
 NXTEST(common_profile_defaults) {
     nxsvc::Env env;
     config_clear();
     services::profile_reload();
     const services::TitleProfile& p = services::profile();
-    CHECK_EQ(p.program_id, 0x010012101468C000ull);
-    CHECK_EQ(p.account_save_size, 4ull << 20);
-    CHECK_EQ(p.account_save_journal, 1ull << 20);
-    CHECK_EQ(static_cast<uint32_t>(p.language), static_cast<uint32_t>(services::Language::AmericanEnglish));
+    const game::Info& g = game::info();
+    if (!g.title_defaults) {
+        nxtest::skip("no test game registered (NXRT_TEST_GAME): no title facts to compare");
+        return;
+    }
+    services::TitleProfile want;
+    g.title_defaults(want);
+    CHECK(g.program_id != 0);
+    CHECK_EQ(p.program_id, g.program_id);
+    CHECK_EQ(want.program_id, g.program_id);
+    CHECK_EQ(p.account_save_size, want.account_save_size);
+    CHECK_EQ(p.account_save_journal, want.account_save_journal);
+    CHECK_EQ(p.main_thread_stack, want.main_thread_stack);
+    CHECK_EQ(p.system_resource_size, want.system_resource_size);
+    CHECK_EQ(p.firmware, want.firmware);
     CHECK(p.docked);
-    // 13 supported languages (control.nacp)
-    CHECK_EQ(__builtin_popcount(p.supported_languages), 13);
+    // the supported languages (control.nacp; American English alone when the title names none)
+    const uint32_t langs = want.supported_languages ? want.supported_languages : 1u << static_cast<uint32_t>(services::Language::AmericanEnglish);
+    CHECK_EQ(p.supported_languages, langs);
+    // the language with none set is the Windows display language when the title has it, else American English: one the title supports
+    CHECK((p.supported_languages >> static_cast<uint32_t>(p.language)) & 1u);
     CHECK_EQ(services::language_code_u64(services::Language::AmericanEnglish), 0x53552d6e65ull);   // "en-US"
+}
+
+// A title that supports only American English answers it whatever the machine's display language is.
+NXTEST(common_profile_language_falls_back_to_american_english) {
+    nxsvc::Env env;
+    config_clear();
+    config_set("title", "supported_languages", "AmericanEnglish");
+    services::profile_reload();
+    CHECK_EQ(static_cast<uint32_t>(services::profile().language), static_cast<uint32_t>(services::Language::AmericanEnglish));
+    CHECK_EQ(services::profile().supported_languages, 1u << static_cast<uint32_t>(services::Language::AmericanEnglish));
+    config_clear();
+    services::profile_reload();
 }
 
 NXTEST(common_profile_overrides) {
@@ -89,7 +117,7 @@ NXTEST(common_profile_overrides) {
 
 NXTEST(common_program_id_default) {
     config_clear();
-    CHECK_EQ(services::program_id_now(), 0x010012101468C000ull);
+    CHECK_EQ(services::program_id_now(), game::info().program_id);   // the registered title's id (oot 0x0400486024DEC000)
     config_set("process", "program_id", "0x1234");
     CHECK_EQ(services::program_id_now(), 0x1234ull);
     config_clear();

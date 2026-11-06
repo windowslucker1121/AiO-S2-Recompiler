@@ -883,6 +883,7 @@ NXTEST(core_mask_svcs_with_six_cores_on_switch2) {
         CHECK_EQ(svc_rc(&beyond, 0x0F), k::kInvalidCombination);
         end_case();
     }
+    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);   // the test game may be a Switch 2 title (oot): say which console is meant
     begin();                                                 // the same request on Switch 1 (three cores): core 5 is outside the mask it can honour
     const uint32_t h = make_thread(fn_idle, 0, 44, 0, "pm3");
     REQUIRE(h);

@@ -16,6 +16,7 @@
 #include <iterator>
 
 #include <nxrt/config.h>
+#include <nxrt/game.h>
 
 #include "astc2bc7.h"
 #ifdef NXRT_HAVE_BC7_REF
@@ -280,6 +281,8 @@ Lay make_layout(uint32_t w, uint32_t h, uint32_t levels, uint32_t bw, uint32_t b
     r.d.gob_blocks_y = nxrt::nvn::be::console_block_height((h + bh - 1) / bh);
     r.d.gob_blocks_z = 1;
     r.d.linear_stride_align = 1;
+    // the console's GOB byte order, as the runtime picks it for the registered game's platform (nvn_texture_layout.cpp; oot is a Switch 2 title)
+    r.d.gob_switch2 = nxrt::game::info().platform == nxrt::game::Platform::Switch2;
     r.L = tegra::compute_layout(r.d);
     return r;
 }

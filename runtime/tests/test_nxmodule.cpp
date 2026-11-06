@@ -364,10 +364,16 @@ NXTEST(import_counts) {
     CHECK(nxrt::nxmodule_register(nullptr, &a, nxrt::kAbiVersion).ok());
     nxrt::hle_register("alpha", h_alpha);
 
+    // Each thread adds its calls to the shared count in steps of 4096 (nxmodule.cpp count_import: one shared atomic add per call cost a boot
+    // thread 11%), so a few calls may not show yet, and 4096 calls on one thread add exactly 4096 whatever that thread counted before.
     CHECK_EQ(nxrt::import_calls(), 0u);
     ::Ctx c{};
     for (int i = 0; i < 3; i++) host_import(&c, NX_IMPORT_ID(0, 0));
-    CHECK_EQ(nxrt::import_calls(), 3u);
+    const uint64_t after3 = nxrt::import_calls();
+    CHECK(after3 == 0u || after3 == 4096u);
+    for (int i = 0; i < 4096; i++) host_import(&c, NX_IMPORT_ID(0, 0));
+    CHECK_EQ(nxrt::import_calls(), after3 + 4096u);
+    CHECK_EQ(c.x[0], 0x11u);   // the calls reached the handler
 
     reset();
     CHECK_EQ(nxrt::import_calls(), 0u);

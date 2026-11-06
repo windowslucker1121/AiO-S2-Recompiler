@@ -108,10 +108,12 @@ NXTEST(misc_aoc_base_id_and_empty_list) {
     services::profile_reload();
     nxsvc::Session s = nxsvc::connect("aoc:u");
     REQUIRE(s.valid());
-    // GetAddOnContentBaseId (cmd 5): PID-descriptor -> u64. The title's add-on base id (control.nacp) is 010012101468D000.
+    // GetAddOnContentBaseId (cmd 5): PID-descriptor -> u64. The title's add-on base id (control.nacp): its program id + 0x1000
+    // (oot 0400486024DED000).
     nxsvc::Reply base = s.call(5, nxsvc::Args().with_pid());
     REQUIRE(base.ok());
-    CHECK_EQ(base.get<uint64_t>(0), 0x010012101468D000ull);
+    CHECK(services::profile().program_id != 0);
+    CHECK_EQ(base.get<uint64_t>(0), services::profile().program_id + 0x1000ull);
     // CountAddOnContent (cmd 2): PID-descriptor -> s32 count = 0.
     nxsvc::Reply cnt = s.call(2, nxsvc::Args().with_pid());
     REQUIRE(cnt.ok());

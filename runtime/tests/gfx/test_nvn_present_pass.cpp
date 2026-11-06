@@ -16,6 +16,7 @@
 #include "nvn_present_pass.h"
 #include "nxrt/gfx.h"
 #include "test_framework.h"
+#include "validation_layer.h"
 NXTEST_GROUP(gfx_nvn_present_pass)
 
 using namespace nxrt;
@@ -122,7 +123,7 @@ bool make_rig(Rig& r, uint32_t w, uint32_t h) {
         std::printf("    device: %s\n", err.c_str());
         return false;
     }
-    CHECK(r.dev->validation_enabled());   // the zero counts below mean something only with the layer on
+    gfxtest::validation_layer_live(*r.dev);   // the zero counts below mean something only with the layer on
     RendererDesc rd;
     rd.headless_width = w;
     rd.headless_height = h;
