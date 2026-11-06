@@ -181,6 +181,11 @@ ShaderControl read_control(const uint8_t* control) {
             c.c0_ssbos = control[0xb2];
             c.c0_textures = control[0xb3];
             c.c0_images = control[0xb6];
+            c.c0_table = static_cast<uint16_t>(control[0xba] | control[0xbb] << 8);
+            c.c0_push_words = control[0xa9];
+            const int slots = 0x10 + 0x10 * (c.c0_ubos + c.c0_ssbos) + 8 * (c.c0_textures + c.c0_images);
+            const int push = int(c.c0_table) - slots;
+            if (push > 0 && push % 0x10 == 0 && push <= 0x100) c.c0_push = static_cast<uint16_t>(push);   // the sdk clamps a push to 256 bytes
         }
         return c;
     }
@@ -870,14 +875,18 @@ std::string describe_like_harness(const ShaderReflection& refl) {
 
 namespace {
 // NVN2 compute shaders read their resources from a per-program table in c[0] (Switch 1 used 0x210/0x310 and c[2]):
-// 0x10 header bytes, then 0x10 per uniform block descriptor, 0x10 per storage buffer descriptor, 8 per texture handle,
-// 8 per image handle, slot n = NVN binding n. The counts are control bytes +0xb1/+0xb2/+0xb3/+0xb6, and the table size at
-// u16 +0xba equals 0x10 + 0x10 * (ubos + ssbos) + 8 * (textures + images) in all 3,142 compute blocks of the corpus.
+// 0x10 header bytes, the push constant area (ShaderControl::c0_push bytes, usually none), then 0x10 per uniform block descriptor,
+// 0x10 per storage buffer descriptor, 8 per texture handle, 8 per image handle, slot n = NVN binding n. The counts are control
+// bytes +0xb1/+0xb2/+0xb3/+0xb6, and the table size at u16 +0xba equals 0x10 + 0x10 * (ubos + ssbos) + 8 * (textures + images)
+// in all 3,142 compute blocks of the Pokopia corpus and 3,741 of OoT's 3,743 (the other two, NDVE, push 0x40 bytes).
 // Checked on e764a3f2 (sb at 0x10), 62619a57 (3 ubos: sb at 0x40, texture at 0x50), 7dbc445a (texture 0x40, image 0x48)
-// and 0034791c (2 ubos, 30 textures from 0x30 by GLSLC binding, image at 0x120).
+// and 0034791c (2 ubos, 30 textures from 0x30 by GLSLC binding, image at 0x120). OoT's post-process chain (compute programs built
+// into main) pushes 0x80 bytes: fea98fe7 (3 ssbos, 1 texture, 2 images, table 0xd8) reads its push words at c[0] 0x18..0x80, its
+// storage buffer at 0xb0 (= 0x90 + 2 * 0x10: slot 2), texture 0xc0 (slot 0) and image 0xd0 (slot 1); 54ecc4b4 (11 ubos, 9 ssbos,
+// 7 textures, 2 images, table 0x218) uniform block 10 at 0x130, storage buffer 8 at 0x1c0, textures 4 and 6, image 1.
 void apply_nvn2_compute_table(ShaderReflection& refl, const ShaderControl& c) {
     if (!c.nvn2 || c.stage != 5) return;
-    const int ub0 = 0x10, sb0 = ub0 + 0x10 * c.c0_ubos, tex0 = sb0 + 0x10 * c.c0_ssbos;
+    const int ub0 = 0x10 + c.c0_push, sb0 = ub0 + 0x10 * c.c0_ubos, tex0 = sb0 + 0x10 * c.c0_ssbos;
     const int img0 = tex0 + 8 * c.c0_textures, end = img0 + 8 * c.c0_images;
     for (DescriptorBinding& b : refl.bindings) {
         NvnMeaning& m = b.nvn;

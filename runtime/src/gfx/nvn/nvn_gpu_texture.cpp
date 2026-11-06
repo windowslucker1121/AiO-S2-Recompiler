@@ -184,8 +184,11 @@ VkFormat float_alias(VkFormat f) {
         default: return VK_FORMAT_UNDEFINED;
     }
 }
+// RGB9E5 has a raw 32-bit view too: the hardware cannot store RGB9E5 formatted, so NVN's compiler packs it in the shader and stores the
+// word through an r32ui image (OoT's compute 4c60af1f composites the scene that way); desktop GPUs cannot store to RGB9E5 either.
 VkFormat uint_alias(VkFormat f) {
     switch (f) {
+        case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32: return VK_FORMAT_R32_UINT;
         case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_SINT: return VK_FORMAT_R32_UINT;
         case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32_SINT: return VK_FORMAT_R32G32_UINT;
         case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R32G32B32A32_SINT: return VK_FORMAT_R32G32B32A32_UINT;
@@ -194,6 +197,7 @@ VkFormat uint_alias(VkFormat f) {
 }
 VkFormat sint_alias(VkFormat f) {
     switch (f) {
+        case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32: return VK_FORMAT_R32_SINT;
         case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_UINT: return VK_FORMAT_R32_SINT;
         case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32_UINT: return VK_FORMAT_R32G32_SINT;
         case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R32G32B32A32_UINT: return VK_FORMAT_R32G32B32A32_SINT;
@@ -594,10 +598,11 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
     if (!g->depth && !is_block_format(chosen)) {
         add(VK_IMAGE_USAGE_STORAGE_BIT);
         // sRGB formats have no storage support. The console's image stores write the raw bits (no sRGB encode), which is what a UNORM view
-        // of the same image does: storage usage is then allowed through EXTENDED_USAGE when the UNORM partner can be stored to.
-        const VkFormat unorm = is_srgb(chosen) ? srgb_partner(chosen) : VK_FORMAT_UNDEFINED;
-        if (!(usage & VK_IMAGE_USAGE_STORAGE_BIT) && unorm != VK_FORMAT_UNDEFINED && (flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
-            device().image_supported(make_desc(s, unorm, usage | VK_IMAGE_USAGE_STORAGE_BIT, flags))) {
+        // of the same image does: storage usage is then allowed through EXTENDED_USAGE when the UNORM partner can be stored to. RGB9E5 the
+        // same way through its R32_UINT view (uint_alias), which the shaders store the packed words to.
+        const VkFormat store_as = is_srgb(chosen) ? srgb_partner(chosen) : chosen == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 ? uint_alias(chosen) : VK_FORMAT_UNDEFINED;
+        if (!(usage & VK_IMAGE_USAGE_STORAGE_BIT) && store_as != VK_FORMAT_UNDEFINED && (flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
+            device().image_supported(make_desc(s, store_as, usage | VK_IMAGE_USAGE_STORAGE_BIT, flags))) {
             flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
             usage |= VK_IMAGE_USAGE_STORAGE_BIT;
         }
@@ -1931,6 +1936,7 @@ bool tex_has_storage(Texture* t) {
 VkFormat tex_storage_format(Texture* t, VkFormat requested) {
     TexGpu* g = tex_or_null(t);
     const VkFormat f = requested != VK_FORMAT_UNDEFINED ? requested : g ? g->format : VK_FORMAT_UNDEFINED;
+    if (g && g->mutable_fmt && f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32) return uint_alias(f);   // RGB9E5 is stored to as its packed word
     if (!g || !g->mutable_fmt || !is_srgb(f) || srgb_partner(f) == VK_FORMAT_UNDEFINED) return requested;
     return srgb_partner(f);
 }

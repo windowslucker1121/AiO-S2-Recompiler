@@ -48,12 +48,18 @@ void clamp_exclusive(const int32_t in[4], int32_t out[4]) {
 
 // ---- push constants -------------------------------------------------------------------------------------------------------------
 bool push_write(SmallState& st, uint32_t stage, uint32_t offset, uint32_t size, const void* data) {
+    const bool compute = (stage & kPushCompute) != 0;
+    stage &= ~kPushCompute;
     if (stage >= kPushStages || !data) return false;
     size = std::min(size, kPushAreaBytes) & ~3u;
     if (size < 4) return false;
     offset = (offset & 0xFFu) & ~3u;
     if (offset + size > kPushAreaBytes) size = kPushAreaBytes - offset;
     std::memcpy(st.push[stage] + offset, data, size);
+    if (compute) {
+        std::memcpy(st.push_cs + offset, data, size);
+        st.push_cs_stage = stage;
+    }
     ++st.pushes;
     return true;
 }

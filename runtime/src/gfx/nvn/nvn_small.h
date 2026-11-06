@@ -38,6 +38,7 @@ enum class SmallKind : uint32_t {
 
 constexpr uint32_t kPushStages = 9;        // NVN2 has 9 stage slots (mask 0x1FF, docs/nvn2_abi.md section 5)
 constexpr uint32_t kPushAreaBytes = 256;   // the sdk clamps a push to 256 bytes (0x100) and works in 32-bit words
+constexpr uint32_t kPushCompute = 0x80000000u;   // in P_Small::a of a push record: it came from a compute push (the stage is in the low bits)
 constexpr uint32_t kMaxViewportsSmall = 16;
 
 // The replay's copy of this family's GPU state. It persists across lists like the other GPU state (nvn_replay.cpp GState).
@@ -45,6 +46,10 @@ struct SmallState {
     // push constants: one 256-byte area per stage; `pushes` counts the writes (the draw path could upload only on change)
     uint8_t push[kPushStages][kPushAreaBytes] = {};
     uint64_t pushes = 0;
+    // what nvnCommandBufferPushComputeConstants(Deferred) wrote, whatever stage number the game passed (also kept in push[stage]): the
+    // area NVN2 compute programs read from their c[0] table (ShaderControl::c0_push). push_cs_stage = the stage of the last compute push.
+    uint8_t push_cs[kPushAreaBytes] = {};
+    uint32_t push_cs_stage = 0;
     // shading rate: the image identity (0 none), the palette mode, and per palette index 16 four-bit entries (NV palette numbering)
     uint64_t rate_image = 0;
     int32_t rate_palette_mode = 0;

@@ -146,6 +146,95 @@ NXTEST(read_control_fields) {
     CHECK(!read_control(ctrl).valid);
 }
 
+// NVN2 compute: the c[0] resource table. Control bytes of OoT's fea98fe719bc0348 (a compute program built into main, part of the
+// post-process chain): no uniform blocks, 3 storage buffers, 1 texture, 2 images, table 0xd8 bytes = 0x10 header + 0x80 push constants
+// + 3 * 0x10 + 3 * 8, 29 push words read. The harness printed sb[c0+0x2c], texTexture2D[c0:48] and imgTexture2D[c0:52].
+namespace {
+void make_nvn2_compute_control(uint8_t* ctrl, uint8_t ubos, uint8_t ssbos, uint8_t textures, uint8_t images, uint16_t table, uint8_t push_words) {
+    std::memset(ctrl, 0, 0xd8);
+    auto put = [&](size_t off, uint32_t v) { std::memcpy(ctrl + off, &v, 4); };
+    put(0, kShaderControlMagic);
+    put(4, 201);
+    put(0x38, 0x100);   // program
+    put(0x44, 0x100);   // code block
+    ctrl[0x56] = 5;     // compute
+    put(0x58, 128);
+    put(0x5c, 1);
+    put(0x60, 1);
+    ctrl[0xa9] = push_words;
+    ctrl[0xb1] = ubos;
+    ctrl[0xb2] = ssbos;
+    ctrl[0xb3] = textures;
+    ctrl[0xb6] = images;
+    ctrl[0xba] = static_cast<uint8_t>(table);
+    ctrl[0xbb] = static_cast<uint8_t>(table >> 8);
+}
+DescriptorBinding binding_at(uint32_t b, DescriptorType type, int c0_offset, int word) {
+    DescriptorBinding d;
+    d.set = type == DescriptorType::StorageBuffer ? 1 : type == DescriptorType::StorageImage ? 3 : 2;
+    d.binding = b;
+    d.type = type;
+    d.used = true;
+    d.nvn.c0_offset = c0_offset;
+    d.nvn.bank = word >= 0 ? 0 : -1;
+    d.nvn.word = word;
+    return d;
+}
+}  // namespace
+
+NXTEST(nvn2_compute_table_with_push_constants) {
+    uint8_t ctrl[0xd8], code[0x100] = {};
+    make_nvn2_compute_control(ctrl, 0, 3, 1, 2, 0xd8, 0x1d);
+    const ShaderControl c = read_control(ctrl);
+    CHECK(c.valid && c.nvn2);
+    CHECK_EQ(c.stage, 5);
+    CHECK_EQ(c.c0_table, 0xd8);
+    CHECK_EQ(c.c0_push, 0x80);
+    CHECK_EQ(c.c0_push_words, 0x1d);
+    ShaderReflection refl;
+    refl.stage = ShaderStage::Compute;
+    refl.bindings.push_back(binding_at(0, DescriptorType::StorageBuffer, 0x2c * 4, -1));
+    refl.bindings.push_back(binding_at(0, DescriptorType::CombinedImageSampler, -1, 48));
+    refl.bindings.push_back(binding_at(0, DescriptorType::StorageImage, -1, 52));
+    ShaderInfo info;
+    std::string err;
+    CHECK(make_shader_info(code, ctrl, {}, nullptr, info, &err, &refl));
+    if (info.refl.bindings.size() != 3) return;
+    const NvnMeaning& sb = info.refl.bindings[0].nvn;
+    const NvnMeaning& tex = info.refl.bindings[1].nvn;
+    const NvnMeaning& img = info.refl.bindings[2].nvn;
+    CHECK(sb.source == NvnSource::StorageBuffer);
+    CHECK_EQ(sb.index, 2);          // 0xb0 = 0x90 + 2 * 0x10
+    CHECK(tex.source == NvnSource::SamplerBinding);
+    CHECK_EQ(tex.index, 0);         // 0xc0
+    CHECK(img.source == NvnSource::ImageBinding);
+    CHECK_EQ(img.index, 1);         // 0xd0 = 0xc8 + 8
+    // the same program without push constants (a corpus-style table of 0x58 bytes) keeps the 0x10-byte header only: 0xb0 is then outside
+    make_nvn2_compute_control(ctrl, 0, 3, 1, 2, 0x58, 0);
+    CHECK_EQ(read_control(ctrl).c0_push, 0);
+    CHECK(make_shader_info(code, ctrl, {}, nullptr, info, &err, &refl));
+    if (info.refl.bindings.size() == 3) CHECK(info.refl.bindings[0].nvn.source == NvnSource::Unknown);
+    // 54ecc4b4d30b3e2c: 11 uniform blocks, 9 storage buffers, 7 textures, 2 images, table 0x218: uniform block 10 at 0x130 (read as
+    // storage), storage buffer 8 at 0x1c0, textures 4 and 6 at words 124 and 128, image 1 at word 132
+    make_nvn2_compute_control(ctrl, 11, 9, 7, 2, 0x218, 0x1d);
+    refl.bindings.clear();
+    refl.bindings.push_back(binding_at(0, DescriptorType::StorageBuffer, 0x4c * 4, -1));
+    refl.bindings.push_back(binding_at(1, DescriptorType::StorageBuffer, 0x70 * 4, -1));
+    refl.bindings.push_back(binding_at(0, DescriptorType::CombinedImageSampler, -1, 124));
+    refl.bindings.push_back(binding_at(1, DescriptorType::CombinedImageSampler, -1, 128));
+    refl.bindings.push_back(binding_at(0, DescriptorType::StorageImage, -1, 132));
+    CHECK(make_shader_info(code, ctrl, {}, nullptr, info, &err, &refl));
+    if (info.refl.bindings.size() != 5) return;
+    CHECK(info.refl.bindings[0].nvn.source == NvnSource::UniformAsStorage);
+    CHECK_EQ(info.refl.bindings[0].nvn.index, 10);
+    CHECK(info.refl.bindings[1].nvn.source == NvnSource::StorageBuffer);
+    CHECK_EQ(info.refl.bindings[1].nvn.index, 8);
+    CHECK_EQ(info.refl.bindings[2].nvn.index, 4);
+    CHECK_EQ(info.refl.bindings[3].nvn.index, 6);
+    CHECK(info.refl.bindings[4].nvn.source == NvnSource::ImageBinding);
+    CHECK_EQ(info.refl.bindings[4].nvn.index, 1);
+}
+
 NXTEST(read_control_on_first_corpus_block) {
     std::string manifest, code, ctrl;
     if (!read_file(fs::path(kCorpusDir) / "manifest.tsv", manifest)) {
