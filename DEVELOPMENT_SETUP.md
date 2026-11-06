@@ -206,7 +206,10 @@ tools\.venv\Scripts\python tools\ai\tests\test_gamectl.py
 powershell -ExecutionPolicy Bypass -File runtime\scripts\build.ps1 -Test
 cd recomp && ..\tools\.venv\Scripts\python oracle\difftest\difftest.py all
 ```
-The runtime tests build in their own folder (the game build has `NXRT_BUILD_TESTS` off). The recompiler oracles
+The runtime tests build in their own folder (the game build has `NXRT_BUILD_TESTS` off); all 170 groups pass. In a git worktree the
+git-ignored tool folders are missing: link them from the main checkout first (`mklink /J tools\llvm <main>\tools\llvm`, the same for
+`tools\sccache`, `tools\.venv`, `tools\vcpkg`, `tools\uv` and `tools\textures\build`), and after a header change there clean the build
+folder first (`ninja -C runtime\build\release -t clean`): sccache cache hits leave ninja watching the main checkout's headers. The recompiler oracles
 (`oracle\difftest`, `oracle\e2e\run_e2e.py`, `oracle\hooks\test_hooks.py`) use unicorn as the reference CPU.
 
 ## 10. Moving to another computer

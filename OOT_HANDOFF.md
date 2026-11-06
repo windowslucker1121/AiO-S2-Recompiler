@@ -110,8 +110,9 @@ Numbered as in the artifacts table of `AGENTS.md`.
   operation_mode = handheld`); the lifted code is built for baseline x86-64 (every FMADD is a CRT `fmaf` call; FMA3 flags need a full
   25-minute rebuild).
 - **Housekeeping**: `recomp/games/oot/main.sites` no longer has the temporary NDVE probe hooks, but `oot_main.lib` was not rebuilt
-  (`recomp\scripts\build_game.cmd oot_main`, then rebuild the exe). The runtime tests were not built here (`NXRT_BUILD_TESTS` is off
-  in the game build); `runtime\scripts\build.ps1 -Test` would run them, including the new `harness_handle_expression`.
+  (`recomp\scripts\build_game.cmd oot_main`, then rebuild the exe). The runtime tests (`runtime\scripts\build.ps1 -Test`, their own
+  build folder; the game build has `NXRT_BUILD_TESTS` off) pass, all 170 groups: the 27 that failed first were stale expectations from
+  the upstream Metroid Prime module, not OoT regressions (AGENTS.md "Runtime tests").
 - **Pokopia regression risk** (no Pokopia dump here): the shared changes below also run for Pokopia, especially the harness's draw
   parameter answer, `LINEAR_RENDER_TARGET` as pitch-linear, the shader preparation check and the audio effect fixes.
 

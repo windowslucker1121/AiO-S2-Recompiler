@@ -153,7 +153,7 @@ Open points besides the milestones:
 - **Pokopia regression risk** (no Pokopia dump here): shared changes in funcs.py (header/MOD0, ADR starts, RETAA/RETAB, zero FDEs), a64.py
   (PAC decode), tier2 FP16, used-memory accounting, NVN minor 40, TLS +0x110, MapMemory Alias sources, WaitIfEqual64, bsd descriptors.
   Oracles, from `recomp\`: `..\tools\.venv\Scripts\python oracle/difftest/difftest.py all`, `oracle/e2e/run_e2e.py`,
-  `oracle/hooks/test_hooks.py`; runtime tests `runtime\scripts\build.ps1 -Test`.
+  `oracle/hooks/test_hooks.py`; runtime tests `runtime\scripts\build.ps1 -Test` (all 170 groups pass, see "Runtime tests" below).
 
 ## Artifacts (the user wants every one fixed; add each one seen, mark it fixed with the cause)
 
@@ -261,12 +261,38 @@ input while unfocused is known only once `oot.exe` runs. `launch` sets `test.fra
 
 Disk: C: had 130 GB free before the setup (the `.nup` already in the repo root); the extracted game takes 26.3 GB, `work\` ~8 GB.
 
-**Runtime tests** (`runtime\scripts\build.ps1 -Test`, 2026-11-06): they configure now (the default game module was `mpr`, which this
-repository does not carry; now `oot` when `games/mpr` is missing, and `tests/gfx/test_prompts.cpp`, which needs mpr's pak/txtr readers,
-is left out), and the lift tests find the repo-local LLVM (`recomp/oracle/e2e/build_prog.py`, `runtime/tests/tools/make_sites.py`).
-Result: 143 of 170 pass. The 27 failing groups were never run on this branch; the ones looked at expect upstream state: the Vulkan
-validation layer (`gfx_nvn_texgpu`: no Vulkan SDK), NVN API version 55 (`gfx_nvn_device`: OoT needs 231.40), mpr's local user
-(`svc_acc`), a Switch 2 core-mask error code (`kernel_threads`). Not yet sorted into stale tests and real regressions.
+**Runtime tests** (`runtime\scripts\build.ps1 -Test`, builds in `runtime\build\release`, ~3.5 min clean; one group: `runtime\build\release\nxrt_tests.exe <group>`
+or `nxrt_gfx_tests.exe <group>`, failures print `FAILED <file>:<line>`): **all 170 groups pass** (2026-11-06).
+They configure since the default game module became `oot` when `games/mpr` is missing (`tests/gfx/test_prompts.cpp`, which needs mpr's
+pak/txtr readers, is left out) and the lift tests find the repo-local LLVM. The 27 groups that failed on the first run were all stale
+expectations, none a regression of the OoT branch: the upstream tests were written against the Metroid Prime Remastered module (never in this
+repository), so with `oot` registered (`NXRT_TEST_GAME`) they met another title. What changed, so later tests follow the same rules:
+- **Title facts** (program id, save sizes, display version, languages, firmware, account uid/nickname, aoc base id, SystemResourceSize) are
+  compared with the registered game's `Info` / `TitleProfile` (`services::profile()`), not mpr's literals.
+- **Platform**: tests whose numbers belong to one console say so with `nxtest::ScopedPlatform` (`tests/test_platform.h`): Switch 1 core mask,
+  total memory, 4 GiB heap limit, entropy subtypes, NVN 55.15, the Switch 1 movie:: HLE; Switch 2 checks were added next to them (NVN2 231.40
+  and the 0x62..0xA9 table, the Switch 2 GOB byte order, 10.5 GiB, kHeapMax). Block-linear layouts in tests take `gob_switch2` from the platform.
+- **Host language**: with no `[system] language` the profile follows the Windows display language (German on this machine), so tests that check
+  an encoding pin `[system] language = AmericanEnglish`.
+- **Vulkan validation layer** (no Vulkan SDK here on purpose): the zero-validation-error counts print a note instead of failing
+  (`tests/gfx/validation_layer.h`); `gfx_device.validation_layer_really_reports_errors` skips.
+- **Play vocabulary**: play_config, play_engine, launcher_bindings_edit and launcher_tweaks test the shared settings code through mpr's words
+  ("fire", "morph", contexts gameplay/morph/scan) and factory controls.ini: `tests/play_fixture/mpr_play_fixture.{h,cpp}` rebuilds that data
+  and `NXTEST_GROUP_FIXTURE` (test_framework.h) registers it around each case of those groups. play_pad_live uses the game's own frame hook.
+- **tt_core**: the fake game has mpr's memory shape; without mpr's probes a stand-in probe table reads it for the script/replay cases, and
+  the cases that test mpr's probes and warp sequence skip (`probes_read_the_fake_game`, `warp_*`).
+- Deliberate OoT changes now have tests: WaitIfEqual64 (`kernel_sync`), used memory = heap + main thread stack (`svc_info`), the bsd
+  descriptor table (Socket / EventFd / Poll, `svc_network`), batched import counting (`nxmodule`).
+- One runtime fix came out of it: in deterministic test mode (`[test] deterministic = 1`) the virtual clock converted sleeps and wall time
+  at 19.2 MHz while it steps frames at the platform rate, so on Switch 2 a 1 ms sleep advanced 0.61 ms (`src/testtools/tt_core.cpp`; normal
+  runs never use it).
+Skips that remain on this machine are data-dependent (no `work/shader_cache`, no `NXRT_MOVIE_DIR`), hardware-dependent (no integrated GPU)
+or need mpr (`tt_core` probes/warp). In a git worktree the git-ignored tools are missing: `mklink /J` `tools\llvm`, `tools\sccache`,
+`tools\.venv`, `tools\vcpkg`, `tools\uv` and `tools\textures\build` from the main checkout before building. **sccache in a worktree:** a
+cache hit replays the include list of the compile that filled the cache, so objects first built from the main checkout's cache carry
+ninja header dependencies on the *main checkout's* headers, and a header changed in the worktree (a merge that touched `nxrt/gfx.h`) does
+not rebuild them: four gfx groups crashed in `Overlay::build_ui` on a stale `overlay.cpp.obj`. After a header change in a worktree, clean
+first (`ninja -C runtime\build\release -t clean`, then `build.ps1 -Test`); `ninja -t deps <obj>` shows the paths ninja watches.
 
 ## OoT pipeline
 
