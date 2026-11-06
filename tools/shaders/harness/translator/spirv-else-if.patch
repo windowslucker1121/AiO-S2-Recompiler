@@ -1,15 +1,37 @@
 Ryujinx SPIR-V back end: emit "else if" chains (AstBlockType.ElseIf) as nested selections.
 Without this, the false edge of the If before an ElseIf goes straight to the merge block and every
 ElseIf/Else after it becomes unreachable code. See docs/nvn/TRANSLATOR.md, "else if chains".
+Also a diagnosis switch, off unless the environment sets it: NXRT_HARNESS_LOOP_CAP=N makes every loop
+of a function leave once its back edges, counted in one per-invocation variable, reach N (an endless
+loop in a translated shader then ends instead of taking the GPU down; OoT A8, AGENTS.md).
 Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a copy in private/build; the
 checkout in private/third_party stays untouched. The Ryujinx code in the context lines is MIT.
 
 --- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
 +++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
-@@ -311,6 +311,33 @@
+@@ -17,6 +17,10 @@
+     static class SpirvGenerator
+     {
+         // Resource pools for Spirv generation. Note: Increase count when more threads are being used.
++        // Diagnosis (NXRT_HARNESS_LOOP_CAP=N, default 0 = off): every loop back edge of a function counts in one per-invocation counter; once
++        // it reaches N, every loop of the function exits. A shader that stops taking the GPU down with it had an endless loop.
++        private static readonly int LoopCap = int.TryParse(Environment.GetEnvironmentVariable("NXRT_HARNESS_LOOP_CAP"), out int loopCap) ? loopCap : 0;
++
+         private const int GeneratorPoolCount = 1;
+         private static readonly ObjectPool<SpvInstructionPool> _instructionPool;
+         private static readonly ObjectPool<SpvLiteralIntegerPool> _integerPool;
+@@ -311,6 +315,41 @@
  
              context.LoopTargets = loopTargets;
  
++            SpvInstruction loopCounter = null;
++            if (LoopCap > 0)
++            {
++                SpvInstruction s32 = context.TypeS32();
++                loopCounter = context.Variable(context.TypePointer(StorageClass.Private, s32), StorageClass.Private, context.Constant(s32, 0));
++                context.AddGlobalVariable(loopCounter);
++            }
++
 +            // "else if" chains (AstOptimizer turns "else { if ... }" into ElseIf blocks once expression propagation
 +            // has emptied the else block of everything but the if). Each ElseIf is its own nested selection
 +            // construct: its header is the first label of the block, and it gets its own merge block, which
@@ -40,7 +62,7 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
              visitor.BlockEntered += (sender, e) =>
              {
                  AstBlock mergeBlock = e.Block.Parent;
-@@ -320,7 +347,7 @@
+@@ -320,7 +359,7 @@
                      AstBlock ifTrueBlock = e.Block;
                      AstBlock ifFalseBlock;
  
@@ -49,7 +71,7 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
                      {
                          ifFalseBlock = nextBlock;
                      }
-@@ -334,6 +361,23 @@
+@@ -334,6 +373,23 @@
                      context.SelectionMerge(context.GetNextLabel(mergeBlock), SelectionControlMask.MaskNone);
                      context.BranchConditional(condition, context.GetNextLabel(ifTrueBlock), context.GetNextLabel(ifFalseBlock));
                  }
@@ -73,7 +95,22 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
                  else if (e.Block.Type == AstBlockType.DoWhile)
                  {
                      SpvInstruction continueTarget = context.Label();
-@@ -378,7 +422,7 @@
+@@ -364,6 +420,14 @@
+ 
+                         SpvInstruction condition = context.Get(AggregateType.Bool, e.Block.Condition);
+ 
++                        if (loopCounter != null)
++                        {
++                            SpvInstruction s32 = context.TypeS32();
++                            SpvInstruction n = context.IAdd(s32, context.Load(s32, loopCounter), context.Constant(s32, 1));
++                            context.Store(loopCounter, n);
++                            condition = context.LogicalAnd(context.TypeBool(), condition, context.SLessThan(context.TypeBool(), n, context.Constant(s32, LoopCap)));
++                        }
++
+                         context.BranchConditional(condition, loopTarget, context.GetNextLabel(mergeBlock));
+                     }
+                     else
+@@ -378,7 +442,7 @@
  
                          if (!lastIsCf)
                          {
@@ -82,7 +119,7 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
                          }
                      }
  
-@@ -386,9 +430,22 @@
+@@ -386,9 +450,22 @@
                          (nextBlock.Type == AstBlockType.Else ||
                           nextBlock.Type == AstBlockType.ElseIf);
  
