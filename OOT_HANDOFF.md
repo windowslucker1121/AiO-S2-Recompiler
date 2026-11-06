@@ -12,10 +12,14 @@ techniques, rules) and `DEVELOPMENT_SETUP.md` (what a development machine needs)
 | Audio | Opus decodes on libopus (not listened to). Two audio-renderer crashes on entering gameplay are fixed. |
 | Shaders | Second machine: 46,192 of the corpus's 47,203 blocks translated in a fresh batch run (`work\shaders\oot\spirv`; the first machine's cache also had on-demand and re-translated rows: 46,357 of 47,428). Pre-boot shader preparation done (39,327 of 39,363 programs, 36 without a shader) into `work\shaders\oot\pipeline_cache.bin` (2.2 GB on the RTX 4080). |
 | New Game | Title -> 5-minute intro movie (`Dm_Kokiri_0000.webm`, cannot be skipped) -> ~70 s loading -> first 3D scene. |
-| **First 3D scene** | **Blocked: `VK_ERROR_DEVICE_LOST` 1-7 s after its first frame, on every full run (A8, below).** |
+| **First 3D scene** | The device loss (A8) is fixed in the translator (branch `claude/busy-hamilton-0e62aa`): endless loops from Ryujinx's goto elimination in 14,692 pixel shaders. With a cache translated with the fix the scene ran 4 minutes without a loss (a control run with the three old A8 shaders put back lost the device 4 s into the scene, in the original draw); the scene is black (separate issue). `work\shaders\oot\spirv` still has the old shaders until it is re-translated and prepared again. |
 | FPS | Title well above 30 fps. In game unknown (blocked); with 1/16 of the fragment draws enabled the scene ran at 10-15 fps. |
 
-## The current problem: GPU device lost in the first scene (A8)
+## GPU device lost in the first scene (A8): fixed
+
+**Root cause (2026-11-06):** Ryujinx's goto elimination enclosed a loop's exit (`if (c) break;`) in a newer flag loop, so the break left only that
+loop and the shader's light loop never ended. Fix, offline check and numbers: `AGENTS.md` artifact A8 and `tools/shaders/README.md` ("Structurizer").
+The investigation below is kept as it was.
 
 Symptom: after "New Game" and the intro, the first scene presents one to three frames (the first takes 9-112 s to replay because of
 first-use texture uploads), then `vkQueueSubmit2 failed (-4): the device is lost or out of memory` in `oot.log` and the process ends.

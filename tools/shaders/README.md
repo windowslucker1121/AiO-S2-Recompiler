@@ -111,6 +111,27 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
 
 `spirv-nan.patch` is carried from Wonder but not applied (Wonder's published numbers were built without it).
 
+## Structurizer: loop exits in goto elimination (OoT A8)
+
+- `harness/translator/structured-goto-loop-exits.patch` (`StructuredIr/GotoElimination.cs`): Ryujinx eliminates gotos last to
+  first. A goto that leaves a loop becomes `if (c) break;` in the loop (MoveOutward); when a later goto in the same loop body then
+  encloses statements in a new do-while (EncloseDoWhile, Lift: the flag loops `do { ... } while (gotoTemp)`), that break was
+  enclosed too and left only the new loop. OoT's material shaders (a light loop with a `CALL.REL.NOINC` exit and a `BRX` switch
+  inside whose cases jump to the switch's end) then never left the light loop: the GPU was lost after the driver's timeout. A new
+  do-while now forwards every break/continue of an outer loop it encloses: the exit sets a flag and leaves the new loop, and
+  `if (flag) { flag = false; break; }` (or `continue`) right after the new loop repeats it. The flags are cleared at the start of the
+  function, not before the loop (a later goto may guard the statements before it).
+- **Structurizer check** (`harness/translator/StructuredCfgCheck.cs`, hooks in `structured-program-cfg-check.patch` and
+  `structured-context-node-blocks.patch`): `NXRT_HARNESS_CFG_CHECK=N` (off by default; then the output is unchanged) makes every
+  translation run N random walks through each structured function right after goto elimination. Branch conditions of the original
+  code take random values, goto-elimination flags are evaluated exactly, and every time the walk enters a basic block (its first AST
+  statement) the block must be the one the block graph names after the previous block. A mismatch, a statement that runs outside its
+  block or a walk that does not end is an exception, so `--batch` lists the block as `exception: ... CFG check`; a passing translation
+  prints `cfg check <function>: N walks ok, blocks seen/total, edges seen/total` on stderr. OoT corpus (47,203 blocks, 100 walks each,
+  `--batch ... --jobs 8`, ~6 min): 14,684 blocks fail before the fix, all pixel shaders with BRX/CALL.REL.NOINC, and none after it
+  (one compute block branches on an undefined value and is not checked). The fix changes the SPIR-V of 14,692 blocks (the 8 more
+  fail before it after 100-107 walks); 17,094 corpus blocks contain a BRX/BRXU or CALL.REL.NOINC.
+
 ## Cache completeness (S40)
 
 - `scripts/gap_corpus.py <romfs> --cache <spirv dir> --out <dir> [--programs programs.bin] [--all]`: scans the game files the way the
