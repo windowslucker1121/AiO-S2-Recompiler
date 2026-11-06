@@ -11,8 +11,10 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -817,34 +819,78 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     return pipe;
 }
 
+namespace {
+// One vkCreateComputePipelines call, timed; VK_NULL_HANDLE on failure (logged).
+VkPipeline create_compute(const ShaderInfo* cs, VkShaderModule m, VkPipelineLayout layout) {
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    ci.stage.module = m;
+    ci.stage.pName = "main";
+    ci.layout = layout;
+    VkPipeline pipe = VK_NULL_HANDLE;
+    const uint64_t tp0 = nxrt::hitch_ticks();
+    const auto t0 = std::chrono::steady_clock::now();
+    const VkResult cr = vkCreateComputePipelines(vkdev(), g_cache, 1, &ci, nullptr, &pipe);
+    if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - tp0);
+    const double ms = ms_from(t0);
+    if (ms >= 250.0)
+        NXLOG_W(kTag, "compute pipeline %s took %.0f ms to create (%zu bytes of SPIR-V)", cs->hash.c_str(), ms, cs->spirv.size() * 4);
+    if (cr != VK_SUCCESS) {
+        NXLOG_E(kTag, "compute pipeline failed for %s", cs->hash.c_str());
+        return VK_NULL_HANDLE;
+    }
+    counters().pipelines_created.fetch_add(1);
+    ++g_pipeline_count;
+    g_pipes_created.add(1);
+    g_cache_dirty.store(true, std::memory_order_relaxed);
+    g_new_since_save.fetch_add(1, std::memory_order_relaxed);
+    return pipe;
+}
+
+// Compute programs with this much SPIR-V are built on a thread of their own, and their dispatches are left out until the pipeline is there.
+// OoT's tensor-core upscaler programs (fea98fe7, f90d726d: 4-5 MB of SPIR-V each) took 116 s in the NVIDIA driver the first time, all of it
+// on the render thread (no frame for two minutes). The pipeline cache keeps them afterwards. [nvn] compute_background_spirv_kb (0 = never).
+struct ComputeBuild {
+    std::thread thread;
+    std::atomic<bool> done{false};
+    VkPipeline pipe = VK_NULL_HANDLE;
+};
+std::map<std::pair<const ShaderInfo*, VkPipelineLayout>, std::unique_ptr<ComputeBuild>> g_compute_builds;
+}  // namespace
+
 VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgLayout& layout) {
     ensure_cache();
     const auto k = std::make_pair(cs, layout.layout);
     auto it = g_compute.find(k);
     if (it != g_compute.end()) return it->second;
+    if (auto b = g_compute_builds.find(k); b != g_compute_builds.end()) {   // built in the background: taken once done
+        if (!b->second->done.load(std::memory_order_acquire)) return VK_NULL_HANDLE;
+        b->second->thread.join();
+        const VkPipeline pipe = b->second->pipe;
+        g_compute_builds.erase(b);
+        g_compute[k] = pipe;
+        g_compute_keys.add(1);
+        NXLOG_I(kTag, "compute pipeline %s: background build done, its dispatches run from now on", cs->hash.c_str());
+        return pipe;
+    }
     VkShaderModule m = shader_module(cs);
     VkPipeline pipe = VK_NULL_HANDLE;
-    if (m) {
-        VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        ci.stage.module = m;
-        ci.stage.pName = "main";
-        ci.layout = layout.layout;
-        const uint64_t tp0 = nxrt::hitch_ticks();
-        const VkResult cr = vkCreateComputePipelines(vkdev(), g_cache, 1, &ci, nullptr, &pipe);
-        if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - tp0);
-        if (cr != VK_SUCCESS) {
-            NXLOG_E(kTag, "compute pipeline failed for %s", cs->hash.c_str());
-            pipe = VK_NULL_HANDLE;
-        } else {
-            counters().pipelines_created.fetch_add(1);
-            ++g_pipeline_count;
-            g_pipes_created.add(1);
-            g_cache_dirty.store(true, std::memory_order_relaxed);
-    g_new_since_save.fetch_add(1, std::memory_order_relaxed);
-        }
+    static const uint64_t background_kb = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "compute_background_spirv_kb", 1024)));
+    if (m && background_kb && cs->spirv.size() * 4 >= background_kb * 1024) {
+        auto b = std::make_unique<ComputeBuild>();
+        ComputeBuild* bp = b.get();
+        const VkPipelineLayout pl = layout.layout;
+        NXLOG_I(kTag, "compute pipeline %s (%zu bytes of SPIR-V): built in the background; its dispatches are left out until it is ready",
+                cs->hash.c_str(), cs->spirv.size() * 4);
+        bp->thread = std::thread([bp, cs, m, pl] {
+            bp->pipe = create_compute(cs, m, pl);
+            bp->done.store(true, std::memory_order_release);
+        });
+        g_compute_builds.emplace(k, std::move(b));
+        return VK_NULL_HANDLE;
     }
+    if (m) pipe = create_compute(cs, m, layout.layout);
     g_compute[k] = pipe;                         // new key: the lookup above missed
     g_compute_keys.add(1);
     return pipe;
@@ -914,6 +960,11 @@ void pipeline_shutdown() {
     VkDevice d = vkdev();
     prewarm_shutdown();
     gpl_stop();
+    for (auto& [k, b] : g_compute_builds) {      // a background compute build cannot be cancelled: wait for it before the device goes
+        if (b->thread.joinable()) b->thread.join();
+        if (b->pipe) vkDestroyPipeline(d, b->pipe, nullptr);
+    }
+    g_compute_builds.clear();
     pipeline_cache_flush();
     for (auto& [h, bucket] : g_gfx)
         for (auto& e : bucket) {

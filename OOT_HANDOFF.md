@@ -94,12 +94,11 @@ not converted` (variable rate shading), `GPU-side WaitEvent` not implemented (sk
 
 Numbered as in the artifacts table of `AGENTS.md`.
 
-- **A10, compute resources**: OoT's compute shaders read storage buffers and texture handles from c[0] offsets the runtime does not map
-  (storage at c0 bytes 0xC0, 0xD0, 0x100, 0x110, 0x120, 0x150, 0x160; texture/image handles at c0 words 8-142; Pokopia's table was
-  0x210 uniforms-as-storage and 0x310 storage). The same word is a storage descriptor in one shader and an image handle in another,
-  so it is a per-program table. Ways in: extract the GLSLC reflection sections with the corpus (`work\shaders\oot\corpus\glslc` is
-  empty; `tools/shaders/harness/Nvn2Reflection.cs` parses them), or read the NVN2 driver's compute dispatch code in the `sdk`
-  module. Until then, dispatches whose storage buffers map to nothing are skipped (`[nvn] skip_unmapped_dispatch`).
+- **A10, compute resources: fixed** (branch `claude/charming-brahmagupta-90017e`): the post-process chain's compute programs (built into
+  `main`) keep 0x80 bytes of push constants in their c[0] table before the descriptors; the runtime now lays the table out with them and
+  fills a per-dispatch c[0] from the game's compute pushes. Every resource of the chain resolves (also RGB9E5 storage images through an
+  R32_UINT view, a storage buffer in a virtual pool, the 116 s tensor-network pipeline built in the background, TLD4 .B/.F16 in the
+  translator). The scene is still washed out with the chain running: see A12 in `AGENTS.md` for where that leaves off.
 - **A9, mesh shaders**: foliage and terrain use task/mesh shaders (the 800 "stage 6/7 blocks without code"). Neither the translator
   nor the runtime supports them.
 - **A7, clustered-light shadows**: 4,336 fragment shaders sample shadow maps through a handle read per pixel; the translator cannot

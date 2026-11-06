@@ -353,6 +353,49 @@ BufRef resolve_in_pool(uint64_t gpu_address, uint64_t size, MemoryPool** pool_ou
 BufRef resolve_buffer(uint64_t gpu_address, uint64_t size) { return resolve_in_pool(gpu_address, size, nullptr, nullptr); }
 
 namespace {
+bool virtual_to_physical(MemoryPool& vp, uint64_t off, uint64_t size, uint64_t* phys_address);
+}
+
+uint64_t physical_buffer_address(uint64_t gpu_address, uint64_t size) {
+    const PoolHit hit = pool_lookup(gpu_address);
+    uint64_t phys = 0;
+    if (!hit.pool || !hit.pool->is_virtual || !virtual_to_physical(*hit.pool, hit.offset, size, &phys)) return gpu_address;
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1) < 4)
+        NXLOG_I(kTag, "buffer at virtual pool address 0x%llx (+0x%llx) bound through its physical memory 0x%llx", static_cast<unsigned long long>(gpu_address),
+                static_cast<unsigned long long>(size), static_cast<unsigned long long>(phys));
+    return phys;
+}
+
+namespace {
+// A range of a virtual (sparse) pool as the GPU address of its physical backing: the pool's nvnMemoryPoolMapVirtual mappings must cover all of
+// it with one physical pool at consecutive offsets (several adjacent mappings are fine). OoT keeps a 200 KB storage buffer of its post-process
+// chain there (0x200000382000: written by compute f05596b9, read by 54ecc4b4); bound as the dummy buffer, the passes could not talk.
+bool virtual_to_physical(MemoryPool& vp, uint64_t off, uint64_t size, uint64_t* phys_address) {
+    std::lock_guard<std::mutex> lk(vp.vmu);
+    const MemoryPool* phys = nullptr;
+    int64_t want_poff = 0;
+    uint64_t cur = off;
+    const uint64_t end = off + std::max<uint64_t>(size, 1);
+    while (cur < end) {
+        const MemoryPool::VirtualMap* m = nullptr;
+        for (const MemoryPool::VirtualMap& x : vp.vmaps)
+            if (x.voff <= cur && cur < x.voff + x.size) { m = &x; break; }
+        if (!m || !m->phys || m->phys->is_virtual || !m->phys->base) return false;
+        const int64_t poff = m->poff + static_cast<int64_t>(cur - m->voff);
+        if (poff < 0) return false;
+        if (!phys) {
+            phys = m->phys.get();
+            *phys_address = phys->gpu_base + static_cast<uint64_t>(poff);
+        } else if (m->phys.get() != phys || poff != want_poff) {
+            return false;
+        }
+        want_poff = poff + static_cast<int64_t>(m->voff + m->size - cur);
+        cur = m->voff + m->size;
+    }
+    return phys && static_cast<uint64_t>(want_poff) <= phys->size;   // a physical pool's GPU address is its host address
+}
+
 // out.buffer / out.offset name the chunk (or span) import holding the range; *pool_off_out receives the offset from the pool's aligned base
 // (what the mirror's pages count from). out.avail is what is left of that import, at least the chunk overlap for a chunked pool.
 BufRef resolve_in_pool(uint64_t gpu_address, uint64_t size, MemoryPool** pool_out, PoolGpu** gpu_out, uint64_t* pool_off_out) {

@@ -125,6 +125,9 @@ struct BufRef {
 // The buffer and offset of `size` bytes at a GPU address. When the address is in no pool (or size runs past the pool), ok is
 // false and the buffer is the dummy buffer (a zeroed 64 KiB buffer) so the draw can go on; this is logged once per address.
 BufRef resolve_buffer(uint64_t gpu_address, uint64_t size);
+// A buffer range in a virtual (sparse) pool: the address of the physical memory its nvnMemoryPoolMapVirtual mappings put there, when one
+// physical pool backs all of it at consecutive offsets. Any other address (or a range that is not mapped that way) comes back unchanged.
+uint64_t physical_buffer_address(uint64_t gpu_address, uint64_t size);
 VkBuffer dummy_buffer();
 // The last 32 bytes of the dummy buffer hold the default of an unset vertex attribute: float (0,0,0,1) and integer (0,0,0,1).
 constexpr VkDeviceSize kDummyAttrFloatOffset = 65504, kDummyAttrIntOffset = 65520;
@@ -254,7 +257,8 @@ VkImageView tex_attachment_view(Texture* t, uint32_t level, uint32_t layer, uint
 VkFormat tex_attachment_format(Texture* t, VkFormat view_format);
 // The image can be bound as a storage image (created with NVN_TEXTURE_FLAGS_IMAGE).
 bool tex_has_storage(Texture* t);
-VkFormat tex_storage_format(Texture* t, VkFormat requested);   // the view format a storage binding uses: the UNORM partner of an sRGB image
+// the view format a storage binding uses: the UNORM partner of an sRGB image, R32_UINT for RGB9E5 (the shaders store the packed word)
+VkFormat tex_storage_format(Texture* t, VkFormat requested);
 // The layout a texture is sampled in: SHADER_READ_ONLY_OPTIMAL, or DEPTH_STENCIL_READ_ONLY_OPTIMAL for depth and stencil formats (so
 // the same layout serves a depth texture that is also the read-only depth attachment of the pass).
 VkImageLayout tex_sampled_layout(Texture* t);

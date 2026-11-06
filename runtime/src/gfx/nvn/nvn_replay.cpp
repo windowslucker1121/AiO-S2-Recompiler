@@ -1494,6 +1494,13 @@ bool tsr_jitter(uint32_t* words, size_t n_words) {
 // {address, size} of the bound compute slots, then their texture and image handles. The shader reaches the descriptors and handles through
 // its bindings (the translator maps them); the copy keeps any plain read of those words right. Only programs with push constants need it:
 // the others read nothing from c[0] but descriptor bases and keep the shared driver-constant buffer. False: not such a program, or no room.
+// True when `n` bytes at `addr` lie in a memory pool backed by host memory, so a trace may print them: a virtual (sparse) pool's addresses
+// (0x2000_0000_0000 and up in OoT: storage buffer 8 of compute 54ecc4b4) are not mapped on the host, and reading them faulted.
+bool host_readable(uint64_t addr, uint64_t n) {
+    const PoolHit h = pool_lookup(addr);
+    return h.pool && !h.pool->is_virtual && h.pool->base && h.offset + n <= h.pool->size;
+}
+
 constexpr VkDeviceSize kComputeC0Bytes = 0x1000;
 bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n) {
     if (!c.nvn2 || c.stage != 5 || !c.c0_push || c.c0_table > n) return false;
@@ -1610,7 +1617,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                         const bool bound = slot >= 0 && slot < 16 && S.ssbo[d.nvn_stage][slot].addr;
                         const uint64_t a = bound ? S.ssbo[d.nvn_stage][slot].addr : 0, sz = bound ? S.ssbo[d.nvn_stage][slot].size : 0;
                         std::string words;
-                        if (const uint8_t* p = bound ? host_ptr(a) : nullptr)
+                        if (const uint8_t* p = bound && host_readable(a, std::min<uint64_t>(sz, 64)) ? host_ptr(a) : nullptr)
                             for (int k = 0; k < 16 && static_cast<uint64_t>(k) * 4 < sz; ++k) { char w[12]; std::snprintf(w, sizeof w, " %08x", reinterpret_cast<const uint32_t*>(p)[k]); words += w; }
                         TRACE("    ssbo %s stage %d slot %d (c0 0x%x) %s %llx/%llu:%s", b.name.c_str(), d.nvn_stage, slot, b.nvn.c0_offset, bound ? "bound" : "NOT BOUND",
                               static_cast<unsigned long long>(a), static_cast<unsigned long long>(sz), words.c_str());
@@ -1730,8 +1737,10 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                 ii.imageView = tex_sampled_view(r.tex, q);
             }
             if (!ii.imageView) {
-                if (r.tex) NXLOG_W(kTag, "storage image: texture %u (%s %dx%dx%d) has no storage view (gpu %d, storage usage %d)", r.tex->id, r.tex->fmt ? r.tex->fmt->name : "?",
-                                   r.tex->b.width, r.tex->b.height, r.tex->b.depth, tex_gpu(r.tex) ? 1 : 0, tex_has_storage(r.tex) ? 1 : 0);
+                if (r.tex)
+                    NXLOG_W(kTag, "storage image: texture %u (%s %dx%dx%d, flags 0x%x) has no storage view (gpu %d, storage usage %d)", r.tex->id,
+                            r.tex->fmt ? r.tex->fmt->name : "?", r.tex->b.width, r.tex->b.height, r.tex->b.depth, static_cast<unsigned>(r.tex->b.flags),
+                            tex_gpu(r.tex) ? 1 : 0, tex_has_storage(r.tex) ? 1 : 0);
                 log_once("storage-image-dummy", "a storage image binding has no usable texture: a dummy storage image is bound");
                 ii.imageView = dummy_storage_view(view_type_for(b), shader_fmt);
             }
@@ -3093,7 +3102,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
                 const bool ssbo = b.nvn.source == NvnSource::StorageBuffer;
                 const GState::Bind* bd = (slot >= 0 && slot < 16) ? (ssbo ? &S.ssbo[d.nvn_stage][slot] : &S.ubo[d.nvn_stage][slot]) : nullptr;
                 std::string words;
-                if (bd && bd->addr && resolve_buffer(bd->addr, 4).ok) {
+                if (bd && bd->addr && host_readable(bd->addr, std::min<uint64_t>(bd->size, 512))) {
                     const uint32_t* w = reinterpret_cast<const uint32_t*>(host_ptr(bd->addr));
                     for (uint32_t i = 0; i < 128 && i * 4 < bd->size; ++i) { char t[16]; std::snprintf(t, sizeof t, " %08x", w[i]); words += t; }
                 }
@@ -3104,7 +3113,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
                 const TexResolved r = img ? resolve_image(d) : resolve_texture(d);
                 char c[96];
                 std::string words;
-                if (r.tex && r.tex->mem) {
+                if (r.tex && r.tex->mem && host_readable(reinterpret_cast<uint64_t>(r.tex->mem), 256)) {
                     const uint32_t* w = reinterpret_cast<const uint32_t*>(r.tex->mem);
                     for (uint32_t i = 0; i < 64; ++i) { char t[16]; std::snprintf(t, sizeof t, " %08x", w[i]); words += t; }
                 }
@@ -3766,8 +3775,9 @@ void run_list(const CmdList& list, int depth) {
                 for (uint32_t i = 0; i < p.count; ++i) {
                     const uint32_t k = p.first + i;
                     if (p.kind == kBufVertex && k < 16) S.vtx[k] = {rg[i].address, rg[i].size};
-                    else if (p.kind == kBufUniform && p.stage < 6 && k < 16) S.ubo[p.stage][k] = {rg[i].address, rg[i].size};
-                    else if (p.kind == kBufStorage && p.stage < 6 && k < 16) S.ssbo[p.stage][k] = {rg[i].address, rg[i].size};
+                    // a uniform or storage buffer in a virtual (sparse) pool is bound through the physical memory mapped there (physical_buffer_address)
+                    else if (p.kind == kBufUniform && p.stage < 6 && k < 16) S.ubo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
+                    else if (p.kind == kBufStorage && p.stage < 6 && k < 16) S.ssbo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
                     else if (p.kind == kBufXfb && k < 4) S.xfb[k] = {rg[i].address, rg[i].size};
                 }
                 break;
@@ -3876,7 +3886,7 @@ void run_list(const CmdList& list, int depth) {
                 const uint32_t blob_bytes = r.size() - static_cast<uint32_t>(sizeof(RecHeader)) - static_cast<uint32_t>((sizeof(P_Small) + 7u) & ~7u);
                 if (g_trace && (p.kind == static_cast<uint32_t>(SmallKind::PushConstants) || p.kind == static_cast<uint32_t>(SmallKind::PushConstantsDeferred))) {
                     const bool deferred = p.kind == static_cast<uint32_t>(SmallKind::PushConstantsDeferred);
-                    const uint8_t* src = deferred ? (resolve_buffer(p.addr, 4).ok ? host_ptr(p.addr) : nullptr) : r.blob<P_Small>();
+                    const uint8_t* src = deferred ? (host_readable(p.addr, p.c) ? host_ptr(p.addr) : nullptr) : r.blob<P_Small>();
                     std::string words;
                     for (uint32_t i = 0; src && i * 4 < p.c && i < 64; ++i) { char t[12]; uint32_t w; std::memcpy(&w, src + 4 * i, 4); std::snprintf(t, sizeof t, " %08x", w); words += t; }
                     TRACE("push %s%s stage %u offset 0x%x size 0x%x:%s", (p.a & kPushCompute) ? "compute" : "graphics", deferred ? " deferred" : "", p.a & ~kPushCompute, p.b, p.c,
