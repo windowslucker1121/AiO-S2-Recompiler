@@ -31,3 +31,4 @@ __pycache__/
 /tools/llvm/
 /tools/sccache/
 /tools/vcpkg/
+/tools/nvdisasm/

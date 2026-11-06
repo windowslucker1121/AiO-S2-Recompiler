@@ -2242,7 +2242,8 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         char a[96], b[96], c[96];
         std::string line;
         auto remember = [](Texture* t) {
-            if (!t) return;
+            static const bool dump = nxrt::config_get_bool("nvn", "trace_targets", true);   // false: no PNG of every target (frame ranges)
+            if (!t || !dump) return;
             for (const Ref<Texture>& r : g_trace_targets) if (r.get() == t) return;
             g_trace_targets.push_back(Ref<Texture>::share(t));
         };
