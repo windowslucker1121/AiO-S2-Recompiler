@@ -409,7 +409,7 @@ the instance folder. The keys below without a default stay off.
 | `[fs] save_dir` (saves, temporary storage) | `%APPDATA%\<save folder>\save` | `<instance folder>\save` (empty at first; copy a save in to start from it) |
 | `[play] controls` | `controls.ini` (game folder) | its own copy, made from the game folder's the first time |
 | `[nvn] pipeline_keys`, `[nvn] shader_order` | game folder | own copies, made from the game folder's the first time |
-| `[nvn] pipeline_cache` | `pipeline_cache.bin` beside the shader cache folder | `<instance folder>\pipeline_cache.bin`: a hard link to the shared file (a copy across volumes), renewed when the shared one is newer. The instance's first save writes its own file of the shared size (2-4 GB) |
+| `[nvn] pipeline_cache` | `pipeline_cache.bin` beside the shader cache folder | `<instance folder>\pipeline_cache.bin`: a hard link to the shared file (a copy across volumes), renewed when the shared one is newer. The instance's first save writes its own file of the shared size (a full preparation: 2-4 GB) |
 | `[nvn] setup_on_start` | `true` | `false`: the "Preparing shaders" window writes the shared shader data. `--prepare-shaders` refuses `--instance` |
 | `[album] dir`, `[nvn] shot_dir`, `[test] out`, `[prof] sample_out` | relative to the game folder or exe | inside the instance folder |
 | `[test] shot_dir`, `[test] record`, `[diag] soak_csv`, `[prof] trace`, `[time] csv`, `[audio] wav_dump`, `[nvn] dump_missing`, `[nvn] dump_astc` | off unless set | inside the instance folder when set to a relative path |

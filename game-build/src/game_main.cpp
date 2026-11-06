@@ -540,10 +540,10 @@ int main(int argc, char** argv) {
     dev_default("nvn", "shader_corpus", GAME_DEV_ROOT "/work/shaders/" GAME_ID "/corpus");
     dev_default("nvn", "shader_translator", GAME_DEV_ROOT "/tools/shaders/build/bin/Release/net10.0/spirv_harness.exe");
 #endif
-    nxrt::instance_link_pipeline_cache();     // a named instance: its own pipeline cache file, linked to the shared one (needs [nvn] shader_cache)
     NXLOG_I("boot", GAME_ID " %s (%s PC port)", GAME_RELEASE_VERSION, GAME_TITLE);
     NXLOG_I("boot", "%s %s: exefs '%s'", GAME_TITLE, nxrt::game::info().version, exefs.c_str());
     if (!prepare) check_memory();             // beside other runs of the game: refuse when the memory would not hold one more
+    nxrt::instance_link_pipeline_cache();     // a named instance: its own pipeline cache file, linked to the shared one (needs [nvn] shader_cache)
 
     if (prepare) return prepare_shaders_main(prepare_if_needed, prepare_threads, prepare_programs);
 

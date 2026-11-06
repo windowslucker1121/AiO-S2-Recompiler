@@ -254,7 +254,8 @@ Parallel sessions no longer queue for one game window: `oot.exe --instance NAME 
 own beside others. It writes everything of its own into its folder (default `<game folder>\instances\NAME`; the MCP server uses
 `work\ai_run\oot\NAME`): log, crash / freeze / fatal reports, `dump_threads`, saves and temporary storage (empty at first), `controls.ini`,
 `pipeline_keys.bin`, `shader_order.txt` (copied from the game folder the first time), `pipeline_cache.bin` (a hard link to the shared prepared
-cache, renewed when that one is newer; the instance's first save writes its own 2-4 GB file), screenshots, test output and the outputs of
+cache, renewed when that one is newer; the instance's first save writes its own file of the shared one's size, which happened at the
+title already: ~3,000 shader parts built ahead), screenshots, test output and the outputs of
 diagnostic keys given as relative paths. Shared: the game files, the shader cache (the translator's writes are atomic) and the BC7 cache
 (temporary name + rename). The full list: `runtime/docs/CONFIG.md`, "Named instances"; code: `runtime/src/core/instance.cpp`.
 The window title ends in ` [NAME]`. One run per game folder without a name (as before), one per instance folder with one.
@@ -264,16 +265,23 @@ Rules for agents:
   (or `pid=`) to `screenshot`, `send_input`, `wait_for`, `log`, `reports`, `kill`. Check `status` first: it lists every running game process,
   whose it is, its memory and the free memory. From a shell: `tasklist /FI "IMAGENAME eq oot.exe"`, and start yours with `--instance`.
 - Never end a run you did not start. `kill()` without arguments ends only the MCP server's own runs; another session's needs `force=true`.
-- **Memory: at most two runs on this machine.** A run in the first 3D scene holds 13-16 GB of working set and 18-20 GB of private bytes
-  (measured 2026-11-06); the machine has 32 GB. Beside another run the exe refuses to start (exit code 7) when the free physical memory or
-  commit, minus what the other runs will still grow by, is below `[boot] memory_per_run_gb` (default 13); the MCP `launch` checks the same
-  before starting. A lone run is never refused. On 2026-11-06 a WSL VM (`vmmemWSL`) held 24 GB of commit, which left under 1 GB of commit
-  free beside one run: then even one more build can fail. Ask the user before assuming the machine has room.
-- **Alone, with no other `oot.exe` running:** device-loss tests (A8: a GPU timeout resets the whole adapter and very likely kills the other
-  run's Vulkan device too), fps and frame-time measurements (the other run takes GPU, CPU and memory bandwidth), the shader preparation
+- **Memory: at most two runs on this machine, and two in-game runs do not fit.** A run at the title holds ~5.5 GB, one in the first 3D
+  scene 13-16 GB of working set and 18-20 GB of private bytes (measured 2026-11-06); the machine has 32 GB, of which ~18 GB were free with no
+  game running (a WSL VM, `vmmemWSL`, held 24 GB of commit; with one game in its first scene under 1 GB of commit was left, so even a build
+  could fail). Beside another run the exe refuses to start (exit code 7) when the free physical memory or commit, minus what the other runs
+  will still grow by, is below `[boot] memory_per_run_gb` (default 13); the MCP `launch` checks the same before starting. A lone run is never
+  refused. With the default a second run is refused here (18 GB free minus the first run's remaining ~8-12 GB of growth). Runs that stay in
+  the menus (title, options, input tests) may pass `settings={"boot.memory_per_run_gb": 6}` to both; then neither may enter the 3D scene.
+  Ask the user before assuming the machine has room.
+- **Alone, with no other `oot.exe` running:** device-loss tests (A8: a GPU timeout can reset the whole adapter and kill the other run's
+  Vulkan device too; once, on 2026-11-06, an A8 loss in one instance left the other at the title running, but do not rely on it), fps and
+  frame-time measurements (the other run takes GPU, CPU and memory bandwidth), the shader preparation
   (`--prepare-shaders` refuses `--instance`; the "Preparing shaders" window is off for instances: it writes the shared shader data), and
   anything meant to write the shared pipeline cache or the default run's saves.
 - A build beside a running game is fine if memory allows; still only one build in `work\build\oot` at a time.
+- Checked live on 2026-11-06 (RTX 4080): two instances to the title through the MCP server; Enter to one reached only that one, each wrote
+  only its folder, the game folder's `controls.ini`, `pipeline_keys.bin`, `shader_order.txt`, the shared `pipeline_cache.bin`, `prepare.state`
+  and the default save stayed untouched; a second start of a running instance and the memory guard both exit 7.
 
 ## Machine setup (this checkout, Windows 11)
 
