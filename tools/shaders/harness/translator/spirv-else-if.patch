@@ -1,9 +1,9 @@
 Ryujinx SPIR-V back end: emit "else if" chains (AstBlockType.ElseIf) as nested selections.
 Without this, the false edge of the If before an ElseIf goes straight to the merge block and every
 ElseIf/Else after it becomes unreachable code. See docs/nvn/TRANSLATOR.md, "else if chains".
-Also a diagnosis switch, off unless the environment sets it: NXRT_HARNESS_LOOP_CAP=N makes every loop
-of a function leave once its back edges, counted in one per-invocation variable, reach N (an endless
-loop in a translated shader then ends instead of taking the GPU down; OoT A8, AGENTS.md).
+Also a loop cap: every loop of a function leaves once its back edges, counted in one per-invocation
+variable, reach N. Default 4096 for graphics stages (a runaway per-pixel loop in OoT's material shaders
+took the GPU to TDR / device lost minutes into the first scene), off for compute; NXRT_HARNESS_LOOP_CAP=N overrides (0 = off).
 Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a copy in private/build; the
 checkout in private/third_party stays untouched. The Ryujinx code in the context lines is MIT.
 
@@ -13,9 +13,9 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
      static class SpirvGenerator
      {
          // Resource pools for Spirv generation. Note: Increase count when more threads are being used.
-+        // Diagnosis (NXRT_HARNESS_LOOP_CAP=N, default 0 = off): every loop back edge of a function counts in one per-invocation counter; once
-+        // it reaches N, every loop of the function exits. A shader that stops taking the GPU down with it had an endless loop.
-+        private static readonly int LoopCap = int.TryParse(Environment.GetEnvironmentVariable("NXRT_HARNESS_LOOP_CAP"), out int loopCap) ? loopCap : 0;
++        // NXRT_HARNESS_LOOP_CAP=N (0 = off; unset: DefaultGraphicsLoopCap for graphics stages, off for compute): every loop back edge counts in one
++        private const int DefaultGraphicsLoopCap = 4096;   // per-invocation counter; at N every loop of the function exits: a runaway per-pixel loop cannot hold the GPU until TDR (A8)
++        private static readonly int LoopCap = int.TryParse(Environment.GetEnvironmentVariable("NXRT_HARNESS_LOOP_CAP"), out int loopCap) ? loopCap : -1;   // -1: the default below
 +
          private const int GeneratorPoolCount = 1;
          private static readonly ObjectPool<SpvInstructionPool> _instructionPool;
@@ -25,7 +25,7 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
              context.LoopTargets = loopTargets;
  
 +            SpvInstruction loopCounter = null;
-+            if (LoopCap > 0)
++            int loopCap = LoopCap >= 0 ? LoopCap : (context.Definitions.Stage == ShaderStage.Compute ? 0 : DefaultGraphicsLoopCap); if (loopCap > 0)
 +            {
 +                SpvInstruction s32 = context.TypeS32();
 +                loopCounter = context.Variable(context.TypePointer(StorageClass.Private, s32), StorageClass.Private, context.Constant(s32, 0));
@@ -104,7 +104,7 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
 +                            SpvInstruction s32 = context.TypeS32();
 +                            SpvInstruction n = context.IAdd(s32, context.Load(s32, loopCounter), context.Constant(s32, 1));
 +                            context.Store(loopCounter, n);
-+                            condition = context.LogicalAnd(context.TypeBool(), condition, context.SLessThan(context.TypeBool(), n, context.Constant(s32, LoopCap)));
++                            condition = context.LogicalAnd(context.TypeBool(), condition, context.SLessThan(context.TypeBool(), n, context.Constant(s32, loopCap)));
 +                        }
 +
                          context.BranchConditional(condition, loopTarget, context.GetNextLabel(mergeBlock));

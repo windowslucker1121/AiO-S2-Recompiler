@@ -2646,14 +2646,15 @@ void trace_snap_after_draw() {
         for (Texture* t : g_trace_sampled) take(t);
     }
     // [nvn] trace_snap_ssbo = 1: the storage buffers bound to the vertex and fragment stages too, as the GPU holds them after the draw
-    // (snapb_d<draw>_<stage>s<slot>_<address>.bin, at most 1 MiB each): buffers that compute passes write never reach the CPU's view.
+    // (snapb_d<draw>_<stage>s<slot>_<address>.bin, at most [nvn] trace_snap_ssbo_max_kb each, default 1024): buffers that compute passes write never reach the CPU's view.
     static const bool snap_ssbo = nxrt::config_get_bool("nvn", "trace_snap_ssbo", false);
+    static const uint64_t snap_max = static_cast<uint64_t>(std::max<int64_t>(4, nxrt::config_get_int("nvn", "trace_snap_ssbo_max_kb", 1024))) * 1024;
     if (snap_ssbo)
         for (int st : {kVertex, kFragment})
             for (int k = 0; k < 16; ++k) {
                 const GState::Bind& b = S.ssbo[st][k];
                 if (!b.addr) continue;
-                const uint64_t n = std::min<uint64_t>(b.size ? b.size : 65536, 1u << 20);
+                const uint64_t n = std::min<uint64_t>(b.size ? b.size : 65536, snap_max);
                 const BufRef r = held_or_pool(b.addr, n, kOutStorageXfb, true);
                 if (!r.buffer) continue;
                 const int idx = snapshot_record_buffer(r.buffer, r.offset, std::min<VkDeviceSize>(n, r.avail ? r.avail : n), *F);
@@ -3178,6 +3179,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     }
     if (indirect) {
         vkCmdDispatchIndirect(F->cb, ind.buffer, ind.offset);
+        if (gpass_on()) gstamp(("cs " + cs->hash.substr(0, 8) + " indirect").c_str());
     } else {
         vkCmdDispatch(F->cb, x, y, z);
         if (gpass_on()) gstamp(("cs " + cs->hash.substr(0, 8)).c_str());
