@@ -1,0 +1,35 @@
+Ryujinx shader translator, StructuredProgramContext: for the structurizer check (translator/StructuredCfgCheck.cs, only
+when NXRT_HARNESS_CFG_CHECK is set), records the basic block each AST node is added for (NodeBlocks; null otherwise).
+The Ryujinx code in the context lines is MIT.
+--- a/StructuredIr/StructuredProgramContext.cs
++++ b/StructuredIr/StructuredProgramContext.cs
+@@ -32,6 +32,11 @@
+         public ResourceManager ResourceManager { get; }
+         public bool DebugMode { get; }
+ 
++        // CFG check (StructuredCfgCheck, off unless NXRT_HARNESS_CFG_CHECK is set): the basic block each AST node was made for.
++        public List<(IAstNode Node, int Block)> NodeBlocks { get; set; }
++
++        private int _nodeBlockIndex;
++
+         public StructuredProgramContext(
+             AttributeUsage attributeUsage,
+             ShaderDefinitions definitions,
+@@ -94,6 +99,8 @@
+ 
+         public void EnterBlock(BasicBlock block)
+         {
++            _nodeBlockIndex = block.Index;
++
+             while (_currEndIndex == block.Index)
+             {
+                 (_currBlock, _currEndIndex, _loopEndIndex) = _blockStack.Pop();
+@@ -283,6 +290,8 @@
+ 
+         public void AddNode(IAstNode node)
+         {
++            NodeBlocks?.Add((node, _nodeBlockIndex));
++
+             _currBlock.Add(node);
+         }
+ 
