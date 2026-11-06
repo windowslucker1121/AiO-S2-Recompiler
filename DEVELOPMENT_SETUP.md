@@ -179,7 +179,29 @@ cd recomp && ..\tools\.venv\Scripts\python oracle\difftest\difftest.py all
 The runtime tests build in their own folder (the game build has `NXRT_BUILD_TESTS` off). The recompiler oracles
 (`oracle\difftest`, `oracle\e2e\run_e2e.py`, `oracle\hooks\test_hooks.py`) use unicorn as the reference CPU.
 
-## 10. Not changed on this machine, on purpose
+## 10. Moving to another computer
+
+The code comes from GitHub (`git clone https://github.com/windowslucker1121/switch2-win-oot.git`, default branch `oot-nup`, then
+`git submodule update --init refs/ryubing`). Only the game must be copied; some generated data is worth copying to save time.
+
+| What | Size | Copy? |
+|---|---|---|
+| `game\oot\` (extracted game, plain NSOs, BC7 texture cache in `updates\131072\bc7_cache`) | ~28 GB | **Yes**, to the same place in the new clone. Or copy the `.nup` (25.6 GB) and extract again (section 5). The BC7 cache works on any GPU. |
+| `game\oot\updates\131072\pipeline_cache.bin` | ~650 MB | Only for the same GPU and driver; otherwise delete it. `snap_*.png` / `trace_*.png` there are debug leftovers. |
+| `work\shaders\oot\corpus\` | 0.7 GB | Recommended (saves ~25 min of extraction). |
+| `work\shaders\oot\spirv\` | 5.1 GB | Recommended (saves the translation run, ~5 min). |
+| `work\shaders\oot\programs.bin` | 1 MB | Recommended (saves ~100 s). |
+| `work\shaders\oot\prepare.state`, `pipeline_cache.bin` | 1 GB | **Only for the same GPU and driver.** Elsewhere leave both out so the first start prepares shaders (15-30 min); a copied `prepare.state` saying "complete" would skip that step (its GPU key is not checked before the start) and the game would compile pipelines while playing. |
+| `work\shaders\oot\redo*`, `results_*.tsv`, `results.full.tsv` | ~2.7 GB | No, leftovers of re-translation runs. |
+| `work\lift\`, `work\build\`, `game-build\build\` | ~3 GB | No: Ninja files hold absolute paths. Rebuild (section 6, ~30 min). |
+| `tools\.venv\` | 0.1 GB | No: not relocatable. Recreate (section 4). |
+| `tools\llvm\`, `tools\vcpkg\`, `tools\nvdisasm\` | ~5 GB | Optional: they can be copied as they are instead of downloaded and built again. |
+| `tools\shaders\third_party\`, `tools\textures\build\` | small | No: the setup scripts regenerate them. |
+| `.claude\settings.local.json` | tiny | Recreate if the MCP `game` tools are wanted (section 8). `controls.ini` is recreated by the game. |
+
+System software (section 2) is installed again on the new machine.
+
+## 11. Not changed on this machine, on purpose
 
 Windows Defender exclusions for `work\` and `tools\llvm\` would speed up builds, but they are a security setting: only the machine's
 owner changes them.
