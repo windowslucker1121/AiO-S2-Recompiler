@@ -243,6 +243,13 @@ every storage buffer of a dispatch to device-local memory and back (40 GB in 10 
   `settings {"diag.watchdog_seconds": -1}`), then look the thunk address up in a debug log (`nvnDeviceGetProcAddress("...") -> 0x74...`).
 - Trace a frame range: `NXRT_NVN_TRACE_FRAME=1560-1700` (ranges now work; slow: every traced frame writes its targets as PNG into the
   game folder); `NXRT_NVN_TRACE_TEX_EVENTS=2` logs init/upload/render-target events of every sparse texture.
+- **GPU values of a frame** (render targets and storage buffers as the GPU holds them, not the CPU's copy): trace one frame
+  (`NXRT_NVN_TRACE_SEC=80`, `NXRT_NVN_TRACE_TARGETS=0`) and name the draws to snap: `NXRT_NVN_TRACE_SNAP=560,600` or
+  `NXRT_NVN_TRACE_SNAP_FS=<fs hash prefixes>`, plus `NXRT_NVN_TRACE_SNAP_SAMPLED=1` (textures the draw samples) and
+  `NXRT_NVN_TRACE_SNAP_SSBO=1` (vertex/fragment storage buffers). Then `tools\.venv\Scripts\python toolsi\gpu_snapshots.py targets
+  <run dir>` (NaN/inf share, median, max per target and draw: bisect where NaN first appears), `buffers <run dir> --draw N`, `words
+  <file> --float`, `texel <file> x y --run <dir>`. Draw numbers are the `draw #N` of the trace; frames differ between runs, so prefer
+  `TRACE_SNAP_FS` over numbers. Game addresses of buffers are stable between runs.
 - Thread dumps of a running game: create the file `game-build\build\release\dump_threads` (the watchdog writes all stacks to the log; a
   named instance looks in its instance folder; `dump_threads.<pid>` reaches one process only).
 
