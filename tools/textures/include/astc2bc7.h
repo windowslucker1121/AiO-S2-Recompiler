@@ -80,6 +80,11 @@ a2b_status a2b_transcode(const a2b_input* in, const void* data, size_t data_size
 /* The two halves, usable on their own. rgba is width*height*4 bytes, tightly packed. */
 a2b_status a2b_decode_astc_rgba8(const a2b_input* in, const void* data, size_t data_size, int threads, uint8_t* rgba,
                                  a2b_stats* stats);
+/* BC7 blocks whose alpha can decode only to values <= max_alpha get alpha exactly 0 (modes 4..7; colour kept up to the LSB of modes 6
+ * and 7). For transcodes cached before the encoder pinned fully transparent blocks itself (bc7e left alpha 1..4 there). Returns the
+ * number of blocks changed. */
+size_t a2b_bc7_zero_faint_alpha(void* blocks, size_t count, int max_alpha);
+
 a2b_status a2b_encode_bc7(uint32_t width, uint32_t height, const uint8_t* rgba, const a2b_options* opt, void* out,
                           size_t out_capacity, a2b_stats* stats);
 

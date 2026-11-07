@@ -221,6 +221,10 @@ bool cache_read(const std::string& path, uint64_t key, PreparedTexture& out) {
         out.data.clear();
         return false;
     }
+    // A3: transcodes cached before the encoder pinned fully transparent blocks to alpha 0 can carry alpha 1..4 there (faint stripes
+    // where a sprite's colour under alpha 0 shows through); blocks that can only decode to alpha <= 4 get alpha 0.
+    if (out.format == VK_FORMAT_BC7_SRGB_BLOCK || out.format == VK_FORMAT_BC7_UNORM_BLOCK)
+        a2b_bc7_zero_faint_alpha(out.data.data(), out.data.size() / 16, 4);
     return true;
 }
 

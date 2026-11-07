@@ -251,6 +251,61 @@ static void pin_opaque_alpha(uint64_t& lo, uint64_t& hi) {
     }
 }
 
+static uint32_t get_bits(uint64_t lo, uint64_t hi, int pos, int len) {
+    uint32_t v = 0;
+    for (int i = 0; i < len; i++) {
+        const int b = pos + i;
+        const uint64_t w = b < 64 ? lo : hi;
+        v |= (uint32_t)((w >> (b & 63)) & 1) << i;
+    }
+    return v;
+}
+
+// Makes a BC7 block decode to alpha exactly 0 (A3: the title's 1664x1280 shield-and-sword sprite has colour under alpha 0, and bc7e
+// left alpha 1..4 in ~8% of its fully transparent blocks; drawn with straight alpha over black, those blocks showed as faint vertical
+// stripes). max_alpha < 0: unconditionally (the source block is fully transparent). max_alpha >= 0: only when every alpha the block
+// can decode to is at most max_alpha (both alpha endpoints that small: interpolation stays between them); a cache entry encoded before
+// this fix has no source to look at. Colour stays, up to the LSB of modes 6 and 7, whose p-bits are shared with alpha. Modes 0..3 have
+// no alpha (255) and are left alone. Returns true when the block changed.
+static bool zero_alpha(uint64_t& lo, uint64_t& hi, int max_alpha) {
+    const uint64_t lo0 = lo, hi0 = hi;
+    auto small = [&](uint32_t a8a, uint32_t a8b) { return max_alpha < 0 || ((int)a8a <= max_alpha && (int)a8b <= max_alpha); };
+    if ((lo & 0x1f) == 0x10) {   // mode 4: rotation r, alpha slot 6-bit endpoints (r = 0) or colour slot r-1 (5 bits)
+        const int rot = (int)((lo >> 5) & 3);
+        const int pos0 = rot == 0 ? 38 : 8 + (rot - 1) * 10, pos1 = rot == 0 ? 44 : 13 + (rot - 1) * 10, n = rot == 0 ? 6 : 5;
+        const uint32_t e0 = get_bits(lo, hi, pos0, n), e1 = get_bits(lo, hi, pos1, n);
+        auto x8 = [&](uint32_t e) { return n == 6 ? (e << 2) | (e >> 4) : (e << 3) | (e >> 2); };
+        if (small(x8(e0), x8(e1))) { put_bits(lo, hi, pos0, n, 0); put_bits(lo, hi, pos1, n, 0); }
+    } else if ((lo & 0x3f) == 0x20) {   // mode 5: alpha slot 8-bit endpoints (r = 0) or colour slot r-1 (7 bits)
+        const int rot = (int)((lo >> 6) & 3);
+        const int pos0 = rot == 0 ? 50 : 8 + (rot - 1) * 14, pos1 = rot == 0 ? 58 : 15 + (rot - 1) * 14, n = rot == 0 ? 8 : 7;
+        const uint32_t e0 = get_bits(lo, hi, pos0, n), e1 = get_bits(lo, hi, pos1, n);
+        auto x8 = [&](uint32_t e) { return n == 8 ? e : (e << 1) | (e >> 6); };
+        if (small(x8(e0), x8(e1))) { put_bits(lo, hi, pos0, n, 0); put_bits(lo, hi, pos1, n, 0); }
+    } else if ((lo & 0x7f) == 0x40) {   // mode 6: A0, A1 7 bits at 49 and 56, p-bits at 63 and 64 (alpha = A << 1 | p)
+        const uint32_t a0 = (get_bits(lo, hi, 49, 7) << 1) | get_bits(lo, hi, 63, 1);
+        const uint32_t a1 = (get_bits(lo, hi, 56, 7) << 1) | get_bits(lo, hi, 64, 1);
+        if (small(a0, a1)) { put_bits(lo, hi, 49, 14, 0); put_bits(lo, hi, 63, 2, 0); }
+    } else if ((lo & 0xff) == 0x80) {   // mode 7: two subsets, A0..A3 5 bits at 74, p-bits 94..97 (6-bit endpoint A << 1 | p)
+        bool all = true;
+        for (int k = 0; k < 4 && all; k++) {
+            const uint32_t v = (get_bits(lo, hi, 74 + 5 * k, 5) << 1) | get_bits(lo, hi, 94 + k, 1);
+            all = small((v << 2) | (v >> 4), 0);
+        }
+        if (all) { put_bits(lo, hi, 74, 20, 0); put_bits(lo, hi, 94, 4, 0); }
+    }
+    return lo != lo0 || hi != hi0;
+}
+
+size_t a2b_bc7_zero_faint_alpha(void* blocks, size_t count, int max_alpha) {
+    if (!blocks || max_alpha < 0) return 0;
+    uint64_t* b = (uint64_t*)blocks;
+    size_t changed = 0;
+    for (size_t i = 0; i < count; i++)
+        if (zero_alpha(b[i * 2], b[i * 2 + 1], max_alpha)) changed++;
+    return changed;
+}
+
 a2b_status a2b_encode_bc7(uint32_t width, uint32_t height, const uint8_t* rgba, const a2b_options* opt, void* out,
                           size_t out_capacity, a2b_stats* stats) {
     if (!width || !height || !rgba || !out) return A2B_ERR_ARGS;
@@ -302,11 +357,12 @@ a2b_status a2b_encode_bc7(uint32_t width, uint32_t height, const uint8_t* rgba, 
         const uint32_t n = std::min(kChunk, bx - c0);
         uint32_t pix[2][kChunk * 16];   // [0] opaque blocks, [1] blocks with alpha, compacted
         uint8_t slot[kChunk];           // which list, and implicitly the order within it
+        bool clear[kChunk];             // every texel has alpha 0: the result is pinned to alpha 0 (zero_alpha)
         uint32_t count[2] = {0, 0};
         const uint32_t* src = (const uint32_t*)rgba;
         for (uint32_t b = 0; b < n; b++) {
             uint32_t block[16];
-            bool opaque = true;
+            bool opaque = true, transparent = true;
             for (uint32_t py = 0; py < 4; py++) {
                 const uint32_t y = std::min(row * 4 + py, height - 1);  // replicate edges into partial blocks
                 for (uint32_t px = 0; px < 4; px++) {
@@ -314,8 +370,10 @@ a2b_status a2b_encode_bc7(uint32_t width, uint32_t height, const uint8_t* rgba, 
                     const uint32_t v = src[(size_t)y * width + x];
                     block[py * 4 + px] = v;
                     opaque &= (v >> 24) == 0xff;
+                    transparent &= (v >> 24) == 0;
                 }
             }
+            clear[b] = transparent;
             const int list = exact_opaque && opaque ? 0 : 1;
             slot[b] = (uint8_t)list;
             std::memcpy(&pix[list][count[list]++ * 16], block, sizeof block);
@@ -330,6 +388,9 @@ a2b_status a2b_encode_bc7(uint32_t width, uint32_t height, const uint8_t* rgba, 
             uint64_t lo = res[list][next[list] * 2], hi = res[list][next[list] * 2 + 1];
             next[list]++;
             if (list == 0 && pin_alpha) pin_opaque_alpha(lo, hi);
+            // blocks with alpha: fully transparent ones exactly 0, and ones that can only decode to alpha <= 4 as well (the same rule
+            // a2b_bc7_zero_faint_alpha applies to cached transcodes made before, so a fresh transcode and a cached one agree)
+            if (list == 1) zero_alpha(lo, hi, clear[b] ? -1 : 4);
             dst[b * 2] = lo;
             dst[b * 2 + 1] = hi;
         }
