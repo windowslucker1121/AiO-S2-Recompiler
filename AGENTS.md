@@ -238,6 +238,38 @@ contain only the Vulkan frame. Posted mouse clicks miss in the game window (SDL 
 spent its time in `fmaf` in main+0x370a5a0. `/arch:AVX2`-style flags (FMA3) would need a full rebuild. `[nvn] compute_shadows` copies
 every storage buffer of a dispatch to device-local memory and back (40 GB in 10 s during NDVE): pointless on an integrated GPU.
 
+## Frame capture and replay (since 2026-11-07, `runtime/docs/CAPTURE.md`)
+
+**Use it to iterate quickly on rendering work** (translator fixes, shader bisecting, render-state bugs, GPU timings of one fixed frame):
+capture a scene once, then test each change on the replay in seconds instead of booting the game every time. Confirm the final result in
+the real game. **It is experimental.** A replay can differ from the game (see "State" below), so when the replay and the game disagree,
+suspect the capture first. When you hit a problem in the capture or replay itself and fix it, tell the user what was wrong and what you
+changed, and record it here.
+
+**Debug rendering without booting the game.** A capture saves one whole presented frame: its command lists, the objects they reach, the
+GPU state, the guest memory the GPU reads, the images the GPU rendered before it, and the game's own picture (`reference.png`).
+`oot.exe --replay-capture work\captures\<folder> --instance rep` shows it again in about 5 s, looping, with no game code running.
+`[nvn] skip_fs_file`, `trace_frame`/`trace_snap*`, `[prof] gpu_passes`, screenshots and SSIM against `reference.png` all work on it.
+Shaders come from the shader cache at load, so a re-translated block shows on the next replay start without a new capture.
+
+MCP tools: `capture_frame(name, instance=...)` (the game writes `work\captures\<time>-<instance>-<name>`, 3-10 s, ~4 GB),
+`captures(id)`, `replay_capture(id, instance="replay", seconds=...)`. A request file `capture_frame[.<pid>]` in the request folder or
+`[capture] at_present = N` do the same without the tools. The way in: `load_state("first_scene")` (30-55 s on the 5800X3D/RTX 4080),
+then `capture_frame`.
+
+Each loop starts from the captured memory and images (`[capture] reset`, default on). Without it the picture drifts whiter loop after
+loop: something the game's CPU side steers from frame to frame accumulates. In replay mode `[nvn] compute_out_lazy` defaults off, so
+results reach the pools.
+
+Things learnt on the way (capture of the first scene, 2026-11-07):
+- the device's window origin and depth mode live outside `GState` (`gpu::set_window_modes`): without them the replay was upside down;
+- reading rendered targets back into game memory (`download_texture`) covers too little (182 of 248 could not be: scaled,
+  float16-promoted, depth). Images are saved raw instead (287 images, 857 MiB);
+- ~10 `CallCommands` handles per frame are unknown when the frame is submitted, in the game as well (the gaps list's "CallCommands of
+  an unknown handle").
+
+**State (2026-11-07):** the replay of the Deku Tree view (`work\captures\20261107-121515-cap-deku`) has the reference's geometry, textures and lighting, and every loop is pixel-identical (SSIM 1.0 loop to loop). Against `reference.png` it scores SSIM 0.73: the remaining difference is a haze over the distance (the dark trees on the left are fogged in the replay, clear in the game). Not known yet whether that is a capture gap (fog volume or history data the reset misses, CPU data rewritten before the memory was read) or the game's own frame-to-frame state. The reset costs ~0.5 s per loop (it re-uploads all 857 MiB of images; only the images the frame writes would be needed): the replay runs at ~2 fps with it, ~10 fps with `[capture] reset = 0`.
+
 ## Techniques that worked
 
 - Bring-up probes without a full main rebuild: `entryhook <addr>` in `main.sites` (one shard recompiles) plus

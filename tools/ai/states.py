@@ -581,6 +581,68 @@ class StateTools:
         (d / 'bug.json').write_text(json.dumps(meta, indent=1), encoding='utf-8')
         return d
 
+    # ---- frame captures (runtime/docs/CAPTURE.md) ------------------------------------------------------------------------------------------
+    def _captures_dir(self):
+        """Where frame captures go: NXRT_AI_CAPTURES_DIR, else work/captures of the checkout (the development exe's [capture] dir default)."""
+        return Path(os.environ.get('NXRT_AI_CAPTURES_DIR') or self._root() / 'work' / 'captures').resolve()
+
+    def capture_frame(self, name: str = '', timeout_s: float = 120, instance: str = None, pid: int = None):
+        """Save the next whole frame of a running game (instance= or pid= choose it) as a frame capture (work/captures/<time>[-instance][-name]):
+        the frame's NVN command lists, every object they reach, the GPU state it starts from, the guest memory the GPU reads, the images the
+        GPU rendered before it, and the game's own picture of it (reference.png). Takes a few seconds (the game holds its frame meanwhile) and
+        3-4 GB of disk. replay_capture shows it again without the game; captures lists them."""
+        t = self._target(instance, pid, required=True)
+        d, targets = self._request_dir(t), self._request_pids(t)
+        if not (t and t.running and d and targets):
+            return {'ok': False, 'why': 'the run is not running'}
+        from gamectl import _read_from
+        lp = self._log_path(t)
+        pos = lp.stat().st_size if lp and lp.exists() else 0
+        reqs = []
+        for p in targets:
+            r = Path(d) / f'capture_frame.{p}'
+            r.write_text((name or '') + '\n', encoding='utf-8')
+            reqs.append(r)
+        done = re.compile(r'nvn\.capture: (written|FAILED) (.+?): (.*)$')
+        end = time.time() + timeout_s
+        while time.time() < end:
+            time.sleep(0.5)
+            if lp and lp.exists():
+                lines, pos = _read_from(lp, pos)
+                for ln in lines:
+                    if m := done.search(ln):
+                        for r in reqs:
+                            r.unlink(missing_ok=True)
+                        return {'ok': m.group(1) == 'written', 'capture': m.group(2), 'id': Path(m.group(2)).name, 'summary': m.group(3)}
+        for r in reqs:
+            r.unlink(missing_ok=True)
+        return {'ok': False, 'why': f'no capture within {timeout_s:g} s (a build without frame capture, no frame presented, or stuck)'}
+
+    def captures(self, id: str = None, show: bool = True):
+        """Frame captures (work/captures), newest first: id, size in GB, whether the game's reference picture is there. With id (a folder name,
+        part of one, or "latest"): the files and (show) the reference picture."""
+        d = self._captures_dir()
+        caps = sorted((p for p in d.iterdir() if p.is_dir() and (p / 'capture.bin').exists()), key=lambda p: p.name, reverse=True) if d.exists() else []
+        if id is None:
+            return {'captures_dir': str(d), 'captures': [{'id': c.name, 'gb': round(sum(f.stat().st_size for f in c.iterdir() if f.is_file()) / 2**30, 2),
+                                                          'reference': (c / 'reference.png').exists()} for c in caps]}
+        c = caps[0] if id == 'latest' and caps else next((x for x in caps if x.name == id), None) or next((x for x in caps if id in x.name), None)
+        if c is None:
+            raise ValueError(f'no capture {id!r} in {d}')
+        info = {'id': c.name, 'path': str(c), 'files': {f.name: f.stat().st_size for f in c.iterdir() if f.is_file()}}
+        if show and (c / 'reference.png').exists():
+            return jpeg(c / 'reference.png'), info
+        return info
+
+    def replay_capture(self, id: str = 'latest', instance: str = 'replay', seconds: float = 0, settings: dict = None, env: dict = None):
+        """Show a frame capture without the game: the exe restores the captured memory, objects and images and replays the frame in a loop
+        (each loop from the captured state; settings {"capture.reset": 0} lets loops build on each other). Starts in a few seconds. Every
+        back-end debug key works on it ([nvn] skip_fs_file, trace_frame, trace_snap*, the F1 overlay); screenshot/compare work as on the
+        game. id: a capture (captures), seconds: end after that long (0: until killed). Takes about 6-10 GB of memory."""
+        c = self.captures(id, show=False)['path']
+        args = ['--replay-capture', c] + (['--max-seconds', str(int(seconds))] if seconds else [])
+        return self.launch(args=args, settings=settings, env=env, instance=instance)
+
     def bugs(self, id: str = None, tail: int = 40, show: bool = True, instance: str = None):
         """Bug bundles (work/bugs), newest first: id (folder name), time, origin (hotkey = the player's F9, mcp, request), the instance it
         came from, the note's first line, the state the run was loaded from, screenshot and save files present, the build commit and whether

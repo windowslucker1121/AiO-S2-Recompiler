@@ -32,6 +32,7 @@
 #include "nvn_enums.h"
 #include "nvn_format.h"
 #include "nvn_mask_clear.h"
+#include "nvn_capture.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_tess_gen.h"
 #include "nxrt/lowlat.h"
@@ -186,6 +187,7 @@ bool gw_settled(uint64_t addr, uint64_t size) {
 
 void gpu_wrote(uint64_t addr, uint64_t size, int use) {
     note_gw(addr, size);
+    capture::note_gpu_write(addr, size);
     if (note_gpu_write(addr, size, use)) {
         g_dirty |= kVb | kDesc;
         g_mirror_stale = true;
@@ -4441,6 +4443,45 @@ void replay_shutdown() {
     g_vol3d_use.clear();
     g_vol3d.clear();
     g_fb_clone_n.store(0, std::memory_order_relaxed);
+}
+
+// ---- frame capture (nvn_capture.cpp) --------------------------------------------------------------------------------------------
+// The GPU state a captured frame starts from. GState is plain data apart from its Refs and the ShaderInfo pointers: the image is the raw
+// bytes of a copy whose Refs and stage pointers were cleared, and those go beside it (the capture turns them into object ids).
+std::shared_ptr<void> replay_state_snapshot() { return std::make_shared<GState>(S); }
+
+uint32_t replay_state_size() { return static_cast<uint32_t>(sizeof(GState)); }
+
+void replay_state_image(const std::shared_ptr<void>& snap, std::vector<uint8_t>& pod, ReplayStateRefs& refs) {
+    GState c = *static_cast<const GState*>(snap.get());
+    refs = ReplayStateRefs{};
+    refs.tpool = c.tpool.get();
+    refs.spool = c.spool.get();
+    for (int i = 0; i < 8; ++i) refs.color[i] = c.color_tex[i].get();
+    refs.depth = c.depth_tex.get();
+    for (int i = 0; i < 6; ++i) refs.stage[i] = c.stage[i];
+    c.tpool = nullptr;
+    c.spool = nullptr;
+    for (auto& t : c.color_tex) t = nullptr;
+    c.depth_tex = nullptr;
+    for (auto& st : c.stage) st = nullptr;
+    pod.resize(sizeof(GState));
+    std::memcpy(pod.data(), static_cast<const void*>(&c), sizeof(GState));
+}
+
+bool replay_state_restore(const std::vector<uint8_t>& pod, const ReplayStateRefs& refs) {
+    if (pod.size() != sizeof(GState)) return false;
+    GState n;   // every Ref null, as in the image
+    std::memcpy(static_cast<void*>(&n), pod.data(), sizeof(GState));
+    n.tpool = Ref<TexturePool>::share(static_cast<TexturePool*>(refs.tpool));
+    n.spool = Ref<SamplerPool>::share(static_cast<SamplerPool*>(refs.spool));
+    for (int i = 0; i < 8; ++i) n.color_tex[i] = Ref<Texture>::share(static_cast<Texture*>(refs.color[i]));
+    n.depth_tex = Ref<Texture>::share(static_cast<Texture*>(refs.depth));
+    for (int i = 0; i < 6; ++i) n.stage[i] = refs.stage[i];
+    S = n;
+    // the raw copy's Refs in n are released by n's destructor: they hold the references taken just above, S took its own
+    g_dirty = kAllDirty;
+    return true;
 }
 
 // Gauge (nxrt/gauge.h): reads the atomic mirror above, never the map. Removed before the globals are destroyed.

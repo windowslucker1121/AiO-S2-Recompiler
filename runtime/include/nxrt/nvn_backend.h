@@ -36,6 +36,13 @@ bool backend_installed();
 // Writes the on-disk caches (the pipeline cache) now. For the paths that end the process without shutting the back end down (window closed).
 void backend_flush_caches();
 
+// Frame capture (runtime/docs/CAPTURE.md): the next whole presented frame is written to <[capture] dir>/<time>-<name> (any thread). A request
+// file `capture_frame` in the request folder and [capture] at_present = N do the same.
+void request_frame_capture(const std::string& name);
+// Replays a capture folder in a loop (no game code): call after install_backend and play::start instead of starting the game. Returns the
+// process exit code (0 when the window was closed or [capture] loops / [boot] max_seconds ended it).
+int run_capture_replay(const std::string& folder);
+
 // Traces the next whole presented frame like [nvn] trace_frame (the scripted `@shot nvntrace_<name>` calls this).
 void backend_trace_next_frame();
 

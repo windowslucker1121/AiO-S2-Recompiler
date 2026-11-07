@@ -55,6 +55,11 @@ void pool_unregister(MemoryPool* p) {
     if (it != g_pools.end() && it->second == p) g_pools.erase(it);
 }
 
+void pool_collect(std::vector<Ref<MemoryPool>>& out) {
+    std::shared_lock<std::shared_mutex> lk(g_pool_mu);
+    for (auto& [base, p] : g_pools) out.push_back(Ref<MemoryPool>::share(p));
+}
+
 PoolHit pool_lookup(uint64_t gpu_address) {
     std::shared_lock<std::shared_mutex> lk(g_pool_mu);
     auto it = g_pools.upper_bound(gpu_address);

@@ -2402,6 +2402,136 @@ void texture_registered(Texture* t) { texprep::on_registered(t); }
 // Copies every level of a render target back into the game's storage (block-linear, tiled with tegra::tile). Only when the GPU
 // image holds the newest data: it exists, it was written by the GPU (or uploaded) and the CPU did not write since. Pitch-linear,
 // transcoded, depth and format-fallback textures are not read back.
+// ---- frame capture: the raw contents of rendered images (nvn_capture.cpp) ---------------------------------------------------------------
+namespace {
+// Bytes per texel of one aspect of an uncompressed image format as vkCmdCopyImageToBuffer packs it; 0 for formats a rendered image does not have.
+uint32_t copy_texel_bytes(VkFormat f, VkImageAspectFlags aspect) {
+    if (aspect == VK_IMAGE_ASPECT_STENCIL_BIT) return 1;
+    switch (f) {
+        case VK_FORMAT_D16_UNORM: case VK_FORMAT_D16_UNORM_S8_UINT: return 2;
+        case VK_FORMAT_X8_D24_UNORM_PACK32: case VK_FORMAT_D24_UNORM_S8_UINT: case VK_FORMAT_D32_SFLOAT: case VK_FORMAT_D32_SFLOAT_S8_UINT: return 4;
+        case VK_FORMAT_S8_UINT: return 1;
+        case VK_FORMAT_R4G4_UNORM_PACK8: return 1;
+        case VK_FORMAT_B10G11R11_UFLOAT_PACK32: case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32: return 4;
+        default: break;
+    }
+    if (f >= VK_FORMAT_R4G4B4A4_UNORM_PACK16 && f <= VK_FORMAT_A1R5G5B5_UNORM_PACK16) return 2;
+    if (f >= VK_FORMAT_R8_UNORM && f <= VK_FORMAT_R8_SRGB) return 1;
+    if (f >= VK_FORMAT_R8G8_UNORM && f <= VK_FORMAT_R8G8_SRGB) return 2;
+    if (f >= VK_FORMAT_R8G8B8_UNORM && f <= VK_FORMAT_B8G8R8_SRGB) return 3;
+    if (f >= VK_FORMAT_R8G8B8A8_UNORM && f <= VK_FORMAT_A2B10G10R10_SINT_PACK32) return 4;
+    if (f >= VK_FORMAT_R16_UNORM && f <= VK_FORMAT_R16_SFLOAT) return 2;
+    if (f >= VK_FORMAT_R16G16_UNORM && f <= VK_FORMAT_R16G16_SFLOAT) return 4;
+    if (f >= VK_FORMAT_R16G16B16_UNORM && f <= VK_FORMAT_R16G16B16_SFLOAT) return 6;
+    if (f >= VK_FORMAT_R16G16B16A16_UNORM && f <= VK_FORMAT_R16G16B16A16_SFLOAT) return 8;
+    if (f >= VK_FORMAT_R32_UINT && f <= VK_FORMAT_R32_SFLOAT) return 4;
+    if (f >= VK_FORMAT_R32G32_UINT && f <= VK_FORMAT_R32G32_SFLOAT) return 8;
+    if (f >= VK_FORMAT_R32G32B32_UINT && f <= VK_FORMAT_R32G32B32_SFLOAT) return 12;
+    if (f >= VK_FORMAT_R32G32B32A32_UINT && f <= VK_FORMAT_R32G32B32A32_SFLOAT) return 16;
+    return 0;
+}
+
+// The copy regions of every level and aspect, packed one after the other (level-major, aspects in bit order, all layers). Total bytes in *size.
+bool image_regions(const TexGpu& g, std::vector<VkBufferImageCopy>& regions, uint64_t* size) {
+    regions.clear();
+    uint64_t at = 0;
+    const VkImageAspectFlags aspects[3] = {VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_ASPECT_STENCIL_BIT};
+    for (uint32_t l = 0; l < g.levels; ++l) {
+        const VkExtent3D e = level_extent(g.base, l);
+        for (VkImageAspectFlags a : aspects) {
+            if (!(g.aspect & a)) continue;
+            const uint32_t b = copy_texel_bytes(g.format, a);
+            if (!b) return false;
+            VkBufferImageCopy r = {};
+            r.bufferOffset = at;
+            r.imageSubresource = {a, l, 0, g.layers};
+            r.imageExtent = e;
+            regions.push_back(r);
+            at += (static_cast<uint64_t>(e.width) * e.height * e.depth * g.layers * b + 15) & ~uint64_t(15);
+        }
+    }
+    *size = at;
+    return at > 0;
+}
+}  // namespace
+
+bool tex_image_read(Texture* t, TexImageDump& d) {
+    if (!t || !active() || t->b.samples > 1 || target_is_multisample(t->b.target)) return false;
+    TexGpu* g = t->gpu;
+    if (!g || g->failed || g->sparse || !g->gpu_written || g->layout == VK_IMAGE_LAYOUT_UNDEFINED || !(g->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return false;
+    std::vector<VkBufferImageCopy> regions;
+    uint64_t size = 0;
+    if (!image_regions(*g, regions, &size)) return false;
+    gfx::Buffer rb;
+    bool ok = false;
+    run_frame_sync([&](Frame& f) {
+        if (device().create_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, gfx::MemoryUse::Readback, &rb, "capture image readback") != VK_SUCCESS) return;
+        const VkImageLayout prev = g->layout;
+        move_layout(f, *g, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        vkCmdCopyImageToBuffer(f.cb, g->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb.buffer, static_cast<uint32_t>(regions.size()), regions.data());
+        move_layout(f, *g, prev);
+        ok = true;
+    });
+    if (!rb) return false;
+    if (ok) {
+        device().invalidate_buffer(rb);
+        d.bytes.resize(static_cast<size_t>(size));
+        std::memcpy(d.bytes.data(), rb.mapped, static_cast<size_t>(size));
+        d.format = g->format;
+        d.base = g->base;
+        d.levels = g->levels;
+        d.layers = g->layers;
+        d.aspect = g->aspect;
+        d.scale = g->scale;
+    }
+    device().destroy_buffer(rb);
+    return ok;
+}
+
+bool tex_image_write(Texture* t, const TexImageDump& d, std::string* why) {
+    if (!t || !active()) { *why = "no back end"; return false; }
+    bool ok = false;
+    gfx::Buffer ub;
+    run_frame_sync([&](Frame& f) {
+        TexGpu* g = tex_or_null(t, d.scale);
+        if (!g) { *why = "no image"; return; }
+        if (g->format != d.format || g->base.width != d.base.width || g->base.height != d.base.height || g->base.depth != d.base.depth ||
+            g->levels != d.levels || g->layers != d.layers || g->aspect != d.aspect) {
+            char b[200];
+            std::snprintf(b, sizeof b, "the image differs: format %d/%d, %ux%u/%ux%u, levels %u/%u, layers %u/%u", static_cast<int>(g->format),
+                          static_cast<int>(d.format), g->base.width, g->base.height, d.base.width, d.base.height, g->levels, d.levels, g->layers, d.layers);
+            *why = b;
+            return;
+        }
+        if (!(g->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) { *why = "no transfer-destination usage"; return; }
+        std::vector<VkBufferImageCopy> regions;
+        uint64_t size = 0;
+        if (!image_regions(*g, regions, &size) || size != d.bytes.size()) { *why = "size mismatch"; return; }
+        if (device().create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, gfx::MemoryUse::Upload, &ub, "capture image upload") != VK_SUCCESS) { *why = "no buffer"; return; }
+        std::memcpy(ub.mapped, d.bytes.data(), static_cast<size_t>(size));
+        device().flush_buffer(ub);
+        move_layout(f, *g, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkCmdCopyBufferToImage(f.cb, ub.buffer, g->img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(regions.size()), regions.data());
+        move_layout(f, *g, g->depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        g->uploaded = true;
+        g->gpu_written = true;
+        t->cpu_dirty.store(false);
+        ok = true;
+    });
+    if (ub) device().destroy_buffer(ub);
+    return ok;
+}
+
+bool texture_gpu_written(const Texture* t) {
+    const TexGpu* g = t ? t->gpu : nullptr;
+    return g && !g->failed && g->gpu_written;
+}
+
+bool texture_gpu_depth(const Texture* t) {
+    const TexGpu* g = t ? t->gpu : nullptr;
+    return g && g->depth;
+}
+
 bool download_texture(Texture* t) {
     if (!t || !active() || !t->mem || !t->fmt || !t->block_linear) return false;
     TexGpu* g = t->gpu;
