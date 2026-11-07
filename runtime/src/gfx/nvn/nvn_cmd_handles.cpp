@@ -17,6 +17,7 @@
 #include <unordered_map>
 
 #include "nxrt/gauge.h"
+#include "nxrt/log.h"
 #include "nvn_cmd.h"
 
 namespace nxrt::nvn::be {
@@ -34,12 +35,27 @@ std::atomic<uint64_t> g_next{0x1000};
 std::atomic<uint64_t> g_missing{0};
 std::atomic<int64_t> g_finalized{0};
 
+// Diagnostics for "CallCommands of an unknown handle": why a handle went away (bounded; the oldest entries are forgotten).
+struct Dropped {
+    const char* why;
+    uint64_t by;                 // the handle whose region overlapped (overlap only)
+    uint64_t start, end;         // the dropped list's region
+    uint64_t by_start, by_end;   // the overlapping list's region
+    uint32_t draws, records;
+};
+std::unordered_map<uint64_t, Dropped> g_dropped;
+std::atomic<uint32_t> g_miss_logged{0};
+
 // Not in the game's command memory: no region, or a region in an overflow ring.
 bool unbacked(const Entry& e) { return e.end <= e.start || is_overflow_addr(e.start); }
 
-void drop_locked(uint64_t handle) {
+void drop_locked(uint64_t handle, const char* why = "?", uint64_t by = 0, uint64_t by_start = 0, uint64_t by_end = 0) {
     auto it = g_handles.find(handle);
     if (it == g_handles.end()) return;
+    if (g_dropped.size() > 65536) g_dropped.clear();
+    g_dropped[handle] = Dropped{why, by, it->second.start, it->second.end, by_start, by_end,
+                                it->second.list ? it->second.list->draw_count : 0u,
+                                it->second.list ? it->second.list->record_count : 0u};
     if (it->second.end > it->second.start) {
         auto r = g_regions.find(it->second.start);
         if (r != g_regions.end() && r->second == handle) g_regions.erase(r);
@@ -93,7 +109,7 @@ uint64_t handle_register(Ref<CmdList> list) {
         }
         std::vector<uint64_t> drop;
         for (; it != g_regions.end() && it->first < list->mem_end; ++it) drop.push_back(it->second);
-        for (uint64_t d : drop) drop_locked(d);
+        for (uint64_t d : drop) drop_locked(d, "overlap", h, list->mem_start, list->mem_end);
         g_regions[list->mem_start] = h;
     }
     Entry e;
@@ -109,6 +125,18 @@ Ref<CmdList> handle_lookup(uint64_t handle) {
     auto it = g_handles.find(handle);
     if (it == g_handles.end()) {
         g_missing.fetch_add(1);
+        auto d = g_dropped.find(handle);
+        const bool empty = d != g_dropped.end() && d->second.records == 0;   // an empty list: nothing is lost
+        if (!empty && g_miss_logged.fetch_add(1) < 200) {
+            if (d == g_dropped.end())
+                NXLOG_W("nvn.handles", "unknown handle 0x%llx: %s", static_cast<unsigned long long>(handle),
+                        handle >= g_next.load() || handle < 0x1000 ? "never issued" : "issued, drop not recorded");
+            else
+                NXLOG_W("nvn.handles", "unknown handle 0x%llx (%u records, %u draws, region %llx-%llx): dropped by %s, handle 0x%llx region %llx-%llx",
+                        static_cast<unsigned long long>(handle), d->second.records, d->second.draws, static_cast<unsigned long long>(d->second.start),
+                        static_cast<unsigned long long>(d->second.end), d->second.why, static_cast<unsigned long long>(d->second.by),
+                        static_cast<unsigned long long>(d->second.by_start), static_cast<unsigned long long>(d->second.by_end));
+        }
         return {};
     }
     it->second.list->calls.fetch_add(1);
@@ -118,13 +146,13 @@ Ref<CmdList> handle_lookup(uint64_t handle) {
 void handle_release(uint64_t handle) {
     g_finalized.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(g_mu);
-    drop_locked(handle);
+    drop_locked(handle, "finalize");
 }
 
 void handle_release_unbacked(uint64_t handle) {
     std::lock_guard<std::mutex> lk(g_mu);
     auto it = g_handles.find(handle);
-    if (it != g_handles.end() && unbacked(it->second)) drop_locked(handle);
+    if (it != g_handles.end() && unbacked(it->second)) drop_locked(handle, "unbacked release");
 }
 
 void handles_release_pool(const MemoryPool* pool) {
@@ -134,7 +162,7 @@ void handles_release_pool(const MemoryPool* pool) {
     std::vector<uint64_t> drop;
     for (auto& [h, e] : g_handles)
         if (e.end > e.start && e.start >= lo && e.start < hi) drop.push_back(h);
-    for (uint64_t h : drop) drop_locked(h);
+    for (uint64_t h : drop) drop_locked(h, "pool released");
 }
 
 const char* op_name(Op op) {

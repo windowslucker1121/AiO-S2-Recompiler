@@ -1308,6 +1308,20 @@ void gmem_before_op(bool compute) {
         const ShaderInfo* s = S.stage[st];
         if (!s || !s->refl.global_fallback) continue;
         const bool w_st = s->refl.global_writes;
+        if (w_st) {
+            // The stage's own storage descriptors (the c[0] table a pointer shader reads its buffer addresses from): a store or atomic
+            // through them is a write of the bound range like any storage binding's. OoT's culling root writes the mesh draws' indirect
+            // records so (797045e000 in the Deku Tree capture); without this the capture's write list missed them and every replay loop
+            // added its counts to the previous loop's (an ever denser leaf crown).
+            for (int k = 0; k < 16; ++k) {
+                const GState::Bind& b = S.ssbo[st][k];
+                if (!b.addr || !b.size) continue;
+                const PoolHit hit = pool_lookup(b.addr);
+                if (!hit.pool || hit.pool->is_virtual || !hit.pool->base) continue;
+                if (out_overlaps(b.addr, b.size)) { compute_out_guard(b.addr, b.size, kOutGlobal); ++g_gmem_flushes; }
+                gpu_wrote(b.addr, b.size, kWriteStorage);
+            }
+        }
         for (int k = 0; k < 16 && !full; ++k) {
             const GState::Bind& b = S.ubo[st][k];
             if (!b.addr) continue;
@@ -2861,7 +2875,13 @@ void trace_snap_after_draw() {
         while (i < list.size()) {
             size_t j = list.find(',', i);
             if (j == std::string::npos) j = list.size();
-            if (j > i) g_trace_snap_draws.push_back(std::atoi(list.substr(i, j - i).c_str()));
+            if (j > i) {   // a draw number or a range "a-b"
+                const std::string item = list.substr(i, j - i);
+                const size_t dash = item.find('-');
+                const int a = std::atoi(item.c_str());
+                const int b = dash == std::string::npos ? a : std::atoi(item.c_str() + dash + 1);
+                for (int d = a; d <= b && d - a < 100000; ++d) g_trace_snap_draws.push_back(d);
+            }
             i = j + 1;
         }
     }

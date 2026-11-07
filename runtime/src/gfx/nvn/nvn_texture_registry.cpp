@@ -234,16 +234,27 @@ void texture_registry_detach_gpu() {
 }
 
 Ref<Texture> texture_registry_find_alias(const Texture* t) {
-    if (!t || !t->mem || t->is_display) return Ref<Texture>();
+    if (!t || (!t->mem && !t->vpool) || t->is_display) return Ref<Texture>();
+    auto same_layout = [t](const Texture* o) {
+        return o != t && !o->destroyed.load() && o->gpu && o->storage_size == t->storage_size && o->levels == t->levels && o->layers == t->layers &&
+               o->fmt == t->fmt && o->block_linear == t->block_linear && o->block_height_gobs == t->block_height_gobs && o->b.target == t->b.target &&
+               o->b.width == t->b.width && o->b.height == t->b.height && o->b.depth == t->b.depth && o->b.samples == t->b.samples;
+    };
     std::lock_guard<std::mutex> lk(g_mu);
+    if (t->vpool) {
+        // A texture in a virtual pool has no host storage: the same storage is the same pool and offset. OoT renders its depth into one
+        // texture object and samples the same range through another (the water / terrain blend layer reads the scene depth so).
+        for (Texture* o : g_virtual) {
+            if (o->vpool.get() != t->vpool.get() || o->voffset != t->voffset || !same_layout(o)) continue;
+            o->ref();
+            return Ref<Texture>(o);
+        }
+        return Ref<Texture>();
+    }
     auto r = g_by_start.equal_range(reinterpret_cast<uint64_t>(t->mem));
     for (auto it = r.first; it != r.second; ++it) {
         Texture* o = it->second;
-        if (o == t || o->destroyed.load() || !o->gpu) continue;
-        if (o->storage_size != t->storage_size || o->levels != t->levels || o->layers != t->layers || o->fmt != t->fmt || o->block_linear != t->block_linear ||
-            o->block_height_gobs != t->block_height_gobs || o->b.target != t->b.target || o->b.width != t->b.width || o->b.height != t->b.height ||
-            o->b.depth != t->b.depth || o->b.samples != t->b.samples)
-            continue;
+        if (!same_layout(o)) continue;
         o->ref();
         return Ref<Texture>(o);
     }

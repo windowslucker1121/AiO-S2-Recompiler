@@ -1358,18 +1358,31 @@ int run_replay(const std::string& folder) {
     const auto start = std::chrono::steady_clock::now();
     uint64_t loop = 0;
     for (;;) {
-        if (reset && loop == 1) {   // the first loop has run: the ranges the GPU writes are known
+        if (reset && loop >= 1) {
+            // The ranges the GPU writes, as far as the loops so far have shown them. Collected in every loop, not only the first: a dispatch
+            // or draw left out of the first loops (its pipeline still building on a background thread, its shader being translated) writes
+            // its ranges only later, and a range missing here keeps what the previous loop left (the culling counters of the mesh draws
+            // then added up loop after loop).
             gpu::finish();
-            g_collect_writes.store(false);
-            std::lock_guard lk(g_writes_mu);
-            std::sort(g_writes.begin(), g_writes.end());
-            for (auto& r : g_writes) {
-                if (!writes.empty() && r.first <= writes.back().second) writes.back().second = std::max(writes.back().second, r.second);
-                else writes.push_back(r);
+            std::vector<std::pair<uint64_t, uint64_t>> got;
+            {
+                std::lock_guard lk(g_writes_mu);
+                got.swap(g_writes);
             }
-            uint64_t total = 0;
-            for (auto& r : writes) total += r.second - r.first;
-            NXLOG_I(kTag, "the frame writes %zu ranges of pool memory (%.1f MiB): put back before every loop", writes.size(), total / 1048576.0);
+            if (!got.empty()) {
+                got.insert(got.end(), writes.begin(), writes.end());
+                std::sort(got.begin(), got.end());
+                const size_t before = writes.size();
+                writes.clear();
+                for (auto& r : got) {
+                    if (!writes.empty() && r.first <= writes.back().second) writes.back().second = std::max(writes.back().second, r.second);
+                    else writes.push_back(r);
+                }
+                uint64_t total = 0;
+                for (auto& r : writes) total += r.second - r.first;
+                if (loop == 1 || writes.size() != before)
+                    NXLOG_I(kTag, "the frame writes %zu ranges of pool memory (%.1f MiB): put back before every loop", writes.size(), total / 1048576.0);
+            }
         }
         if (reset && loop >= 1) {
             gpu::finish();
