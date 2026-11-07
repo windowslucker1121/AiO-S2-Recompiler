@@ -73,4 +73,20 @@ struct SpvXfbOutput {
 // captured outputs, stride the bytes of one captured vertex. False (out untouched): no Location outputs or an unexpected module.
 bool spirv_add_xfb(const std::vector<uint32_t>& in, std::vector<uint32_t>& out, std::vector<SpvXfbOutput>* layout, uint32_t* stride);
 
+// spirv_ballot_per_lane (ported from featureJosh/pokopia-recomp, runtime/src/gfx/nvn/nvn_spirv_patch.cpp, GPL-3.0-or-later; approach
+// from pokopia-native (MIT) windows/docs/ballot-hang.md): a compute shader's warp-aggregated atomic counter (ballot(true), the highest
+// lane leads, adds the bit count for all, hands each lane its slot by a shuffle plus its rank) can stop NVIDIA GPUs for good after some
+// lanes returned (device lost). Each such ballot becomes the lane's own bit: every lane leads itself and adds 1.
+struct BallotRewrite {
+    int ballots = 0;       // ballots rewritten
+    int groups = 0;        // counters found (a group of ballots joined by what they meet)
+    int groups_left = 0;   // of those, left as translated (a use the rewrite would change); then the module is left alone
+};
+// Each warp-aggregated counter's ballot(true) (the leader's FindUMsb, the count's BitCount added by an OpAtomicIAdd inside the leader
+// test, the rank's BitCount of LtMask & ballot added to the result the shuffle helper hands out) becomes uvec4(1 << lane, 0, 0, 0),
+// every ballot of a counter or none: each lane leads itself, adds its own share and gets a slot of its own (as many slots, in the same
+// range, as before; only which lane takes which within a warp changes). Assumes 32-lane subgroups. Other ballots (REDUX / MATCH masks,
+// first-lane broadcasts) are left alone. False (out untouched) when nothing is rewritten; stats filled either way when given.
+bool spirv_ballot_per_lane(const std::vector<uint32_t>& in, std::vector<uint32_t>& out, BallotRewrite* stats = nullptr);
+
 }  // namespace nxrt::nvn::be::gpu

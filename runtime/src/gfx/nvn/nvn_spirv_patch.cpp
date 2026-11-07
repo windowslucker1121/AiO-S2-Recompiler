@@ -2,6 +2,7 @@
 // SPIR-V rewrites (declarations in nvn_spirv_patch.h).
 #include "nvn_spirv_patch.h"
 
+#include <algorithm>
 #include <cstring>
 #include <map>
 
@@ -720,6 +721,282 @@ std::vector<SpvIntSlot> spirv_predict_int_inputs(const std::vector<uint32_t>& in
             result.push_back(sl);
         }
     return result;
+}
+
+}  // namespace nxrt::nvn::be::gpu
+
+namespace nxrt::nvn::be::gpu {
+
+// Ported from featureJosh/pokopia-recomp (GPL-3.0-or-later), runtime/src/gfx/nvn/nvn_spirv_patch.cpp, unchanged.
+// Approach from pokopia-native (MIT) windows/docs/ballot-hang.md and windows/src/nxrt/vk/vk_shader.c (vkspv_ballot_per_lane) @4a72d23:
+// make NVN's warp-aggregated counters per lane by replacing their ballot(true) with the lane's own bit. Their matcher wants one ballot
+// that reaches both the leader and the count; our translator writes a counter's ballot once per use (the leader, the count and the
+// rank: three OpGroupNonUniformBallot, AstOptimizer propagates the unary ballot into each use), so the matcher here is our own: it
+// follows each ballot's value, joins the ballots of one counter into a group through what they meet (the leader test that guards the
+// add, the shuffle call that hands the result out, the add of the rank to that result) and rewrites a group only as a whole.
+bool spirv_ballot_per_lane(const std::vector<uint32_t>& in, std::vector<uint32_t>& out, BallotRewrite* stats) {
+    enum : uint32_t {
+        oName = 5, oMemberName = 6, oExtInst = 12, oTypeInt = 21, oTypeVector = 23, oTypePointer = 32, oConstantTrue = 41, oConstant = 43,
+        oFunction = 54, oFunctionEnd = 56, oFunctionCall = 57, oVariable = 59, oLoad = 61, oStore = 62, oAccessChain = 65,
+        oInBoundsAccessChain = 66, oDecorate = 71, oCompositeConstruct = 80, oCompositeExtract = 81, oCopyObject = 83, oBitcast = 124,
+        oIAdd = 128, oIMul = 132, oIEqual = 170, oShrL = 194, oShrA = 195, oShl = 196, oAnd = 199, oBitCount = 205, oAtomicIAdd = 234,
+        oSelectionMerge = 247, oLabel = 248, oBranchConditional = 250, oBallot = 339, oShuffle = 345,
+        DecBuiltIn = 11, BiLane = 41, BiLtMask = 4420, ExtFindSMsb = 74, ExtFindUMsb = 75,
+    };
+    // value flags (every use of an id that carries one is checked) and tags (followed, never checked)
+    enum : uint32_t { B = 1, M = 2, N = 4, A = 8, K = 16, CHECKED = 31, LANE = 32, LTM = 64, LTEST = 128, S = 256 };
+    BallotRewrite st;
+    if (in.size() < 5 || in[0] != 0x07230203u || in[3] == 0 || in[3] > (1u << 22)) return false;
+    std::vector<Inst> insts;
+    for (size_t i = 5; i < in.size();) {
+        const uint32_t len = in[i] >> 16;
+        if (!len || i + len > in.size()) return false;
+        insts.push_back({i, in[i] & 0xffff, len});
+        i += len;
+    }
+    const uint32_t bound = in[3];
+    std::vector<size_t> def(bound, 0);
+    std::vector<uint8_t> is_const(bound, 0), is_true(bound, 0), shuf_fn(bound, 0), nst(bound, 0);   // nst: stores into each id (2: more)
+    std::vector<uint32_t> cval(bound, 0);
+    uint32_t tu = 0, c0 = 0, c1 = 0, lane_var = 0, lt_var = 0;
+    size_t first_fn = 0;
+    std::vector<size_t> ballots;   // instruction index of each ballot(true)
+    for (size_t k = 0, fn = 0; k < insts.size(); k++) {
+        const Inst& n = insts[k];
+        const uint32_t* w = &in[n.at];
+        if ((n.op == oTypeInt || n.op == oTypeVector || n.op == oTypePointer) && n.len >= 2 && w[1] < bound) def[w[1]] = n.at;
+        if (n.op == oVariable && n.len >= 4 && w[2] < bound) def[w[2]] = n.at;
+        if (n.op == oStore && n.len >= 3 && w[1] < bound && nst[w[1]] < 2) nst[w[1]]++;
+        if (n.op == oTypeInt && n.len == 4 && w[2] == 32 && w[3] == 0 && !tu) tu = w[1];
+        if (n.op == oConstantTrue && n.len == 3 && w[2] < bound) is_true[w[2]] = 1;
+        if (n.op == oConstant && n.len == 4 && w[2] < bound) {
+            is_const[w[2]] = 1;
+            cval[w[2]] = w[3];
+            if (tu && w[1] == tu && w[3] == 0 && !c0) c0 = w[2];
+            if (tu && w[1] == tu && w[3] == 1 && !c1) c1 = w[2];
+        }
+        if (n.op == oDecorate && n.len == 4 && w[2] == DecBuiltIn && w[3] == BiLane) lane_var = w[1];
+        if (n.op == oDecorate && n.len == 4 && w[2] == DecBuiltIn && w[3] == BiLtMask) lt_var = w[1];
+        if (n.op == oFunction && n.len >= 3) { fn = w[2]; if (!first_fn) first_fn = k; }
+        if (n.op == oFunctionEnd) fn = 0;
+        if (n.op == oShuffle && fn && fn < bound) shuf_fn[fn] = 1;
+        if (n.op == oBallot && n.len == 5 && w[4] < bound && is_true[w[4]]) ballots.push_back(k);
+    }
+    if (ballots.empty() || !tu || !lane_var || lane_var >= bound || !def[lane_var] || !first_fn) return false;
+    {   // the lane index: an Input uint, as the leader test reads it
+        const uint32_t pt = in[def[lane_var] + 1];
+        if (pt >= bound || !def[pt] || (in[def[pt]] & 0xffff) != oTypePointer || in[def[pt] + 3] != tu) return false;
+    }
+    // groups: one per ballot, joined by union-find
+    const uint32_t nb = static_cast<uint32_t>(ballots.size());
+    std::vector<uint32_t> parent(nb);
+    for (uint32_t g = 0; g < nb; g++) parent[g] = g;
+    auto find = [&](uint32_t g) { while (parent[g] != g) g = parent[g] = parent[parent[g]]; return g; };
+    constexpr uint32_t NOG = ~0u;
+    std::vector<uint32_t> F(bound, 0), G(bound, NOG);   // flags and group of each id (values and pointers alike)
+    bool changed = false;
+    auto join = [&](uint32_t a, uint32_t b) {   // groups a and b (NOG: none) as one; returns the group
+        if (a == NOG) return b;
+        if (b == NOG) return a;
+        a = find(a), b = find(b);
+        if (a != b) { parent[std::max(a, b)] = std::min(a, b); changed = true; }
+        return std::min(a, b);
+    };
+    auto give = [&](uint32_t id, uint32_t f, uint32_t g) {
+        if (id >= bound || (!f && g == NOG)) return;
+        if ((F[id] | f) != F[id]) { F[id] |= f; changed = true; }
+        if (g != NOG) {
+            if (G[id] == NOG) { G[id] = find(g); changed = true; }
+            else join(G[id], g);
+        }
+    };
+    for (uint32_t g = 0; g < nb; g++) give(in[insts[ballots[g]].at + 2], B, g);
+    give(lane_var, LANE, NOG);
+    if (lt_var && lt_var < bound) give(lt_var, LTM, NOG);
+    std::vector<uint8_t> bad(nb, 0), candidate(nb, 0), has_msb(nb, 0);
+    struct Region { size_t from, to; uint32_t g; };
+    std::vector<Region> regions;
+    struct Atom { size_t at; uint32_t g; };
+    std::vector<Atom> atoms;
+    auto fl = [&](uint32_t id) { return id < bound ? F[id] : 0u; };
+    auto gr = [&](uint32_t id) { return id < bound ? G[id] : NOG; };
+    auto cst = [&](uint32_t id) { return id < bound && is_const[id]; };
+    // One walk: flow (final = false, repeated until nothing changes), then the checks (final = true): every use of a checked value
+    // must be one the rewrite keeps right, else its group is left alone.
+    auto walk = [&](bool final) {
+        std::vector<size_t> label_at(final ? bound : 0, 0);
+        if (final) for (const Inst& n : insts) if (n.op == oLabel && in[n.at + 1] < bound) label_at[in[n.at + 1]] = n.at;
+        auto mark = [&](uint32_t id) { if (final && id < bound && (F[id] & CHECKED) && G[id] != NOG) bad[find(G[id])] = 1; };
+        for (size_t k = 0; k < insts.size(); k++) {
+            if (k < first_fn) continue;   // declarations: their literals are not ids
+            const Inst& n = insts[k];
+            const uint32_t* w = &in[n.at];
+            const uint32_t op = n.op, wc = n.len;
+            auto u = [&](uint32_t a) { return a < wc ? w[a] : 0u; };
+            switch (op) {
+            case oName: case oMemberName: case oDecorate: case oBallot: case oVariable: case oFunction: case oLabel:
+                continue;
+            case oCompositeExtract:   // only .x of a ballot (the other words are 0 with 32-lane subgroups, and 0 once rewritten)
+                if ((fl(u(3)) & B) && (wc != 5 || w[4] != 0)) mark(u(3));
+                give(u(2), fl(u(3)), gr(u(3)));
+                continue;
+            case oBitcast: case oCopyObject: case oLoad:
+                if (wc >= 4) give(w[2], fl(w[3]), gr(w[3]));
+                continue;
+            case oStore:
+                // the rank kept in a GPU register (a variable stored more than once): not followed. NVN's rank is dead after its add
+                // (pokopia-native's note: 560a0262fe47818a); here 0f9696499923d6d3 copies it into a float register that is overwritten
+                // before it is read
+                if (wc >= 3 && (fl(w[2]) & CHECKED) == K && w[1] < bound && nst[w[1]] > 1) continue;
+                if (wc >= 3) give(w[1], fl(w[2]), gr(w[2]));
+                continue;
+            case oAccessChain: case oInBoundsAccessChain:
+                if (wc < 4) continue;
+                for (uint32_t a = 4; a < wc; a++) mark(w[a]);   // a counter value as an index
+                if (fl(w[3]) & LTM) { if (wc == 5 && cst(w[4]) && cval[w[4]] == 0) give(w[2], LTM, NOG); continue; }
+                give(w[2], fl(w[3]), gr(w[3]));
+                continue;
+            case oExtInst:
+                if (wc == 6 && (w[4] == ExtFindUMsb || w[4] == ExtFindSMsb) && (fl(w[5]) & CHECKED) == B) {
+                    give(w[2], M, gr(w[5]));
+                    if (final) { uint32_t g = find(gr(w[5])); candidate[g] = has_msb[g] = 1; }
+                    continue;
+                }
+                for (uint32_t a = 5; a < wc; a++) mark(w[a]);
+                continue;
+            case oBitCount:
+                if (wc == 4 && (fl(w[3]) & CHECKED) == B) { give(w[2], N, gr(w[3])); continue; }
+                if (wc == 4 && (fl(w[3]) & CHECKED) == K) { give(w[2], K, gr(w[3])); continue; }
+                if (wc >= 4) mark(w[3]);
+                continue;
+            case oAnd: case oIMul: case oShl: case oShrL: case oShrA: case oIAdd: {
+                if (wc != 5) break;
+                const uint32_t a = w[3], b = w[4], fa = fl(a) & CHECKED, fb = fl(b) & CHECKED;
+                if (!fa && !fb) {   // tags only: the slot (the result handed out plus the rank) is free
+                    if (op == oIAdd && ((fl(a) & S) || (fl(b) & S))) give(w[2], 0, join(gr(a), gr(b)));
+                    continue;
+                }
+                if (op == oAnd && ((fa == B && (fl(b) & LTM)) || (fb == B && (fl(a) & LTM)))) {   // the rank's mask
+                    give(w[2], K, fa ? gr(a) : gr(b));
+                    if (final) candidate[find(fa ? gr(a) : gr(b))] = 1;
+                    continue;
+                }
+                const bool by_const = cst(b) || ((op == oIMul || op == oAnd || op == oIAdd) && cst(a));
+                const uint32_t f = fa | fb;
+                // a count scaled by a constant (entries of a constant size), a rank masked, scaled or split into halves
+                if (by_const && op != oIAdd && ((f == N && (op == oIMul || op == oShl)) || f == K)) {
+                    give(w[2], f, join(gr(a), gr(b)));
+                    continue;
+                }
+                if (op == oIAdd && f == K && (fa == 0 || fb == 0)) {
+                    const uint32_t o = fa ? b : a;
+                    if (fl(o) & S) { give(w[2], 0, join(gr(a), gr(b))); give(w[2], S, NOG); continue; }   // rank + the result handed out
+                    if (cst(o)) { give(w[2], K, join(gr(a), gr(b))); continue; }
+                }
+                if (op == oIAdd && fa == K && fb == K) { give(w[2], K, join(gr(a), gr(b))); continue; }   // halves of a scaled rank
+                mark(a); mark(b);
+                continue;
+            }
+            case oIEqual:   // the leader test: the leader against this lane
+                if (wc == 5 && (((fl(w[3]) & CHECKED) == M && (fl(w[4]) & LANE)) || ((fl(w[4]) & CHECKED) == M && (fl(w[3]) & LANE)))) {
+                    give(w[2], LTEST, (fl(w[3]) & M) ? gr(w[3]) : gr(w[4]));
+                    continue;
+                }
+                break;
+            case oBranchConditional:
+                if (final && wc >= 4 && (fl(w[1]) & LTEST) && k > 0 && insts[k - 1].op == oSelectionMerge) {
+                    const uint32_t t = w[2], m = in[insts[k - 1].at + 1];
+                    if (t < bound && m < bound && label_at[t] && label_at[m] > label_at[t]) regions.push_back({label_at[t], label_at[m], gr(w[1])});
+                }
+                if (wc >= 2) mark(w[1]);
+                continue;
+            case oAtomicIAdd:
+                if (wc == 7 && (fl(w[6]) & CHECKED) == N && !(fl(w[3]) & CHECKED) && !(fl(w[4]) & CHECKED) && !(fl(w[5]) & CHECKED)) {
+                    give(w[2], A, gr(w[6]));
+                    if (final) { atoms.push_back({n.at, gr(w[6])}); candidate[find(gr(w[6]))] = 1; }
+                    continue;
+                }
+                break;
+            case oFunctionCall:   // the result handed out from the leader: a call of a function that shuffles, the leader among its arguments
+                if (wc >= 4 && w[3] < bound && shuf_fn[w[3]]) {
+                    uint32_t g = NOG, f = 0;
+                    for (uint32_t a = 4; a < wc; a++) { f |= fl(w[a]); if (fl(w[a]) & CHECKED) g = join(g, gr(w[a])); }
+                    if (f & CHECKED) {
+                        if ((f & (N | A)) && !(f & M)) for (uint32_t a = 4; a < wc; a++) mark(w[a]);
+                        if (f & (B | K)) for (uint32_t a = 4; a < wc; a++) mark(w[a]);
+                        give(w[2], S, g);
+                    }
+                    continue;
+                }
+                break;
+            default:
+                break;
+            }
+            // any other use of a checked value
+            const uint32_t from = (op == oStore || op == 63 || op == 228 || op == 250 || op == 251 || op == 254) ? 1 : 3;
+            for (uint32_t a = from; a < wc; a++) mark(w[a]);
+        }
+    };
+    for (int pass = 0; pass < 64; pass++) {
+        changed = false;
+        walk(false);
+        if (!changed) break;
+    }
+    walk(true);
+    // a group is taken when it holds a leader, an add of its count inside its own leader test, and nothing it reaches is used otherwise
+    std::vector<uint8_t> grp_bad(nb, 0), grp_cand(nb, 0), grp_msb(nb, 0), grp_atom(nb, 0);
+    for (uint32_t g = 0; g < nb; g++) {
+        const uint32_t r = find(g);
+        grp_bad[r] |= bad[g]; grp_cand[r] |= candidate[g]; grp_msb[r] |= has_msb[g];
+    }
+    for (const Atom& at : atoms) {
+        const uint32_t r = find(at.g);
+        bool inside = false;
+        for (const Region& rg : regions) if (rg.g != NOG && find(rg.g) == r && at.at > rg.from && at.at < rg.to) inside = true;
+        if (inside) grp_atom[r] = 1; else grp_bad[r] = 1;
+    }
+    std::vector<uint8_t> take(nb, 0);
+    bool any = false, partial = false;
+    for (uint32_t g = 0; g < nb; g++) {
+        const uint32_t r = find(g);
+        if (!grp_cand[r]) continue;   // not a counter's ballot (REDUX / MATCH masks, first-lane broadcasts): left alone
+        if (grp_bad[r] || !grp_msb[r] || !grp_atom[r]) { partial = true; continue; }
+        take[g] = 1;
+        any = true;
+    }
+    // a counter's ballot that could not be joined to its group might belong to a taken one: then nothing is rewritten
+    if (partial) any = false;
+    for (uint32_t g = 0; g < nb; g++) {   // the ballot's type: a vector of 4 uints
+        const uint32_t vt = in[insts[ballots[g]].at + 1];
+        if (take[g] && !(vt < bound && def[vt] && (in[def[vt]] & 0xffff) == oTypeVector && in[def[vt] + 2] == tu && in[def[vt] + 3] == 4)) any = false;
+    }
+    if (stats) {
+        for (uint32_t g = 0; g < nb; g++) if (find(g) == g && grp_cand[g]) { st.groups++; if (grp_bad[g] || !grp_msb[g] || !grp_atom[g]) st.groups_left++; }
+    }
+    if (!any) { if (stats) *stats = st; return false; }
+    // the rewrite: the constants 0 and 1 when missing (before the first function), each ballot -> this lane's bit in .x
+    uint32_t nbound = bound;
+    out.clear();
+    out.reserve(in.size() + 16 * nb + 8);
+    out.insert(out.end(), in.begin(), in.begin() + 5);
+    std::vector<uint8_t> at_ballot(insts.size(), 0);
+    for (uint32_t g = 0; g < nb; g++) if (take[g]) at_ballot[ballots[g]] = 1;
+    for (size_t k = 0; k < insts.size(); k++) {
+        const Inst& n = insts[k];
+        if (k == first_fn) {
+            if (!c0) { c0 = nbound++; out.insert(out.end(), {4u << 16 | oConstant, tu, c0, 0u}); }
+            if (!c1) { c1 = nbound++; out.insert(out.end(), {4u << 16 | oConstant, tu, c1, 1u}); }
+        }
+        if (!at_ballot[k]) { out.insert(out.end(), in.begin() + n.at, in.begin() + n.at + n.len); continue; }
+        const uint32_t lid = nbound++, bit = nbound++;
+        out.insert(out.end(), {4u << 16 | oLoad, tu, lid, lane_var});
+        out.insert(out.end(), {5u << 16 | oShl, tu, bit, c1, lid});
+        out.insert(out.end(), {7u << 16 | oCompositeConstruct, in[n.at + 1], in[n.at + 2], bit, c0, c0, c0});
+        st.ballots++;
+    }
+    out[3] = nbound;
+    if (stats) *stats = st;
+    return true;
 }
 
 }  // namespace nxrt::nvn::be::gpu

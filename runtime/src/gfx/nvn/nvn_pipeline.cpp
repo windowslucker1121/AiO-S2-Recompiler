@@ -284,6 +284,33 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words, const ch
             code = &fixed;
         }
     }
+    // [nvn] ballot_fix (as pokopia-recomp 0.7.0): NVN's warp-aggregated atomic counters made per lane (spirv_ballot_per_lane). After
+    // some lanes have returned, their ballot(true) can stop NVIDIA GPUs for good (device lost). auto (default): NVIDIA (vendor 0x10de)
+    // only; the rewrite assumes 32-lane subgroups. on: any GPU. off: never. 57 OoT shaders have the pattern (the culling 4c1e8564 too).
+    static const bool ballot_fix = [] {
+        const std::string v = config_get_str("nvn", "ballot_fix", "auto");
+        const uint32_t vendor = device().properties().vendorID;
+        const bool on = v == "on" || v == "true" || v == "1" || ((v == "auto" || v.empty()) && vendor == 0x10de);
+        NXLOG_I(kTag, "ballot_fix = %s (%s, vendor 0x%04x): warp-aggregated counters %s", v.c_str(), on ? "on" : "off", vendor,
+                on ? "made per lane" : "left as translated");
+        return on;
+    }();
+    std::vector<uint32_t> per_lane;
+    if (ballot_fix) {
+        BallotRewrite br;
+        if (spirv_ballot_per_lane(*code, per_lane, &br)) {
+            code = &per_lane;
+            static std::mutex mu;
+            static std::unordered_map<std::string, int> seen;
+            std::lock_guard<std::mutex> lk(mu);
+            if (seen.emplace(what ? what : "?", 1).second)
+                NXLOG_I(kTag, "ballot_fix: shader %s: %d ballot%s of %d counter%s made per lane", what ? what : "?", br.ballots,
+                        br.ballots == 1 ? "" : "s", br.groups, br.groups == 1 ? "" : "s");
+        } else if (br.groups) {
+            NXLOG_I(kTag, "ballot_fix: shader %s: %d counter%s found, %d left as translated (a use the rewrite would change)", what ? what : "?",
+                    br.groups, br.groups == 1 ? "" : "s", br.groups_left);
+        }
+    }
     // [nvn] spirv_salt (measurement only): an OpSourceExtension with the salt in every module gives the driver a new shader hash, so a run
     // compiles every shader from scratch without touching the driver's own cache on disk.
     static const std::string salt = config_get_str("nvn", "spirv_salt", "");

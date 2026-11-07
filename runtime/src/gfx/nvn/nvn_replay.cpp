@@ -3377,6 +3377,35 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     }
     shadows_after_dispatch();
     memory_barrier(F->cb);
+    if (g_trace) {
+        // [nvn] trace_snap_after = "4c1e8564:796bc6d880+256,796bc82000+64": in a traced frame, after each dispatch of a compute program whose
+        // hash starts with the prefix, the given guest ranges as the GPU holds them (the pool buffer behind each address; a held or shadow copy
+        // is not followed): snapa_<n>_<cs>_<address>.bin. For memory a shader reaches through pointers (A17), which trace_snap_ssbo misses.
+        static const std::string spec = nxrt::config_get_str("nvn", "trace_snap_after", "");
+        const size_t colon = spec.find(':');
+        if (colon != std::string::npos && cs->hash.compare(0, colon, spec, 0, colon) == 0) {
+            static int na = 0;
+            const int n_this = na++;
+            size_t p = colon + 1;
+            while (p < spec.size()) {
+                size_t e = spec.find(',', p);
+                if (e == std::string::npos) e = spec.size();
+                const std::string item = spec.substr(p, e - p);
+                p = e + 1;
+                const size_t plus = item.find('+');
+                const uint64_t a = std::strtoull(item.c_str(), nullptr, 16);
+                const uint64_t sz = plus != std::string::npos ? std::strtoull(item.c_str() + plus + 1, nullptr, 0) : 256;
+                const BufRef br = resolve_buffer(a, sz);
+                TRACE("    snap after %s: %llx+%llu %s", cs->hash.c_str(), static_cast<unsigned long long>(a), static_cast<unsigned long long>(sz),
+                      br.ok ? "in a pool" : "IN NO POOL");
+                if (!br.ok) continue;
+                const int ri = snapshot_record_buffer(br.buffer, br.offset, std::min<VkDeviceSize>(sz, br.avail), *F);
+                char nm[128];
+                std::snprintf(nm, sizeof nm, "snapa_%03d_%s_%llx.bin", n_this, cs->hash.substr(0, 8).c_str(), static_cast<unsigned long long>(a));
+                if (ri >= 0) g_trace_snaps.push_back({ri, g_trace_n, nm, "raw"});
+            }
+        }
+    }
     g_dirty = kAllDirty;
     counters().dispatches.fetch_add(1, std::memory_order_relaxed);
 }
