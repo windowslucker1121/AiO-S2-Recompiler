@@ -793,6 +793,9 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
                 mesh ? key.mesh[1]->hash.c_str() : key.stage[0] ? key.stage[0]->hash.c_str() : "-", key.stage[1] ? key.stage[1]->hash.c_str() : "-", key.color_count);
         pipe = VK_NULL_HANDLE;
     } else {
+        if (ms_taken >= 1000.0)   // the driver's compiler took that long: which shaders (a stall at a draw names its pipeline here)
+            NXLOG_W(kTag, "graphics pipeline took %.0f ms to create: %s %s fs %s", ms_taken, mesh ? "ms" : "vs",
+                    mesh ? key.mesh[1]->hash.c_str() : key.stage[0] ? key.stage[0]->hash.c_str() : "-", key.stage[1] ? key.stage[1]->hash.c_str() : "-");
         counters().pipelines_created.fetch_add(1);
         g_cache_dirty.store(true, std::memory_order_relaxed);
     g_new_since_save.fetch_add(1, std::memory_order_relaxed);
@@ -802,6 +805,10 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
     }
     return pipe;
 }
+
+struct MeshBuild { std::thread thread; std::atomic<bool> done{false}; VkPipeline pipe = VK_NULL_HANDLE; };
+// Mesh pipelines being built (render thread only). Never destroyed: a std::thread still running at exit must not be destructed.
+std::vector<std::pair<GraphicsKey, std::unique_ptr<MeshBuild>>>& g_mesh_builds = *new std::vector<std::pair<GraphicsKey, std::unique_ptr<MeshBuild>>>();
 
 VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     ensure_cache();
@@ -818,13 +825,28 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     VkPipeline pipe = VK_NULL_HANDLE;
     std::shared_ptr<PipeUpgrade> later;          // the key file's whole pipeline, still being built: it replaces the linked one
     // compiled ahead on a worker; one being compiled is linked from its parts meanwhile when they are built (else waited for)
-    if (key.mesh[1]) {   // mesh pipelines: built whole at the first draw (no pipeline library parts, not in the prewarm key file)
-        NXFT("pipe.create");
-        pipe = build_graphics_pipeline(key, layout);
-        if (pipe) { ++g_pipeline_count; g_built_at_draw.fetch_add(1, std::memory_order_relaxed); }
-        g_gfx_keys.add(1);
-        bucket.push_back({key, pipe, VK_NULL_HANDLE, nullptr});
-        return pipe;
+    if (key.mesh[1]) {   // mesh pipelines: built whole (no pipeline library parts, not in the prewarm key file), on a thread of their own
+        for (auto it = g_mesh_builds.begin(); it != g_mesh_builds.end(); ++it) {
+            if (!(it->first == key)) continue;
+            if (!it->second->done.load(std::memory_order_acquire)) return VK_NULL_HANDLE;   // still compiling: the draw is skipped
+            it->second->thread.join();
+            pipe = it->second->pipe;
+            g_mesh_builds.erase(it);
+            if (pipe) { ++g_pipeline_count; g_built_at_draw.fetch_add(1, std::memory_order_relaxed); }
+            g_gfx_keys.add(1);
+            bucket.push_back({key, pipe, VK_NULL_HANDLE, nullptr});
+            return pipe;
+        }
+        // The driver can take tens of seconds for one of them (fallback global memory code, A17): never on the render thread.
+        auto b = std::make_unique<MeshBuild>();
+        MeshBuild* raw = b.get();
+        const ProgLayout* pl = &layout;
+        raw->thread = std::thread([raw, key, pl] {
+            raw->pipe = build_graphics_pipeline(key, *pl);
+            raw->done.store(true, std::memory_order_release);
+        });
+        g_mesh_builds.emplace_back(key, std::move(b));
+        return VK_NULL_HANDLE;
     }
     if (prewarm_take(key, &pipe, [&] { return gpl_ready(key, layout); }, &later)) {
         ++g_pipeline_count;

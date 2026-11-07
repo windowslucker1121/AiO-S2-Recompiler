@@ -6,22 +6,79 @@ Also: an access no descriptor can be traced for checks every storage descriptor 
 
 --- a/Translation/Optimizations/GlobalToStorage.cs
 +++ b/Translation/Optimizations/GlobalToStorage.cs
-@@ -652,6 +652,14 @@
-             }
+@@ -224,7 +224,7 @@
+                         continue;
+                     }
+ 
+-                    if (IsGlobalMemory(operation.StorageKind))
++                    if (IsGlobalMemory(operation.StorageKind) && !AmpereGlobal.IsDeviceAddressOp(operation))   // device address accesses stay global (AmpereGlobal.cs)
+                     {
+                         LinkedListNode<INode> nextNode = ReplaceGlobalMemoryWithStorage(
+                             gtsContext,
+@@ -653,6 +653,16 @@
  
              targetCbs.Sort();
-+
+ 
 +            // Not traceable to one descriptor: check every storage descriptor of the stage at run time (AmpereGlobal.cs, as the Lichii emulator does)
++            bool viaFallback = false;
 +            if (targetCbs.Count == 0 && AmpereGlobal.Candidates is { Length: > 0 } fallback)
 +            {
++                viaFallback = true;
 +                foreach (int word in fallback) targetCbs.Add(PackCbSlotAndOffset(0, word));
 +                AmpereGlobal.Used = true;
 +                gpuAccessor.Log($"Global memory fallback for operation \"{operation.Inst}\": {fallback.Length} storage descriptors checked at run time.");
 +            }
- 
++
              if (targetCbs.Count == 0)
              {
-@@ -1046,6 +1054,14 @@
+                 gpuAccessor.Log($"Failed to find storage buffer for global memory operation \"{operation.Inst}\".");
+@@ -678,6 +688,10 @@
+ 
+             Operand globalAddressLow = Argument(0);
+             Operand globalAddressHigh = Argument(1);
++
++            // The fallback's candidates are searched in a loop first (AmpereGlobal.cs: the drivers inline this function at every access)
++            Operand fallbackHit = viaFallback ? AmpereGlobal.EmitCandidateSearch(context, resourceManager.GetConstantBufferBinding(0)) : null;
++            int targetIndex = 0;
+ 
+             foreach (uint targetCb in targetCbs)
+             {
+@@ -687,6 +701,13 @@
+                 Operand baseAddrHigh = Cbuf(sbCbSlot, sbCbOffset + 1);
+                 Operand size = Cbuf(sbCbSlot, sbCbOffset + 2);
+ 
++                Operand inRange;
++                if (fallbackHit != null)
++                {
++                    inRange = context.ICompareEqual(fallbackHit, Const(targetIndex));
++                }
++                else
++                {
+                 Operand offset = context.ISubtract(globalAddressLow, baseAddrLow);
+                 Operand borrow = context.ICompareLessUnsigned(globalAddressLow, baseAddrLow);
+ 
+@@ -696,7 +717,9 @@
+ 
+                 Operand inRangeHigh = context.ICompareEqual(addrHighBorrowed, baseAddrHigh);
+ 
+-                Operand inRange = context.BitwiseAnd(inRangeLow, inRangeHigh);
++                inRange = context.BitwiseAnd(inRangeLow, inRangeHigh);
++                }
++                targetIndex++;
+ 
+                 Operand lblSkip = Label();
+                 context.BranchIfFalse(lblSkip, inRange);
+@@ -750,6 +773,9 @@
+             }
+ 
+             bool returnsValue = operation.Dest != null;
++
++            // No bound storage buffer holds the address: the pool address table and a device address pointer (AmpereGlobal.cs, A17)
++            if (viaFallback) AmpereGlobal.EmitDeviceAddressAccess(context, operation.Inst, operation.StorageKind, inArgumentsCount, returnsValue);
+ 
+             if (returnsValue)
+             {
+@@ -1046,6 +1072,14 @@
              // because constant buffer are always encoded as the second operand,
              // so the second operand will always be the one from the last instruction.
  

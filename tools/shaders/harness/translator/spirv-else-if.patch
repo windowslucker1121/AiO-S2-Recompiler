@@ -22,15 +22,16 @@ the epilogue at the end of main, every global in the entry point).
          private const int GeneratorPoolCount = 1;
          private static readonly ObjectPool<SpvInstructionPool> _instructionPool;
          private static readonly ObjectPool<SpvLiteralIntegerPool> _integerPool;
-@@ -121,6 +125,7 @@
+@@ -121,6 +125,8 @@
              }
  
              Declarations.DeclareAll(context, info);
 +            AmpereMesh.Declare(context);   // task/mesh (tools/shaders/ampere/frontend/AmpereMesh.cs): outputs, capability, SPIR-V 1.4
++            AmpereGlobal.Declare(context);   // device address pointers (tools/shaders/ampere/frontend/AmpereGlobal.cs, A17)
  
              for (int funcIndex = 0; funcIndex < info.Functions.Count; funcIndex++)
              {
-@@ -147,6 +152,7 @@
+@@ -147,6 +153,7 @@
                  Generate(context, info, funcIndex);
              }
  
@@ -38,7 +39,7 @@ the epilogue at the end of main, every global in the entry point).
              byte[] result = context.Generate();
  
              lock (_poolLock)
-@@ -178,14 +184,15 @@
+@@ -178,14 +185,15 @@
              if (function.MainBlock.Last is not AstOperation operation ||
                  (operation.Inst != Instruction.Return && operation.Inst != Instruction.Discard))
              {
@@ -56,7 +57,7 @@ the epilogue at the end of main, every global in the entry point).
  
                  if (context.Definitions.Stage == ShaderStage.TessellationControl)
                  {
-@@ -294,6 +301,7 @@
+@@ -294,6 +302,7 @@
                          localSizeX,
                          localSizeY,
                          localSizeZ);
@@ -64,7 +65,7 @@ the epilogue at the end of main, every global in the entry point).
                  }
  
                  if (context.Definitions.TransformFeedbackEnabled && context.Definitions.LastInVertexPipeline)
-@@ -311,6 +319,41 @@
+@@ -311,6 +320,41 @@
  
              context.LoopTargets = loopTargets;
  
@@ -106,7 +107,7 @@ the epilogue at the end of main, every global in the entry point).
              visitor.BlockEntered += (sender, e) =>
              {
                  AstBlock mergeBlock = e.Block.Parent;
-@@ -320,7 +363,7 @@
+@@ -320,7 +364,7 @@
                      AstBlock ifTrueBlock = e.Block;
                      AstBlock ifFalseBlock;
  
@@ -115,7 +116,7 @@ the epilogue at the end of main, every global in the entry point).
                      {
                          ifFalseBlock = nextBlock;
                      }
-@@ -333,6 +376,23 @@
+@@ -333,6 +377,23 @@
  
                      context.SelectionMerge(context.GetNextLabel(mergeBlock), SelectionControlMask.MaskNone);
                      context.BranchConditional(condition, context.GetNextLabel(ifTrueBlock), context.GetNextLabel(ifFalseBlock));
@@ -139,7 +140,7 @@ the epilogue at the end of main, every global in the entry point).
                  }
                  else if (e.Block.Type == AstBlockType.DoWhile)
                  {
-@@ -363,6 +423,14 @@
+@@ -363,6 +424,14 @@
                          context.AddLabel(continueTarget);
  
                          SpvInstruction condition = context.Get(AggregateType.Bool, e.Block.Condition);
@@ -154,7 +155,7 @@ the epilogue at the end of main, every global in the entry point).
  
                          context.BranchConditional(condition, loopTarget, context.GetNextLabel(mergeBlock));
                      }
-@@ -378,7 +446,7 @@
+@@ -378,7 +447,7 @@
  
                          if (!lastIsCf)
                          {
@@ -163,7 +164,7 @@ the epilogue at the end of main, every global in the entry point).
                          }
                      }
  
-@@ -386,9 +454,22 @@
+@@ -386,9 +455,22 @@
                          (nextBlock.Type == AstBlockType.Else ||
                           nextBlock.Type == AstBlockType.ElseIf);
  

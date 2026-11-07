@@ -5,6 +5,7 @@
 // the same pages. Measured on the RTX 3080 and the UHD 770 with MapViewOfFile views: imports work with 4096-byte alignment,
 // and GPU writes are visible through every view of the section.
 #include <algorithm>
+#include <map>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -37,6 +38,7 @@ struct PoolChunk {
     void* view = nullptr;             // private small view of the heap section the import goes through (nullptr: imported at its own address)
     uint64_t off = 0;                 // pool offset (from PoolGpu::base) of byte 0 of the import
     VkDeviceSize size = 0;
+    uint64_t dev_addr = 0;            // its buffer's device address (bufferDeviceAddress; 0 without): the pool address table
     bool tried = false;               // import attempted
     bool failed = false;
 };
@@ -95,6 +97,24 @@ uint64_t import_stride() {
 }
 uint64_t import_overlap() { return import_stride() / 4; }
 
+// The pool address table (A17): every imported range as {guest address, size, device address of its buffer}. Translated shaders whose global
+// memory accesses no bound storage buffer explains look their address up in it (AmpereGlobal.cs) and access the memory through a
+// PhysicalStorageBuffer pointer. Game memory is the host memory these ranges import, so a guest address is the host address.
+std::mutex g_addr_mu;
+std::map<uint64_t, std::pair<uint64_t, uint64_t>> g_addr_by_dev;   // device address -> (guest address, size)
+std::atomic<uint64_t> g_addr_gen{0};
+void address_table_add(uint64_t guest, uint64_t size, uint64_t dev) {
+    if (!dev) return;
+    std::lock_guard<std::mutex> lk(g_addr_mu);
+    g_addr_by_dev[dev] = {guest, size};
+    g_addr_gen.fetch_add(1);
+}
+void address_table_remove(uint64_t dev) {
+    std::lock_guard<std::mutex> lk(g_addr_mu);
+    g_addr_by_dev.erase(dev);
+    g_addr_gen.fetch_add(1);
+}
+
 // Imports pool bytes [off, off + size) of g into c. False (c.failed) when it cannot.
 bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const char* what, size_t index, size_t count) {
     c.tried = true;
@@ -132,6 +152,8 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
     VkImportMemoryHostPointerInfoEXT imp = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
     imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
     imp.pHostPointer = import_ptr;
+    VkMemoryAllocateFlagsInfo maf = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, nullptr, VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT, 0};
+    if (dev.features().buffer_device_address) { maf.pNext = imp.pNext; imp.pNext = &maf; }
     VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imp};
     mai.allocationSize = size;
     mai.memoryTypeIndex = ty;
@@ -154,7 +176,8 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
     bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                 VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
-                (device().features().transform_feedback ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0u);
+                (device().features().transform_feedback ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0u) |
+                (dev.features().buffer_device_address ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
     bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     r = vkCreateBuffer(dev.device(), &bci, nullptr, &c.buffer);
     if (r == VK_SUCCESS) vk_gauge_buffers().add(1);
@@ -166,6 +189,8 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
         return false;
     }
     counters().pools_imported.fetch_add(1);
+    c.dev_addr = dev.buffer_address(c.buffer);
+    address_table_add(start, size, c.dev_addr);
     {   // a slow import stalls a vkQueueSubmit2 running beside it (the driver): size and where the time went, to tell page pinning from the rest
         const auto tm3 = std::chrono::steady_clock::now();
         auto msd = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
@@ -183,6 +208,7 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
 
 void destroy_chunk(PoolChunk& c) {
     gfx::Device& dev = device();
+    if (c.dev_addr) address_table_remove(c.dev_addr);
     if (c.buffer) buffer_views_forget(c.buffer);
     if (c.buffer) { vkDestroyBuffer(dev.device(), c.buffer, nullptr); vk_gauge_buffers().sub(1); }
     if (c.mem) {
@@ -339,6 +365,17 @@ void prefetch_pool(MemoryPool* p) {
     if (!g_pf_thread.joinable()) g_pf_thread = std::thread(prefetch_loop);
     g_pf_queue.push_back(Ref<MemoryPool>::share(p));
     g_pf_cv.notify_all();
+}
+
+uint64_t pool_address_table_generation() { return g_addr_gen.load(); }
+size_t pool_address_table(std::vector<PoolAddress>& out) {
+    out.clear();
+    {
+        std::lock_guard<std::mutex> lk(g_addr_mu);
+        for (const auto& [dev, gs] : g_addr_by_dev) out.push_back({gs.first, gs.second, dev});
+    }
+    std::sort(out.begin(), out.end(), [](const PoolAddress& a, const PoolAddress& b) { return a.guest < b.guest; });
+    return out.size();
 }
 
 VkBuffer dummy_buffer() {

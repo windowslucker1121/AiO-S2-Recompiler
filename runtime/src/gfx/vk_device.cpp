@@ -626,6 +626,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     features_.depth_clamp = af.depthClamp;
     features_.fill_mode_non_solid = af.fillModeNonSolid;
     features_.timeline_semaphore = a12.timelineSemaphore;
+    features_.buffer_device_address = a12.bufferDeviceAddress == VK_TRUE;
     features_.dynamic_rendering = true;
     features_.synchronization2 = true;
     features_.geometry_shader = af.geometryShader;
@@ -769,6 +770,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     aci.instance = instance_;
     aci.vulkanApiVersion = VK_API_VERSION_1_3;
     aci.pVulkanFunctions = &vf;
+    if (features_.buffer_device_address) aci.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     r = vmaCreateAllocator(&aci, &vma_);
     if (r != VK_SUCCESS) return fail("vmaCreateAllocator failed (" + std::to_string(r) + ")");
     register_vma_gauges(vma_, props_.deviceType);
@@ -1041,6 +1043,13 @@ void Device::destroy_image(Image& img) {
 }
 
 // ---- buffers ----------------------------------------------------------------------------------------------------------
+uint64_t Device::buffer_address(VkBuffer b) const {
+    if (!b || !features_.buffer_device_address) return 0;
+    VkBufferDeviceAddressInfo i = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+    i.buffer = b;
+    return vkGetBufferDeviceAddress(device_, &i);
+}
+
 VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, MemoryUse use, Buffer* out, const char* name) {
     VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bi.size = size;

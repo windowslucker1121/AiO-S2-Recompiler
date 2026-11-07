@@ -128,6 +128,10 @@ BufRef resolve_buffer(uint64_t gpu_address, uint64_t size);
 // A buffer range in a virtual (sparse) pool: the address of the physical memory its nvnMemoryPoolMapVirtual mappings put there, when one
 // physical pool backs all of it at consecutive offsets. Any other address (or a range that is not mapped that way) comes back unchanged.
 uint64_t physical_buffer_address(uint64_t gpu_address, uint64_t size);
+// The pool address table (nvn_gpu_pool.cpp, A17): imported ranges sorted by guest address, and a counter that changes with every import or release.
+struct PoolAddress { uint64_t guest, size, dev; };
+size_t pool_address_table(std::vector<PoolAddress>& out);
+uint64_t pool_address_table_generation();
 VkBuffer dummy_buffer();
 // The last 32 bytes of the dummy buffer hold the default of an unset vertex attribute: float (0,0,0,1) and integer (0,0,0,1).
 constexpr VkDeviceSize kDummyAttrFloatOffset = 65504, kDummyAttrIntOffset = 65520;

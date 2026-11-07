@@ -13,7 +13,41 @@ to the task payload region uses the TaskPayloadWorkgroupEXT storage class. The R
              {
                  context.Return();
              }
-@@ -1721,7 +1721,7 @@
+@@ -1659,14 +1659,19 @@
+         {
+             SpvInstruction pointer = GetStoragePointer(context, operation, out AggregateType varType);
+ 
++            bool device = operation.StorageKind == StorageKind.GlobalMemory;   // PhysicalStorageBuffer accesses need an alignment (AmpereGlobal.cs)
++
+             if (isStore)
+             {
+-                context.Store(pointer, context.Get(varType, operation.GetSource(operation.SourcesCount - 1)));
++                SpvInstruction st = device ? context.Store(pointer, context.Get(varType, operation.GetSource(operation.SourcesCount - 1)), MemoryAccessMask.Aligned)
++                                           : context.Store(pointer, context.Get(varType, operation.GetSource(operation.SourcesCount - 1)));
++                if (device) st.AddOperand((Spv.Generator.LiteralInteger)4);
+                 return OperationResult.Invalid;
+             }
+             else
+             {
+-                SpvInstruction result = context.Load(context.GetType(varType), pointer);
++                SpvInstruction result = device ? context.Load(context.GetType(varType), pointer, MemoryAccessMask.Aligned) : context.Load(context.GetType(varType), pointer);
++                if (device) result.AddOperand((Spv.Generator.LiteralInteger)4);
+                 return new OperationResult(varType, result);
+             }
+         }
+@@ -1674,6 +1679,11 @@
+         private static SpvInstruction GetStoragePointer(CodeGenContext context, AstOperation operation, out AggregateType varType)
+         {
+             StorageKind storageKind = operation.StorageKind;
++
++            if (storageKind == StorageKind.GlobalMemory)   // a device address the pool address table gave (AmpereGlobal.cs, A17)
++            {
++                return AmpereGlobal.DevicePointer(context, operation, out varType);
++            }
+ 
+             StorageClass storageClass;
+             SpvInstruction baseObj;
+@@ -1721,7 +1731,7 @@
                      }
                      else
                      {

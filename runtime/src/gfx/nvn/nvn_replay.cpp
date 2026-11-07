@@ -1538,6 +1538,39 @@ VkDescriptorBufferInfo g_c0_made = {};   // the c[0] header compute_c0 made for 
 // The header words: OoT's sky-lighting pass 16a42858 (spherical harmonics of the sky panorama, dispatched 1x1x1 with 32x32 invocations) reads
 // c[0] 0x4 as the row width in groups and 0x4 * 0x8 as the sample count; left zero, it divided by zero, its inf/NaN went into the ambient term of
 // every material and whole frames came out white (A12). False: not an NVN2 compute program, or no room.
+// The pool address table of this frame (A17, nvn_gpu_pool.cpp): 32-byte entries {guest address, size, device address, 0} sorted by guest
+// address, in the upload ring, remade when the frame or the set of imports changes. Shaders that resolve global memory at run time find its
+// device address in c[0] at kPoolTableC0 (u64) and the entry count at kPoolTableC0 - 8 (written by graphics_c0 and fill_compute_c0).
+constexpr size_t kPoolTableC0 = 0xff8;
+void pool_table_words(uint8_t* c0) {
+    static Frame* frame = nullptr;
+    static uint64_t gen = ~0ull, addr = 0;
+    static uint32_t count = 0;
+    if (!device().features().buffer_device_address) return;
+    const uint64_t now = pool_address_table_generation();
+    if (frame != F || gen != now) {
+        frame = F;
+        gen = now;
+        addr = 0;
+        count = 0;
+        static std::vector<PoolAddress> table;
+        pool_address_table(table);
+        if (!table.empty()) {
+            UploadAlloc u = F->upload(32ull * table.size(), 32);
+            if (u) {
+                uint64_t* w = reinterpret_cast<uint64_t*>(u.ptr);
+                for (size_t i = 0; i < table.size(); ++i) { w[4 * i] = table[i].guest; w[4 * i + 1] = table[i].size; w[4 * i + 2] = table[i].dev; w[4 * i + 3] = 0; }
+                static VkBuffer buf = VK_NULL_HANDLE;
+                static uint64_t buf_addr = 0;
+                if (u.buffer != buf) { buf = u.buffer; buf_addr = device().buffer_address(buf); }
+                if (buf_addr) { addr = buf_addr + u.offset; count = static_cast<uint32_t>(table.size()); }
+            }
+        }
+    }
+    std::memcpy(c0 + kPoolTableC0, &addr, 8);
+    std::memcpy(c0 + kPoolTableC0 - 8, &count, 4);
+}
+
 constexpr VkDeviceSize kComputeC0Bytes = 0x1000;
 bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n) {
     if (!c.nvn2 || c.stage != 5 || c.c0_table > n) return false;
@@ -1556,6 +1589,7 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n) {
     for (int i = 0; i < c.c0_ssbos; ++i) desc(i < 16 ? &S.ssbo[kCompute][i] : nullptr);
     for (int i = 0; i < c.c0_textures; ++i, off += 8) put64(i < 64 ? S.tex[kCompute][i] : 0);
     for (int i = 0; i < c.c0_images; ++i, off += 8) put64(i < 16 ? S.img[kCompute][i] : 0);
+    if (n >= kPoolTableC0 + 8 && off <= kPoolTableC0 - 8) pool_table_words(p);
     return true;
 }
 // c[0] of a graphics draw whose shader resolves global memory at run time (ShaderReflection::global_fallback, A17): the static driver constants
@@ -1581,6 +1615,7 @@ bool graphics_c0(VkDescriptorBufferInfo& bi) {
             std::memcpy(u.ptr + base + 0x10 * k + 8, &size, 4);
         }
     }
+    pool_table_words(u.ptr);
     bi = {u.buffer, u.offset, kGraphicsC0Bytes};
     return true;
 }
