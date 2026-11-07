@@ -1124,7 +1124,8 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
                     SendMessageW(prep_bar_, PBM_SETPOS, static_cast<WPARAM>(1000.0 * static_cast<double>(std::min(done_, total_)) / static_cast<double>(total_)), 0);
                     t += L": " + with_commas(done_) + L" of " + with_commas(total_);
                     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - step_t0_).count();
-                    if (done_ > 0 && done_ < total_ && secs > 5) {
+                    // not before 5%: the compile step starts with its most expensive programs, so an early estimate is far too long
+                    if (done_ > 0 && done_ < total_ && secs > 5 && done_ * 20 >= total_) {
                         const int left = static_cast<int>(secs / static_cast<double>(done_) * static_cast<double>(total_ - done_));
                         t += left >= 120 ? L"  ·  about " + std::to_wstring(left / 60) + L" min left" : L"  ·  about " + std::to_wstring(std::max(left, 1)) + L" s left";
                     }
