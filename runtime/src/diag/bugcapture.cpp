@@ -468,6 +468,15 @@ void set_screenshot_fn(ScreenshotFn fn) {
     g().shot = fn;
 }
 
+bool screenshot_next_frame(const char* png_path) {
+    ScreenshotFn fn;
+    {
+        std::lock_guard<std::mutex> lk(g().mu);
+        fn = g().shot;
+    }
+    return fn && fn(png_path);
+}
+
 void set_trace_fn(void (*fn)()) {
     std::lock_guard<std::mutex> lk(g().mu);
     g().trace = fn;

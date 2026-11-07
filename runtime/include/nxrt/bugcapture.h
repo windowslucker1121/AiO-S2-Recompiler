@@ -43,6 +43,7 @@ bool wait_complete(const std::string& dir, uint32_t timeout_ms);
 // Graphics hooks, registered by the play layer: write the next presented frame as a PNG (true when asked), trace the next frame.
 using ScreenshotFn = bool (*)(const char* png_path);
 void set_screenshot_fn(ScreenshotFn fn);
+bool screenshot_next_frame(const char* png_path);   // through the registered hook; false without one
 void set_trace_fn(void (*fn)());
 // The build the exe was made from (game_main: the commit compiled in and whether the checkout had uncommitted changes then).
 void set_build_info(const char* commit, bool dirty);

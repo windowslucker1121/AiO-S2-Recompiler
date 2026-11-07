@@ -468,6 +468,7 @@ int main(int argc, char** argv) {
     std::string game = std::getenv(GAME_ENV("GAME")) ? std::getenv(GAME_ENV("GAME")) : "";
     const char* ini = nullptr;
     const char* logp = nullptr;
+    std::string replay_capture;                            // --replay-capture DIR: show a frame capture in a loop instead of starting the game (runtime/docs/CAPTURE.md)
     bool prepare = false, prepare_if_needed = false;      // --prepare-shaders [--if-needed] [--threads N]: compile the game's shaders ahead and exit (no game start)
     int prepare_threads = 0;
     std::string prepare_programs;                         // --programs FILE: another program list (tests)
@@ -489,6 +490,7 @@ int main(int argc, char** argv) {
         else if (arg("--programs")) prepare_programs = argv[++i];
         else if (arg("--instance")) instance = argv[++i];
         else if (arg("--instance-dir")) instance_dir = argv[++i];
+        else if (arg("--replay-capture")) replay_capture = argv[++i];
         else if (!std::strcmp(argv[i], "--no-nvn")) boot_opts.emplace_back("nvn", "0");
         else if (!std::strcmp(argv[i], "--headless")) boot_opts.emplace_back("gfx", "headless");
         else if (!std::strcmp(argv[i], "--window")) boot_opts.emplace_back("gfx", "window");
@@ -570,6 +572,8 @@ int main(int argc, char** argv) {
     dev_default("nvn", "shader_translator", GAME_DEV_ROOT "/tools/shaders/build/bin/Release/net10.0/spirv_harness.exe");
     // Bug capture bundles (F9, capture_bug request files) go to the checkout's work/bugs, where tools/ai lists them.
     if (!nxrt::config_has("bug", "dir")) nxrt::config_set("bug", "dir", GAME_DEV_ROOT "/work/bugs");
+    // Frame captures (runtime/docs/CAPTURE.md) go to the checkout's work/captures.
+    if (!nxrt::config_has("capture", "dir")) nxrt::config_set("capture", "dir", GAME_DEV_ROOT "/work/captures");
 #endif
     nxrt::bug::set_build_info(GAME_BUILD_COMMIT, GAME_BUILD_DIRTY != 0);
     NXLOG_I("boot", "built from commit %s%s", *GAME_BUILD_COMMIT ? GAME_BUILD_COMMIT : "(unknown)", GAME_BUILD_DIRTY ? " with uncommitted changes" : "");
@@ -580,6 +584,9 @@ int main(int argc, char** argv) {
 
     if (prepare) return prepare_shaders_main(prepare_if_needed, prepare_threads, prepare_programs);
 
+    // A frame capture replay puts the captured memory back before every loop: compute results must reach the pools at the end of each
+    // submission instead of staying in device-local copies (runtime/docs/CAPTURE.md).
+    if (!replay_capture.empty() && !nxrt::config_has("nvn", "compute_out_lazy")) nxrt::config_set("nvn", "compute_out_lazy", "0");
     bool play_started = false;
     if (nxrt::config_get_bool("boot", "nvn", true)) {
         nxrt::nvn::install();   // nvnBootstrapLoader and the NVN entry points (logging stubs for what no back end implements)
@@ -590,7 +597,7 @@ int main(int argc, char** argv) {
             const bool headless = gfxmode != "window";
             nxrt::play::DisplayConfig disp;
             // First start (or after a cancelled one): the "Preparing shaders" window translates and compiles every shader before the game runs.
-            if (!headless) {
+            if (!headless && replay_capture.empty()) {
                 const bool go = nxrt::nvn::shader_setup_before_start(nxrt::game::info().title, [](const std::function<bool(uint64_t, uint64_t)>& progress) {
                     nxrt::nvn::ShaderPrepareOptions po;
                     po.only_if_needed = true;
@@ -644,8 +651,15 @@ int main(int argc, char** argv) {
             po.overlay = !headless;
             nxrt::play::start(po);
             play_started = true;
+            if (!replay_capture.empty()) {   // a frame capture instead of the game: no module is mapped, no game code runs
+                const int rc = nxrt::nvn::run_capture_replay(absolute_utf8(replay_capture));
+                nxrt::nvn::backend_flush_caches();
+                nxrt::log_flush();
+                TerminateProcess(GetCurrentProcess(), static_cast<UINT>(rc));
+            }
         }
     }
+    if (!replay_capture.empty()) die("--replay-capture needs the graphics back end ([boot] nvn and gfx must not be off)");
     if (!play_started) {
         nxrt::play::StartOptions po;           // no graphics: play mode still turns scripted keys into pad input
         po.overlay = false;

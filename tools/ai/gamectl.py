@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import states  # noqa: E402  (tools/ai/states.py: saved states and bug bundles)
 
 TOOLS = ['status', 'launch', 'restart', 'kill', 'screenshot', 'send_input', 'wait_for', 'compare', 'log', 'reports',
-         'states', 'save_state', 'load_state', 'capture_bug', 'bugs']
+         'states', 'save_state', 'load_state', 'capture_bug', 'bugs', 'capture_frame', 'captures', 'replay_capture']
 # list parameters whose items are not only strings (route names or step dicts): the MCP schema leaves their items open
 ANY_ITEMS = {'reach', 'route'}
 # The game exe's exit codes (game_main.cpp, the test tooling's contract in tt.h, crash handler, watchdog, fatal).
