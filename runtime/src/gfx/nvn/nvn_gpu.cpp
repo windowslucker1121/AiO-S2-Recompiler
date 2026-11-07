@@ -25,6 +25,7 @@
 #include "nxrt/lowlat.h"
 #include "nxrt/gaps.h"
 #include "vk_gauges.h"
+#include "nvn_capture.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_impl.h"
 #include "nvn_pipeline.h"
@@ -744,7 +745,9 @@ bool async_submit() {
 uint64_t submit(const std::vector<Ref<CmdList>>& lists) {
     if (!g) return ++g_idle_serial;
     NXFT("submit");
-    return queue_submit([lists](Frame& f) {
+    const bool snap = capture::on_submit(lists);   // the first submission of a frame being captured: the GPU state it starts from
+    return queue_submit([lists, snap](Frame& f) {
+        if (snap) capture::state_taken(replay_state_snapshot());
         replay_begin_submit(f);
         replay_lists(f, lists);
         replay_end_submit(f);
@@ -828,6 +831,7 @@ bool gpu_wait_frames(int frames_back, uint64_t timeout_ns) {
 // render thread one present behind the game at most (2 let a second finished frame wait in the queue: one more frame between input and screen).
 void present(Window* window, int index) {
     if (!g || !window) return;
+    capture::on_present(window, index);
     NXFT("present.call");
     nxrt::hitch_note_game_present();
     {

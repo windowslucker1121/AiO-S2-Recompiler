@@ -119,6 +119,8 @@ NVNboolean nvnProgramSetShaders(NVNprogram* program, int count, const NVNshaderD
     for (int s = 0; s < 8; ++s) {
         p->stage[s] = nullptr;
         p->code_hash[s] = 0;
+        p->code_addr[s] = 0;
+        p->control_addr[s] = 0;
     }
     p->pending.clear();
     p->has_pending.store(false, std::memory_order_release);
@@ -168,6 +170,8 @@ NVNboolean nvnProgramSetShaders(NVNprogram* program, int count, const NVNshaderD
         }
         p->stage[stage] = si;
         p->code_hash[stage] = parse_hash(si->hash);
+        p->code_addr[stage] = reinterpret_cast<uint64_t>(code);
+        p->control_addr[stage] = reinterpret_cast<uint64_t>(control);
     }
     p->has_pending.store(!p->pending.empty(), std::memory_order_release);
     p->linked = all_found;
@@ -212,6 +216,8 @@ bool be::program_resolve_pending(Program* p) {
         }
         p->stage[stage] = si;
         p->code_hash[stage] = parse_hash(si->hash);
+        p->code_addr[stage] = reinterpret_cast<uint64_t>(b.code);
+        p->control_addr[stage] = reinterpret_cast<uint64_t>(b.control);
         changed = true;
     }
     p->pending = std::move(keep);

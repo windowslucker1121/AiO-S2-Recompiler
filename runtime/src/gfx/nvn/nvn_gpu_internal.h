@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -316,6 +317,37 @@ void replay_lists(Frame& f, const std::vector<Ref<CmdList>>& lists);
 void replay_end_submit(Frame& f);
 void replay_request_trace();      // trace the next whole presented frame (any thread)
 void replay_shutdown();           // destroys pipelines and layouts (render thread, device idle)
+// Frame capture (nvn_capture.cpp): the replay's persistent GPU state at the start of a captured frame. snapshot copies it (render thread,
+// between submissions); image splits a snapshot into raw bytes and the objects it references (any thread); restore makes it the replay's
+// state again (render thread, between submissions). The image is only valid for the build that wrote it (size checked).
+struct ReplayStateRefs {
+    Obj* tpool = nullptr;
+    Obj* spool = nullptr;
+    Obj* color[8] = {};
+    Obj* depth = nullptr;
+    const ShaderInfo* stage[8] = {};   // by NVN stage, task and mesh included
+};
+std::shared_ptr<void> replay_state_snapshot();
+uint32_t replay_state_size();
+void replay_state_image(const std::shared_ptr<void>& snap, std::vector<uint8_t>& pod, ReplayStateRefs& refs);
+// Frame capture: the texture has a GPU image the GPU rendered since the CPU last wrote its storage / the image is depth or stencil.
+// Read without the render thread's lock: call when the GPU is idle (after finish()).
+bool texture_gpu_written(const Texture* t);
+// The whole image of a texture the GPU rendered (every level, aspect and layer, packed), as the GPU holds it: scaled, promoted and depth
+// images included. read: any thread but the render thread, GPU idle. write: makes the image (at the dump's scale) and fills it; false
+// (with why) when the image this build makes differs from the dump.
+struct TexImageDump {
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    VkExtent3D base = {1, 1, 1};
+    uint32_t levels = 1, layers = 1;
+    VkImageAspectFlags aspect = 0;
+    float scale = 1.0f;
+    std::vector<uint8_t> bytes;
+};
+bool tex_image_read(Texture* t, TexImageDump& d);
+bool tex_image_write(Texture* t, const TexImageDump& d, std::string* why);
+bool texture_gpu_depth(const Texture* t);
+bool replay_state_restore(const std::vector<uint8_t>& pod, const ReplayStateRefs& refs);
 
 // ---- shared facts (nvn_gpu.cpp) ----------------------------------------------------------------------------------------
 int window_origin_mode();
