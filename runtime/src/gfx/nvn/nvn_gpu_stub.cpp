@@ -21,6 +21,7 @@ bool debug_labels() { return false; }
 uint64_t submit(const std::vector<Ref<CmdList>>& lists) { (void)lists; return ++g_serial; }
 uint64_t flush() { return g_serial.load(); }
 void finish() {}
+void finish_on_render_thread() {}
 uint64_t last_serial() { return g_serial.load(); }
 bool wait_serial(uint64_t, uint64_t) { return true; }
 bool serial_done(uint64_t) { return true; }

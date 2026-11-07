@@ -44,15 +44,21 @@ struct PoolGauges {
 PoolGauges g_pool_gauges;
 }  // namespace
 
+std::atomic<uint64_t> g_pool_gen{0};
+
 void pool_register(MemoryPool* p) {
     std::unique_lock<std::shared_mutex> lk(g_pool_mu);
     g_pools[p->gpu_base] = p;
+    g_pool_gen.fetch_add(1, std::memory_order_relaxed);
 }
+
+uint64_t pool_registry_generation() { return g_pool_gen.load(std::memory_order_relaxed); }
 
 void pool_unregister(MemoryPool* p) {
     std::unique_lock<std::shared_mutex> lk(g_pool_mu);
     auto it = g_pools.find(p->gpu_base);
     if (it != g_pools.end() && it->second == p) g_pools.erase(it);
+    g_pool_gen.fetch_add(1, std::memory_order_relaxed);
 }
 
 void pool_collect(std::vector<Ref<MemoryPool>>& out) {

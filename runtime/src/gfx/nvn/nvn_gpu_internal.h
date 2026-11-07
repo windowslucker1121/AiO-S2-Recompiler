@@ -137,6 +137,13 @@ uint64_t pool_address_table_generation();
 // root entry count and device address, as the shaders find them in c[0] 0xfe0. False when there is none (no buffer device address).
 bool page_table_words(uint32_t* shifts, uint32_t* root_entries, uint64_t* address);
 void page_table_stats(uint64_t* spans, uint64_t* pages);
+// The device address the page table gives a guest address (the shaders' walk, on the host), 0 when it maps nothing there (trace lines).
+uint64_t page_table_lookup(uint64_t guest);
+// Imports every chunk of every registered (non-virtual) pool, so the page table maps all of them: a pointer shader can reach any pool
+// address, while chunked pools are otherwise imported only where the render thread binds something (A15: OoT's foliage vertex shader read
+// its light-probe tables through pointers into a 149 MiB pool nothing else bound, and got zeros). Does nothing while the pool registry is
+// unchanged since the last call. Render thread.
+void import_pools_for_pointers();
 VkBuffer dummy_buffer();
 // The last 32 bytes of the dummy buffer hold the default of an unset vertex attribute: float (0,0,0,1) and integer (0,0,0,1).
 constexpr VkDeviceSize kDummyAttrFloatOffset = 65504, kDummyAttrIntOffset = 65520;

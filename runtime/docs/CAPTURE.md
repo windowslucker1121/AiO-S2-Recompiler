@@ -24,8 +24,8 @@ The next whole frame (from one present to the next) is recorded. At its end the 
 | File | What |
 |---|---|
 | `capture.bin` | The frame's events (submissions and the present), its command lists and every list they call, every object they reach (memory pools with their virtual maps, textures, texture and sampler pools, programs, syncs, events, the window), the replay's GPU state at the frame's start (`GState`), the memory table, the device modes (window origin, depth mode) and the table of rendered images. |
-| `memory.bin` | Guest memory the GPU reads: every non-virtual memory pool, plus each program's code block and control section. All-zero MiB chunks are left out. |
-| `images.bin` | The images the GPU had rendered before the frame (render targets, shadow and probe maps, history buffers), read back raw as the GPU holds them: scaled, promoted to float16, and depth images included. |
+| `memory.bin` | Guest memory the GPU reads: every non-virtual memory pool, plus each program's code block and control section. All-zero MiB chunks are left out. Ranges the frame's GPU work writes hold what they held when the frame started (saved at the first GPU write of each range), everything else what it held at the end. |
+| `images.bin` | The images the GPU had rendered before the frame (render targets, shadow and probe maps, history buffers), read back raw as the GPU holds them: scaled, promoted to float16, depth and BC-compressed images included. Images with storage in a pool are read when the capture is armed, before the frame's first submission (their state at the frame's start); images without storage, or rendered for the first time in the frame, at its end. |
 | `reference.png` | The game's own picture of the captured frame, for comparing with the replay. |
 
 The first scene is about 3.2 GiB of memory and 0.9 GiB of images. Writing takes 3 to 10 s. Before writing, compute results the back end
@@ -64,9 +64,19 @@ What works on a replay, unchanged:
 
 - A capture belongs to the runtime build that wrote it: the size of `GState` and of the object layouts is checked, and a mismatch asks
   for a new capture. Shader translations are looked up fresh, so translator changes need no new capture.
-- Memory is read once the frame's last submission has completed. CPU data the game already rewrote for the next frame (a uniform ring with
-  fewer slots than frames in flight) can differ from what the frame used.
+- Memory is read once the frame's last submission has completed, except the ranges the frame's GPU work writes (saved at their first
+  write, see `memory.bin`). CPU data the game already rewrote for the next frame (a uniform ring with fewer slots than frames in flight)
+  can differ from what the frame used.
+- Why frame-start contents (2026-11-07): OoT's volumetric fog accumulates into its 3D volumes in place and clears accumulators on the CPU.
+  Saved as the frame left them, every replay loop added a second frame of fog on top: a thick haze (SSIM 0.53-0.58 against
+  `reference.png`), and without `[capture] reset` a white-out after a few loops. With the frame-start contents: SSIM 0.86-0.88.
+  The capture log says `frame start: N rendered images read` and `memory the frame writes: N ranges ... saved as they were when the
+  frame started`.
 - `CallCommands` handles the game had already released when the frame was submitted are skipped in the replay, as in the game (the gaps
   list shows them).
-- Sparse (virtual-pool) images and multisampled images are not saved in `images.bin`. They start from their storage, or cleared.
+- Sparse (virtual-pool) images and multisampled images are not saved in `images.bin`. They start from their storage, or cleared. The
+  capture log names each image it could not read.
+- Trace snapshots (`trace_snap*`, `snapm_`/`snapd_`/`snapa_` files) are read after the GPU went idle at the traced frame's present. Before
+  2026-11-07 they were read without that wait, and the frame's later draws read as zeros (the "colour-pass mesh records read 0 on the
+  replay with the pool copies on" of A15/A17 was this, not a replay difference).
 - Only the frame's GPU work is replayed. CPU-side game behaviour, input, audio and loading need the game.

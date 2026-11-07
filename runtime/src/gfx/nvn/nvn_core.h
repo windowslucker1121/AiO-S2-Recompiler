@@ -127,6 +127,7 @@ void pool_register(MemoryPool* p);
 void pool_unregister(MemoryPool* p);
 PoolHit pool_lookup(uint64_t gpu_address);          // pool is null when the address is in no pool
 void pool_collect(std::vector<Ref<MemoryPool>>& out);   // every registered pool, referenced (frame capture)
+uint64_t pool_registry_generation();                  // changes with every pool registered or unregistered
 inline uint8_t* host_ptr(uint64_t gpu_address) { return reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(gpu_address)); }
 
 // The data of an NVNbuffer (0x30 bytes in the game's memory).

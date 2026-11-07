@@ -509,6 +509,50 @@ bool page_table_words(uint32_t* shifts, uint32_t* root_entries, uint64_t* addres
     return a != 0;
 }
 void page_table_stats(uint64_t* spans, uint64_t* pages) { *spans = pt::g_spans.load(); *pages = pt::g_pages.load(); }
+namespace {
+BufRef resolve_in_pool(uint64_t gpu_address, uint64_t size, MemoryPool** pool_out, PoolGpu** gpu_out, uint64_t* pool_off_out);
+}
+
+void import_pools_for_pointers() {
+    static uint64_t done_gen = ~uint64_t{0};
+    const uint64_t gen = pool_registry_generation();
+    if (gen == done_gen) return;
+    done_gen = gen;
+    std::vector<Ref<MemoryPool>> pools;
+    pool_collect(pools);
+    const auto t0 = std::chrono::steady_clock::now();
+    uint64_t chunks = 0, bytes = 0;
+    for (const Ref<MemoryPool>& r : pools) {
+        MemoryPool* mp = r.get();
+        if (!mp || mp->is_virtual || !mp->base || !mp->size) continue;
+        MemoryPool* pool = nullptr;
+        PoolGpu* pg = nullptr;
+        resolve_in_pool(reinterpret_cast<uint64_t>(mp->base), 1, &pool, &pg, nullptr);   // the pool's import (or chunk table) and its first chunk
+        if (!pg || pg->failed || pg->chunks.size() < 2) continue;
+        for (uint64_t k = 0; k < pg->chunks.size(); ++k) {
+            const bool had = pg->chunks[static_cast<size_t>(k)].tried;
+            const PoolChunk* c = pool_chunk(pg, k);
+            if (!had && c && c->buffer) { ++chunks; bytes += c->size; }
+        }
+    }
+    if (chunks)
+        NXLOG_I(kTag, "pointer shaders: %llu more pool chunks imported (%llu MiB) so the page table maps every pool: %.1f ms", static_cast<unsigned long long>(chunks),
+                static_cast<unsigned long long>(bytes >> 20), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+}
+
+uint64_t page_table_lookup(uint64_t guest) {
+    std::lock_guard<std::mutex> lk(g_addr_mu);
+    if (!pt::g_buf.buffer) return 0;
+    uint64_t node = 0;   // byte offset of the root
+    for (int level = 0; level < 3; ++level) {
+        const uint64_t mask = level == 0 ? pt::kRootEntries - 1 : pt::kNodeEntries - 1;
+        const uint64_t e = pt::words()[(node + ((guest >> pt::kShift[level]) & mask) * 8) / 8];
+        if (!e) return 0;
+        if (e & 1) return (e & ~uint64_t{1}) + (guest & ((uint64_t{1} << pt::kShift[level]) - 1));
+        node = e;
+    }
+    return 0;
+}
 size_t pool_address_table(std::vector<PoolAddress>& out) {
     out.clear();
     {

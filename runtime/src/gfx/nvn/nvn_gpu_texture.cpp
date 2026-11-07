@@ -2431,6 +2431,15 @@ uint32_t copy_texel_bytes(VkFormat f, VkImageAspectFlags aspect) {
     return 0;
 }
 
+// Bytes per 4x4 block of the BC formats (0: not one). Frame captures read and write such images whole: OoT's 3D fog noise volumes (BC4,
+// 64x64x64) are filled by the GPU at load and have no content in game memory; without them a replay's volumetric fog came out far too thick.
+uint32_t bc_block_bytes(VkFormat f) {
+    if (f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_BC1_RGBA_SRGB_BLOCK) return 8;
+    if (f == VK_FORMAT_BC4_UNORM_BLOCK || f == VK_FORMAT_BC4_SNORM_BLOCK) return 8;
+    if (f >= VK_FORMAT_BC2_UNORM_BLOCK && f <= VK_FORMAT_BC7_SRGB_BLOCK) return 16;
+    return 0;
+}
+
 // The copy regions of every level and aspect, packed one after the other (level-major, aspects in bit order, all layers). Total bytes in *size.
 bool image_regions(const TexGpu& g, std::vector<VkBufferImageCopy>& regions, uint64_t* size) {
     regions.clear();
@@ -2440,14 +2449,17 @@ bool image_regions(const TexGpu& g, std::vector<VkBufferImageCopy>& regions, uin
         const VkExtent3D e = level_extent(g.base, l);
         for (VkImageAspectFlags a : aspects) {
             if (!(g.aspect & a)) continue;
-            const uint32_t b = copy_texel_bytes(g.format, a);
-            if (!b) return false;
+            const uint32_t bb = a == VK_IMAGE_ASPECT_COLOR_BIT ? bc_block_bytes(g.format) : 0;
+            const uint32_t b = bb ? 0 : copy_texel_bytes(g.format, a);
+            if (!b && !bb) return false;
             VkBufferImageCopy r = {};
             r.bufferOffset = at;
             r.imageSubresource = {a, l, 0, g.layers};
             r.imageExtent = e;
             regions.push_back(r);
-            at += (static_cast<uint64_t>(e.width) * e.height * e.depth * g.layers * b + 15) & ~uint64_t(15);
+            const uint64_t bytes = bb ? static_cast<uint64_t>((e.width + 3) / 4) * ((e.height + 3) / 4) * e.depth * g.layers * bb
+                                      : static_cast<uint64_t>(e.width) * e.height * e.depth * g.layers * b;
+            at += (bytes + 15) & ~uint64_t(15);
         }
     }
     *size = at;

@@ -1287,6 +1287,8 @@ bool gmem_coherence_on() {
 bool host_readable(uint64_t addr, uint64_t n);   // below
 
 void gmem_before_op(bool compute) {
+    for (int st = 0; st < kStages; ++st)   // a pointer shader can reach any pool: every chunk imported, so the page table maps it
+        if ((st == kCompute) == compute && S.stage[st] && S.stage[st]->refl.global_fallback) { import_pools_for_pointers(); break; }
     if (!gmem_coherence_on()) return;
     bool any = false, writes = false;
     for (int st = 0; st < kStages; ++st) {
@@ -1833,6 +1835,20 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             for (int k = 0; k < 16 && static_cast<uint64_t>(k) * 4 < sz; ++k) { char w[12]; std::snprintf(w, sizeof w, " %08x", reinterpret_cast<const uint32_t*>(p)[k]); words += w; }
                         TRACE("    ssbo %s stage %d slot %d (c0 0x%x) %s %llx/%llu:%s", b.name.c_str(), d.nvn_stage, slot, b.nvn.c0_offset, bound ? "bound" : "NOT BOUND",
                               static_cast<unsigned long long>(a), static_cast<unsigned long long>(sz), words.c_str());
+                        // A pointer shader (A17): where the 64-bit pointers among those words lead (pool, page table), since a page the table
+                        // does not map reads 0 in the shader.
+                        if (d.shader && d.shader->refl.global_fallback && bound && host_readable(a, std::min<uint64_t>(sz, 64)))
+                            for (int k = 0; k + 1 < 16 && static_cast<uint64_t>(k + 2) * 4 <= sz; k += 2) {
+                                uint64_t v;
+                                std::memcpy(&v, host_ptr(a) + k * 4, 8);
+                                if (v < (1ull << 32) || v >= (1ull << 47)) continue;
+                                const PoolHit h = pool_lookup(v);
+                                const uint64_t dv = page_table_lookup(v);
+                                TRACE("      ptr word %d: %llx -> %s pool %llx+0x%llx (%llu MiB%s), page table %s%llx", k, static_cast<unsigned long long>(v),
+                                      h.pool ? "in" : "in no", static_cast<unsigned long long>(h.pool ? reinterpret_cast<uint64_t>(h.pool->base) : 0),
+                                      static_cast<unsigned long long>(h.offset), static_cast<unsigned long long>(h.pool ? h.pool->size >> 20 : 0),
+                                      h.pool && h.pool->is_virtual ? ", virtual" : "", dv ? "" : "UNMAPPED ", static_cast<unsigned long long>(dv));
+                            }
                     }
                     if (slot >= 0 && slot < 16 && S.ssbo[d.nvn_stage][slot].addr) {
                         const GState::Bind& bind = S.ssbo[d.nvn_stage][slot];
@@ -4703,6 +4719,9 @@ void replay_lists(Frame& f, const std::vector<Ref<CmdList>>& lists) {
 void replay_request_trace() { g_trace_req.store(true); }
 
 void trace_dump_targets() {
+    // The snapshot copies are in the frame's submissions, which the GPU may still be running at present time: reading their buffers
+    // before it finished gave zeros for the frame's later draws (the colour-pass mesh records "read 0" on replays, 2026-11-07).
+    if (!g_trace_snaps.empty()) vkDeviceWaitIdle(device().device());
     for (const TraceSnap& sn : g_trace_snaps) {
         std::string stats;
         const bool ok = snapshot_write(sn.index, sn.name, &stats);

@@ -24,6 +24,8 @@ uint64_t submit(const std::vector<Ref<CmdList>>& lists);
 uint64_t flush();
 // Waits until every submission so far has completed on the GPU and its write-backs are visible to the CPU.
 void finish();
+// The same, called on the render thread itself (inside a submission's work).
+void finish_on_render_thread();
 uint64_t last_serial();
 // Waits for `serial` to complete (timeout_ns: 0 poll, UINT64_MAX forever). True when it did.
 bool wait_serial(uint64_t serial, uint64_t timeout_ns);

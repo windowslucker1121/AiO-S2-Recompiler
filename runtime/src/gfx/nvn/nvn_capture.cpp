@@ -95,6 +95,18 @@ Recorder& rec() {
 
 std::atomic<bool> g_replaying{false};
 std::atomic<bool> g_collect_writes{false};
+// Frame start contents of the memory the captured frame writes (frame_submit_begin): saved on the render thread at the first GPU write of
+// each range, written into memory.bin instead of what the range held at the end of the frame. Non-overlapping, by address.
+std::mutex g_pre_mu;
+std::map<uint64_t, std::vector<uint8_t>> g_pre;
+uint64_t g_pre_bytes = 0;
+bool g_pre_on = false;                 // render thread: a submission of the frame being captured is being recorded
+constexpr uint64_t kPreMaxBytes = 1ull << 30;
+// Frame start contents of the images the GPU had rendered (read when the capture is armed, before the frame's first submission is queued):
+// images the frame updates in place (OoT's volumetric fog volumes accumulate into themselves) must start from what the frame started from,
+// not from what it left behind. Images rendered for the first time in the frame are read at its end, as before.
+std::mutex g_pre_img_mu;
+std::unordered_map<const Texture*, std::pair<Ref<Texture>, gpu::TexImageDump>> g_pre_img;
 std::mutex g_writes_mu;
 std::vector<std::pair<uint64_t, uint64_t>> g_writes;   // [lo, hi) the GPU wrote during the first loop
 
@@ -382,14 +394,27 @@ bool write_capture(const std::string& name, std::vector<FrameEvent>& events, con
     }
     struct ImgEntry { uint64_t tex; gpu::TexImageDump d; uint64_t off; uint64_t size; };
     std::vector<ImgEntry> images;
-    uint64_t img_bytes = 0, img_fail = 0;
+    uint64_t img_bytes = 0, img_fail = 0, img_start = 0;
     {
         Out im(dir / "images.bin");
         for (size_t i = 0; i < w.objs[kTex].size(); ++i) {
             Texture* t = const_cast<Texture*>(static_cast<const Texture*>(w.objs[kTex][i]));
             if (!gpu::texture_gpu_written(t)) continue;
             ImgEntry e{i + 1, {}, im.bytes(), 0};
-            if (!gpu::tex_image_read(t, e.d)) { ++img_fail; continue; }
+            bool from_start = false;
+            {
+                std::lock_guard lk(g_pre_img_mu);
+                auto it = g_pre_img.find(t);
+                if (it != g_pre_img.end()) { e.d = std::move(it->second.second); from_start = true; }
+            }
+            if (from_start) ++img_start;
+            else if (!gpu::tex_image_read(t, e.d)) {   // sparse or multisampled (Limits in runtime/docs/CAPTURE.md): the replay starts it from its storage
+                ++img_fail;
+                NXLOG_W(kTag, "rendered image t%u (%s %dx%dx%d, %u level(s), %u layer(s)%s%s) could not be read: not saved", t->id, t->fmt ? t->fmt->name : "?",
+                        t->b.width, t->b.height, t->b.depth, t->levels, t->layers, t->b.samples > 1 ? ", multisampled" : "",
+                        t->b.target == NVN_TEXTURE_TARGET_3D ? ", 3D" : "");
+                continue;
+            }
             im.raw(e.d.bytes.data(), e.d.bytes.size());
             img_bytes += e.d.bytes.size();
             e.size = e.d.bytes.size();
@@ -399,7 +424,12 @@ bool write_capture(const std::string& name, std::vector<FrameEvent>& events, con
         }
         im.close();
     }
-    NXLOG_I(kTag, "rendered images saved: %zu (%.0f MiB), %llu could not be read", images.size(), img_bytes / 1048576.0, static_cast<unsigned long long>(img_fail));
+    NXLOG_I(kTag, "rendered images saved: %zu (%.0f MiB; %llu as the frame started), %llu could not be read", images.size(), img_bytes / 1048576.0,
+            static_cast<unsigned long long>(img_start), static_cast<unsigned long long>(img_fail));
+    {
+        std::lock_guard lk(g_pre_img_mu);
+        g_pre_img.clear();
+    }
 
     Out o(dir / "capture.bin");
     o.raw(kMagic, 8);
@@ -583,11 +613,27 @@ bool write_capture(const std::string& name, std::vector<FrameEvent>& events, con
         for (uint64_t c = 0; c < chunks; ++c) {
             const uint64_t k = std::min(kChunk, r.n - off);
             read_guest(r.a + off, k, buf.data());
+            {   // ranges the frame writes: their contents at the frame's start (frame_submit_begin)
+                std::lock_guard lk(g_pre_mu);
+                const uint64_t lo = r.a + off, hi = lo + k;
+                auto it = g_pre.upper_bound(lo);
+                if (it != g_pre.begin()) --it;
+                for (; it != g_pre.end() && it->first < hi; ++it) {
+                    const uint64_t a = std::max(lo, it->first), b = std::min(hi, it->first + it->second.size());
+                    if (a < b) std::memcpy(buf.data() + (a - lo), it->second.data() + (a - it->first), static_cast<size_t>(b - a));
+                }
+            }
             if (!all_zero(buf.data(), k)) { where[c] = m.bytes(); m.raw(buf.data(), k); written += k; }
             off += k;
         }
         total += r.n;
         for (uint64_t x : where) o.put(x);
+    }
+    {
+        std::lock_guard lk(g_pre_mu);
+        NXLOG_I(kTag, "memory the frame writes: %zu ranges (%.1f MiB) saved as they were when the frame started", g_pre.size(), g_pre_bytes / 1048576.0);
+        g_pre.clear();
+        g_pre_bytes = 0;
     }
     // device modes (nvnDeviceSetWindowOriginMode / SetDepthMode): appended, a capture without them replays with the defaults
     o.put(static_cast<int32_t>(gpu::window_origin_mode()));
@@ -648,11 +694,13 @@ void poll_request(Recorder& r) {
 }  // namespace
 
 // ---- hooks (nvn_gpu.cpp) -------------------------------------------------------------------------------------------------------------
-bool on_submit(const std::vector<Ref<CmdList>>& lists) {
+bool on_submit(const std::vector<Ref<CmdList>>& lists, bool* recorded) {
+    if (recorded) *recorded = false;
     if (g_replaying.load(std::memory_order_relaxed)) return false;
     Recorder& r = rec();
     std::lock_guard lk(r.mu);
     if (r.phase != Phase::Recording) return false;
+    if (recorded) *recorded = true;
     FrameEvent e;
     e.kind = 0;
     e.lists = lists;
@@ -681,6 +729,29 @@ bool on_submit(const std::vector<Ref<CmdList>>& lists) {
     r.state_requested = true;
     return true;
 }
+
+namespace {
+// Game thread, between the present before the captured frame and its first submission: every image with storage in a pool that the GPU
+// rendered, as it is now (queued behind the previous frame's work, so after it).
+void read_images_at_frame_start() {
+    const auto t0 = std::chrono::steady_clock::now();
+    std::vector<Ref<Texture>> list = texture_registry_collect([](const Texture& t, void*) { return gpu::texture_gpu_written(&t); }, nullptr);
+    uint64_t bytes = 0;
+    size_t n = 0;
+    std::lock_guard lk(g_pre_img_mu);
+    g_pre_img.clear();
+    for (Ref<Texture>& t : list) {
+        gpu::TexImageDump d;
+        if (!gpu::tex_image_read(t.get(), d)) continue;
+        bytes += d.bytes.size();
+        ++n;
+        const Texture* key = t.get();
+        g_pre_img.emplace(key, std::make_pair(std::move(t), std::move(d)));
+    }
+    NXLOG_I(kTag, "frame start: %zu rendered images read (%.0f MiB) in %.0f ms", n, bytes / 1048576.0,
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+}
+}  // namespace
 
 void state_taken(std::shared_ptr<void> snap) {
     Recorder& r = rec();
@@ -722,6 +793,9 @@ void on_present(Window* w, int index) {
         r.phase = Phase::Recording;   // the frame after this present
         r.events.clear();
         r.called.clear();
+        lk.unlock();
+        read_images_at_frame_start();
+        lk.lock();
         // the game's own picture of the recorded frame (the renderer writes the next presented frame): the reference a replay is compared with
         {
             std::error_code ec;
@@ -746,7 +820,52 @@ void request(const std::string& name) {
 
 bool replaying() { return g_replaying.load(std::memory_order_relaxed); }
 
+void frame_submit_begin(bool first) {
+    if (first) {
+        gpu::finish_on_render_thread();   // earlier frames' GPU writes have landed before anything is saved
+        std::lock_guard lk(g_pre_mu);
+        g_pre.clear();
+        g_pre_bytes = 0;
+    }
+    g_pre_on = true;
+}
+void frame_submit_end() { g_pre_on = false; }
+
+namespace {
+// The parts of [lo, hi) not saved yet: their bytes now (results held in device-local copies go back to the pool first).
+void save_frame_start(uint64_t lo, uint64_t hi) {
+    std::vector<std::pair<uint64_t, uint64_t>> gaps;
+    {
+        std::lock_guard lk(g_pre_mu);
+        if (g_pre_bytes >= kPreMaxBytes) return;
+        uint64_t cur = lo;
+        auto it = g_pre.upper_bound(lo);
+        if (it != g_pre.begin()) --it;
+        for (; it != g_pre.end() && it->first < hi && cur < hi; ++it) {
+            const uint64_t a = it->first, b = a + it->second.size();
+            if (b <= cur) continue;
+            if (a > cur) gaps.emplace_back(cur, a);
+            cur = std::max(cur, b);
+        }
+        if (cur < hi) gaps.emplace_back(cur, hi);
+    }
+    for (auto [a, b] : gaps) {
+        const PoolHit h = pool_lookup(a);
+        if (!h.pool || h.pool->is_virtual || !h.pool->base) continue;
+        b = std::min<uint64_t>(b, h.pool->gpu_base + h.pool->size);
+        if (b <= a) continue;
+        gpu::cpu_will_read(a, b - a);
+        std::vector<uint8_t> v(static_cast<size_t>(b - a));
+        read_guest(a, b - a, v.data());
+        std::lock_guard lk(g_pre_mu);
+        g_pre_bytes += v.size();
+        g_pre.emplace(a, std::move(v));
+    }
+}
+}  // namespace
+
 void note_gpu_write(uint64_t addr, uint64_t size) {
+    if (g_pre_on && size) save_frame_start(addr, addr + size);
     if (!g_collect_writes.load(std::memory_order_relaxed) || !size) return;
     std::lock_guard lk(g_writes_mu);
     if (!g_writes.empty() && g_writes.back().first == addr && g_writes.back().second == addr + size) return;

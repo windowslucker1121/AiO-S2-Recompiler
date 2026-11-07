@@ -745,12 +745,15 @@ bool async_submit() {
 uint64_t submit(const std::vector<Ref<CmdList>>& lists) {
     if (!g) return ++g_idle_serial;
     NXFT("submit");
-    const bool snap = capture::on_submit(lists);   // the first submission of a frame being captured: the GPU state it starts from
-    return queue_submit([lists, snap](Frame& f) {
+    bool recorded = false;
+    const bool snap = capture::on_submit(lists, &recorded);   // the first submission of a frame being captured: the GPU state it starts from
+    return queue_submit([lists, snap, recorded](Frame& f) {
+        if (recorded) capture::frame_submit_begin(snap);
         if (snap) capture::state_taken(replay_state_snapshot());
         replay_begin_submit(f);
         replay_lists(f, lists);
         replay_end_submit(f);
+        if (recorded) capture::frame_submit_end();
     }, !async_submit(), false);
 }
 
@@ -763,6 +766,11 @@ void finish() {
         wait_serial_blocking(g->submitted);
         retire();
     });
+}
+void finish_on_render_thread() {
+    if (!g) return;
+    wait_serial_blocking(g->submitted);
+    retire();
 }
 
 bool serial_done(uint64_t serial) {
