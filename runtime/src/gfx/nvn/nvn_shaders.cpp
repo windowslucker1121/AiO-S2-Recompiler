@@ -1146,10 +1146,13 @@ std::unique_ptr<ShaderCache::Preloaded> ShaderCache::preload_one(const std::stri
             have_record = true;
         }
     }
-    if (have_record) {
-        std::vector<HarnessResource> list;
-        if (!parse_harness_resources(record, list) || !apply_harness(p->refl, list)) return nullptr;   // the game's own load reports it
-    }
+    // A .spv without its results.tsv record is left to the game's own load: that one translates it again on demand (the file is stale)
+    // and applies the new record. Preloaded, the old words and a reflection without the record's NVN meanings were used instead, and
+    // load() ignores a record it is handed once a preloaded entry exists: every storage buffer of such a compute shader mapped to no NVN
+    // binding and its dispatches were left out (run da_12: 40 shaders, the culling root 4c1e8564 among them, after rows were deleted).
+    if (!have_record) return nullptr;
+    std::vector<HarnessResource> list;
+    if (!parse_harness_resources(record, list) || !apply_harness(p->refl, list)) return nullptr;   // the game's own load reports it
     return p;
 }
 
