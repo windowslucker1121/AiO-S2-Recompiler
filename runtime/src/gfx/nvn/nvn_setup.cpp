@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -182,20 +183,63 @@ void begin_step(int step, uint64_t total) {
     g.step = step;
 }
 
+std::vector<std::string> missing_corpus_blocks() {
+    std::vector<std::string> missing;
+    be::ShaderCache& cache = be::shader_cache();
+    if (!cache.is_open() || !cache.translator_on() || cache.corpus_dir().empty()) return missing;
+    for (std::string& h : corpus_hashes(cache.corpus_dir()))
+        if (!cache.has_record(h)) missing.push_back(std::move(h));
+    return missing;
+}
+
+void use_setup_translate_jobs() {
+    // The setup may use every core but two: the translator's job count is read when the cache opens (on first use, after this).
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    if (!config_has("nvn", "shader_translate_jobs")) config_set("nvn", "shader_translate_jobs", std::to_string(hw > 3 ? hw - 2 : 1).c_str());
+}
+
+// Step 1 of the setup: every block in `missing` goes to the translator; progress until all are answered or progress() says stop.
+void translate_blocks(const std::vector<std::string>& missing, const std::function<bool(uint64_t, uint64_t)>& progress, ShaderTranslateResult* r) {
+    be::ShaderCache& cache = be::shader_cache();
+    r->missing = missing.size();
+    const uint64_t before = cache.translator_done();
+    for (const std::string& h : missing) cache.translate_corpus_block(h);
+    auto answered = [&] { return missing.size() - std::min<uint64_t>(missing.size(), cache.translator_pending()); };
+    while (cache.translator_on() && cache.translator_pending() > 0) {
+        if (progress && !progress(answered(), missing.size())) { r->cancelled = true; break; }
+        Sleep(100);
+    }
+    r->answered = answered();
+    r->with_spirv = cache.translator_done() - before;
+    if (progress && !r->cancelled) progress(r->answered, missing.size());
+    NXLOG_I("setup", "translation: %llu of %zu blocks answered (%llu with SPIR-V)%s", static_cast<unsigned long long>(r->answered), missing.size(),
+            static_cast<unsigned long long>(r->with_spirv), r->cancelled ? ", stopped" : "");
+    if (!cache.translator_on() && cache.translator_pending() > 0) {
+        r->error = "the shader translator stopped before the end";
+        NXLOG_W("setup", "%s", r->error.c_str());
+    }
+}
+
 }  // namespace
+
+bool translate_missing_shaders(const std::function<bool(uint64_t done, uint64_t total)>& progress, ShaderTranslateResult* r) {
+    *r = ShaderTranslateResult{};
+    use_setup_translate_jobs();
+    be::ShaderCache& cache = be::shader_cache();
+    if (!cache.is_open()) { r->error = "no shader cache is open ([nvn] shader_cache)"; return false; }
+    if (!cache.translator_on()) { r->error = "the shader translator did not start ([nvn] shader_translator)"; return false; }
+    if (cache.corpus_dir().empty()) { r->error = "no shader corpus ([nvn] shader_corpus)"; return false; }
+    translate_blocks(missing_corpus_blocks(), progress, r);
+    return r->error.empty();
+}
 
 bool shader_setup_before_start(const char* title, const ShaderSetupPrepare& prepare) {
     if (!config_get_bool("nvn", "setup_on_start", true)) return true;
-    // The setup may use every core: the translator's job count is read when the cache opens (just below, on first use).
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    if (!config_has("nvn", "shader_translate_jobs")) config_set("nvn", "shader_translate_jobs", std::to_string(hw > 3 ? hw - 2 : 1).c_str());
+    use_setup_translate_jobs();
     be::ShaderCache& cache = be::shader_cache();
     if (!cache.is_open()) return true;   // logged by the cache; the game runs with what it has
 
-    std::vector<std::string> missing;
-    if (cache.translator_on() && !cache.corpus_dir().empty())
-        for (std::string& h : corpus_hashes(cache.corpus_dir()))
-            if (!cache.has_record(h)) missing.push_back(std::move(h));
+    const std::vector<std::string> missing = missing_corpus_blocks();
     const std::filesystem::path base = std::filesystem::path(cache.dir()).parent_path();
     std::error_code ec;
     const bool want_prepare = prepare && std::filesystem::is_regular_file(base / "programs.bin", ec) && !prepare_finished(base / "prepare.state", base / "programs.bin");
@@ -213,16 +257,11 @@ bool shader_setup_before_start(const char* title, const ShaderSetupPrepare& prep
     std::thread worker([&] {
         if (!missing.empty()) {
             begin_step(1, missing.size());
-            const uint64_t before = cache.translator_done();
-            for (const std::string& h : missing) cache.translate_corpus_block(h);
-            while (!g.cancel && cache.translator_on() && cache.translator_pending() > 0) {
-                g.done = missing.size() - std::min<uint64_t>(missing.size(), cache.translator_pending());
-                Sleep(100);
-            }
-            g.done = missing.size() - std::min<uint64_t>(missing.size(), cache.translator_pending());
-            NXLOG_I("setup", "translation: %llu of %zu blocks answered (%llu with SPIR-V)%s", static_cast<unsigned long long>(g.done.load()),
-                    missing.size(), static_cast<unsigned long long>(cache.translator_done() - before), g.cancel ? ", stopped" : "");
-            if (!cache.translator_on() && cache.translator_pending() > 0) NXLOG_W("setup", "the shader translator stopped before the end");
+            ShaderTranslateResult tr;
+            translate_blocks(missing, [](uint64_t done, uint64_t) {
+                g.done = done;
+                return !g.cancel.load();
+            }, &tr);
         }
         if (want_prepare && !g.cancel) {
             begin_step(2, 0);

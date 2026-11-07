@@ -82,6 +82,25 @@ foreach(m IN LISTS GM_MODULES)
     set_target_properties(${GM_ID}_${m} PROPERTIES IMPORTED_LOCATION "${GAME_LIB_DIR}/${GM_ID}_${m}.lib")
 endforeach()
 
+# The Initial Setup (runtime/apps/setup): the first program a player starts. Requirements, extraction, shader preparation, Play. Its names
+# come from the manifest (files.setup_exe); it links nothing of the runtime (the game exe does the shader work as a child process).
+get_filename_component(GAME_SETUP_STEM "${GM_files_setup_exe}" NAME_WE)
+include(FetchContent)
+FetchContent_GetProperties(vulkan_headers)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/setup.manifest.in" "${GAME_GEN}/setup.manifest" @ONLY)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/setup.rc" "${GAME_GEN}/setup.rc" COPYONLY)
+add_executable(game_setup WIN32 "${GAME_RUNTIME_DIR}/apps/setup/setup_main.cpp" "${GAME_RUNTIME_DIR}/apps/setup/setup_core.cpp" "${GAME_GEN}/setup.rc")
+set_target_properties(game_setup PROPERTIES OUTPUT_NAME "${GAME_SETUP_STEM}")
+target_include_directories(game_setup PRIVATE "${GAME_GEN}" "${GAME_RUNTIME_DIR}/apps/setup" "${vulkan_headers_SOURCE_DIR}/include")
+target_compile_definitions(game_setup PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+set_source_files_properties("${GAME_GEN}/setup.rc" PROPERTIES COMPILE_DEFINITIONS "GAME_VER_MAJOR=${GAME_VER_MAJOR};GAME_VER_MINOR=${GAME_VER_MINOR};GAME_VER_PATCH=${GAME_VER_PATCH};GAME_VER_TEXT=\"${GAME_VERSION}\""
+                            OBJECT_DEPENDS "${GAME_GEN}/setup.manifest")
+if(NOT GAME_RELEASE)
+    target_compile_definitions(game_setup PRIVATE SETUP_DEV_ROOT="${GAME_ROOT}")   # development build: the checkout's tools (scripts, translator, venv)
+endif()
+target_link_libraries(game_setup PRIVATE comctl32 uxtheme shell32 ole32 shlwapi)
+target_link_options(game_setup PRIVATE /MANIFEST:NO /DEBUG)   # res/setup.rc carries the manifest
+
 # Release model (b) (GAME_BUILD_RT_DLL=ON, docs/RELEASE.md): no game code in anything built here. The runtime and the boot code become
 # the runtime DLL (+ the import library of the same stem); the game exe is linked on the player PC from the libraries lifted out of
 # their own dump and src/stub.cpp (tools/build/game_build.py in the package, with the bundled Zig). Nothing lifted is imported here.

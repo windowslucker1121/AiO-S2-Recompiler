@@ -20,6 +20,23 @@ You need your own copy of the game, version 2.0.1a: an extracted folder, or NSP/
 
 F1 opens the settings in game. Middle mouse toggles Joy-Con 2 mouse mode for placing items.
 
+## Ocarina of Time (branch `oot-nup`): how a player starts
+
+The Ocarina of Time port has its own first program, **`oot_setup.exe`** (Initial Setup), next to `oot.exe`:
+
+1. **Requirements**: it checks the PC and says how to get anything missing (it installs nothing and changes no system setting):
+   Windows 10 1809 or newer, 64-bit; a graphics card with Vulkan 1.3 and a current driver (VK_EXT_graphics_pipeline_library to compile
+   the shaders ahead; VK_EXT_mesh_shader for foliage); 16 GB of RAM recommended; about 40 GB free (the extracted game 26 GB, shader data
+   about 10 GB); the .NET 10 runtime when the bundled shader translator is not self-contained; Python 3.11+ with `zstandard` and `lz4`
+   for the extraction and the shader scan (`py -3 -m pip install --user zstandard lz4`). No Visual C++ Redistributable: the exe links its
+   runtime statically (the setup checks every DLL `oot.exe` imports).
+2. **Game files**: your own dump of version 2.0.0 (update 131072), as a `.nup` package or an extracted folder (`exefs\` + `romfs\`).
+   NSP/XCI are not supported by this build yet. Choose a data folder for what the setup writes.
+3. **Prepare**: extract, find the shaders, translate them, list the programs, compile them for your graphics card (one to two hours, most
+   of it the last step). Cancel stops at any time; Start continues where it stopped.
+4. **Play** starts the game (or make a desktop shortcut there). After a game update, a new translator or a new graphics driver the setup
+   marks the steps that must run again; Rebuild shaders does it by hand.
+
 ## Reporting problems
 
 [Open an issue](../../issues/new/choose) with `pkp.log` from the session where it happened, your GPU and your Windows version.

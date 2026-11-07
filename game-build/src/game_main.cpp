@@ -413,13 +413,22 @@ bool run_shader_prepare(const nxrt::nvn::ShaderPrepareOptions& po, nxrt::nvn::Sh
     return ok;
 }
 
-int prepare_shaders_main(bool if_needed, int threads, const std::string& programs) {
+// --cancel-event NAME (the Initial Setup app): a named event; once it is set, --prepare-shaders and --translate-shaders stop at the next
+// progress report and end as if the window had been closed (what is done stays done: the pipeline cache is saved, translations stay in
+// the cache), instead of being killed.
+HANDLE g_cancel_event = nullptr;
+bool cancel_requested() { return g_cancel_event && WaitForSingleObject(g_cancel_event, 0) == WAIT_OBJECT_0; }
+
+int prepare_shaders_main(bool if_needed, bool check_only, bool force, int threads, const std::string& programs) {
     nxrt::nvn::ShaderPrepareOptions po;
     po.only_if_needed = if_needed;
+    po.check_only = check_only;
+    po.force = force;
     po.programs_file = programs;
     po.threads = threads;
     auto last = std::chrono::steady_clock::now();
     po.progress = [&](uint64_t done, uint64_t total) {
+        if (cancel_requested()) return false;
         const auto now = std::chrono::steady_clock::now();
         if (done < total && now - last < std::chrono::milliseconds(250)) return true;
         last = now;
@@ -433,11 +442,38 @@ int prepare_shaders_main(bool if_needed, int threads, const std::string& program
     int rc = 0;
     if (!ok) { std::printf("prepare: error %s\n", err.c_str()); rc = 1; }
     else if (pr.already_ready) std::printf("prepare: ready\n");
+    else if (check_only) std::printf("prepare: needed %s\n", pr.needed_why.empty() ? "not prepared yet" : pr.needed_why.c_str());
     else std::printf("prepare: done programs=%llu prepared=%llu missing=%llu failed=%llu parts=%llu fast=%llu seconds=%.1f%s\n", static_cast<unsigned long long>(pr.programs),
                      static_cast<unsigned long long>(pr.prepared), static_cast<unsigned long long>(pr.missing_shaders), static_cast<unsigned long long>(pr.failed),
                      static_cast<unsigned long long>(pr.parts), static_cast<unsigned long long>(pr.fast_parts), pr.seconds, pr.cancelled ? " cancelled" : "");
     std::fflush(stdout);
     if (ok && pr.cancelled) rc = 3;
+    nxrt::shutdown();
+    return rc;
+}
+
+// --translate-shaders: no game, no window, no GPU. The first step of the "Preparing shaders" window: every block of the shader corpus that
+// the shader cache has no row for goes through the on-demand translator ([nvn] shader_cache / shader_corpus / shader_translator).
+// Output: "translate: <done> <total>" lines, then "translate: done missing=N answered=N spirv=N [cancelled]" or "translate: error <text>".
+// Exit code: 0 done, 1 could not run, 3 cancelled.
+int translate_shaders_main() {
+    auto last = std::chrono::steady_clock::now();
+    nxrt::nvn::ShaderTranslateResult tr;
+    const bool ok = nxrt::nvn::translate_missing_shaders([&](uint64_t done, uint64_t total) {
+        if (cancel_requested()) return false;
+        const auto now = std::chrono::steady_clock::now();
+        if (done < total && now - last < std::chrono::milliseconds(250)) return true;
+        last = now;
+        std::printf("translate: %llu %llu\n", static_cast<unsigned long long>(done), static_cast<unsigned long long>(total));
+        std::fflush(stdout);
+        return true;
+    }, &tr);
+    int rc = 0;
+    if (!ok) { std::printf("translate: error %s\n", tr.error.c_str()); rc = 1; }
+    else std::printf("translate: done missing=%llu answered=%llu spirv=%llu%s\n", static_cast<unsigned long long>(tr.missing),
+                     static_cast<unsigned long long>(tr.answered), static_cast<unsigned long long>(tr.with_spirv), tr.cancelled ? " cancelled" : "");
+    std::fflush(stdout);
+    if (ok && tr.cancelled) rc = 3;
     nxrt::shutdown();
     return rc;
 }
@@ -470,6 +506,9 @@ int main(int argc, char** argv) {
     const char* logp = nullptr;
     std::string replay_capture;                            // --replay-capture DIR: show a frame capture in a loop instead of starting the game (runtime/docs/CAPTURE.md)
     bool prepare = false, prepare_if_needed = false;      // --prepare-shaders [--if-needed] [--threads N]: compile the game's shaders ahead and exit (no game start)
+    bool prepare_force = false;                           // --prepare-shaders --force: prepare again although prepare.state says it is done
+    bool prepare_check = false;                           // --prepare-shaders --check: only say "prepare: ready" or "prepare: needed <why>"
+    bool translate = false;                               // --translate-shaders: translate the corpus blocks the shader cache lacks and exit
     int prepare_threads = 0;
     std::string prepare_programs;                         // --programs FILE: another program list (tests)
     std::string instance = std::getenv("NXRT_INSTANCE") ? std::getenv("NXRT_INSTANCE") : "";              // --instance NAME (nxrt/instance.h)
@@ -486,6 +525,10 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--version")) { std::printf(GAME_ID " %s\n", GAME_RELEASE_VERSION); return 0; }
         else if (!std::strcmp(argv[i], "--prepare-shaders")) { prepare = true; _putenv("NXRT_DIAG_WATCHDOG_SECONDS=0"); }
         else if (!std::strcmp(argv[i], "--if-needed")) prepare_if_needed = true;
+        else if (!std::strcmp(argv[i], "--check")) prepare_check = true;
+        else if (!std::strcmp(argv[i], "--force")) prepare_force = true;
+        else if (!std::strcmp(argv[i], "--translate-shaders")) { translate = true; _putenv("NXRT_DIAG_WATCHDOG_SECONDS=0"); }
+        else if (arg("--cancel-event")) g_cancel_event = OpenEventW(SYNCHRONIZE, FALSE, widen_utf8(argv[++i]).c_str());
         else if (arg("--threads")) prepare_threads = std::atoi(argv[++i]);
         else if (arg("--programs")) prepare_programs = argv[++i];
         else if (arg("--instance")) instance = argv[++i];
@@ -579,10 +622,11 @@ int main(int argc, char** argv) {
     NXLOG_I("boot", "built from commit %s%s", *GAME_BUILD_COMMIT ? GAME_BUILD_COMMIT : "(unknown)", GAME_BUILD_DIRTY ? " with uncommitted changes" : "");
     NXLOG_I("boot", GAME_ID " %s (%s PC port)", GAME_RELEASE_VERSION, GAME_TITLE);
     NXLOG_I("boot", "%s %s: exefs '%s'", GAME_TITLE, nxrt::game::info().version, exefs.c_str());
-    if (!prepare) check_memory();             // beside other runs of the game: refuse when the memory would not hold one more
+    if (!prepare && !translate) check_memory();             // beside other runs of the game: refuse when the memory would not hold one more
     nxrt::instance_link_pipeline_cache();     // a named instance: its own pipeline cache file, linked to the shared one (needs [nvn] shader_cache)
 
-    if (prepare) return prepare_shaders_main(prepare_if_needed, prepare_threads, prepare_programs);
+    if (prepare) return prepare_shaders_main(prepare_if_needed, prepare_check, prepare_force, prepare_threads, prepare_programs);
+    if (translate) return translate_shaders_main();
 
     // A frame capture replay puts the captured memory back before every loop: compute results must reach the pools at the end of each
     // submission instead of staying in device-local copies (runtime/docs/CAPTURE.md).

@@ -191,6 +191,41 @@ game-build\build\release\oot.exe --game %CD%\game\oot\updates\131072 --log %CD%\
 ```
 Runtime settings are `[section] key` entries of `runtime\docs\CONFIG.md`, also settable as `NXRT_<SECTION>_<KEY>` variables.
 
+### 7b. Initial Setup (what a player starts)
+
+`oot_setup.exe` (target `game_setup`, source `runtime\apps\setup`, name from `game.toml` `files.setup_exe`) is the player's first
+program: requirements with fix steps, the dump (`.nup` or extracted folder), the preparation steps with progress, cancel and resume, and
+Play. Build it next to `oot.exe`:
+```bat
+cmd /c "runtime\scripts\env.cmd && cmake --build game-build\build\release --target game_setup"
+```
+A development build finds its tools in the checkout (`tools\.venv` Python, `tools\extract\nup_extract.py`, `tools\shaders\scripts`,
+`tools\shaders\build\...\spirv_harness.exe`); a release folder carries them next to it (`tools\python\python.exe` optional,
+`tools\scripts\{nup_extract,extract_generic,bnsh_programs}.py`, `tools\spirv_harness\spirv_harness.exe`). It writes into its data
+folder (default `game_data` next to the exe; `oot_setup.ini` next to the exe remembers it and the dump): `dump\` (the extraction),
+`shader_cache\{corpus,spirv,programs.bin,prepare.state,pipeline_cache.bin}`, `oot.ini` (the `[nvn]` paths), `logs\` and
+`setup_state.ini` (which game build and translator each step ran for). The steps:
+
+| Step | Command | Redone when |
+|---|---|---|
+| Extract | `python -I nup_extract.py <nup> <data>\dump` | another .nup is chosen |
+| Find shaders | `python -I extract_generic.py --romfs --exefs --out <data>\shader_cache\corpus --progress` | main's build id changed (game update) |
+| Translate | `oot.exe --translate-shaders` (step 1 of the "Preparing shaders" window, headless; resumable) | game update (new blocks only), new translator (all again) |
+| List programs | `python -I bnsh_programs.py --romfs --out <data>\shader_cache\programs.bin` | game update |
+| Compile | `oot.exe --prepare-shaders --if-needed` (`--force` from Rebuild) | `oot.exe --prepare-shaders --check` says needed: other GPU, driver or pipeline cache UUID, new translations |
+
+The two `oot.exe` steps get `--cancel-event <name>`: Cancel sets the event, the exe stops at its next progress report and keeps what it
+has (translations stay in the cache, the pipeline cache is saved). The Python steps are ended; `nup_extract.py` keeps finished files.
+Play runs `oot.exe --game <game folder> --ini <data>\oot.ini` (also what the desktop shortcut does).
+
+A small end-to-end test (minutes, not hours) with a synthetic `.nup` (the real ExeFS and four small romfs files):
+```bat
+tools\.venv\Scripts\python -I runtime\apps\setup\tests\make_test_nup.py --game game\oot\updates\131072 --base game\oot\base --out work\setup_test\oot_test.nup
+game-build\build\release\oot_setup.exe --data %CD%\work\setup_test\data --source %CD%\work\setup_test\oot_test.nup --start
+```
+`runtime\apps\setup\tests\winshot.py shot "Initial Setup" <png>` takes a screenshot without the mouse (PrintWindow); `cmd "Initial Setup"
+<id>` posts a menu command (ids: `setup_main.cpp` enum `Id`; pages 1011-1014, Start 1006, Rebuild 1007).
+
 ## 8. AI test tools (optional)
 
 The MCP server `game` (`tools\ai\mcp_server.py`, registered in `.mcp.json`) lets an agent launch the game, script input (including a

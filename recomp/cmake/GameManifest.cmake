@@ -115,6 +115,8 @@ function(game_manifest_header _gm_out)
     _gm_str(GAME_LAUNCHER_INI "${GM_files_launcher_ini}")
     _gm_str(GAME_SHADER_PACK "${GM_files_shader_pack}")
     _gm_str(GAME_SAVE_FOLDER "${GM_files_save_folder}")
+    _gm_str(GAME_DUMP_VERSION "${GM_dump_version}")              # the dump the release is made for (the setup tool shows it)
+    _gm_str(GAME_MAIN_BUILD_ID "${GM_dump_main_build_id}")       # build id of that dump's main (hex): the setup tool compares the player's
     string(APPEND _h "#define GAME_ENV(name) GAME_ID_UPPER \"_\" name\n")
     string(APPEND _h "#define GAME_HEADER \"${GM_ID}/${GM_ID}_game.h\"\n")
     string(APPEND _h "#define GAME_REGISTER nxrt_register_game_${GM_ID}\n")

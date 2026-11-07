@@ -1191,10 +1191,11 @@ std::string prepare_key(uint64_t programs) {
 
 // Finished on this GPU and driver with the current raster flags, its pipeline cache file still there, and no program has become preparable
 // since (usable_now: usable_programs of the list).
-bool prepare_state_ready(const std::string& path, const std::string& key, uint64_t usable_now) {
+bool prepare_state_ready(const std::string& path, const std::string& key, uint64_t usable_now, std::string* why_out = nullptr) {
     std::string why;
     if (!prepare_state_complete(path, &why)) {
         NXLOG_I(kTag, "shader preparation needed: %s (%s)", why.c_str(), path.c_str());
+        if (why_out) *why_out = why;
         return false;
     }
     std::ifstream f(path);
@@ -1208,6 +1209,8 @@ bool prepare_state_ready(const std::string& path, const std::string& key, uint64
         if (l.rfind("prepared: ", 0) == 0 || l.rfind("failed: ", 0) == 0) covered += std::strtoull(l.c_str() + l.find(' ') + 1, nullptr, 10);
     }
     if (!key_ok) NXLOG_I(kTag, "shader preparation needed: made for another GPU, driver or program list (%s)", path.c_str());
+    if (why_out) *why_out = !key_ok ? "made for another GPU, driver or program list"
+                          : usable_now > covered ? std::to_string(usable_now - covered) + " programs became preparable since (new shader translations)" : "";
     return key_ok && usable_now <= covered;
 }
 
@@ -1235,14 +1238,52 @@ bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
     r.programs = progs.size();
     const std::string state_path = (std::filesystem::path(file).parent_path() / "prepare.state").string();
     const std::string key = prepare_key(r.programs);
+    if (o.check_only) {
+        r.already_ready = prepare_state_ready(state_path, key, usable_programs(progs), &r.needed_why);
+        return true;
+    }
     if (o.only_if_needed && !o.force && prepare_state_ready(state_path, key, usable_programs(progs))) {
         r.already_ready = true;
         return true;
     }
-    // fragment shader first: programs that share one are made together, so the part of a shared fragment shader is made once per batch
-    std::sort(progs.begin(), progs.end(), [](const ProgHashes& a, const ProgHashes& b) {
-        return a.fs != b.fs ? a.fs < b.fs : a.vs != b.vs ? a.vs < b.vs : a.gs < b.gs;
+    // Order: the expensive programs first, then the rest grouped by fragment shader. Without a barrier between batches a part that takes the
+    // driver a minute only holds up the end when it starts late, so the programs whose shaders use the global-memory fallback (the "gmem"
+    // token: 13-70 s per pipeline seen) or are large start at once, largest first. The rest stay grouped (fragment shader, then vertex
+    // shader), so a shader's last program comes soon after its first and its module and SPIR-V are released early.
+    struct Cost { uint64_t bytes = 0; bool gmem = false; };
+    std::unordered_map<uint64_t, Cost> costs;
+    auto cost_of = [&](uint64_t h) -> const Cost& {
+        auto it = costs.find(h);
+        if (it != costs.end()) return it->second;
+        Cost c;
+        if (h) shader_cache().record_cost(hex16(h), &c.bytes, &c.gmem);
+        return costs.emplace(h, c).first->second;
+    };
+    const uint64_t heavy_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "prepare_heavy_kb", 256))) * 1024;
+    struct Item { ProgHashes p; uint64_t weight; bool heavy; };
+    std::vector<Item> items;
+    items.reserve(progs.size());
+    for (const ProgHashes& ph : progs) {
+        const Cost &v = cost_of(ph.vs), &f = cost_of(ph.fs), &g = cost_of(ph.gs);
+        const bool gmem = v.gmem || f.gmem || g.gmem;
+        const uint64_t bytes = v.bytes + f.bytes + g.bytes;
+        items.push_back({ph, bytes * (gmem ? 8 : 1), gmem || (heavy_bytes && bytes >= heavy_bytes)});
+    }
+    std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+        if (a.heavy != b.heavy) return a.heavy;
+        if (a.heavy && a.weight != b.weight) return a.weight > b.weight;
+        return a.p.fs != b.p.fs ? a.p.fs < b.p.fs : a.p.vs != b.p.vs ? a.p.vs < b.p.vs : a.p.gs < b.p.gs;
     });
+    size_t heavy = 0;
+    for (const Item& it : items) heavy += it.heavy;
+    // Sliding window instead of batches: every shader counts the programs of the list that still need it; the last one to finish releases
+    // its shader modules (module_cache_release) and SPIR-V words, while the other threads go on.
+    struct Use { uint32_t left = 0; const ShaderInfo* si = nullptr; };
+    std::unordered_map<uint64_t, Use> uses;
+    for (const Item& it : items)
+        for (uint64_t h : {it.p.vs, it.p.fs, it.p.gs})
+            if (h) ++uses[h].left;
+    std::mutex uses_mu;
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     const int threads = o.threads > 0 ? o.threads : static_cast<int>(hw > 3 ? hw - 2 : 1);
     {
@@ -1253,10 +1294,12 @@ bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
     g_prep_fast.store(0);
     g_prepare_cache.store(config_get_bool("nvn", "prepare_cache", true));
     g_discard.store(true);
+    NXLOG_I(kTag, "shader preparation: %zu programs (%zu expensive first), %d threads", items.size(), heavy, threads);
     const auto t0 = Clock::now();
-    constexpr size_t kBatch = 192;                       // programs per batch; the shader modules and SPIR-V of a batch are released after it
-    std::atomic<uint64_t> done{0}, prepared{0}, missing{0}, failed{0}, parts{0};
+    std::atomic<uint64_t> done{0}, prepared{0}, missing{0}, failed{0}, parts{0}, released{0};
     std::atomic<bool> cancel{false};
+    std::atomic<size_t> next{0};
+    std::atomic<int> busy_max{0}, busy_now{0};
     std::mutex progress_mu;
     auto report = [&] {
         if (!o.progress) return;
@@ -1264,66 +1307,91 @@ bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
         if (!lk.owns_lock()) return;
         if (!o.progress(done.load(), r.programs)) cancel.store(true);
     };
-    for (size_t base = 0; base < progs.size() && !cancel.load(); base += kBatch) {
-        const size_t end = std::min(progs.size(), base + kBatch);
-        std::atomic<size_t> next{base};
-        std::vector<const ShaderInfo*> used;
-        std::mutex used_mu;
-        auto work = [&] {
-            set_compile_thread_priority(false);
-            std::vector<const ShaderInfo*> mine;
-            for (;;) {
-                if (cancel.load()) break;
-                const size_t i = next.fetch_add(1);
-                if (i >= end) break;
-                const ProgHashes& ph = progs[i];
-                const ShaderInfo* vs = shader_cache().load_stub(hex16(ph.vs));
-                const ShaderInfo* fs = shader_cache().load_stub(hex16(ph.fs));
-                const ShaderInfo* gs = ph.gs ? shader_cache().load_stub(hex16(ph.gs)) : nullptr;
-                if (!vs || !fs || (ph.gs && !gs)) {
-                    missing.fetch_add(1);
-                } else {
-                    mine.push_back(vs); mine.push_back(fs);
-                    if (gs) mine.push_back(gs);
-                    const ShaderInfo* st6[kProgStages] = {vs, fs, gs, nullptr, nullptr, nullptr};
-                    const ProgLayout* pl = prog_layout(st6);
-                    GraphicsKey k;
-                    k.stage[0] = vs; k.stage[1] = fs; k.stage[2] = gs;
-                    predict_int_attributes(k);
-                    StageModules sm;
-                    bool ok = pl && resolve_stage_modules(k, &sm) && sm.m[0] && sm.m[1];
-                    if (ok) {
-                        const auto tp = Clock::now();
-                        std::vector<RasterKey> rs;
-                        { std::lock_guard<std::mutex> lk(g_mu); rs = g_rasters; }
-                        for (const RasterKey& rk : rs) {
-                            get_part(pre_key(sm, *pl, rk), false, [&] { return build_pre(sm.m[0], sm.m[2], *pl, rk); });
-                            parts.fetch_add(1);
-                        }
-                        get_part(fs_key(sm, *pl), false, [&] { return build_fs(sm.m[1], *pl); });
-                        parts.fetch_add(1);
-                        (void)tp;
-                    }
-                    if (ok) prepared.fetch_add(1); else failed.fetch_add(1);
-                }
-                done.fetch_add(1);
-                report();
+    auto load = [&](uint64_t h) -> const ShaderInfo* {
+        const ShaderInfo* si = shader_cache().load_stub(hex16(h));
+        if (si) {
+            std::lock_guard<std::mutex> lk(uses_mu);
+            uses[h].si = si;
+        }
+        return si;
+    };
+    // A program is over (built, failed or skipped): its shaders need one program less; the last one releases them.
+    auto finished = [&](const ProgHashes& ph) {
+        const ShaderInfo* drop[3] = {};
+        int n = 0;
+        {
+            std::lock_guard<std::mutex> lk(uses_mu);
+            for (uint64_t h : {ph.vs, ph.fs, ph.gs}) {
+                if (!h) continue;
+                Use& u = uses[h];
+                if (u.left && --u.left == 0 && u.si) drop[n++] = u.si;
             }
-            std::lock_guard<std::mutex> lk(used_mu);
-            used.insert(used.end(), mine.begin(), mine.end());
-        };
+        }
+        for (int i = 0; i < n; ++i) {
+            module_cache_release(drop[i]);
+            shader_cache().release_stub_spirv(drop[i]);
+            released.fetch_add(1);
+        }
+    };
+    auto work = [&] {
+        set_compile_thread_priority(false);
+        for (;;) {
+            if (cancel.load()) break;
+            const size_t i = next.fetch_add(1);
+            if (i >= items.size()) break;
+            const ProgHashes& ph = items[i].p;
+            const int b = busy_now.fetch_add(1) + 1;
+            for (int m = busy_max.load(); b > m && !busy_max.compare_exchange_weak(m, b);) {}
+            const ShaderInfo* vs = load(ph.vs);
+            const ShaderInfo* fs = load(ph.fs);
+            const ShaderInfo* gs = ph.gs ? load(ph.gs) : nullptr;
+            if (!vs || !fs || (ph.gs && !gs)) {
+                missing.fetch_add(1);
+            } else {
+                const ShaderInfo* st6[kProgStages] = {vs, fs, gs, nullptr, nullptr, nullptr};
+                const ProgLayout* pl = prog_layout(st6);
+                GraphicsKey k;
+                k.stage[0] = vs; k.stage[1] = fs; k.stage[2] = gs;
+                predict_int_attributes(k);
+                StageModules sm;
+                const bool ok = pl && resolve_stage_modules(k, &sm) && sm.m[0] && sm.m[1];
+                if (ok) {
+                    std::vector<RasterKey> rs;
+                    { std::lock_guard<std::mutex> lk(g_mu); rs = g_rasters; }
+                    for (const RasterKey& rk : rs) {
+                        get_part(pre_key(sm, *pl, rk), false, [&] { return build_pre(sm.m[0], sm.m[2], *pl, rk); });
+                        parts.fetch_add(1);
+                    }
+                    get_part(fs_key(sm, *pl), false, [&] { return build_fs(sm.m[1], *pl); });
+                    parts.fetch_add(1);
+                }
+                if (ok) prepared.fetch_add(1); else failed.fetch_add(1);
+            }
+            busy_now.fetch_sub(1);
+            finished(ph);
+            done.fetch_add(1);
+            report();
+        }
+    };
+    {
         std::vector<std::thread> pool;
         for (int t = 1; t < threads; ++t) pool.emplace_back(work);
         work();
         for (auto& t : pool) t.join();
-        // between batches nothing is creating pipelines: drop the batch's modules, parts and SPIR-V
-        module_cache_clear();
-        {
-            std::lock_guard<std::mutex> lk(g_mu);
-            g_libs.clear();
-        }
-        for (const ShaderInfo* si : used) shader_cache().release_stub_spirv(si);
     }
+    // Nothing is creating pipelines now: drop what is left (a stopped run's shaders, parts of programs whose modules failed).
+    module_cache_clear();
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        g_libs.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(uses_mu);
+        for (auto& [h, u] : uses)
+            if (u.si) shader_cache().release_stub_spirv(u.si);
+    }
+    NXLOG_I(kTag, "shader preparation: %llu shaders released as their last program finished, %d threads busy at most",
+            static_cast<unsigned long long>(released.load()), busy_max.load());
     g_discard.store(false);
     // Kept also when stopped: a resumed preparation then finds what this one compiled in the cache.
     uint64_t cache_bytes = 0;
