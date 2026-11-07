@@ -1138,7 +1138,7 @@ int storage_c0_base(int nvn_stage) {   // c[0] byte offset of a graphics stage's
         case kGeometry: return 0x410;
         case kFragment: return 0x510;
         case kTask: return 0x650;
-        case kMesh: return 0x750;
+        case kMesh: return 0x770;
         default: return 0x310;
     }
 }
@@ -1155,10 +1155,12 @@ int storage_slot_for(int nvn_stage, int c0_offset) {
         case kGeometry: base = 0x410; break;
         case kFragment: base = 0x510; break;
         case kCompute: base = 0x310; break;
-        // task / mesh: four slots past the 0x110 + 0x100 * i pattern (measured in OoT's first scene: the task shader dereferences a pointer
-        // from c[0] 0x670, and the game's task slot 2 is the only bound buffer of pointers; 0x680 / 0x770 / 0x780 fit slots 3 / 2 / 3 alike)
+        // task 0x650 (four slots past the 0x110 + 0x100 * i pattern), mesh 0x770 (six past). Measured in OoT's first scene (A15): the task
+        // shader dereferences a pointer from c[0] 0x670, and the game's task slot 2 is the only bound buffer of pointers. The same mesh
+        // program family reads its GPU-written record buffer (count at word 3) at 0x770 where the game binds it at mesh slot 0 (depth
+        // prepass, mesh a24d8406) and at 0x790 where it binds it at slot 2 (colour pass, b8b873e5); every other slot fits the same way.
         case kTask: base = 0x650; break;
-        case kMesh: base = 0x750; break;
+        case kMesh: base = 0x770; break;
         default: return 0;
     }
     if (c0_offset < base) return 0;
@@ -1702,7 +1704,7 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_tabl
 }
 // c[0] of a graphics draw whose shader resolves global memory at run time (ShaderReflection::global_fallback, A17): the static driver constants
 // (driver_constants_buffer: the agl point size at 0x610) with the storage descriptors {address, size} of every graphics stage's bound slots,
-// where the NVN driver keeps them (0x110 + 0x100 * hardware stage + 0x10 * slot; task 0x650, mesh 0x750; storage_slot_for). 4 KiB per descriptor
+// where the NVN driver keeps them (0x110 + 0x100 * hardware stage + 0x10 * slot; task 0x650, mesh 0x770; storage_slot_for). 4 KiB per descriptor
 // set built for such a shader; other draws keep the shared static buffer.
 constexpr VkDeviceSize kGraphicsC0Bytes = 0x1000;
 bool graphics_c0(VkDescriptorBufferInfo& bi, bool old_table) {
@@ -2267,7 +2269,12 @@ void set_dynamic_state(uint32_t dirty, VkPrimitiveTopology topo, bool indexed, i
     if (dirty & kDynDepth) {
         vkCmdSetDepthTestEnable(cb, have_depth && S.ds.depth_test);
         vkCmdSetDepthWriteEnable(cb, have_depth && !P.depth_ro && S.ds.depth_test && S.ds.depth_write);
-        vkCmdSetDepthCompareOp(cb, vk_compare_op(S.ds.depth_func ? S.ds.depth_func : NVN_DEPTH_FUNC_LESS));
+        int func = S.ds.depth_func ? S.ds.depth_func : NVN_DEPTH_FUNC_LESS;
+        // [nvn] debug_equal_as = 4 (LEQUAL) / 8 (ALWAYS): diagnostic, draws that test EQUAL against a depth prepass use this NVN function
+        // instead, which shows colour-pass geometry the prepass does not match (A15: broken vertices, black hulls)
+        static const int equal_as = static_cast<int>(nxrt::config_get_int("nvn", "debug_equal_as", 0));
+        if (equal_as && func == NVN_DEPTH_FUNC_EQUAL) func = equal_as;
+        vkCmdSetDepthCompareOp(cb, vk_compare_op(func));
         vkCmdSetDepthBoundsTestEnable(cb, have_depth && S.depth_bounds && device().features().depth_bounds);
         if (S.depth_bounds && device().features().depth_bounds) vkCmdSetDepthBounds(cb, S.db_near, S.db_far);
     }

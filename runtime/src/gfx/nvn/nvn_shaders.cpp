@@ -334,12 +334,12 @@ void set_c0_offset(NvnMeaning& m, ShaderStage stage, int byte_offset) {
         return;
     }
     // tessellation control 1 and evaluation 2: Ryujinx's hardware stage order (inferred; no game shader checked)
-    // task and mesh: 0x650 / 0x750, four slots past the pattern (measured; storage_slot_for in nvn_replay.cpp has the evidence)
+    // task and mesh: 0x650 / 0x770, four and six slots past the pattern (measured; storage_slot_for in nvn_replay.cpp has the evidence)
     int graphics_index = stage == ShaderStage::Vertex ? 0 : stage == ShaderStage::TessControl ? 1 : stage == ShaderStage::TessEval ? 2
                          : stage == ShaderStage::Geometry ? 3 : stage == ShaderStage::Fragment ? 4 : stage == ShaderStage::Task ? 5
                          : stage == ShaderStage::Mesh ? 6 : -1;
     if (graphics_index < 0) return;
-    int base = 0x110 + 0x100 * graphics_index + (graphics_index >= 5 ? 0x40 : 0);
+    int base = 0x110 + 0x100 * graphics_index + (graphics_index == 5 ? 0x40 : graphics_index == 6 ? 0x60 : 0);
     if (in(base, 16)) m.source = NvnSource::StorageBuffer, m.index = ((byte_offset - base) / 0x10) ^ graphics_ssbo_slot_xor();
 }
 

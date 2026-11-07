@@ -1636,7 +1636,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 Dst(ctx, o[0], ExtractSmallInt(ctx, small, GetBitOffset(ctx, addr), v));
                 return;
             }
-            for (int w = 0; w < words; w++) DstWord(ctx, o[0], w, LoadCbuf(ctx, c, w));
+            // Every word is loaded before the first is written: the destination pair may overlap the index register
+            // ("LDC.64 R58, c[0x6][R58+0x28]", OoT's skinning vertex shaders), and the second load must use the old index.
+            IrOperand[] vals = new IrOperand[words];
+            for (int w = 0; w < words; w++) vals[w] = LoadCbuf(ctx, c, w);
+            for (int w = 0; w < words; w++) DstWord(ctx, o[0], w, vals[w]);
         }
 
         /// Byte address of a [Ra(.X4|.X8|.X16) + URb + imm] operand (shared/local memory).

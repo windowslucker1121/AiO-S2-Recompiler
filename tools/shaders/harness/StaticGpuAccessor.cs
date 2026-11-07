@@ -116,7 +116,7 @@ namespace SpirvHarness
 
         /// The c[0] word offsets of every storage descriptor an NVN2 block's stage can have bound: the candidates of the global memory fallback
         /// (tools/shaders/ampere/frontend/AmpereGlobal.cs). Graphics: 16 slots at 0x110 + 0x100 * hardware stage (vertex 0, tessellation control 1,
-        /// evaluation 2, geometry 3, fragment 4), task 0x650 and mesh 0x750 (measured, nvn_replay.cpp storage_slot_for); compute: the storage entries
+        /// evaluation 2, geometry 3, fragment 4), task 0x650 and mesh 0x770 (measured, nvn_replay.cpp storage_slot_for); compute: the storage entries
         /// of the program's c[0] table (header, push area, uniform block entries, then storage entries; as apply_nvn2_compute_table). Null: none.
         public static int[] GlobalFallbackWords(byte[] ctrl)
         {
@@ -131,7 +131,7 @@ namespace SpirvHarness
                 case 3: baseByte = 0x210; break;
                 case 4: baseByte = 0x310; break;
                 case 6: baseByte = 0x650; break;
-                case 7: baseByte = 0x750; break;
+                case 7: baseByte = 0x770; break;
                 case 5:
                     {
                         int ubos = ctrl[0xb1], ssbos = ctrl[0xb2], textures = ctrl[0xb3], images = ctrl[0xb6];
