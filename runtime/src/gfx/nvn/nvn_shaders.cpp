@@ -1047,6 +1047,7 @@ bool ShaderCache::open(const std::string& dir) {
                 size_t tab = line.find('\t', start);
                 const std::string_view name = line.substr(start, tab == std::string_view::npos ? std::string_view::npos : tab - start);
                 if (name == "status") status_col = col;
+                if (name == "spv_bytes") spv_col_ = col;
                 if (name == "resources") {
                     resources_col = col;
                     break;
@@ -1506,6 +1507,20 @@ bool ShaderCache::is_open() const {
 bool ShaderCache::has_record(const std::string& hash) const {
     std::lock_guard lk(lock_);
     return lines_.count(hash) != 0;
+}
+
+bool ShaderCache::record_cost(const std::string& hash, uint64_t* spv_bytes, bool* gmem) const {
+    *spv_bytes = 0;
+    *gmem = false;
+    std::lock_guard lk(lock_);
+    const auto it = lines_.find(hash);
+    if (it == lines_.end()) return false;
+    const std::string_view line(results_.data() + it->second.first, it->second.second);
+    if (spv_col_ >= 0) *spv_bytes = std::strtoull(column_text(line, spv_col_).c_str(), nullptr, 10);
+    const std::string res = column_text(line, resources_col_);
+    for (size_t p = res.find("gmem"); p != std::string::npos; p = res.find("gmem", p + 1))
+        if ((p == 0 || res[p - 1] == ' ') && (p + 4 == res.size() || res[p + 4] == ' ')) *gmem = true;   // a token of its own
+    return true;
 }
 
 bool ShaderCache::usable(const std::string& hash) const {

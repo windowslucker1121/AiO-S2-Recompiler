@@ -1038,6 +1038,39 @@ void module_cache_clear() {
     g_module_ids.clear();
 }
 
+// The modules of one shader: its own, its variants as a producer (keyed by the producer only) and its fragment variants. The shader
+// preparation calls it once the last program using the shader is built, while other threads go on creating pipelines from other shaders.
+void module_cache_release(const ShaderInfo* s) {
+    VkDevice d = vkdev();
+    std::vector<VkShaderModule> gone;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g_module_mu);
+        if (auto it = g_modules.find(s); it != g_modules.end()) {
+            if (it->second) gone.push_back(it->second);
+            g_modules.erase(it);
+        }
+        for (auto it = g_variants.lower_bound({s, {}}); it != g_variants.end() && it->first.first == s;) {
+            if (it->second && std::find(gone.begin(), gone.end(), it->second) == gone.end()) gone.push_back(it->second);
+            it = g_variants.erase(it);
+        }
+        if (auto it = g_dual_src.find(s); it != g_dual_src.end()) {
+            if (it->second && std::find(gone.begin(), gone.end(), it->second) == gone.end()) gone.push_back(it->second);
+            g_dual_src.erase(it);
+        }
+        if (auto it = g_no_out.find(s); it != g_no_out.end()) {
+            if (it->second.first && it->second.second) gone.push_back(it->second.first);   // not owned: it is the g_modules entry
+            g_no_out.erase(it);
+        }
+        if (auto it = g_xfb_mod.find(s); it != g_xfb_mod.end()) {
+            if (it->second.first) gone.push_back(it->second.first);
+            g_xfb_mod.erase(it);
+        }
+        for (VkShaderModule m : gone) vkDestroyShaderModule(d, m, nullptr);
+    }
+    std::lock_guard<std::mutex> lk2(g_module_id_mu);
+    for (VkShaderModule m : gone) g_module_ids.erase(m);
+}
+
 uint64_t module_content_id(VkShaderModule m) {
     std::lock_guard<std::mutex> lk(g_module_id_mu);
     auto it = g_module_ids.find(m);

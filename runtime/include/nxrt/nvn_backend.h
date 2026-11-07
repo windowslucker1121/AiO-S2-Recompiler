@@ -53,6 +53,7 @@ struct ShaderPrepareOptions {
     std::string programs_file;                                    // empty: programs.bin next to the shader cache folder
     bool only_if_needed = false;                                  // do nothing when the state file says this GPU and driver were prepared already
     bool force = false;                                           // ignore the state file
+    bool check_only = false;                                      // only say whether a preparation is needed (already_ready, needed_why)
     int threads = 0;                                              // 0: all hardware threads but two
     std::function<bool(uint64_t done, uint64_t total)> progress;  // called often; returning false cancels
 };
@@ -66,6 +67,7 @@ struct ShaderPrepareResult {
     double seconds = 0;
     bool cancelled = false;
     bool already_ready = false;     // only_if_needed and nothing to do
+    std::string needed_why;         // not ready: why a preparation is needed (another GPU or driver, new shaders, never finished, ...)
     std::string error;              // why nothing could be done
 };
 bool prepare_shaders(const ShaderPrepareOptions& o, ShaderPrepareResult* r);
@@ -77,6 +79,17 @@ bool prepare_shaders(const ShaderPrepareOptions& o, ShaderPrepareResult* r);
 // false when it failed. Returns false only when the player closed the window: the game must not start. [nvn] setup_on_start = false skips it.
 using ShaderSetupPrepare = std::function<bool(const std::function<bool(uint64_t done, uint64_t total)>& progress)>;
 bool shader_setup_before_start(const char* title, const ShaderSetupPrepare& prepare);
+// The setup's first step without its window (<game> --translate-shaders, the Initial Setup app): every corpus block the shader cache has no
+// record of goes through the on-demand translator. progress returns false to stop (the blocks answered so far stay in the cache: the
+// next run translates only the rest). False with r->error when it cannot run (no cache, translator or corpus) or the translator died.
+struct ShaderTranslateResult {
+    uint64_t missing = 0;      // corpus blocks without a record when it started
+    uint64_t answered = 0;     // of those, answered by the translator (with or without SPIR-V)
+    uint64_t with_spirv = 0;   // answers with a usable translation
+    bool cancelled = false;
+    std::string error;
+};
+bool translate_missing_shaders(const std::function<bool(uint64_t done, uint64_t total)>& progress, ShaderTranslateResult* r);
 
 struct BackendStats {
     uint64_t submits = 0, lists_replayed = 0, draws = 0, draws_skipped = 0, dispatches = 0, clears = 0, copies = 0, presents = 0;

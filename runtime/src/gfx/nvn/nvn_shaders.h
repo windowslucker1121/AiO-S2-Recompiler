@@ -334,6 +334,9 @@ public:
     const std::string& corpus_dir() const { return corpus_; }
     bool has_record(const std::string& hash) const;
     bool usable(const std::string& hash) const;   // a record whose status is ok (or ok-retry)
+    // What a block costs the driver, from its results.tsv row: the SPIR-V size (spv_bytes column) and the "gmem" resource token (the
+    // global-memory fallback, whose pipelines take the driver far longer). False when there is no row.
+    bool record_cost(const std::string& hash, uint64_t* spv_bytes, bool* gmem) const;
     bool translate_corpus_block(const std::string& hash) { return worker_ && worker_->submit_corpus(hash); }
     size_t loaded() const;   // ShaderInfos built so far
     size_t missing() const;  // hashes asked for that have no usable .spv (or do not reflect)
@@ -386,6 +389,7 @@ private:
     std::string results_;                                                   // results.tsv, read once
     int resources_col_ = -1;                                                // column index of "resources"
     int status_col_ = -1;                                                   // column index of "status"
+    int spv_col_ = -1;                                                      // column index of "spv_bytes" (-1: none)
     std::unordered_map<std::string, std::pair<size_t, size_t>> lines_;     // hash -> (offset, length) in results_
     std::unordered_map<std::string, std::unique_ptr<ShaderInfo>> by_hash_; // null: no usable .spv (logged once)
     std::unordered_set<uintptr_t> bad_controls_;                           // malformed control pointers (logged once)

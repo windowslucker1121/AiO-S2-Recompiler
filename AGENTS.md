@@ -27,7 +27,7 @@ Runtime side: `runtime/games/oot` exists as a bring-up module (identity from the
 core 0, stack 0x100000, system resource 0x3000000; firmware 22.0.0 as a lower bound since ZBIC needs it; uid "OOTRecmp"; no hooks,
 probes or play mode). The runtime copes without play hooks (`play.cpp`: `if (gp && gp->frame_update)`).
 Placeholders (no control.nacp in the dump): languages 0x1ffff, display version "2.0.0", save sizes and temporary storage 64 MiB.
-Not started: hook sites, shader cache, NUP support in the launcher.
+Not started: hook sites, shader cache. A `.nup` goes through the Initial Setup (`oot_setup.exe`, below).
 
 Shader toolchain: `refs/ryubing` is a git submodule (Ryubing's Ryujinx, `https://git.ryujinx.app/ryubing/ryujinx.git`, pinned to
 `a82350bb774f70fcbd41c9987bf67a3775409963`, the revision `tools/shaders` names; MIT). After `git submodule update --init`:
@@ -94,6 +94,38 @@ parts, cache not loaded), overlay ~12,300 left; after 0.73 ms per prepared part 
 preparation made (x ms each), M new (y ms each); the overlay shows K left` tracks it. With the driver's disk cache warm the preparation
 took 25 min for 117,981 parts (both raster sets); a forced second one loads the file, rebuilds everything in 58 s and saves the same
 2,305,488,425 bytes. Test folder: `work\shaders\pcfix` (deleted after the merge; runs `work\run\pcfix_*`).
+
+**Initial Setup (`oot_setup.exe`, since 2026-11-07; `runtime/apps/setup`, target `game_setup`, name from `game.toml` `files.setup_exe`)**:
+the player's first program, native Win32 (menu bar, four pages: Requirements, Game files, Prepare, Play; task dialog for Rebuild).
+Game independent: names from `game_manifest.h` (`GAME_DUMP_VERSION`, `GAME_MAIN_BUILD_ID` were added to `GameManifest.cmake`); it links
+nothing of the runtime. Requirements it checks (and gives fix steps / winget commands for, never installs): Windows 10 1809+, a Vulkan 1.3
+GPU (its own vulkan-1.dll query: dynamic rendering, synchronization2, swapchain; warns without VK_EXT_graphics_pipeline_library or
+VK_EXT_mesh_shader), RAM, disk space, every DLL `oot.exe` and the DLLs next to it import (PE import table: no VC++ redistributable is needed,
+the exe is /MT), .NET for the translator (from `spirv_harness.runtimeconfig.json`: the dev build is framework-dependent net10.0, a
+self-contained publish needs none), Python with `zstandard` + `lz4` (extraction and shader scan), the dump (main's build id against the
+manifest). Steps (child processes, below-normal priority, each in a job object so Cancel ends the whole tree): `nup_extract.py`,
+`extract_generic.py --exefs` (main is ZBIC: the scan skips it, the on-demand translator covers main's few blocks), `oot.exe
+--translate-shaders` (new: step 1 of the "Preparing shaders" window without the window, `translate_missing_shaders` in nvn_setup.cpp),
+`bnsh_programs.py`, `oot.exe --prepare-shaders --if-needed`. New exe flags: `--cancel-event NAME` (graceful stop: translations stay,
+pipeline cache saved, exit 3), `--prepare-shaders --check` (`prepare: ready` / `prepare: needed <why>`: GPU, driver, pipeline cache UUID,
+new translations), `--prepare-shaders --force`. Redo detection: `<data>\setup_state.ini` records the game (main build id + version folder)
+each step ran for and a stamp of the translator folder (names, sizes, times of its exe/DLLs); a change re-runs that step and the ones after
+it (a new translator moves the old `spirv` aside first). Data folder layout and the test route: DEVELOPMENT_SETUP.md section 7b.
+Checked on the RTX 4080 with a 77 MB test `.nup` (`runtime/apps/setup/tests/make_test_nup.py`: real ExeFS + 4 small romfs files): all
+steps in about 2 minutes (224 blocks, 181 programs, 100 s of it the compile while the main checkout's full preparation ran beside it),
+every page screenshotted (`tests/winshot.py`), driver change detected (edited `prepare.state` key), Rebuild "compile again" (0.4 s from the
+pipeline cache), Cancel in the shader scan of the full game (no process left), Play started the exe (refused by the memory guard beside
+another run: the setup now explains an exit within 4 s instead of closing). Not checked: a real Play into the game from the setup, a full
+`.nup` extraction, NSP/XCI (not supported: `tools/setup` is not in this repository).
+
+**Shader preparation without batches (2026-11-07, `gpl_prepare` in nvn_gpl.cpp)**: the 192-program batches with a barrier are gone. One
+work list, every thread takes the next program; each shader counts the programs of the list that still need it and the last one releases
+its modules (`module_cache_release`, nvn_pipeline.cpp) and SPIR-V words. The expensive programs go first: a stage with the `gmem` token
+(`ShaderCache::record_cost`, from results.tsv) or at least `[nvn] prepare_heavy_kb` (256) KB of SPIR-V, largest (gmem x8) first; the
+rest grouped by fragment shader. Part keys stay in `g_libs` for the whole run, so a part shared across the old batch borders is built once.
+Independent of how the global-memory search is compiled (only the token and the size are read). Test set route:
+`tools/shaders/scripts/programs_subset.py` (a random sample of programs.bin with its .spv files in a folder of its own) and a fresh
+`NXRT_NVN_SPIRV_SALT` per run, so the driver's disk cache cannot answer.
 
 Hardware of this machine (since 2026-11-06, the second development machine): AMD Ryzen 7 5800X3D (8 cores, 16 threads), **NVIDIA
 GeForce RTX 4080** (discrete, 15.7 GiB, Vulkan 1.4.341, driver 610.88), 32 GB RAM, Windows 11 Pro 26200. Everything above that names
@@ -172,7 +204,7 @@ Open points besides the milestones:
 - **auddmg** session answers only ListVirtualDeviceNames; microphone capture (the remake's voice/ocarina features) later.
 - **nn::vi queries** (QueryDisplayHdrStatus/VrrSupported/HdrPaperWhite/CurrentRefreshRate) return the SDK's 0x272 for the stand-in display.
 - **Movies** need libvpx (vcpkg `libvpx:x64-windows-static`, `NXRT_LIBVPX_ROOT`); not installed.
-- **Launcher** accepts NSP/XCI/folder only; `.nup` would go through `nup_extract.py`.
+- **Launcher** (`runtime/apps/launcher`, mpr's, not built for OoT) accepts NSP/XCI/folder only; the Initial Setup (`oot_setup.exe`) takes `.nup` (through `nup_extract.py`) or an extracted folder. NSP/XCI need `tools/setup` (not in this repository).
 - **Pokopia regression risk** (no Pokopia dump here): shared changes in funcs.py (header/MOD0, ADR starts, RETAA/RETAB, zero FDEs), a64.py
   (PAC decode), tier2 FP16, used-memory accounting, NVN minor 40, TLS +0x110, MapMemory Alias sources, WaitIfEqual64, bsd descriptors.
   Oracles, from `recomp\`: `..\tools\.venv\Scripts\python oracle/difftest/difftest.py all`, `oracle/e2e/run_e2e.py`,

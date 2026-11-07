@@ -204,6 +204,7 @@ using PrepareOptions = nxrt::nvn::ShaderPrepareOptions;
 using PrepareResult = nxrt::nvn::ShaderPrepareResult;
 bool gpl_prepare(const PrepareOptions& o, PrepareResult* r);       // false: nothing could be done (see r->error)
 void module_cache_clear();                                          // destroys every cached shader module and variant (nothing may be creating pipelines)
+void module_cache_release(const ShaderInfo* s);                       // destroys one shader's modules and variants (no pipeline being made from them)
 
 void pipeline_shutdown();
 size_t pipeline_count();
