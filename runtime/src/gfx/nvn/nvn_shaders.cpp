@@ -312,6 +312,7 @@ int stage_slot(ShaderStage s) {
     case ShaderStage::Geometry: return 2;
     case ShaderStage::TessControl: return 3;
     case ShaderStage::TessEval: return 4;
+    case ShaderStage::Mesh: return 4;    // the harness binds task programs in slot 0 and mesh programs in slot 4 (AmpereMesh.cs)
     default: return 0;
     }
 }
@@ -333,10 +334,12 @@ void set_c0_offset(NvnMeaning& m, ShaderStage stage, int byte_offset) {
         return;
     }
     // tessellation control 1 and evaluation 2: Ryujinx's hardware stage order (inferred; no game shader checked)
+    // task and mesh: 0x650 / 0x750, four slots past the pattern (measured; storage_slot_for in nvn_replay.cpp has the evidence)
     int graphics_index = stage == ShaderStage::Vertex ? 0 : stage == ShaderStage::TessControl ? 1 : stage == ShaderStage::TessEval ? 2
-                         : stage == ShaderStage::Geometry ? 3 : stage == ShaderStage::Fragment ? 4 : -1;
+                         : stage == ShaderStage::Geometry ? 3 : stage == ShaderStage::Fragment ? 4 : stage == ShaderStage::Task ? 5
+                         : stage == ShaderStage::Mesh ? 6 : -1;
     if (graphics_index < 0) return;
-    int base = 0x110 + 0x100 * graphics_index;
+    int base = 0x110 + 0x100 * graphics_index + (graphics_index >= 5 ? 0x40 : 0);
     if (in(base, 16)) m.source = NvnSource::StorageBuffer, m.index = ((byte_offset - base) / 0x10) ^ graphics_ssbo_slot_xor();
 }
 
@@ -471,6 +474,8 @@ bool reflect_spirv(const uint32_t* words, size_t count, ShaderReflection& out, s
                             : model == kExecutionModelGeometry ? ShaderStage::Geometry
                             : model == kExecutionModelTessControl ? ShaderStage::TessControl
                             : model == kExecutionModelTessEval ? ShaderStage::TessEval
+                            : model == 5364 ? ShaderStage::Task     // TaskEXT
+                            : model == 5365 ? ShaderStage::Mesh     // MeshEXT
                             : ShaderStage::Unknown;
             }
             break;
@@ -672,6 +677,12 @@ bool parse_harness_resources(std::string_view text, std::vector<HarnessResource>
         std::string_view tok = text.substr(0, sp);
         text = sp == std::string_view::npos ? std::string_view{} : text.substr(sp + 1);
         if (tok.empty()) continue;
+        if (tok == "gmem") {   // no binding of its own: a flag (ShaderReflection::global_fallback)
+            HarnessResource g;
+            g.kind = HarnessResource::GlobalFallback;
+            out.push_back(std::move(g));
+            continue;
+        }
         // "...=s<set>b<binding>"
         size_t eq = tok.rfind('=');
         if (eq == std::string_view::npos || eq + 1 >= tok.size() || tok[eq + 1] != 's') return false;
@@ -809,6 +820,10 @@ bool parse_handle_expr(std::string_view text, std::vector<HandleExprOp>& out) {
 bool apply_harness(ShaderReflection& refl, const std::vector<HarnessResource>& resources) {
     bool ok = true;
     for (const HarnessResource& r : resources) {
+        if (r.kind == HarnessResource::GlobalFallback) {
+            refl.global_fallback = true;
+            continue;
+        }
         DescriptorBinding* b = nullptr;
         for (auto& x : refl.bindings)
             if (int(x.set) == r.set && int(x.binding) == r.binding) b = &x;
@@ -958,6 +973,8 @@ const char* stage_name(ShaderStage s) {
     case ShaderStage::Geometry: return "geometry";
     case ShaderStage::TessControl: return "tessellationcontrol";      // the harness's spelling (results.tsv)
     case ShaderStage::TessEval: return "tessellationevaluation";
+    case ShaderStage::Task: return "task";
+    case ShaderStage::Mesh: return "mesh";
     default: return "unknown";
     }
 }
@@ -1129,10 +1146,13 @@ std::unique_ptr<ShaderCache::Preloaded> ShaderCache::preload_one(const std::stri
             have_record = true;
         }
     }
-    if (have_record) {
-        std::vector<HarnessResource> list;
-        if (!parse_harness_resources(record, list) || !apply_harness(p->refl, list)) return nullptr;   // the game's own load reports it
-    }
+    // A .spv without its results.tsv record is left to the game's own load: that one translates it again on demand (the file is stale)
+    // and applies the new record. Preloaded, the old words and a reflection without the record's NVN meanings were used instead, and
+    // load() ignores a record it is handed once a preloaded entry exists: every storage buffer of such a compute shader mapped to no NVN
+    // binding and its dispatches were left out (run da_12: 40 shaders, the culling root 4c1e8564 among them, after rows were deleted).
+    if (!have_record) return nullptr;
+    std::vector<HarnessResource> list;
+    if (!parse_harness_resources(record, list) || !apply_harness(p->refl, list)) return nullptr;   // the game's own load reports it
     return p;
 }
 

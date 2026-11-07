@@ -258,12 +258,12 @@ struct Program : Obj {
     static constexpr Kind kKind = Kind::Program;
     Program() : Obj(kKind) {}
     // stages indexed by the NVNshaderStage value: 0 vertex, 1 fragment, 2 geometry, 3 tess control, 4 tess eval, 5 compute
-    const ShaderInfo* stage[6] = {};
-    uint64_t code_hash[6] = {};
+    const ShaderInfo* stage[8] = {};      // by NVN stage: 0 vs, 1 fs, 2 gs, 3 tcs, 4 tes, 5 cs, 6 task, 7 mesh
+    uint64_t code_hash[8] = {};
     // Where each stage's code block and control section were (guest = host addresses) when SetShaders found them: a frame capture
     // (nvn_capture.cpp) saves those bytes and looks the stages up again in the shader cache.
-    uint64_t code_addr[6] = {};
-    uint64_t control_addr[6] = {};
+    uint64_t code_addr[8] = {};
+    uint64_t control_addr[8] = {};
     char missing[64] = {};                  // keys of the blocks SetShaders found no translation for (trace: "cs -" dispatches)
     bool linked = false;
     uint32_t serial = 0;

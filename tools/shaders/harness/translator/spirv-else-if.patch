@@ -3,12 +3,14 @@ Without this, the false edge of the If before an ElseIf goes straight to the mer
 ElseIf/Else after it becomes unreachable code. See docs/nvn/TRANSLATOR.md, "else if chains".
 Also a loop cap: every loop of a function leaves once its back edges, counted in one per-invocation
 variable, reach N. Default 4096 for graphics stages (a runaway per-pixel loop in OoT's material shaders
-took the GPU to TDR / device lost minutes into the first scene), off for compute; NXRT_HARNESS_LOOP_CAP=N overrides (0 = off).
+took the GPU to TDR / device lost minutes into the first scene) and for task/mesh programs (translated as compute; OoT task fd8debac
+runs 2^27 rounds while the data it counts is not built yet), off for compute; NXRT_HARNESS_LOOP_CAP=N overrides (0 = off).
 Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a copy in private/build; the
 checkout in private/third_party stays untouched. The Ryujinx code in the context lines is MIT.
-
---- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
-+++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
+Also the task/mesh hooks of tools/shaders/ampere/frontend/AmpereMesh.cs (declarations after DeclareAll, execution model and modes,
+the epilogue at the end of main, every global in the entry point).
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs	2026-11-07 14:07:08.798017000 +0100
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs	2026-11-07 14:07:08.826021600 +0100
 @@ -17,6 +17,10 @@
      static class SpirvGenerator
      {
@@ -20,12 +22,59 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
          private const int GeneratorPoolCount = 1;
          private static readonly ObjectPool<SpvInstructionPool> _instructionPool;
          private static readonly ObjectPool<SpvLiteralIntegerPool> _integerPool;
-@@ -311,6 +315,41 @@
+@@ -121,6 +125,8 @@
+             }
+ 
+             Declarations.DeclareAll(context, info);
++            AmpereMesh.Declare(context);   // task/mesh (tools/shaders/ampere/frontend/AmpereMesh.cs): outputs, capability, SPIR-V 1.4
++            AmpereGlobal.Declare(context);   // device address pointers (tools/shaders/ampere/frontend/AmpereGlobal.cs, A17)
+ 
+             for (int funcIndex = 0; funcIndex < info.Functions.Count; funcIndex++)
+             {
+@@ -147,6 +153,7 @@
+                 Generate(context, info, funcIndex);
+             }
+ 
++            AmpereMesh.FinishModule(context);   // task/mesh: every global variable in the entry point (SPIR-V 1.4)
+             byte[] result = context.Generate();
+ 
+             lock (_poolLock)
+@@ -178,14 +185,15 @@
+             if (function.MainBlock.Last is not AstOperation operation ||
+                 (operation.Inst != Instruction.Return && operation.Inst != Instruction.Discard))
+             {
+-                context.Return();
++                if (!(funcIndex == 0 && AmpereMesh.EmitEpilogue(context))) context.Return();   // task/mesh: the hardware's end of program first
+             }
+ 
+             context.FunctionEnd();
+ 
+             if (funcIndex == 0)
+             {
+-                context.AddEntryPoint(context.Definitions.Stage.Convert(), spvFunc, "main", context.GetMainInterface());
++                // task/mesh: the interface (every global, SPIR-V 1.4) is filled in by AmpereMesh.FinishModule
++                context.AddEntryPoint(AmpereMesh.Model(context.Definitions.Stage.Convert()), spvFunc, "main", AmpereMesh.Active ? Array.Empty<SpvInstruction>() : context.GetMainInterface());
+ 
+                 if (context.Definitions.Stage == ShaderStage.TessellationControl)
+                 {
+@@ -294,6 +302,7 @@
+                         localSizeX,
+                         localSizeY,
+                         localSizeZ);
++                    AmpereMesh.AddModes(context, spvFunc);   // mesh: output vertices / primitives / triangles
+                 }
+ 
+                 if (context.Definitions.TransformFeedbackEnabled && context.Definitions.LastInVertexPipeline)
+@@ -311,6 +320,45 @@
  
              context.LoopTargets = loopTargets;
  
 +            SpvInstruction loopCounter = null;
-+            int loopCap = LoopCap >= 0 ? LoopCap : (context.Definitions.Stage == ShaderStage.Compute ? 0 : DefaultGraphicsLoopCap); if (loopCap > 0)
++            // task and mesh programs are translated as compute (AmpereMesh) but are graphics stages: they get the graphics default. OoT's task
++            // fd8debac counts its rounds from data earlier dispatches build; before those run (a block still being translated on demand) the
++            // count is 0 and the loop runs 2^27 rounds: device lost.
++            int loopCap = LoopCap >= 0 ? LoopCap : (context.Definitions.Stage == ShaderStage.Compute && !AmpereMesh.Active ? 0 : DefaultGraphicsLoopCap);
++            if (loopCap > 0)
 +            {
 +                SpvInstruction s32 = context.TypeS32();
 +                loopCounter = context.Variable(context.TypePointer(StorageClass.Private, s32), StorageClass.Private, context.Constant(s32, 0));
@@ -62,7 +111,7 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
              visitor.BlockEntered += (sender, e) =>
              {
                  AstBlock mergeBlock = e.Block.Parent;
-@@ -320,7 +359,7 @@
+@@ -320,7 +368,7 @@
                      AstBlock ifTrueBlock = e.Block;
                      AstBlock ifFalseBlock;
  
@@ -71,7 +120,7 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
                      {
                          ifFalseBlock = nextBlock;
                      }
-@@ -334,6 +373,23 @@
+@@ -334,6 +382,23 @@
                      context.SelectionMerge(context.GetNextLabel(mergeBlock), SelectionControlMask.MaskNone);
                      context.BranchConditional(condition, context.GetNextLabel(ifTrueBlock), context.GetNextLabel(ifFalseBlock));
                  }
@@ -95,7 +144,7 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
                  else if (e.Block.Type == AstBlockType.DoWhile)
                  {
                      SpvInstruction continueTarget = context.Label();
-@@ -364,6 +420,14 @@
+@@ -364,6 +429,14 @@
  
                          SpvInstruction condition = context.Get(AggregateType.Bool, e.Block.Condition);
  
@@ -110,7 +159,7 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
                          context.BranchConditional(condition, loopTarget, context.GetNextLabel(mergeBlock));
                      }
                      else
-@@ -378,7 +442,7 @@
+@@ -378,7 +451,7 @@
  
                          if (!lastIsCf)
                          {
@@ -119,7 +168,7 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
                          }
                      }
  
-@@ -386,9 +450,22 @@
+@@ -386,9 +459,22 @@
                          (nextBlock.Type == AstBlockType.Else ||
                           nextBlock.Type == AstBlockType.ElseIf);
  

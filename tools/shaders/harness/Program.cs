@@ -46,6 +46,8 @@ namespace SpirvHarness
         const uint ComputeMagic = 0x12345679;
         static readonly TimeSpan Timeout = TimeSpan.FromSeconds(60);
         static bool NoRetry;   // --no-retry: report attempt 1 only (the translator as Ryujinx runs it)
+        // --no-global-fallback or NXRT_HARNESS_NO_GLOBAL_FALLBACK=1: untraceable global memory accesses are dropped as before (A17, AmpereGlobal.cs)
+        static bool NoGlobalFallback = Environment.GetEnvironmentVariable("NXRT_HARNESS_NO_GLOBAL_FALLBACK") == "1";
         static bool Debug;     // --debug-mode: DebugMode from attempt 1 (also reports undecodable opcodes)
 
         static readonly Dictionary<string, string> GlslcByHash = new();   // --reflect <corpus>: code hash -> GLSLC output
@@ -56,6 +58,7 @@ namespace SpirvHarness
         static int Main(string[] args)
         {
             NoRetry = args.Contains("--no-retry");
+            NoGlobalFallback |= args.Contains("--no-global-fallback");
             StaticGpuAccessor.DesktopHost = Opt(args, "--host", "desktop") != "moltenvk";
             Debug = args.Contains("--debug-mode");
             try
@@ -232,12 +235,27 @@ namespace SpirvHarness
                 0 => ShaderStage.Vertex, 1 => ShaderStage.Fragment, 2 => ShaderStage.Geometry,
                 3 => ShaderStage.TessellationControl, 4 => ShaderStage.TessellationEvaluation, _ => ShaderStage.Compute,
             };
+            // Task (6) and mesh (7) programs: a graphics SPH, translated as compute work groups into VK_EXT_mesh_shader stages
+            // (tools/shaders/ampere/frontend/AmpereMesh.cs). Their resources bind in Ryujinx's vertex slot (task) and tessellation
+            // evaluation slot (mesh): a mesh pipeline has neither of those stages.
+            AmpereMeshInfo mesh = null;
+            if (nvnStage is 6 or 7)
+            {
+                mesh = AmpereMeshInfo.FromNvn2(code, ctrl, nvnStage, out string meshError);
+                if (mesh == null)
+                {
+                    r.Stage = nvnStage == 6 ? "task" : "mesh";
+                    r.Status = "unsupported";
+                    r.Error = "unsupported: " + meshError;
+                    return r;
+                }
+            }
             bool compute = stage == ShaderStage.Compute;
-            r.Stage = stage.ToString().ToLowerInvariant();
-            int start = compute ? 0 : 0x80;
+            r.Stage = mesh != null ? (mesh.IsTask ? "task" : "mesh") : stage.ToString().ToLowerInvariant();
+            int start = compute && mesh == null ? 0 : 0x80;
             int end = Math.Min(progEnd, code.Length) & ~0xf;
             while (end - 16 >= start && code.AsSpan(end - 16, 16).IndexOfAnyExcept((byte)0) < 0) end -= 16;
-            if (nvnStage > 5 || end <= start)
+            if (nvnStage > 7 || end <= start)
             {
                 r.Status = "exception";
                 r.Error = $"NVN2 block without code (stage {nvnStage}, program end 0x{progEnd:x}, code 0x{code.Length:x} bytes)";
@@ -252,7 +270,7 @@ namespace SpirvHarness
             {
                 // Address 0 of the accessor's code is the SPH (graphics) or the first instruction (compute); the constant
                 // data offset (+0x40) is from the start of the code area in both cases.
-                StaticGpuAccessor gpu = new(code, constOff, constSize, stage, ctrl);
+                StaticGpuAccessor gpu = new(code, constOff, constSize, stage, ctrl, mesh == null ? -1 : mesh.IsTask ? 0 : 4);
                 if (refl != null) foreach (var h in refl.BufferTextureHandles(nvnStage, ctrl)) gpu.BufferTextures.Add(h);
                 else foreach (var h in BufferFetchHandles(insts, compute)) gpu.BufferTextures.Add(h);
                 TranslationFlags flags = (compute ? TranslationFlags.Compute : TranslationFlags.None) |
@@ -261,7 +279,8 @@ namespace SpirvHarness
                 AmpereProgram prog = null;
                 try
                 {
-                    TranslatorContext tctx = AmpereTranslator.CreateContext(gpu, options, insts, out prog);
+                    AmpereGlobal.Begin(NoGlobalFallback ? null : StaticGpuAccessor.GlobalFallbackWords(ctrl));   // A17: untraceable global accesses
+                    TranslatorContext tctx = AmpereTranslator.CreateContext(gpu, options, insts, out prog, mesh);
                     ShaderProgram sp = tctx.Translate();
                     if (prog.Unsupported.Count == 0)
                     {
@@ -271,6 +290,7 @@ namespace SpirvHarness
                         r.SpvBytes = spv?.Length ?? 0;
                         r.Status = spv == null ? "no-output" : attempt == 1 ? "ok" : "ok-retry";
                         r.Resources = DescribeResources(sp.Info, gpu);
+                        if (AmpereGlobal.Used) r.Resources += (r.Resources.Length > 0 ? " " : "") + "gmem";   // the runtime fills this stage's c[0] storage descriptors per draw
                         if (refl != null) lock (gpu.Messages) gpu.Messages.AddRange(refl.Check(nvnStage, sp.Info));
                     }
                 }

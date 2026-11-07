@@ -43,6 +43,8 @@ namespace Ryujinx.Graphics.Shader.Translation
         internal readonly Dictionary<int, (int Start, int End)> Subroutines = new(); // CALL address -> [start, RET address]
         internal readonly IGpuAccessor Gpu;
         internal ShaderStage Stage;
+        internal AmpereMeshInfo Mesh;          // task/mesh block (AmpereMesh.cs), else null
+        internal int EpilogueAddress = -1;     // task/mesh: every EXIT jumps here (the end-of-program block)
 
         /// Reasons this block cannot be translated (instruction forms the front end does not handle). Non-empty = failed.
         public List<string> Unsupported { get; } = new();
@@ -70,14 +72,24 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         /// Builds the translation context. `insts` are the program's instructions (addresses from 0 = first
         /// instruction after the SPH); the SPH itself is read through gpuAccessor at address 0 (graphics only).
-        public static TranslatorContext CreateContext(IGpuAccessor gpuAccessor, TranslationOptions options, IReadOnlyList<SassInst> insts, out AmpereProgram program)
+        public static TranslatorContext CreateContext(IGpuAccessor gpuAccessor, TranslationOptions options, IReadOnlyList<SassInst> insts, out AmpereProgram program,
+                                                      AmpereMeshInfo mesh = null)
         {
             program = new AmpereProgram(insts.ToList(), gpuAccessor);
             bool compute = options.Flags.HasFlag(TranslationFlags.Compute);
+            AmpereMesh.Begin(mesh);   // this thread's task/mesh state for the emitters and the back end (null: none)
+            program.Mesh = mesh;
 
             ShaderDefinitions definitions;
             int localMemorySize;
-            if (compute)
+            if (mesh != null)
+            {
+                // Task/mesh: a compute work group for Ryujinx (AmpereMesh.cs); the code has a graphics SPH (local memory sizes).
+                definitions = new ShaderDefinitions(ShaderStage.Compute, mesh.Threads, 1, 1);
+                ShaderHeader header = new(gpuAccessor, 0);
+                localMemorySize = header.ShaderLocalMemoryLowSize + header.ShaderLocalMemoryHighSize + (header.ShaderLocalMemoryCrsSize / ThreadsPerWarp);
+            }
+            else if (compute)
             {
                 definitions = new ShaderDefinitions(ShaderStage.Compute, gpuAccessor.QueryComputeLocalSizeX(), gpuAccessor.QueryComputeLocalSizeY(), gpuAccessor.QueryComputeLocalSizeZ());
                 localMemorySize = gpuAccessor.QueryComputeLocalMemorySize();
@@ -133,6 +145,16 @@ namespace Ryujinx.Graphics.Shader.Translation
                 current.OpCodes.Add(new InstOp((ulong)i.Address, 7UL << 16, InstName.Nop, emitter, InstProps.None));
                 current.EndAddress = (ulong)i.Address + 0x10;
                 prevAddr = i.Address;
+            }
+            if (mesh != null && prog.Insts.Count > 0)
+            {
+                // The end of a task/mesh program: one block after all code that every EXIT jumps to (barrier, return; the back end adds
+                // the output copies or the task launch at that return, AmpereMesh.EmitEpilogue).
+                prog.EpilogueAddress = prog.Insts[^1].Address + 0x10;
+                Block epi = new((ulong)prog.EpilogueAddress);
+                epi.OpCodes.Add(new InstOp((ulong)prog.EpilogueAddress, 7UL << 16, InstName.Nop, ctx => InstEmit.EmitAmpereMeshEnd(ctx, prog), InstProps.None));
+                epi.EndAddress = (ulong)prog.EpilogueAddress + 0x10;
+                blocks.Add(epi);
             }
             main.SetBlocks(blocks.ToArray());
 
@@ -298,6 +320,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 case "LDL": case "STL": features |= FeatureFlags.LocalMemory; break;
                 case "LDS": case "STS": case "ATOMS": features |= FeatureFlags.SharedMemory; break;
+                case "ISBEWR": features |= FeatureFlags.SharedMemory; break;   // task/mesh: the ISBE regions are shared memories (8-bit map stores need the CAS lowering)
                 case "LDSM": features |= FeatureFlags.SharedMemory | FeatureFlags.Shuffle; break;
                 case "STG": case "ATOMG": case "ATOM": case "RED": case "SUST": case "SUATOM": case "SURED": features |= FeatureFlags.Store; break;
                 case "SHFL": case "REDUX": case "MATCH": case "FSWZADD": case "HMMA": case "MOVM": features |= FeatureFlags.Shuffle; break;

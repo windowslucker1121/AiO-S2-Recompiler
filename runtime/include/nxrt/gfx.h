@@ -119,6 +119,8 @@ struct DeviceFeatures {
     bool graphics_pipeline_library = false;   // VK_EXT_graphics_pipeline_library (pipelines linked from separately compiled parts, S24)
     bool external_memory_host = false, push_descriptor = false;
     bool dynamic_rendering_unused_attachments = false;
+    bool buffer_device_address = false;   // Vulkan 1.2 bufferDeviceAddress: raw guest pointers in translated shaders (A17, the pool address table)
+    bool mesh_shader = false, task_shader = false;   // VK_EXT_mesh_shader (NVN2 task/mesh programs); [gfx] mesh_shader = false leaves it off
     bool transform_feedback = false, transform_feedback_queries = false;   // VK_EXT_transform_feedback (the feedback queries: transformFeedbackQueries)
     bool fragment_shading_rate = false;   // VK_KHR_fragment_shading_rate with pipelineFragmentShadingRate (NVN2 shading rate image, nvn_small.h)
     bool conservative_raster_dynamic = false;   // VK_EXT_conservative_rasterization + the extended-dynamic-state-3 mode / overestimation size (NVN2 conservative raster)
@@ -143,6 +145,7 @@ struct DeviceLimitsExt {
     uint32_t subgroup_size = 0, subgroup_ops = 0;
     uint32_t max_memory_allocation_count = 0;
     float cons_max_extra = 0, cons_granularity = 0;   // VK_EXT_conservative_rasterization: maxExtraPrimitiveOverestimationSize, extraPrimitiveOverestimationSizeGranularity
+    uint32_t mesh_max_groups = 0, task_max_groups = 0;   // VK_EXT_mesh_shader: maxMeshWorkGroupCount[0], maxTaskWorkGroupCount[0]
     uint32_t fsr_sizes = 0;   // VK_KHR_fragment_shading_rate: bit (log2(w) * 3 + log2(h)) = a fragment size of 1 sample the device supports (w, h in 1, 2, 4)
 };
 
@@ -162,6 +165,7 @@ public:
     uint32_t queue_family() const { return queue_family_; }
     std::mutex& queue_mutex() { return queue_mutex_; }              // hold while calling vkQueueSubmit / vkQueuePresentKHR
     VmaAllocator allocator() const { return vma_; }
+    uint64_t buffer_address(VkBuffer b) const;   // vkGetBufferDeviceAddress (0 without the feature or the usage bit)
     VkSurfaceKHR surface() const { return surface_; }              // null when headless
     bool headless() const { return surface_ == VK_NULL_HANDLE; }
     const VkPhysicalDeviceProperties& properties() const { return props_; }

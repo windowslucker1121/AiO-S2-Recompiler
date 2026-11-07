@@ -290,6 +290,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 case "NOP": case "DEPBAR": case "BSSY": case "BSYNC": case "BREAK": case "WARPSYNC": case "ERRBAR": case "YIELD": case "CCTL":
                     return;
                 case "EXIT":
+                    if (prog.Mesh != null) { ctx.Branch(ctx.GetLabel((ulong)prog.EpilogueAddress)); return; }   // task/mesh: to the end-of-program block
                     if (ctx.PrepareForReturn()) ctx.Return();
                     return;
                 case "KILL":
@@ -318,6 +319,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     DstWord(ctx, o[0], 0, Const(0));
                     if (!Has(i, "32")) DstWord(ctx, o[0], 1, Const(0));
                     return;
+                case "ISBERD" when prog.Mesh != null: EmitIsberdMesh(ctx, prog, i); return;
+                case "ISBEWR": EmitIsbewrMesh(ctx, prog, i); return;
                 case "ISBERD":
                     // ISBERD Rd, [Ra]: read of the internal stage buffer; Ryujinx (Maxwell Isberd) copies Ra to Rd
                     Dst(ctx, i.Operands[0], i.Operands[1].Kind == OperandKind.Mem ? Gpr(i.Operands[1].Reg) : Src(ctx, i.Operands[1]));
@@ -467,6 +470,25 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 case "DSETP": EmitDsetpAmpere(ctx, i); return;
                 case "F2I": EmitF2iAmpere(ctx, i); return;
                 case "I2F": EmitI2fAmpere(ctx, i); return;
+                case "F2IP":
+                    {
+                        // F2IP.U8|S8.F32[.TRUNC][.NTZ][.RELU] Rd, Ra, Rb, Rc: Ra and Rb rounded (RN or toward zero), saturated to 8 bits and packed
+                        // like PTX cvt.pack: Rb in byte 0, Ra in byte 1, Rc's low half in bits 16..31 (NaN converts to 0, as F2I's .NTZ).
+                        if (Has(i, "H1") || i.Mods.Any(m => m.StartsWith("INVALID"))) throw Unsup("F2IP form");
+                        bool s8 = Has(i, "S8");
+                        IrOperand Conv(IrOperand v)
+                        {
+                            v = ctx.ConditionalSelect(ctx.FPCompareEqual(v, v), v, ConstF(0));   // NaN -> 0
+                            if (Has(i, "RELU")) v = ctx.FPMaximum(v, ConstF(0));
+                            v = Has(i, "TRUNC") ? ctx.FPTruncate(v) : ctx.FPRound(v);
+                            v = ctx.FPMinimum(ctx.FPMaximum(v, ConstF(s8 ? -128f : 0f)), ConstF(s8 ? 127f : 255f));
+                            return ctx.BitwiseAnd(ctx.FP32ConvertToS32(v), Const(0xff));
+                        }
+                        IrOperand lo8 = Conv(FSrc(ctx, o[2])), hi8 = Conv(FSrc(ctx, o[1]));
+                        IrOperand c16 = ctx.ShiftLeft(Raw(ctx, o[3]), Const(16));
+                        Dst(ctx, o[0], ctx.BitwiseOr(ctx.BitwiseOr(lo8, ctx.ShiftLeft(hi8, Const(8))), c16));
+                        return;
+                    }
                 case "I2FP":
                     if (!Has(i, "F32")) throw Unsup();
                     Dst(ctx, o[0], IntToF32(ctx, i, Src(ctx, o[1]), Has(i, "U32")));
@@ -2332,8 +2354,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             IrOperand acc = ReadLane(ctx, v, first);
             for (int l = 0; l < 32; l++)
             {
-                IrOperand take = ctx.BitwiseAnd(ctx.ICompareNotEqual(ctx.BitwiseAnd(mask, Const(1 << l)), Const(0)), ctx.ICompareNotEqual(first, Const(l)));
-                acc = ctx.ConditionalSelect(take, f(acc, ReadLane(ctx, v, Const(l))), acc);
+                IrOperand active = ctx.ICompareNotEqual(ctx.BitwiseAnd(mask, Const(1 << l)), Const(0));
+                IrOperand take = ctx.BitwiseAnd(active, ctx.ICompareNotEqual(first, Const(l)));
+                // Only active lanes are read: an inactive lane's slot reads the first active lane instead (its value is not taken). Reading
+                // a lane that is not active is undefined in SPIR-V, and on NVIDIA it waited for lanes that never come: a mesh program's lanes
+                // past its count leave at the start and wait at the end-of-program barrier while the others REDUX (OoT mesh f3054ac2,
+                // device lost once the GPU culling gave the mesh draws work).
+                IrOperand src = ctx.ConditionalSelect(active, Const(l), first);
+                acc = ctx.ConditionalSelect(take, f(acc, ReadLane(ctx, v, src)), acc);
             }
             Dst(ctx, o[0], acc);
         }

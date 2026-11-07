@@ -69,6 +69,15 @@ namespace Nx.Shaders.Ampere
                 c.Op = "I2FP"; c.Mod("F32"); c.Mod(c.B(74) ? "S32" : "U32"); c.Mod(78, 2, null, "INVALID1", "INVALID2", "RZ");   // I2FP rounds RN or RZ only [xcheck probe]
                 c.ANeg = -1; c.AAbs = -1; c.BAbs = -1; c.BNeg = -1; c.ImmK = ImmKind.SHex; c.Dst = 1; c.Add(c.R(16), c.Src2());
             });
+            // F2IP 0x043 [nvdisasm bit probe, OoT culling compute f2422a7a]: two F32 to two saturated 8-bit integers, packed (PTX cvt.pack:
+            // Rb -> byte 0, Ra -> byte 1, Rc's low half -> bits 16..31). U8/S8 76..77, rounding 78..79 (RN, -, -, TRUNC), NTZ 74, RELU 75,
+            // Rc 64..71 with .H1 72 (Rc's high half; not seen in the game, flagged with the "H1" modifier).
+            Op9(0x043, c =>
+            {
+                c.Op = "F2IP"; c.Mod(76, 2, "U8", "S8", "INVALID2", "INVALID3"); c.Mod("F32");
+                c.Mod(78, 2, null, "INVALID1", "INVALID2", "TRUNC"); c.Mod(c.B(74), "NTZ"); c.Mod(c.B(75), "RELU"); c.Mod(c.B(72), "H1");
+                c.ImmK = ImmKind.F32; c.Dst = 1; c.Add(c.R(16), c.SrcA(), c.Src2(), c.R(64));
+            });
             // F2FP 0x03e [NAK]: MERGE_C 78 (dst, B slot, R64; .H1 72), else PACK_AB (dst, A, B slot); rounding 79..81
             Op9(0x03e, c =>
             {

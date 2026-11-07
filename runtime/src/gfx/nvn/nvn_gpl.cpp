@@ -572,7 +572,7 @@ void predict_int_attributes(GraphicsKey& k) {
 }
 
 void run_job(const Job& j) {
-    const ShaderInfo* st6[6] = {j.st[0], j.st[1], j.st[2], nullptr, nullptr, nullptr};
+    const ShaderInfo* st6[kProgStages] = {j.st[0], j.st[1], j.st[2], nullptr, nullptr, nullptr};
     const ProgLayout* pl = prog_layout(st6);
     if (!pl) {
         std::lock_guard<std::mutex> lk(g_mu);
@@ -1285,7 +1285,7 @@ bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
                 } else {
                     mine.push_back(vs); mine.push_back(fs);
                     if (gs) mine.push_back(gs);
-                    const ShaderInfo* st6[6] = {vs, fs, gs, nullptr, nullptr, nullptr};
+                    const ShaderInfo* st6[kProgStages] = {vs, fs, gs, nullptr, nullptr, nullptr};
                     const ProgLayout* pl = prog_layout(st6);
                     GraphicsKey k;
                     k.stage[0] = vs; k.stage[1] = fs; k.stage[2] = gs;

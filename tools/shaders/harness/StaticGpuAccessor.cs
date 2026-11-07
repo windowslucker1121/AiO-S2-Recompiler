@@ -39,7 +39,8 @@ namespace SpirvHarness
         // Draw-time queries the translator made for this shader (what a runtime variant would have to key on).
         public readonly SortedSet<string> DrawTimeQueries = new();
 
-        public StaticGpuAccessor(byte[] code, int constOff, int constSize, ShaderStage stage, byte[] ctrl)
+        /// `stageSlot`: Ryujinx's binding slot when it is not the stage's own (task 0, mesh 4: AmpereMesh.cs); -1 = the stage's.
+        public StaticGpuAccessor(byte[] code, int constOff, int constSize, ShaderStage stage, byte[] ctrl, int stageSlot = -1)
         {
             // Pad so that the decoder may read past the program end (it asks for minimum sizes) without bounds errors.
             _code = new byte[(code.Length + 0x1000 + 7) & ~7];
@@ -55,6 +56,7 @@ namespace SpirvHarness
                 ShaderStage.TessellationEvaluation => 4,
                 _ => 0,
             };
+            if (stageSlot >= 0) _stageSlot = stageSlot;
             // Compute work-group size: control section +0x748..+0x750 (verified against BNSH reflection, SHADERS.md).
             _localX = _localY = _localZ = 1;
             if (Program.IsNvn2(ctrl))
@@ -80,6 +82,9 @@ namespace SpirvHarness
             // Shared memory bytes: control +0x754 (0 exactly for the compute shaders without shared memory). Without
             // it the translator declares its default, 0xc000, past the 32 KB Metal allows (docs/nvn/DEBUG.md #23).
             if (!Program.IsNvn2(ctrl) && ctrl != null && ctrl.Length >= 0x758) _sharedSize = BitConverter.ToInt32(ctrl, 0x754);
+            // Task/mesh (stageSlot set): no shared memory of their own (no LDS/STS in the game's blocks); their ISBE regions are separate
+            // definitions (AmpereMesh.cs). 4 bytes keeps Ryujinx's default 4 KiB array out of the mesh stage's 28 KiB.
+            if (stageSlot >= 0) _sharedSize = 4;
         }
 
         // NVN2 tessellation evaluation blocks keep their GLSL input layout in the control section as GL enums: +0x58 domain
@@ -107,6 +112,42 @@ namespace SpirvHarness
             if (prim is not (0x4 or 0x7 or 0x8e7a) || spacing is not (0x202 or 0x8e7b or 0x8e7c) || order is not (0x900 or 0x901))
                 lock (messages) messages.Add($"tessellation layout not recognised: control +0x58 0x{prim:x} +0x5c 0x{spacing:x} +0x64 0x{order:x}");
             return (pt, sp, order == 0x900);
+        }
+
+        /// The c[0] word offsets of every storage descriptor an NVN2 block's stage can have bound: the candidates of the global memory fallback
+        /// (tools/shaders/ampere/frontend/AmpereGlobal.cs). Graphics: 16 slots at 0x110 + 0x100 * hardware stage (vertex 0, tessellation control 1,
+        /// evaluation 2, geometry 3, fragment 4), task 0x650 and mesh 0x750 (measured, nvn_replay.cpp storage_slot_for); compute: the storage entries
+        /// of the program's c[0] table (header, push area, uniform block entries, then storage entries; as apply_nvn2_compute_table). Null: none.
+        public static int[] GlobalFallbackWords(byte[] ctrl)
+        {
+            if (!Program.IsNvn2(ctrl) || ctrl.Length < 0xbc) return null;
+            int stage = BitConverter.ToUInt16(ctrl, 0x56);
+            int baseByte, count = 16;
+            switch (stage)
+            {
+                case 0: baseByte = 0x110; break;
+                case 1: baseByte = 0x510; break;
+                case 2: baseByte = 0x410; break;
+                case 3: baseByte = 0x210; break;
+                case 4: baseByte = 0x310; break;
+                case 6: baseByte = 0x650; break;
+                case 7: baseByte = 0x750; break;
+                case 5:
+                    {
+                        int ubos = ctrl[0xb1], ssbos = ctrl[0xb2], textures = ctrl[0xb3], images = ctrl[0xb6];
+                        int table = ctrl[0xba] | ctrl[0xbb] << 8;
+                        int push = table - (0x10 + 0x10 * (ubos + ssbos) + 8 * (textures + images));
+                        if (push < 0 || push % 0x10 != 0 || push > 0x100) push = 0;
+                        if (ssbos == 0) return null;
+                        baseByte = 0x10 + push + 0x10 * ubos;
+                        count = ssbos;
+                        break;
+                    }
+                default: return null;
+            }
+            int[] words = new int[count];
+            for (int k = 0; k < count; k++) words[k] = (baseByte + 0x10 * k) / 4;
+            return words;
         }
 
         public void Log(string message)

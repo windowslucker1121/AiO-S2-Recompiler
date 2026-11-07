@@ -46,6 +46,8 @@ int nvn_stage_of(ShaderStage s) {
         case ShaderStage::TessControl: return 3;
         case ShaderStage::TessEval: return 4;
         case ShaderStage::Compute: return 5;
+        case ShaderStage::Task: return 6;
+        case ShaderStage::Mesh: return 7;
         default: return -1;
     }
 }
@@ -114,7 +116,7 @@ NVNboolean nvnProgramSetShaders(NVNprogram* program, int count, const NVNshaderD
     Program* p = host_of<Program>(program);
     if (!p) return 0;
     std::lock_guard pending_lk(p->pending_mu);   // the replay thread's program_resolve_pending
-    for (int s = 0; s < 6; ++s) {
+    for (int s = 0; s < 8; ++s) {
         p->stage[s] = nullptr;
         p->code_hash[s] = 0;
         p->code_addr[s] = 0;
@@ -238,9 +240,9 @@ static_assert(sizeof(ShaderDataExt) == 0x18, "nvnProgramSetShadersExt entries ar
 
 NVNboolean nvnProgramSetShadersExt(NVNprogram* program, int count, const ShaderDataExt* shaders) {
     if (count > 0 && !shaders) return nvnProgramSetShaders(program, count, nullptr);
-    NVNshaderData plain[6]{};
-    if (count < 0 || count > 6) {
-        NXLOG_W("nvn", "nvnProgramSetShadersExt: %d stages (at most 6)", count);
+    NVNshaderData plain[8]{};
+    if (count < 0 || count > 8) {
+        NXLOG_W("nvn", "nvnProgramSetShadersExt: %d stages (at most 8)", count);
         return 0;
     }
     for (int k = 0; k < count; ++k) plain[k] = shaders[k].base;

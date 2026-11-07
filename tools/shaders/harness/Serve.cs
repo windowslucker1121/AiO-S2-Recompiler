@@ -194,12 +194,16 @@ namespace SpirvHarness
 
         static void PutSpv(string cache, string hash, byte[] spv)
         {
+            // A request comes only for a block without a results.tsv row, so a .spv already there is stale (its row was removed to have
+            // the block translated again, or it is from another translator build) and is replaced: keeping it left a new row next to the
+            // old words, and the runtime rejected the pair ("resources record does not match the SPIR-V": five of OoT's culling-chain
+            // compute shaders never ran, run game_1). The other writer writes the same words, so the last replace wins harmlessly.
             string dst = Path.Combine(cache, hash + ".spv");
-            if (File.Exists(dst)) return;
             string tmp = Path.Combine(cache, $"{hash}.spv.{Environment.ProcessId}.tmp");
             File.WriteAllBytes(tmp, spv);
-            try { File.Move(tmp, dst, false); }
-            catch (IOException) { File.Delete(tmp); }   // the other writer put it there first
+            try { File.Move(tmp, dst, true); }
+            catch (IOException) { File.Delete(tmp); }                   // open in a reader right now: the old file stays for this run
+            catch (UnauthorizedAccessException) { File.Delete(tmp); }
         }
 
         static readonly object RowLock = new();

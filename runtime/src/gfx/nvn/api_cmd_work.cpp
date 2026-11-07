@@ -222,6 +222,44 @@ void nvnCommandBufferDrawTransformFeedback(NVNcommandBuffer* cmd, NVNdrawPrimiti
     cb->rec->emit(Op::DrawXfb, p);
     cb->rec->draw_count++;
 }
+// ---- mesh draws (NVN2 task/mesh programs) -------------------------------------------------------------------------------------
+namespace {
+void record_mesh(NVNcommandBuffer* cmd, const P_DrawMesh& p) {
+    std::unique_lock<std::mutex> lk;
+    CommandBuffer* cb = begin_record(cmd, lk);
+    if (!cb) return;
+    cb->rec->emit(Op::DrawMeshTasks, p);
+    cb->rec->draw_count++;
+}
+P_DrawMesh mesh_payload(uint32_t kind) { P_DrawMesh p = zeroed<P_DrawMesh>(); p.kind = kind; p.max_count = 1; return p; }
+}  // namespace
+void nvnCommandBufferDrawMeshTasks(NVNcommandBuffer* cmd, int first, int count) {
+    P_DrawMesh p = mesh_payload(0); p.x = static_cast<uint32_t>(first); p.y = static_cast<uint32_t>(count); record_mesh(cmd, p);
+}
+void nvnCommandBufferDrawMeshTasks3D(NVNcommandBuffer* cmd, int x, int y, int z) {
+    P_DrawMesh p = mesh_payload(1); p.x = static_cast<uint32_t>(x); p.y = static_cast<uint32_t>(y); p.z = static_cast<uint32_t>(z); record_mesh(cmd, p);
+}
+void nvnCommandBufferDrawMeshTasksIndirect(NVNcommandBuffer* cmd, NVNbufferAddress indirect) {
+    P_DrawMesh p = mesh_payload(2); p.indirect = indirect; record_mesh(cmd, p);
+}
+void nvnCommandBufferDrawMeshTasks3DIndirect(NVNcommandBuffer* cmd, NVNbufferAddress indirect) {
+    P_DrawMesh p = mesh_payload(3); p.indirect = indirect; record_mesh(cmd, p);
+}
+void nvnCommandBufferMultiDrawMeshTasksIndirect(NVNcommandBuffer* cmd, NVNbufferAddress indirect, int drawCount, int stride) {
+    P_DrawMesh p = mesh_payload(2); p.indirect = indirect; p.multi = 1; p.max_count = static_cast<uint32_t>(drawCount); p.stride = stride; record_mesh(cmd, p);
+}
+void nvnCommandBufferMultiDrawMeshTasks3DIndirect(NVNcommandBuffer* cmd, NVNbufferAddress indirect, int drawCount, int stride) {
+    P_DrawMesh p = mesh_payload(3); p.indirect = indirect; p.multi = 1; p.max_count = static_cast<uint32_t>(drawCount); p.stride = stride; record_mesh(cmd, p);
+}
+void nvnCommandBufferMultiDrawMeshTasksIndirectCount(NVNcommandBuffer* cmd, NVNbufferAddress indirect, NVNbufferAddress count, int maxCount, int stride) {
+    P_DrawMesh p = mesh_payload(2); p.indirect = indirect; p.multi = 1; p.count_address = count; p.max_count = static_cast<uint32_t>(maxCount); p.stride = stride;
+    record_mesh(cmd, p);
+}
+void nvnCommandBufferMultiDrawMeshTasks3DIndirectCount(NVNcommandBuffer* cmd, NVNbufferAddress indirect, NVNbufferAddress count, int maxCount, int stride) {
+    P_DrawMesh p = mesh_payload(3); p.indirect = indirect; p.multi = 1; p.count_address = count; p.max_count = static_cast<uint32_t>(maxCount); p.stride = stride;
+    record_mesh(cmd, p);
+}
+
 void record_xfb(NVNcommandBuffer* cmd, Op op, NVNbufferAddress control) {
     std::unique_lock<std::mutex> lk;
     CommandBuffer* cb = begin_record(cmd, lk);
@@ -649,6 +687,14 @@ void register_api_cmd_work() {
     NVN_REG(nvnCommandBufferMultiDrawArraysIndirectCount);
     NVN_REG(nvnCommandBufferMultiDrawElementsIndirectCount);
     NVN_REG(nvnCommandBufferDrawTransformFeedback);
+    NVN2_REG(nvnCommandBufferDrawMeshTasks);
+    NVN2_REG(nvnCommandBufferDrawMeshTasks3D);
+    NVN2_REG(nvnCommandBufferDrawMeshTasksIndirect);
+    NVN2_REG(nvnCommandBufferDrawMeshTasks3DIndirect);
+    NVN2_REG(nvnCommandBufferMultiDrawMeshTasksIndirect);
+    NVN2_REG(nvnCommandBufferMultiDrawMeshTasks3DIndirect);
+    NVN2_REG(nvnCommandBufferMultiDrawMeshTasksIndirectCount);
+    NVN2_REG(nvnCommandBufferMultiDrawMeshTasks3DIndirectCount);
     NVN_REG(nvnCommandBufferBeginTransformFeedback);
     NVN_REG(nvnCommandBufferEndTransformFeedback);
     NVN_REG(nvnCommandBufferPauseTransformFeedback);
