@@ -103,10 +103,27 @@ Times here: lift + build of all four modules 10 min 48 s cold (was 25 min), runt
 translation 2 min 49 s, shader preparation ~80 programs/s (was 34).
 
 **Merged 2026-11-07 (65daeb3): A9 mesh shaders, A17 global-memory fallback with device addresses, culling-chain fixes.** All 172 runtime
-test groups pass (after `ninja -t clean`: four gfx groups segfaulted on stale sccache objects first). **The main shader cache
-`work\shaders\oot\spirv` predates this harness**: re-translate the corpus, drop the rows of blocks not in the corpus (the on-demand
-translator now replaces their stale `.spv`), and prepare again, or the merged code paths (gmem, mesh, task loop cap) stay inactive.
-The cache it was tested with was removed with worktree quirky-panini-7286ba; kept from it: the frame capture
+test groups pass (after `ninja -t clean`: four gfx groups segfaulted on stale sccache objects first). **Main shader cache re-translated
+2026-11-07 (afbe1f5)** with the merged harness plus `spirv-nan.patch` (float Clamp/Min/Max as NClamp/NMin/NMax; chained after the mesh
+patch through the csproj's `Then` metadata): corpus without the quarantined block in `work\shaders\oot\corpus_noq` (filtered
+`unique.tsv`, junctions), 46,988 ok / 207 unsupported / 7 exceptions (the same blocks in the old cache: 46,203 / 177 / 822; the 7 are
+GotoElimination NullReferenceExceptions, old too), 3,413 `gmem` rows, mesh 770 ok, task 15 ok; the SPIR-V of 36,900 blocks changed.
+On-demand rows (blocks not in the corpus) were dropped; the quarantined block keeps its old row and `.spv`. Old cache:
+`work\shaders\oot\spirv_old_20261107` (delete once the new one is trusted). Culling root 4c1e8564 (from `work\dumps\code`): 0 Function
+variables read but never written (the old cache's `.spv` has the 17). All 10,716 discarding fragment shaders use `OpKill` (no demote), so a
+discarded fragment cannot reach the colour writes. **Preparation** with a cold driver cache: 88 min (~4 programs/s past the parts the
+driver's disk cache still had), 118,089 parts, `pipeline_cache.bin` 2.83 GB; the first attempt loaded the old 4.7 GB cache on top and
+hit the 16 GB `[memory] limit_gb` at 34,696 of 39,363 programs, saving nothing: move a stale `pipeline_cache.bin` aside before preparing
+for re-translated shaders (old one: `pipeline_cache_old_20261107.bin`), and pass `NXRT_MEMORY_LIMIT_GB=24` to `--prepare-shaders`.
+**The first scene now passes 16 GB of footprint** (peak 17.7 GB; the default limit stopped the first baseline run 4 s into the scene):
+use `settings={"memory.limit_gb": 24}` with `load_state`. **Baseline `workunase_1`** (exe from 8d7d56e, RTX 4080, alone):
+scene at 42 s, 21 s / 14 s / 10 s render-thread stalls on pipeline creation first (54 pipelines over 1 s, up to 44 s, mesh and gmem
+programs), then 12-15 fps (one 10 s window 21.5), no device loss; shots `shot_2_t170` .. `shot_5_t283`: Deku Tree, roots and textures
+right, background trees dark-blue silhouettes (A15), white blobs on water/stones and over the tree's face (A14), no green blocks seen.
+Capture of this build and cache: `work\captures61107-193137-base_1-base`. Pitfall: when a `screenshot` call times out during a
+stall, the MCP server marks the pid as never answering and later calls fall back to PrintWindow (black); write
+`<instance folder>\screenshot.<pid>` (one line: the PNG path) yourself or restart the server.
+The cache the merge was tested with was removed with worktree quirky-panini-7286ba; kept from it: the frame capture
 `work\captures\20261107-144949-a10-deku` (first scene, format 3, readable by the merged exe) and the code dump of the culling root in
 `work\dumps\code` (4c1e8564 is a block from `main`, not in the corpus). Windows Defender quarantined corpus block
 `5747cdd7457ef048.bin` as a false positive (user's decision; batch translations need a `unique.tsv` without it until then).
