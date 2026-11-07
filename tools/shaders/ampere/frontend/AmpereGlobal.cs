@@ -163,6 +163,38 @@ namespace Ryujinx.Graphics.Shader.Translation
             Operand pLo = c.IAdd(dLo, offLo);
             Operand pHi = c.IAdd(dHi, Carry(c, pLo, dLo));
 
+            // Atomics other than add, exchange and compare-and-swap as a compare-and-swap loop. The device address points into a game memory
+            // pool, which is host memory imported into Vulkan, and a GPU atomic on system memory is a PCIe atomic operation: PCIe has only
+            // fetch-add, swap and compare-and-swap, so min/max/and/or/xor there did nothing. Seen in OoT's culling 4c1e8564: its RED.E.MAX
+            // of each indirect dispatch record's work-group count left x at 0 (every GPU-culled dispatch and mesh draw empty) while the
+            // counts' atomic adds next to it landed; as a CAS loop the records get 65, 66, 1, 20 (capture deku150).
+            Func<Operand, Operand, Operand> combine = baseInst switch
+            {
+                IrInstruction.AtomicMaxU32 => c.IMaximumU32,
+                IrInstruction.AtomicMaxS32 => c.IMaximumS32,
+                IrInstruction.AtomicMinU32 => c.IMinimumU32,
+                IrInstruction.AtomicMinS32 => c.IMinimumS32,
+                IrInstruction.AtomicAnd => c.BitwiseAnd,
+                IrInstruction.AtomicOr => c.BitwiseOr,
+                IrInstruction.AtomicXor => c.BitwiseExclusiveOr,
+                _ => null,
+            };
+            if (combine != null && inArguments == 3)
+            {
+                Operand casLoop = Label();
+                c.MarkLabel(casLoop);
+                Operand before = LoadDevice(c, pLo, pHi);   // loaded again in every round: IR locals are single-assignment
+                Operand want = combine(before, Argument(2));
+                Operand seen = Local();
+                Operation cas = new(IrInstruction.AtomicCompareAndSwap, StorageKind.GlobalMemory, seen, pLo, pHi, before, want);
+                (_deviceOps ??= new HashSet<Operation>()).Add(cas);
+                c.Add(cas);
+                c.BranchIfTrue(casLoop, c.ICompareNotEqual(seen, before));
+                if (returnsValue) c.Return(before); else c.Return();
+                c.MarkLabel(skip);
+                return;
+            }
+
             Operand dest = returnsValue ? Local() : null;
             Operand[] sources = inArguments switch
             {
