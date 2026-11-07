@@ -9,7 +9,7 @@
 //  2. Our own (Lichii has nothing for it): when no bound buffer holds the address (pointers read from memory or uniform tables, e.g. the
 //     culling root 4c1e8564's counters), it is looked up in the runtime's pool address table: every imported game memory range as
 //     {guest address, size, device address} (32-byte entries sorted by guest address; c[0] 0xff8 holds the table's device address, 0xff0
-//     the entry count; nvn_replay.cpp pool_table_words). A 12-step binary search (no loop: 4096 entries at most) finds the range, and the
+//     the entry count; nvn_replay.cpp pool_table_words). A binary search of SearchSteps steps finds the range, and the
 //     access goes through a PhysicalStorageBuffer pointer to device address + (address - guest base). Nothing found still reads 0.
 //     Such accesses stay StorageKind.GlobalMemory operations; the SPIR-V back end turns them into pointer accesses (DevicePointer) and the
 //     module gets PhysicalStorageBufferAddresses / PhysicalStorageBuffer64 (Declare). Only 32-bit accesses (64/128-bit ones are split into
@@ -36,7 +36,10 @@ namespace Ryujinx.Graphics.Shader.Translation
         [ThreadStatic] static HashSet<Operation> _deviceOps;
 
         public const int PoolTableC0 = 0xff8;   // u64 device address of the pool address table; the u32 entry count at PoolTableC0 - 8
-        const int SearchSteps = 12;             // 4096 entries at most
+        // 65536 entries at most (a loop, so steps are cheap). It was 12 (4096): the first scene of OoT imports 4,000-4,600 ranges, and with
+        // more than 4096 the entries past the 4096th could not be found, so every access to them read 0 (the GPU culling 4c1e8564 then
+        // accepted nothing: capture 141109, 4,595 entries; capture deku150, 3,968, counted).
+        public const int SearchSteps = 16;
 
         /// c[0] word offsets of the storage descriptors to check (null or empty: the access is dropped as before). Resets the flags.
         public static void Begin(int[] candidateWords)

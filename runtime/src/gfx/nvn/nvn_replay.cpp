@@ -1557,6 +1557,9 @@ void pool_table_words(uint8_t* c0) {
         count = 0;
         static std::vector<PoolAddress> table;
         pool_address_table(table);
+        // the shaders' search covers 2^16 entries (AmpereGlobal.SearchSteps); past that, accesses to the last ranges would read 0
+        if (table.size() > 65536 && first_time_key("pool-table-size"))
+            NXLOG_W(kTag, "pool address table has %zu entries, the shaders search 65536: global accesses to the last ranges read 0", table.size());
         if (!table.empty()) {
             UploadAlloc u = F->upload(32ull * table.size(), 32);
             if (u) {
