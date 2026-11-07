@@ -48,8 +48,9 @@
     <!-- Structurizer check hooks (NXRT_HARNESS_CFG_CHECK, off by default): StructuredCfgCheck.cs. -->
     <ShaderPatch Include="structured-program-cfg-check.patch" File="StructuredIr/StructuredProgram.cs" />
     <ShaderPatch Include="structured-context-node-blocks.patch" File="StructuredIr/StructuredProgramContext.cs" />
-    <!-- Task/mesh programs (AmpereMesh.cs): end-of-program epilogue at the return of main, task payload pointers. -->
-    <ShaderPatch Include="ampere-mesh-instructions.patch" File="CodeGen/Spirv/Instructions.cs" />
+    <!-- Task/mesh programs (AmpereMesh.cs): end-of-program epilogue at the return of main, task payload pointers.
+         Then: float Clamp/Min/Max as NClamp/NMin/NMax (FMNMX / .SAT NaN semantics); same file, applied after it. -->
+    <ShaderPatch Include="ampere-mesh-instructions.patch" File="CodeGen/Spirv/Instructions.cs" Then="spirv-nan.patch" />
     <!-- Optimizer.RemoveNode: the dead-use walk stops at calls and atomics, which stay (see the patch header; OoT culling A17). -->
     <ShaderPatch Include="optimizer-remove-node-side-effects.patch" File="Translation/Optimizations/Optimizer.cs" />
     <!-- Shared small-integer stores: the CAS loop keeps the word an integer (see the patch header; OoT mesh programs). -->
@@ -85,19 +86,24 @@
   </ItemGroup>
 
   <Target Name="ApplyShaderPatches" BeforeTargets="BeforeBuild;CoreCompile"
-          Inputs="@(ShaderPatch);@(ShaderPatch->'$(ShaderSrc)%(File)')"
+          Inputs="@(ShaderPatch);@(ShaderPatch->'%(Then)');@(ShaderPatch->'$(ShaderSrc)%(File)')"
           Outputs="@(ShaderPatch->'$(PatchedDir)%(File)')">
     <MakeDir Directories="@(ShaderPatch->'$(PatchedDir)%(File)'->'%(RootDir)%(Directory)')" />
     <Exec Condition="'$(OS)' != 'Windows_NT'"
           Command="patch --quiet --forward -o &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(ShaderSrc)%(ShaderPatch.File)&quot; &quot;%(ShaderPatch.FullPath)&quot;" />
+    <!-- `Then`: a second patch of the same file, applied to the first one's output. -->
+    <Exec Condition="'$(OS)' != 'Windows_NT' And '%(ShaderPatch.Then)' != ''"
+          Command="patch --quiet --forward &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(MSBuildThisFileDirectory)%(ShaderPatch.Then)&quot;" />
     <!-- Windows has no `patch`: tools/maxwell/apply_patch.py does the same (unified diff, exact hunks, -o).
          Python: the repo's venv if present, else `python` on PATH (override with -p:PatchPython=...). -->
     <PropertyGroup Condition="'$(OS)' == 'Windows_NT' And '$(PatchPython)' == ''">
       <PatchPython Condition="Exists('$(MSBuildThisFileDirectory)../../../.venv/Scripts/python.exe')">$(MSBuildThisFileDirectory)../../../.venv/Scripts/python.exe</PatchPython>
       <PatchPython Condition="'$(PatchPython)' == ''">python</PatchPython>
     </PropertyGroup>
-    <Exec Condition="'$(OS)' == 'Windows_NT'"
+    <Exec Condition="'$(OS)' == 'Windows_NT' And '%(ShaderPatch.Then)' == ''"
           Command="&quot;$(PatchPython)&quot; &quot;$(MSBuildThisFileDirectory)../../scripts/apply_patch.py&quot; --quiet --forward -o &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(ShaderSrc)%(ShaderPatch.File)&quot; &quot;%(ShaderPatch.FullPath)&quot;" />
+    <Exec Condition="'$(OS)' == 'Windows_NT' And '%(ShaderPatch.Then)' != ''"
+          Command="&quot;$(PatchPython)&quot; &quot;$(MSBuildThisFileDirectory)../../scripts/apply_patch.py&quot; --quiet --forward -o &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(ShaderSrc)%(ShaderPatch.File)&quot; &quot;%(ShaderPatch.FullPath)&quot; &quot;$(MSBuildThisFileDirectory)%(ShaderPatch.Then)&quot;" />
   </Target>
 
 </Project>

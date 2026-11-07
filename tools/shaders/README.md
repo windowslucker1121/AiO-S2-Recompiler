@@ -109,7 +109,7 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
 - `StaticGpuAccessor.cs`: the host profile reports no fragment shader interlock, so no module needs `SPV_EXT_fragment_shader_interlock`.
 - `scripts/make_code_corpus.py <corpus> --out <dir> [--verify <results dir>]`: collapses the 67,506-block survey corpus to the 13,016 distinct code blocks, keyed by the first 16 hex digits of sha1(code). `--verify` checks that blocks sharing code gave identical SPIR-V (9,750 groups, 0 differ).
 
-`spirv-nan.patch` is carried from Wonder but not applied (Wonder's published numbers were built without it).
+`spirv-nan.patch` (carried from Wonder) is applied since 2026-11-07: float Clamp/Min/Max become NClamp/NMin/NMax (FMNMX and .SAT drop NaN). It patches the same file as `ampere-mesh-instructions.patch` and is chained after it through the `Then` metadata of that `ShaderPatch` item (`scripts/apply_patch.py` takes several patch files in order).
 
 ## Structurizer: loop exits in goto elimination (OoT A8)
 

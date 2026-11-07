@@ -1,10 +1,10 @@
-Ryujinx shader translator: Maxwell float clamp/min/max drop NaN. .SAT maps NaN to 0 and FMNMX returns the
-non-NaN operand, but Ryujinx emitted GLSL.std.450 FClamp/FMin/FMax, whose NaN result is undefined (SPIRV-Cross
-turns them into Metal fast::clamp/min/max), so NaN reached render targets. Float Clamp/Minimum/Maximum now use
-NClamp/NMin/NMax (MSL precise::clamp/min/max). The IR makes float Clamp only in FPSaturate and float
-Minimum/Maximum only in FMNMX and the unsigned F2I clamp, which want the same semantics. See
-docs/nvn/GLITCH-PLAN.md G9. Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a copy in
-private/build; the checkout in private/third_party stays untouched. The Ryujinx code in the context lines is MIT.
+Ryujinx shader translator: Maxwell/Ampere float clamp/min/max drop NaN. .SAT maps NaN to 0 and FMNMX returns the
+non-NaN operand, but Ryujinx emitted GLSL.std.450 FClamp/FMin/FMax, whose NaN result is undefined, so NaN reached
+render targets. Float Clamp/Minimum/Maximum now use NClamp/NMin/NMax. The IR makes float Clamp only in FPSaturate and
+float Minimum/Maximum only in FMNMX and the unsigned F2I clamp, which want the same semantics. Carried from the
+SuperMarioWonder port (docs/nvn/GLITCH-PLAN.md G9 there). Same file as ampere-mesh-instructions.patch: the csproj
+applies this one to that patch's output (ShaderPatch metadata `Then`); its hunks lie before the mesh hunks, so the
+line numbers are those of upstream. The Ryujinx code in the context lines is MIT.
 --- a/CodeGen/Spirv/Instructions.cs	2026-09-30 07:06:08
 +++ b/CodeGen/Spirv/Instructions.cs	2026-09-30 07:06:19
 @@ -333,7 +333,9 @@

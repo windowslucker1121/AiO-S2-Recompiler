@@ -9,7 +9,10 @@ Used by tools/maxwell/spirv_harness/translator/Ryujinx.Graphics.Shader.csproj on
   - CR/LF differences are ignored when matching (a Windows checkout may give the .patch CRLF line ends), and the
     output keeps the line ends of <in>.
 
-Usage: python tools/maxwell/apply_patch.py [--quiet] [--forward] -o <out> <in> <patchfile>
+More than one patch file may follow <in>: they apply in order, each to the result of the one before (the csproj's
+`Then` metadata: two patches of the same upstream file).
+
+Usage: python tools/shaders/scripts/apply_patch.py [--quiet] [--forward] -o <out> <in> <patchfile> [<patchfile>...]
 """
 import re
 import sys
@@ -98,19 +101,20 @@ def main(argv):
             pass
         else:
             args.append(a)
-    if out_path is None or len(args) != 2:
+    if out_path is None or len(args) < 2:
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
         return 2
-    src_path, patch_path = args
+    src_path, patch_paths = args[0], args[1:]
     with open(src_path, encoding="utf-8", newline="") as f:
-        src_text = f.read()
-    with open(patch_path, encoding="utf-8", newline="") as f:
-        patch_text = f.read()
-    try:
-        result = apply(src_text, parse_hunks(patch_text))
-    except ValueError as e:
-        print(f"apply_patch: {patch_path}: {e}", file=sys.stderr)
-        return 1
+        result = f.read()
+    for patch_path in patch_paths:
+        with open(patch_path, encoding="utf-8", newline="") as f:
+            patch_text = f.read()
+        try:
+            result = apply(result, parse_hunks(patch_text))
+        except ValueError as e:
+            print(f"apply_patch: {patch_path}: {e}", file=sys.stderr)
+            return 1
     with open(out_path, "w", encoding="utf-8", newline="") as f:
         f.write(result)
     return 0
