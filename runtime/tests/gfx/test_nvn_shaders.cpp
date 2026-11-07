@@ -102,6 +102,21 @@ NXTEST(harness_numbers_out_of_range) {
     CHECK(!parse_harness_resources("sb[c0+0x100000000]=s0b1", r));
 }
 
+// The global memory flags (A17): "gmem" (run-time resolution), "gpt" (through the guest page table), "gmemw" (it writes that way).
+NXTEST(harness_global_memory_flags) {
+    std::vector<HarnessResource> r;
+    CHECK(parse_harness_resources("cb0=s0b1 gmem gpt gmemw", r));
+    CHECK_EQ(r.size(), size_t(4));
+    ShaderReflection refl;
+    refl.bindings.push_back({});
+    refl.bindings.back().set = 0;
+    refl.bindings.back().binding = 1;
+    apply_harness(refl, r);
+    CHECK(refl.global_fallback);
+    CHECK(refl.global_pt);
+    CHECK(refl.global_writes);
+}
+
 // A texture whose handle the draw computes (translator/ampere-bindless-handle-expr.patch): the expression after '|' (it holds an "x" in
 // "xor", which is not the array length), parsed into a program that leaves one value.
 NXTEST(harness_handle_expression) {

@@ -5,6 +5,7 @@
 // the same pages. Measured on the RTX 3080 and the UHD 770 with MapViewOfFile views: imports work with 4096-byte alignment,
 // and GPU writes are visible through every view of the section.
 #include <algorithm>
+#include <cstring>
 #include <map>
 #include <chrono>
 #include <condition_variable>
@@ -103,15 +104,147 @@ uint64_t import_overlap() { return import_stride() / 4; }
 std::mutex g_addr_mu;
 std::map<uint64_t, std::pair<uint64_t, uint64_t>> g_addr_by_dev;   // device address -> (guest address, size)
 std::atomic<uint64_t> g_addr_gen{0};
+
+// The guest page table (A17; harness side AmpereGlobal.EmitPageWalk): the same imports as one device address per guest page, so a shader's
+// pointer access costs a walk of two or three dependent loads instead of a 16-step binary search over the sorted imports. Three levels:
+// the root has an entry per 1 GiB (2^17 entries: 47-bit addresses), a node below it an entry per 2 MiB, a leaf node one per 4 KiB page.
+// A 2 MiB span that one import holds whole is a leaf in the middle level. Entries: 0 = not mapped, bit 0 = leaf (device address of the
+// span's first byte | 1), else the byte offset of the next node from the table's start. The shaders read the layout from c[0]
+// (page_table_words), so it can change here without re-translating them.
+// The table lives in host-visible memory and is written in place (under g_addr_mu, by the render thread and the background importer), so a
+// mapping added while a submission is recorded is seen when it runs. Entries only go from 0 to a value or back to 0 (a range two imports
+// hold keeps the first one's address), nodes are never freed, and a table that runs out of room is copied into a larger buffer (the old one
+// stays alive: submissions in flight still read it).
+namespace pt {
+constexpr int kShift[3] = {30, 21, 12};
+constexpr uint32_t kRootEntries = 1u << 17;
+constexpr uint64_t kNodeEntries = 512;
+constexpr uint64_t kRootBytes = uint64_t{kRootEntries} * 8;
+constexpr uint64_t kNodeBytes = kNodeEntries * 8;
+constexpr uint64_t kSpan1 = uint64_t{1} << kShift[1], kPage = uint64_t{1} << kShift[2];
+gfx::Buffer g_buf;
+std::vector<gfx::Buffer> g_retired;
+uint64_t g_bytes = 0, g_used = 0, g_dev = 0;
+bool g_failed = false;
+std::atomic<uint64_t> g_dev_pub{0};
+std::atomic<uint64_t> g_pages{0}, g_spans{0};   // statistics: page and 2 MiB leaves set
+
+uint64_t* words() { return static_cast<uint64_t*>(g_buf.mapped); }
+void put(uint64_t entry_off, uint64_t v) { reinterpret_cast<std::atomic<uint64_t>*>(words())[entry_off / 8].store(v, std::memory_order_release); }
+
+bool grow(uint64_t need) {
+    if (g_failed) return false;
+    gfx::Device& d = device();
+    if (!d.features().buffer_device_address) { g_failed = true; return false; }
+    uint64_t bytes = g_bytes ? g_bytes * 2 : (32ull << 20);
+    while (bytes < need) bytes *= 2;
+    gfx::Buffer nb;
+    if (d.create_buffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, gfx::MemoryUse::Upload, &nb, "nvn guest page table") != VK_SUCCESS ||
+        !nb.mapped) {
+        g_failed = true;
+        NXLOG_W(kTag, "guest page table: no buffer of %llu MiB: global memory accesses past the current table read 0", static_cast<unsigned long long>(bytes >> 20));
+        return false;
+    }
+    std::memset(nb.mapped, 0, bytes);
+    if (g_buf.buffer) {
+        std::memcpy(nb.mapped, g_buf.mapped, g_used);
+        g_retired.push_back(g_buf);   // submissions in flight read it (a few MiB; kept until exit)
+    }
+    g_buf = nb;
+    g_bytes = bytes;
+    if (!g_used) g_used = kRootBytes;
+    g_dev = d.buffer_address(g_buf.buffer);
+    g_dev_pub.store(g_dev, std::memory_order_release);
+    NXLOG_I(kTag, "guest page table: %llu MiB at device address 0x%llx (%llu KiB used)", static_cast<unsigned long long>(bytes >> 20),
+            static_cast<unsigned long long>(g_dev), static_cast<unsigned long long>(g_used >> 10));
+    return g_dev != 0;
+}
+
+// The node the entry at byte offset entry_off points at, made when `make` and the entry is 0. 0: none (or the entry is a leaf).
+uint64_t child(uint64_t entry_off, bool make) {
+    const uint64_t e = words()[entry_off / 8];
+    if (e & 1) return 0;
+    if (e || !make) return e;
+    if (g_used + kNodeBytes > g_bytes && !grow(g_used + kNodeBytes)) return 0;
+    const uint64_t n = g_used;
+    g_used += kNodeBytes;
+    put(entry_off, n);
+    return n;
+}
+
+// Maps the pages of [guest, guest + size) that lie inside [lo, hi) and are not mapped yet to dev + (page - guest).
+void map(uint64_t guest, uint64_t size, uint64_t dev, uint64_t lo, uint64_t hi) {
+    if (!g_buf.buffer && !grow(0)) return;
+    uint64_t cur = (std::max(guest, lo) + kPage - 1) & ~(kPage - 1);
+    const uint64_t end = std::min(guest + size, hi) & ~(kPage - 1);
+    while (cur < end) {
+        const uint64_t ri = cur >> kShift[0];
+        if (ri >= kRootEntries) return;
+        const uint64_t n1 = child(ri * 8, true);
+        if (!n1) return;
+        const uint64_t e1 = n1 + ((cur >> kShift[1]) & (kNodeEntries - 1)) * 8;
+        const uint64_t span_end = (cur | (kSpan1 - 1)) + 1;
+        const uint64_t v1 = words()[e1 / 8];
+        if (v1 & 1) { cur = span_end; continue; }          // a 2 MiB leaf of another import holds it all
+        if (!v1 && (cur & (kSpan1 - 1)) == 0 && cur + kSpan1 <= end) {
+            put(e1, (dev + (cur - guest)) | 1);
+            g_spans.fetch_add(1, std::memory_order_relaxed);
+            cur = span_end;
+            continue;
+        }
+        const uint64_t n2 = child(e1, true);
+        if (!n2) return;
+        const uint64_t stop = std::min(span_end, end);
+        for (; cur < stop; cur += kPage) {
+            const uint64_t e2 = n2 + ((cur >> kShift[2]) & (kNodeEntries - 1)) * 8;
+            if (!words()[e2 / 8]) { put(e2, (dev + (cur - guest)) | 1); g_pages.fetch_add(1, std::memory_order_relaxed); }
+        }
+    }
+}
+
+// Clears the entries of [guest, guest + size) that point into [dev, dev + size).
+void unmap(uint64_t guest, uint64_t size, uint64_t dev) {
+    if (!g_buf.buffer) return;
+    auto mine = [&](uint64_t v) { const uint64_t a = v & ~uint64_t{1}; return (v & 1) && a >= dev && a < dev + size; };
+    uint64_t cur = guest & ~(kPage - 1);
+    const uint64_t end = guest + size;
+    while (cur < end) {
+        const uint64_t ri = cur >> kShift[0];
+        if (ri >= kRootEntries) return;
+        const uint64_t n1 = child(ri * 8, false);
+        if (!n1) { cur = (ri + 1) << kShift[0]; continue; }
+        const uint64_t e1 = n1 + ((cur >> kShift[1]) & (kNodeEntries - 1)) * 8;
+        const uint64_t span_end = (cur | (kSpan1 - 1)) + 1;
+        const uint64_t v1 = words()[e1 / 8];
+        if (v1 & 1) { if (mine(v1)) put(e1, 0); cur = span_end; continue; }
+        if (!v1) { cur = span_end; continue; }
+        const uint64_t stop = std::min(span_end, end);
+        for (; cur < stop; cur += kPage) {
+            const uint64_t e2 = v1 + ((cur >> kShift[2]) & (kNodeEntries - 1)) * 8;
+            if (mine(words()[e2 / 8])) put(e2, 0);
+        }
+    }
+}
+}  // namespace pt
+
 void address_table_add(uint64_t guest, uint64_t size, uint64_t dev) {
     if (!dev) return;
     std::lock_guard<std::mutex> lk(g_addr_mu);
     g_addr_by_dev[dev] = {guest, size};
+    pt::map(guest, size, dev, 0, UINT64_MAX);
     g_addr_gen.fetch_add(1);
 }
 void address_table_remove(uint64_t dev) {
     std::lock_guard<std::mutex> lk(g_addr_mu);
-    g_addr_by_dev.erase(dev);
+    auto it = g_addr_by_dev.find(dev);
+    if (it != g_addr_by_dev.end()) {
+        const uint64_t guest = it->second.first, size = it->second.second;
+        g_addr_by_dev.erase(it);
+        pt::unmap(guest, size, dev);
+        // what other imports hold of the range (overlapping chunks of a pool, spans) is theirs again
+        for (const auto& [d2, gs] : g_addr_by_dev)
+            if (gs.first < guest + size && guest < gs.first + gs.second) pt::map(gs.first, gs.second, d2, guest, guest + size);
+    }
     g_addr_gen.fetch_add(1);
 }
 
@@ -368,6 +501,14 @@ void prefetch_pool(MemoryPool* p) {
 }
 
 uint64_t pool_address_table_generation() { return g_addr_gen.load(); }
+bool page_table_words(uint32_t* shifts, uint32_t* root_entries, uint64_t* address) {
+    const uint64_t a = pt::g_dev_pub.load(std::memory_order_acquire);
+    *shifts = static_cast<uint32_t>(pt::kShift[0]) | static_cast<uint32_t>(pt::kShift[1]) << 8 | static_cast<uint32_t>(pt::kShift[2]) << 16;
+    *root_entries = a ? pt::kRootEntries : 0;
+    *address = a;
+    return a != 0;
+}
+void page_table_stats(uint64_t* spans, uint64_t* pages) { *spans = pt::g_spans.load(); *pages = pt::g_pages.load(); }
 size_t pool_address_table(std::vector<PoolAddress>& out) {
     out.clear();
     {
@@ -1509,7 +1650,8 @@ void out_log() {
             (unsigned long long)(held_bytes >> 10), (unsigned long long)(nd - pn_def), (unsigned long long)(nr - pn_read), (unsigned long long)(ng - pn_ng));
     static uint64_t pw_b[kOutWhyCount] = {}, pw_n[kOutWhyCount] = {};
     static const char* const kWhyName[kOutWhyCount] = {"reader", "submit end", "copies off", "dispatch", "draw vertex/index/uniform", "draw storage/xfb",
-                                                       "indirect", "buffer write", "buffer read", "texture upload", "event", "other"};
+                                                       "indirect", "buffer write", "buffer read", "texture upload", "event", "other",
+                                                       "global memory"};
     std::string why;
     for (int w = 0; w < kOutWhyCount; ++w) {
         const uint64_t b = g_why_bytes[w].load(), n = g_why_n[w].load();

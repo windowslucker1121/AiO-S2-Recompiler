@@ -683,6 +683,18 @@ bool parse_harness_resources(std::string_view text, std::vector<HarnessResource>
             out.push_back(std::move(g));
             continue;
         }
+        if (tok == "gmemw") {  // a flag: stores or atomics go through the page table (ShaderReflection::global_writes)
+            HarnessResource g;
+            g.kind = HarnessResource::GlobalWrites;
+            out.push_back(std::move(g));
+            continue;
+        }
+        if (tok == "gpt") {    // a flag too: the fallback walks the guest page table (ShaderReflection::global_pt)
+            HarnessResource g;
+            g.kind = HarnessResource::GlobalPageTable;
+            out.push_back(std::move(g));
+            continue;
+        }
         // "...=s<set>b<binding>"
         size_t eq = tok.rfind('=');
         if (eq == std::string_view::npos || eq + 1 >= tok.size() || tok[eq + 1] != 's') return false;
@@ -822,6 +834,14 @@ bool apply_harness(ShaderReflection& refl, const std::vector<HarnessResource>& r
     for (const HarnessResource& r : resources) {
         if (r.kind == HarnessResource::GlobalFallback) {
             refl.global_fallback = true;
+            continue;
+        }
+        if (r.kind == HarnessResource::GlobalWrites) {
+            refl.global_writes = true;
+            continue;
+        }
+        if (r.kind == HarnessResource::GlobalPageTable) {
+            refl.global_pt = true;
             continue;
         }
         DescriptorBinding* b = nullptr;

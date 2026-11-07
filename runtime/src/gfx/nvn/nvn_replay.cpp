@@ -1258,6 +1258,94 @@ BufRef held_or_pool(uint64_t addr, uint64_t size, int why, bool flush) {
     return resolve_buffer(addr, size);
 }
 
+// ---- global memory (A17): coherence of shaders that reach the pools through pointers -------------------------------------------
+// Shaders with the harness's "gmem" token resolve some of their memory accesses at run time through the guest page table, whose device
+// addresses point at the imported pools themselves, not at the device-local pool copies (Mirror) or compute shadows the replay binds
+// for ordinary storage buffers. What such a shader reaches is not known on the CPU; its pointers come from its uniform blocks (OoT's GPU
+// culling 4c1e8564: c[4][i * 16 + 0xe0] and +0x80/+0xa0), so every 64-bit word of the stage's bound uniform blocks that points into an
+// imported pool stands for kGmemWindow bytes from its page on:
+//  (a) before such a shader runs (dispatch or draw of any stage), compute results held only in a pool copy there go back to the pool (it
+//      may read them, and a later copy-back would overwrite what it writes there);
+//  (b) after a shader that stores or does atomics that way ("gmemw"), those ranges count as written (gpu_wrote: pool copy pages, the
+//      GPU-write ring, the capture's list).
+// A write further from such a pointer, or through a pointer read from memory, is missed (gap "gmem ranges assumed from uniform pointers").
+// Flushing every held result before each pointer shader instead cost 900 MB/s of copy-backs (7 fps in the first scene, 2026-11-07).
+// [nvn] gmem_coherence = false turns both off.
+constexpr uint64_t kGmemWindow = 64 * 1024;
+constexpr uint64_t kGmemUboScanWrite = 4096;   // bytes of each uniform block searched for pointers: writers
+constexpr uint64_t kGmemUboScanRead = 1024;    // readers (thousands of vertex shaders per frame)
+constexpr int kGmemMaxPointers = 128;          // per op
+uint64_t g_gmem_flushes = 0, g_gmem_windows = 0;
+
+bool gmem_coherence_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "gmem_coherence", true);
+    return on;
+}
+
+bool host_readable(uint64_t addr, uint64_t n);   // below
+
+void gmem_before_op(bool compute) {
+    if (!gmem_coherence_on()) return;
+    bool any = false, writes = false;
+    for (int st = 0; st < kStages; ++st) {
+        if ((st == kCompute) != compute) continue;
+        const ShaderInfo* s = S.stage[st];
+        if (!s || !s->refl.global_fallback) continue;
+        any = true;
+        writes |= s->refl.global_writes;
+    }
+    const bool held = out_any();
+    if (!any || (!writes && !held)) return;
+    uint64_t seen[kGmemMaxPointers];
+    int n = 0;
+    bool full = false;
+    for (int st = 0; st < kStages && !full; ++st) {
+        if ((st == kCompute) != compute) continue;
+        const ShaderInfo* s = S.stage[st];
+        if (!s || !s->refl.global_fallback) continue;
+        const bool w_st = s->refl.global_writes;
+        for (int k = 0; k < 16 && !full; ++k) {
+            const GState::Bind& b = S.ubo[st][k];
+            if (!b.addr) continue;
+            const uint64_t len = std::min<uint64_t>(b.size ? b.size : 65536, w_st ? kGmemUboScanWrite : kGmemUboScanRead) & ~uint64_t{7};
+            if (!len || !host_readable(b.addr, len)) continue;
+            const uint8_t* w = static_cast<const uint8_t*>(host_ptr(b.addr));
+            for (uint64_t o = 0; o < len; o += 8) {
+                uint64_t v;
+                std::memcpy(&v, w + o, 8);
+                if (v < 0x10000 || (v >> 47)) continue;
+                const uint64_t page = v & ~uint64_t{4095};
+                bool dup = false;
+                for (int i = 0; i < n && !dup; ++i) dup = seen[i] == page;
+                if (dup) continue;
+                if (!w_st) {   // a reader: only results held there matter
+                    if (out_overlaps(page, kGmemWindow)) {
+                        if (n == kGmemMaxPointers) { full = true; break; }
+                        seen[n++] = page;
+                        compute_out_guard(page, kGmemWindow, kOutGlobal);
+                        ++g_gmem_flushes;
+                    }
+                    continue;
+                }
+                const PoolHit hit = pool_lookup(v);
+                if (!hit.pool || hit.pool->is_virtual || !hit.pool->base) continue;
+                if (n == kGmemMaxPointers) { full = true; break; }
+                seen[n++] = page;
+                const uint64_t end = std::min<uint64_t>(page + kGmemWindow, reinterpret_cast<uint64_t>(hit.pool->base) + hit.pool->size);
+                if (end > page) {
+                    if (out_overlaps(page, end - page)) { compute_out_guard(page, end - page, kOutGlobal); ++g_gmem_flushes; }
+                    gpu_wrote(page, end - page, kWriteStorage);
+                    ++g_gmem_windows;
+                }
+            }
+        }
+    }
+    if (writes) {
+        const ShaderInfo* s0 = S.stage[compute ? kCompute : kFragment];
+        nxrt::gap("gmem", "global memory writes: ranges assumed from uniform pointers", s0 ? s0->hash : std::string("?"));
+    }
+}
+
 // The reads of a draw's bound buffers (out_before_op).
 void out_draw_bindings() {
     for (const GState::Bind& b : S.vtx) out_draw_read(b.addr, b.size, true, kOutDrawBuffer);
@@ -1497,6 +1585,10 @@ void shadows_after_dispatch() {
                 (unsigned long long)(g_sh_bytes_pool >> 20), (unsigned long long)(g_sh_bytes_out >> 20), (unsigned long long)g_sh_direct,
                 (unsigned long long)g_sh_direct_filled, (unsigned long long)(g_sh_bytes_fill >> 20), (unsigned long long)(out_bytes_total() >> 20),
                 (unsigned long long)g_sh_flushes, (unsigned long long)g_sh_merged);
+        uint64_t spans = 0, pages = 0;
+        page_table_stats(&spans, &pages);
+        NXLOG_I("nvn.replay", "global memory: %llu held-result flushes for pointer shaders, %llu write windows marked; page table %llu spans of 2 MiB, %llu pages",
+                (unsigned long long)g_gmem_flushes, (unsigned long long)g_gmem_windows, (unsigned long long)spans, (unsigned long long)pages);
         for (auto it = g_shadows.begin(); it != g_shadows.end();) {
             if (F->serial - it->second.last > 600) {
                 gfx::Buffer old = it->second.buf;
@@ -1544,7 +1636,18 @@ VkDescriptorBufferInfo g_c0_made = {};   // the c[0] header compute_c0 made for 
 // address, in the upload ring, remade when the frame or the set of imports changes. Shaders that resolve global memory at run time find its
 // device address in c[0] at kPoolTableC0 (u64) and the entry count at kPoolTableC0 - 8 (written by graphics_c0 and fill_compute_c0).
 constexpr size_t kPoolTableC0 = 0xff8;
-void pool_table_words(uint8_t* c0) {
+// The guest page table (nvn_gpu_pool.cpp page_table_words; AmpereGlobal.EmitPageWalk), for shaders with the "gpt" token: c[0] 0xfe0 the level
+// shifts, 0xfe4 the root entry count, 0xfe8 the table's device address. The sorted import table above only for older translations (no "gpt").
+constexpr size_t kPageTableC0 = 0xfe0;
+void pool_table_words(uint8_t* c0, bool old_table) {
+    {
+        uint32_t w[2] = {0, 0};
+        uint64_t a = 0;
+        page_table_words(&w[0], &w[1], &a);
+        std::memcpy(c0 + kPageTableC0, w, 8);
+        std::memcpy(c0 + kPageTableC0 + 8, &a, 8);
+    }
+    if (!old_table) return;
     static Frame* frame = nullptr;
     static uint64_t gen = ~0ull, addr = 0;
     static uint32_t count = 0;
@@ -1577,7 +1680,7 @@ void pool_table_words(uint8_t* c0) {
 }
 
 constexpr VkDeviceSize kComputeC0Bytes = 0x1000;
-bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n) {
+bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_table = true) {
     if (!c.nvn2 || c.stage != 5 || c.c0_table > n) return false;
     std::memset(p, 0, n);
     std::memcpy(p + 4, g_dispatch_groups, 12);
@@ -1594,7 +1697,7 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n) {
     for (int i = 0; i < c.c0_ssbos; ++i) desc(i < 16 ? &S.ssbo[kCompute][i] : nullptr);
     for (int i = 0; i < c.c0_textures; ++i, off += 8) put64(i < 64 ? S.tex[kCompute][i] : 0);
     for (int i = 0; i < c.c0_images; ++i, off += 8) put64(i < 16 ? S.img[kCompute][i] : 0);
-    if (n >= kPoolTableC0 + 8 && off <= kPoolTableC0 - 8) pool_table_words(p);
+    if (n >= kPoolTableC0 + 8 && off <= kPageTableC0) pool_table_words(p, old_table);
     return true;
 }
 // c[0] of a graphics draw whose shader resolves global memory at run time (ShaderReflection::global_fallback, A17): the static driver constants
@@ -1602,7 +1705,7 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n) {
 // where the NVN driver keeps them (0x110 + 0x100 * hardware stage + 0x10 * slot; task 0x650, mesh 0x750; storage_slot_for). 4 KiB per descriptor
 // set built for such a shader; other draws keep the shared static buffer.
 constexpr VkDeviceSize kGraphicsC0Bytes = 0x1000;
-bool graphics_c0(VkDescriptorBufferInfo& bi) {
+bool graphics_c0(VkDescriptorBufferInfo& bi, bool old_table) {
     const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
     UploadAlloc u = F->upload(kGraphicsC0Bytes, std::max<VkDeviceSize>(align, 256));
     if (!u) return false;
@@ -1620,7 +1723,7 @@ bool graphics_c0(VkDescriptorBufferInfo& bi) {
             std::memcpy(u.ptr + base + 0x10 * k + 8, &size, 4);
         }
     }
-    pool_table_words(u.ptr);
+    pool_table_words(u.ptr, old_table);
     bi = {u.buffer, u.offset, kGraphicsC0Bytes};
     return true;
 }
@@ -1629,7 +1732,7 @@ bool compute_c0(const ShaderInfo& s, VkDescriptorBufferInfo& bi) {
     if (!s.control.nvn2 || s.control.stage != 5) return false;
     const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
     UploadAlloc u = F->upload(kComputeC0Bytes, std::max<VkDeviceSize>(align, 256));
-    if (!u || !fill_compute_c0(s.control, u.ptr, static_cast<size_t>(kComputeC0Bytes))) return false;
+    if (!u || !fill_compute_c0(s.control, u.ptr, static_cast<size_t>(kComputeC0Bytes), s.refl.global_fallback && !s.refl.global_pt)) return false;
     bi = {u.buffer, u.offset, kComputeC0Bytes};
     g_c0_made = bi;   // do_dispatch: an indirect dispatch's GPU-written counts are copied into words 1-3 of this header
     return true;
@@ -1663,7 +1766,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                     break;
                 case NvnSource::DriverConstants: {
                     if (d.nvn_stage == kCompute && compute_c0(*d.shader, bi)) break;   // a compute table with push constants: built for this dispatch
-                    if (d.nvn_stage != kCompute && d.shader->refl.global_fallback && graphics_c0(bi)) break;   // storage descriptors for the A17 fallback
+                    if (d.nvn_stage != kCompute && d.shader->refl.global_fallback && graphics_c0(bi, !d.shader->refl.global_pt)) break;   // storage descriptors for the A17 fallback
                     VkDeviceSize range = 0;
                     VkBuffer buf = driver_constants_buffer(&range);
                     if (buf) bi = {buf, 0, range};
@@ -2423,6 +2526,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (!S.render_enable) return false;
     ++g_draw_idx;
     if (S.stage[kFragment] && skip_fs_draw(S.stage[kFragment]->hash)) return false;
+    gmem_before_op(false);   // A17: held results back, ranges its pointers name written
     upscaler_note_draw(S.stage[kFragment]);   // [nvn] upscaler_dst = fs:...: where the replaced upscaler writes
     {   // [nvn] trace_fs_draws = PREFIX (NXRT_NVN_TRACE_FS_DRAWS): trace the draws with this fragment shader where they happen, in any frame, at
         // most [nvn] trace_fs_draws_max (default 8): the bindings and uniform words of a draw that takes the GPU down in the frame it first appears in.
@@ -3303,6 +3407,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
             }
     prepare_textures(*pl);
     end_pass();
+    gmem_before_op(true);   // A17: held results back, ranges its pointers name written
     if (g_trace) {   // the compute bindings: buffers (source, slot, address), texel buffers and textures, and the first words of each uniform block
         for (const BindingDesc& d : pl->bindings) {
             const DescriptorBinding& b = d.shader->refl.bindings[d.index];
@@ -3398,8 +3503,19 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
                 const std::string item = spec.substr(p, e - p);
                 p = e + 1;
                 const size_t plus = item.find('+');
-                const uint64_t a = std::strtoull(item.c_str(), nullptr, 16);
+                uint64_t a = std::strtoull(item.c_str(), nullptr, 16);
                 const uint64_t sz = plus != std::string::npos ? std::strtoull(item.c_str() + plus + 1, nullptr, 0) : 256;
+                // "u<slot>@<hex offset>": the range starts at the 64-bit pointer stored in compute uniform block <slot> at that offset (as the CPU
+                // holds it when the dispatch is recorded): game addresses of GPU records change from run to run, their pointer tables do not
+                if (item.size() > 2 && item[0] == 'u' && item.find('@') != std::string::npos) {
+                    const int slot = std::atoi(item.c_str() + 1) & 15;
+                    const uint64_t off = std::strtoull(item.c_str() + item.find('@') + 1, nullptr, 16);
+                    const GState::Bind& ub = S.ubo[kCompute][slot];
+                    a = 0;
+                    if (ub.addr && off + 8 <= ub.size && host_readable(ub.addr + off, 8)) std::memcpy(&a, host_ptr(ub.addr + off), 8);
+                    TRACE("    snap after %s: %s -> %llx", cs->hash.c_str(), item.c_str(), static_cast<unsigned long long>(a));
+                    if (!a) continue;
+                }
                 const BufRef br = resolve_buffer(a, sz);
                 TRACE("    snap after %s: %llx+%llu %s", cs->hash.c_str(), static_cast<unsigned long long>(a), static_cast<unsigned long long>(sz),
                       br.ok ? "in a pool" : "IN NO POOL");

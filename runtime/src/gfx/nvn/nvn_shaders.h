@@ -177,6 +177,11 @@ struct ShaderReflection {
     // The harness's "gmem" token: global memory accesses resolved at run time against the stage's c[0] storage descriptors (A17,
     // tools/shaders/ampere/frontend/AmpereGlobal.cs): graphics stages then get a c[0] with those descriptors per draw (graphics_c0).
     bool global_fallback = false;
+    // The harness's "gpt" token: those accesses walk the guest page table (c[0] 0xfe0; nvn_replay.cpp pool_table_words). Without it (older
+    // translations) they binary-search the sorted import table at c[0] 0xff0/0xff8.
+    bool global_pt = false;
+    // The harness's "gmemw" token: some store or atomic goes through the page table (nvn_replay.cpp gmem_before_op).
+    bool global_writes = false;
 
     const DescriptorBinding* find(uint32_t set, uint32_t binding) const;
     // Vertex: the attribute locations the shader reads. Fragment: the render targets it writes.
@@ -197,7 +202,7 @@ bool reflect_spirv(const uint32_t* words, size_t count, ShaderReflection& out, s
 //   img<type>[c<slot>:<word>(x<n>)]=s<set>b<binding>  image, likewise
 
 struct HarnessResource {
-    enum Kind : uint8_t { Uniform, Storage, Texture, Image, GlobalFallback } kind = Uniform;   // GlobalFallback: the "gmem" token
+    enum Kind : uint8_t { Uniform, Storage, Texture, Image, GlobalFallback, GlobalPageTable, GlobalWrites } kind = Uniform;   // GlobalFallback: the "gmem" token
     int set = -1, binding = -1;
     int bank = -1;           // c[bank] as printed (-1 = the default texture bank)
     int word = -1;           // storage: descriptor word in c[bank]; texture/image: handle word

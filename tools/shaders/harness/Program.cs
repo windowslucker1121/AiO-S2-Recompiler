@@ -291,6 +291,8 @@ namespace SpirvHarness
                         r.Status = spv == null ? "no-output" : attempt == 1 ? "ok" : "ok-retry";
                         r.Resources = DescribeResources(sp.Info, gpu);
                         if (AmpereGlobal.Used) r.Resources += (r.Resources.Length > 0 ? " " : "") + "gmem";   // the runtime fills this stage's c[0] storage descriptors per draw
+                        if (AmpereGlobal.UsedDeviceAddress) r.Resources += " gpt";
+                        if (AmpereGlobal.UsedWrite) r.Resources += " gmemw";   // stores/atomics through it (nvn_replay.cpp gmem_before_op)   // and the guest page table words (c[0] 0xfe0, AmpereGlobal.EmitPageWalk)
                         if (refl != null) lock (gpu.Messages) gpu.Messages.AddRange(refl.Check(nvnStage, sp.Info));
                     }
                 }

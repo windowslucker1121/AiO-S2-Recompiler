@@ -133,6 +133,10 @@ uint64_t physical_buffer_address(uint64_t gpu_address, uint64_t size);
 struct PoolAddress { uint64_t guest, size, dev; };
 size_t pool_address_table(std::vector<PoolAddress>& out);
 uint64_t pool_address_table_generation();
+// The guest page table of the same imports (nvn_gpu_pool.cpp; AmpereGlobal.EmitPageWalk): level shifts (one byte each from the root),
+// root entry count and device address, as the shaders find them in c[0] 0xfe0. False when there is none (no buffer device address).
+bool page_table_words(uint32_t* shifts, uint32_t* root_entries, uint64_t* address);
+void page_table_stats(uint64_t* spans, uint64_t* pages);
 VkBuffer dummy_buffer();
 // The last 32 bytes of the dummy buffer hold the default of an unset vertex attribute: float (0,0,0,1) and integer (0,0,0,1).
 constexpr VkDeviceSize kDummyAttrFloatOffset = 65504, kDummyAttrIntOffset = 65520;
@@ -197,6 +201,7 @@ enum OutWhy {
     kOutTexture,            // a texture upload reading a held result
     kOutEvent,              // an event signal over a held result
     kOutOther,              // anything else (feedback begin/end, ops without an address)
+    kOutGlobal,             // a shader that reaches memory through pointers (A17 page table): it reads and writes the pools themselves
     kOutWhyCount
 };
 // Records into cb (outside any pass) the copy-back of every result sharing a page with [addr, +size) (size UINT64_MAX: all), with the
