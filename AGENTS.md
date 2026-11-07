@@ -106,7 +106,9 @@ translation 2 min 49 s, shader preparation ~80 programs/s (was 34).
 test groups pass (after `ninja -t clean`: four gfx groups segfaulted on stale sccache objects first). **The main shader cache
 `work\shaders\oot\spirv` predates this harness**: re-translate the corpus, drop the rows of blocks not in the corpus (the on-demand
 translator now replaces their stale `.spv`), and prepare again, or the merged code paths (gmem, mesh, task loop cap) stay inactive.
-The tested cache is `.claude\worktrees\quirky-panini-7286ba\work\shaders\mtest\spirv`. Windows Defender quarantined corpus block
+The cache it was tested with was removed with worktree quirky-panini-7286ba; kept from it: the frame capture
+`work\captures\20261107-144949-a10-deku` (first scene, format 3, readable by the merged exe) and the code dump of the culling root in
+`work\dumps\code` (4c1e8564 is a block from `main`, not in the corpus). Windows Defender quarantined corpus block
 `5747cdd7457ef048.bin` as a false positive (user's decision; batch translations need a `unique.tsv` without it until then).
 
 ## Boot progress (`oot.exe --game game\oot\updates\131072 --log work\run\bootN\oot.log --max-seconds 60`)
