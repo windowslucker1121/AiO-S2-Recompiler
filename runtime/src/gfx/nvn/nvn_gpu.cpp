@@ -39,7 +39,7 @@ namespace {
 constexpr const char* kTag = "nvn.gpu";
 constexpr uint32_t kSlots = 36;                  // about three frames of submissions (the game submits ~11 times a frame): with fewer, recording waits on
                                                  // the GPU for a submission of a recent frame and the CPU cannot get frames ahead
-constexpr uint32_t kGpMax = 1024;      // GPU pass profiler: timestamps per submission
+constexpr uint32_t kGpMax = 8192;      // GPU pass profiler: timestamps per submission (the first scene's main submission needs ~3,000)
 constexpr VkDeviceSize kUploadBytes = 8ull << 20;   // per slot; larger uploads get their own staging buffer
 
 // Live-count gauges of this file (leak monitor, nxrt/gauge.h).
@@ -245,10 +245,10 @@ Slot& acquire_slot() {
         }
     }
     if (s.gp_n >= 2 && g->gpool) {      // GPU pass profiler: one event per interval between two timestamps, named gp:<label>, arg = draws
-        uint64_t ts[kGpMax];
+        static thread_local std::vector<uint64_t> ts; ts.resize(kGpMax);
         const uint32_t n = std::min(s.gp_n, kGpMax);
         const uint32_t base = static_cast<uint32_t>(&s - g->slots) * kGpMax;
-        if (vkGetQueryPoolResults(g->dev->device(), g->gpool, base, n, sizeof(uint64_t) * n, ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+        if (vkGetQueryPoolResults(g->dev->device(), g->gpool, base, n, sizeof(uint64_t) * n, ts.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
             static std::map<std::string, uint16_t> zones;
             const double period = g->dev->properties().limits.timestampPeriod;
             uint64_t t = s.cpu_t0;

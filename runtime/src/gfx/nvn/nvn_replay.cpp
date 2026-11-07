@@ -3300,10 +3300,15 @@ void do_copy_texture_texture(const P_CopyTexTex& p);
 // scene: OoT's last scene draw renders into the HDR target the network pass reads). Destination: imgN (a compute image binding) or
 // fs:<hash prefix>:texN = the texture the LAST draw of the previous frame with that fragment shader sampled at binding N (the frame's final
 // composite reads the upscaler's output; earlier draws with the same shader in a frame do not count). Empty upscaler_replace: off.
+// [nvn] upscaler_fallback (OoT default on): the copy stands in only while a pass of the chain cannot run (its pipeline is still building in
+// the background, its shader is waiting for translation or untranslated); once every pass runs, the game's own chain does (A10/A12: the
+// chain gives the sharper, anti-aliased picture at ~2 ms of GPU time on an RTX 4080). The fragment shader's network pipeline fea98fe7 takes
+// 2-3 minutes to build the first time: without the fallback the 3D scene would stay black that long.
 struct UpscalerOverride {
     std::vector<std::string> skip;
     std::string replace, dst_fs;
     bool src_img = false, src_depth_rt = false;
+    bool fallback = false;
     int src = 0, dst = 0;
 };
 
@@ -3340,9 +3345,10 @@ const UpscalerOverride& upscaler_override() {
         } else {
             o.dst = slot(dst, nullptr);
         }
+        o.fallback = nxrt::config_get_bool("nvn", "upscaler_fallback", false);
         if (!o.replace.empty())
-            NXLOG_I(kTag, "upscaler override: %zu pass(es) left out, %s becomes a scaled copy %s -> %s", o.skip.size(), o.replace.c_str(),
-                    src.c_str(), dst.c_str());
+            NXLOG_I(kTag, "upscaler override: %zu pass(es) left out, %s becomes a scaled copy %s -> %s%s", o.skip.size(), o.replace.c_str(),
+                    src.c_str(), dst.c_str(), o.fallback ? " while a pass of the chain cannot run (upscaler_fallback); the game's chain otherwise" : "");
         return o;
     }();
     return u;
@@ -3374,11 +3380,43 @@ void upscaler_note_draw(const ShaderInfo* fs) {
 }
 
 
+uint64_t g_chain_broken_present = ~0ull;   // upscaler_fallback: the present count when a pass of the chain last could not run
+
+// upscaler_fallback: can the bound compute program run now? Asking for its pipeline starts a background build that has not started yet.
+bool chain_pass_ready() {
+    const ShaderInfo* cs = S.stage[kCompute];
+    if (!cs || g_cs_pending) return false;
+    const ShaderInfo* stages[kStages] = {nullptr, nullptr, nullptr, nullptr, nullptr, cs, nullptr, nullptr};
+    const ProgLayout* pl = prog_layout(stages);
+    return pl && compute_pipeline(cs, *pl) != VK_NULL_HANDLE;
+}
+
 // True when the dispatch belongs to the replaced upscaler (and is handled: left out, or turned into the copy).
 bool upscaler_dispatch(const std::string& hash) {
     const UpscalerOverride& u = upscaler_override();
     if (u.replace.empty() || hash.empty() || !g_upscaler_on.load(std::memory_order_relaxed)) return false;
     auto matches = [&](const std::string& prefix) { return !prefix.empty() && hash.compare(0, prefix.size(), prefix) == 0; };
+    bool in_chain = matches(u.replace);
+    for (const std::string& s : u.skip) in_chain = in_chain || matches(s);
+    if (!in_chain) return false;
+    if (u.fallback) {
+        // the copy stands in for this frame and the next after a pass of the chain could not run; the game's chain runs otherwise
+        const uint64_t pr = counters().presents.load(std::memory_order_relaxed);
+        if (!chain_pass_ready()) {
+            if (g_chain_broken_present == ~0ull || g_chain_broken_present + 1 < pr)
+                NXLOG_I(kTag, "upscaler fallback: %s cannot run yet: the scaled copy stands in for the game's chain", hash.c_str());
+            g_chain_broken_present = pr;
+        }
+        const bool copy_mode = g_chain_broken_present != ~0ull && g_chain_broken_present + 1 >= pr;
+        if (!copy_mode) {
+            static bool told = false;
+            if (!told && g_chain_broken_present != ~0ull) {
+                told = true;
+                NXLOG_I(kTag, "upscaler fallback: every pass of the chain runs: the game's own chain from now on");
+            }
+            return false;
+        }
+    }
     if (matches(u.replace)) {
         upscaler_frame_check();
         Texture* src = u.src_depth_rt ? g_last_depth_rt.get() : pool_texture(u.src_img ? S.img[kCompute][u.src & 15] : S.tex[kCompute][u.src & 63]);
