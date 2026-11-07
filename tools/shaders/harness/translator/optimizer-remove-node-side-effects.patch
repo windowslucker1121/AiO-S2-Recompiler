@@ -1,0 +1,23 @@
+Ryujinx shader translator, Optimizer.RemoveNode: removing a node also takes it out of its sources' use lists, and when
+a source is left without uses it goes on into the operation that defines that source. That operation is not removed from
+its block, only from the use lists of its own sources; for an operation with side effects (a call, an atomic) whose result
+went unused that is wrong: it stays in the program (IsUnused keeps it) but its sources now look unused, so the optimizer
+removes their definitions while it still reads them, and the SPIR-V reads variables nothing assigns. GlobalToStorage
+makes such calls: a RED (atomic without result) through a global address becomes "r = call ...; copy r" and the copy is
+dead. Seen in OoT's GPU culling 4c1e8564 (AGENTS.md A17): the RED.E.MAX that writes the work-group count of each indirect
+dispatch record got an undefined address high word and value, so every GPU-culled dispatch and mesh draw got x = 0. Now
+the walk stops at operations with side effects. The Ryujinx code in the context lines is MIT.
+--- a/Translation/Optimizations/Optimizer.cs	2026-11-07 12:02:46.270009800 +0100
++++ b/Translation/Optimizations/Optimizer.cs	2026-11-07 12:02:46.356854300 +0100
+@@ -381,7 +381,10 @@
+                         continue;
+                     }
+ 
+-                    if (src.UseOps.Remove(node) && src.UseOps.Count == 0)
++                    // An operation with side effects (a call, an atomic) stays in its block when its result goes unused, so it keeps
++                    // its sources: going on into it here took it out of their use lists and let them be removed while it still reads
++                    // them (optimizer-remove-node-side-effects.patch).
++                    if (src.UseOps.Remove(node) && src.UseOps.Count == 0 && !HasSideEffects(src.AsgOp))
+                     {
+                         Debug.Assert(src.AsgOp != null);
+                         nodes.Enqueue(src.AsgOp);
