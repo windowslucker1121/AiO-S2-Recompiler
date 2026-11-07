@@ -3,14 +3,14 @@ Without this, the false edge of the If before an ElseIf goes straight to the mer
 ElseIf/Else after it becomes unreachable code. See docs/nvn/TRANSLATOR.md, "else if chains".
 Also a loop cap: every loop of a function leaves once its back edges, counted in one per-invocation
 variable, reach N. Default 4096 for graphics stages (a runaway per-pixel loop in OoT's material shaders
-took the GPU to TDR / device lost minutes into the first scene), off for compute; NXRT_HARNESS_LOOP_CAP=N overrides (0 = off).
+took the GPU to TDR / device lost minutes into the first scene) and for task/mesh programs (translated as compute; OoT task fd8debac
+runs 2^27 rounds while the data it counts is not built yet), off for compute; NXRT_HARNESS_LOOP_CAP=N overrides (0 = off).
 Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a copy in private/build; the
 checkout in private/third_party stays untouched. The Ryujinx code in the context lines is MIT.
 Also the task/mesh hooks of tools/shaders/ampere/frontend/AmpereMesh.cs (declarations after DeclareAll, execution model and modes,
 the epilogue at the end of main, every global in the entry point).
-
---- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
-+++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs	2026-11-07 14:07:08.798017000 +0100
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs	2026-11-07 14:07:08.826021600 +0100
 @@ -17,6 +17,10 @@
      static class SpirvGenerator
      {
@@ -65,12 +65,16 @@ the epilogue at the end of main, every global in the entry point).
                  }
  
                  if (context.Definitions.TransformFeedbackEnabled && context.Definitions.LastInVertexPipeline)
-@@ -311,6 +320,41 @@
+@@ -311,6 +320,45 @@
  
              context.LoopTargets = loopTargets;
  
 +            SpvInstruction loopCounter = null;
-+            int loopCap = LoopCap >= 0 ? LoopCap : (context.Definitions.Stage == ShaderStage.Compute ? 0 : DefaultGraphicsLoopCap); if (loopCap > 0)
++            // task and mesh programs are translated as compute (AmpereMesh) but are graphics stages: they get the graphics default. OoT's task
++            // fd8debac counts its rounds from data earlier dispatches build; before those run (a block still being translated on demand) the
++            // count is 0 and the loop runs 2^27 rounds: device lost.
++            int loopCap = LoopCap >= 0 ? LoopCap : (context.Definitions.Stage == ShaderStage.Compute && !AmpereMesh.Active ? 0 : DefaultGraphicsLoopCap);
++            if (loopCap > 0)
 +            {
 +                SpvInstruction s32 = context.TypeS32();
 +                loopCounter = context.Variable(context.TypePointer(StorageClass.Private, s32), StorageClass.Private, context.Constant(s32, 0));
@@ -107,7 +111,7 @@ the epilogue at the end of main, every global in the entry point).
              visitor.BlockEntered += (sender, e) =>
              {
                  AstBlock mergeBlock = e.Block.Parent;
-@@ -320,7 +364,7 @@
+@@ -320,7 +368,7 @@
                      AstBlock ifTrueBlock = e.Block;
                      AstBlock ifFalseBlock;
  
@@ -116,11 +120,10 @@ the epilogue at the end of main, every global in the entry point).
                      {
                          ifFalseBlock = nextBlock;
                      }
-@@ -333,6 +377,23 @@
- 
+@@ -334,6 +382,23 @@
                      context.SelectionMerge(context.GetNextLabel(mergeBlock), SelectionControlMask.MaskNone);
                      context.BranchConditional(condition, context.GetNextLabel(ifTrueBlock), context.GetNextLabel(ifFalseBlock));
-+                }
+                 }
 +                else if (e.Block.Type == AstBlockType.ElseIf)
 +                {
 +                    // Header block of the nested selection (the false target of the previous If/ElseIf).
@@ -137,14 +140,14 @@ the epilogue at the end of main, every global in the entry point).
 +
 +                    context.SelectionMerge(elseIfMerge, SelectionControlMask.MaskNone);
 +                    context.BranchConditional(condition, context.GetNextLabel(e.Block), ifFalseLabel);
-                 }
++                }
                  else if (e.Block.Type == AstBlockType.DoWhile)
                  {
-@@ -363,6 +424,14 @@
-                         context.AddLabel(continueTarget);
+                     SpvInstruction continueTarget = context.Label();
+@@ -364,6 +429,14 @@
  
                          SpvInstruction condition = context.Get(AggregateType.Bool, e.Block.Condition);
-+
+ 
 +                        if (loopCounter != null)
 +                        {
 +                            SpvInstruction s32 = context.TypeS32();
@@ -152,10 +155,11 @@ the epilogue at the end of main, every global in the entry point).
 +                            context.Store(loopCounter, n);
 +                            condition = context.LogicalAnd(context.TypeBool(), condition, context.SLessThan(context.TypeBool(), n, context.Constant(s32, loopCap)));
 +                        }
- 
++
                          context.BranchConditional(condition, loopTarget, context.GetNextLabel(mergeBlock));
                      }
-@@ -378,7 +447,7 @@
+                     else
+@@ -378,7 +451,7 @@
  
                          if (!lastIsCf)
                          {
@@ -164,7 +168,7 @@ the epilogue at the end of main, every global in the entry point).
                          }
                      }
  
-@@ -386,9 +455,22 @@
+@@ -386,9 +459,22 @@
                          (nextBlock.Type == AstBlockType.Else ||
                           nextBlock.Type == AstBlockType.ElseIf);
  

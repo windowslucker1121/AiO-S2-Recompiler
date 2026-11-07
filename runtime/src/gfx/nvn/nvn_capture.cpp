@@ -61,8 +61,9 @@ namespace {
 
 constexpr const char* kTag = "nvn.capture";
 constexpr char kMagic[8] = {'N', 'X', 'C', 'A', 'P', '0', '0', '1'};
-constexpr uint32_t kVersion = 2;     // 2: 8 shader stages per program and in the GPU state (task, mesh)
+constexpr uint32_t kVersion = 3;     // 2: 8 shader stages per program and in the GPU state (task, mesh); 3: blocks still being translated
 constexpr int kCapStages = 8;
+uint32_t g_read_version = kVersion;   // of the capture being loaded
 constexpr uint64_t kChunk = 1ull << 20;      // memory is written in chunks of this size; all-zero chunks are left out
 constexpr uint64_t kControlBytes = 0x800;    // a shader control section (the fields read_control uses end before 0x760)
 
@@ -501,6 +502,24 @@ bool write_capture(const std::string& name, std::vector<FrameEvent>& events, con
             }
         }
         o.put(static_cast<uint32_t>(p->sample_shading));
+        // Blocks the on-demand translator had not finished when the frame was captured: SetShaders knows no stage for them yet, so
+        // without these the replay ran such programs without the stage (a capture taken while a run translates, run cap_1: five
+        // dispatches of OoT's culling chain "cs -" on every replay). The replay resolves them like a running game does.
+        std::vector<std::pair<uint64_t, uint64_t>> pend;
+        {
+            std::unique_lock lk(const_cast<Program*>(p)->pending_mu, std::try_to_lock);
+            if (lk.owns_lock())
+                for (const Program::PendingBlock& b : p->pending)
+                    pend.emplace_back(reinterpret_cast<uint64_t>(b.code), reinterpret_cast<uint64_t>(b.control));
+        }
+        o.put(static_cast<uint32_t>(pend.size()));
+        for (const auto& [code, control] : pend) {
+            o.put(code);
+            o.put(control);
+            add_range(ranges, control, kControlBytes);
+            const ShaderControl c = read_control(reinterpret_cast<const uint8_t*>(control));
+            add_range(ranges, code, c.valid && c.code_size ? c.code_size : 0x1000);
+        }
     }
     // syncs, events
     o.put(static_cast<uint64_t>(w.objs[kSync].size()));
@@ -840,7 +859,8 @@ bool load_capture(const stdfs::path& dir, Loaded& L, std::string* err) {
     in.raw(magic, 8);
     if (std::memcmp(magic, kMagic, 8) != 0) { *err = "not a frame capture (magic)"; return false; }
     const uint32_t ver = in.get<uint32_t>(), gsize = in.get<uint32_t>();
-    if (ver != kVersion) { *err = "capture version " + std::to_string(ver) + ", this build reads " + std::to_string(kVersion); return false; }
+    if (ver != kVersion && ver != 2) { *err = "capture version " + std::to_string(ver) + ", this build reads 2 and " + std::to_string(kVersion); return false; }
+    g_read_version = ver;
     if (gsize != gpu::replay_state_size()) {
         *err = "the capture was written by another runtime build (GPU state " + std::to_string(gsize) + " bytes, this build " +
                std::to_string(gpu::replay_state_size()) + "): capture the frame again";
@@ -962,7 +982,7 @@ bool load_capture(const stdfs::path& dir, Loaded& L, std::string* err) {
         L.spools.emplace_back(sp);
     }
     // programs (their shaders are looked up after the memory is back)
-    struct ProgImg { std::string label; uint64_t code[kCapStages] = {}, control[kCapStages] = {}; std::string hash[kCapStages]; uint32_t sample_shading; };
+    struct ProgImg { std::string label; uint64_t code[kCapStages] = {}, control[kCapStages] = {}; std::string hash[kCapStages]; uint32_t sample_shading; std::vector<std::pair<uint64_t, uint64_t>> pending; };
     std::vector<ProgImg> pimgs;
     const uint64_t nprog = in.get<uint64_t>();
     for (uint64_t i = 0; i < nprog && in.ok(); ++i) {
@@ -974,6 +994,11 @@ bool load_capture(const stdfs::path& dir, Loaded& L, std::string* err) {
             pi.hash[s] = in.str();
         }
         pi.sample_shading = in.get<uint32_t>();
+        const uint32_t npend = g_read_version >= 3 ? in.get<uint32_t>() : 0;   // version 2 has no pending blocks
+        for (uint32_t k = 0; k < npend && in.ok(); ++k) {
+            const uint64_t code = in.get<uint64_t>();
+            pi.pending.emplace_back(code, in.get<uint64_t>());
+        }
         pimgs.push_back(std::move(pi));
     }
     const uint64_t nsync = in.get<uint64_t>();
@@ -1116,9 +1141,20 @@ bool load_capture(const stdfs::path& dir, Loaded& L, std::string* err) {
             p->code_addr[s] = pi.code[s];
             p->control_addr[s] = pi.control[s];
         }
+        for (const auto& [code_a, control_a] : pi.pending) {   // blocks still being translated at capture time (format 3)
+            const uint8_t* code = reinterpret_cast<const uint8_t*>(code_a);
+            const uint8_t* control = reinterpret_cast<const uint8_t*>(control_a);
+            ShaderCache::FindMiss miss;
+            const ShaderInfo* si = cache.find(code, control, &miss);
+            if (!si && !miss.pending) { ++missing; p->missing_hard = true; all = false; continue; }
+            p->pending.push_back(Program::PendingBlock{code, control, si ? si->hash : miss.hash});
+            if (!si) ++pending;
+            all = false;
+        }
         p->has_pending.store(!p->pending.empty());
         p->linked = all;
-        if (all) gpu::prewarm_program_shaders(p->stage);
+        if (!p->pending.empty()) program_resolve_pending(p);   // the ones the cache has by now get their stage at once
+        if (p->linked) gpu::prewarm_program_shaders(p->stage);
         L.progs.emplace_back(p);
     }
     NXLOG_I(kTag, "%zu programs: %llu stages being translated, %llu missing", L.progs.size(), static_cast<unsigned long long>(pending),

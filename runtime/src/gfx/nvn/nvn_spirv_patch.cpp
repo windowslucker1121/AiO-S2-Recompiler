@@ -746,6 +746,7 @@ bool spirv_ballot_per_lane(const std::vector<uint32_t>& in, std::vector<uint32_t
     // value flags (every use of an id that carries one is checked) and tags (followed, never checked)
     enum : uint32_t { B = 1, M = 2, N = 4, A = 8, K = 16, CHECKED = 31, LANE = 32, LTM = 64, LTEST = 128, S = 256 };
     BallotRewrite st;
+    if (stats) st.why = stats->why;
     if (in.size() < 5 || in[0] != 0x07230203u || in[3] == 0 || in[3] > (1u << 22)) return false;
     std::vector<Inst> insts;
     for (size_t i = 5; i < in.size();) {
@@ -826,12 +827,20 @@ bool spirv_ballot_per_lane(const std::vector<uint32_t>& in, std::vector<uint32_t
     auto walk = [&](bool final) {
         std::vector<size_t> label_at(final ? bound : 0, 0);
         if (final) for (const Inst& n : insts) if (n.op == oLabel && in[n.at + 1] < bound) label_at[in[n.at + 1]] = n.at;
-        auto mark = [&](uint32_t id) { if (final && id < bound && (F[id] & CHECKED) && G[id] != NOG) bad[find(G[id])] = 1; };
+        uint32_t cur_op = 0;
+        auto mark = [&](uint32_t id) {
+            if (final && id < bound && (F[id] & CHECKED) && G[id] != NOG) {
+                const uint32_t g = find(G[id]);
+                if (!bad[g] && stats && stats->why) stats->why->push_back("group " + std::to_string(g) + ": value %" + std::to_string(id) + " (flags " + std::to_string(F[id] & CHECKED) + ") used by op " + std::to_string(cur_op));
+                bad[g] = 1;
+            }
+        };
         for (size_t k = 0; k < insts.size(); k++) {
             if (k < first_fn) continue;   // declarations: their literals are not ids
             const Inst& n = insts[k];
             const uint32_t* w = &in[n.at];
             const uint32_t op = n.op, wc = n.len;
+            cur_op = op;
             auto u = [&](uint32_t a) { return a < wc ? w[a] : 0u; };
             switch (op) {
             case oName: case oMemberName: case oDecorate: case oBallot: case oVariable: case oFunction: case oLabel:
@@ -953,14 +962,19 @@ bool spirv_ballot_per_lane(const std::vector<uint32_t>& in, std::vector<uint32_t
         const uint32_t r = find(at.g);
         bool inside = false;
         for (const Region& rg : regions) if (rg.g != NOG && find(rg.g) == r && at.at > rg.from && at.at < rg.to) inside = true;
-        if (inside) grp_atom[r] = 1; else grp_bad[r] = 1;
+        if (inside) grp_atom[r] = 1;
+        else { if (!grp_bad[r] && stats && stats->why) stats->why->push_back("group " + std::to_string(r) + ": its atomic add is outside its leader test"); grp_bad[r] = 1; }
     }
     std::vector<uint8_t> take(nb, 0);
     bool any = false, partial = false;
     for (uint32_t g = 0; g < nb; g++) {
         const uint32_t r = find(g);
         if (!grp_cand[r]) continue;   // not a counter's ballot (REDUX / MATCH masks, first-lane broadcasts): left alone
-        if (grp_bad[r] || !grp_msb[r] || !grp_atom[r]) { partial = true; continue; }
+        if (grp_bad[r] || !grp_msb[r] || !grp_atom[r]) {
+            if (stats && stats->why && find(g) == g && !grp_bad[r]) stats->why->push_back("group " + std::to_string(r) + (grp_msb[r] ? "" : ": no leader (FindUMsb)") + (grp_atom[r] ? "" : ": no atomic add of its count"));
+            partial = true;
+            continue;
+        }
         take[g] = 1;
         any = true;
     }

@@ -2354,8 +2354,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             IrOperand acc = ReadLane(ctx, v, first);
             for (int l = 0; l < 32; l++)
             {
-                IrOperand take = ctx.BitwiseAnd(ctx.ICompareNotEqual(ctx.BitwiseAnd(mask, Const(1 << l)), Const(0)), ctx.ICompareNotEqual(first, Const(l)));
-                acc = ctx.ConditionalSelect(take, f(acc, ReadLane(ctx, v, Const(l))), acc);
+                IrOperand active = ctx.ICompareNotEqual(ctx.BitwiseAnd(mask, Const(1 << l)), Const(0));
+                IrOperand take = ctx.BitwiseAnd(active, ctx.ICompareNotEqual(first, Const(l)));
+                // Only active lanes are read: an inactive lane's slot reads the first active lane instead (its value is not taken). Reading
+                // a lane that is not active is undefined in SPIR-V, and on NVIDIA it waited for lanes that never come: a mesh program's lanes
+                // past its count leave at the start and wait at the end-of-program barrier while the others REDUX (OoT mesh f3054ac2,
+                // device lost once the GPU culling gave the mesh draws work).
+                IrOperand src = ctx.ConditionalSelect(active, Const(l), first);
+                acc = ctx.ConditionalSelect(take, f(acc, ReadLane(ctx, v, src)), acc);
             }
             Dst(ctx, o[0], acc);
         }
