@@ -129,7 +129,9 @@ Independent of how the global-memory search is compiled (only the token and the 
 **Measured (RTX 4080, 2026-11-07, 1,152 random programs = 3,456 parts, 14 threads, cold driver cache, machine otherwise idle):** old
 (batches) 375.7 s, 4,722 s CPU = 12.6 cores busy; new 354.5 s, 4,867 s CPU = 13.7 cores busy: **6% faster**. With a cold cache the driver's
 own compile work (1.4 s CPU per part on average) keeps the threads busy and the barrier costs little; the gain is the idle tail of each
-batch. The full preparation in the main checkout the same day (old code, 39,363 programs, 45,289 of 118,089 parts under 2 ms from the
+batch. **Half warm** (the driver's disk cache already holds the parts of half the programs, as after a partly finished or repeated
+preparation; one salt per exe, warmed with 576 of the programs): old 206.8 s, 11.5 cores busy; new 182.2 s, 13.7 cores: **12% faster**.
+Fully warm both take about 2 s. The full preparation in the main checkout the same day (old code, 39,363 programs, 45,289 of 118,089 parts under 2 ms from the
 driver's disk cache) took 5,293 s. More speed needs less driver work, not more parallelism: e.g. the two raster sets compile every
 pre-raster part twice (`[nvn] prepare_rasters`), and 33% of the sample's programs count as expensive.
 
