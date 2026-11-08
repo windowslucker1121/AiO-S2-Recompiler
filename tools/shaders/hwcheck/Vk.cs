@@ -55,6 +55,9 @@ namespace Hwcheck
         [DllImport(Dll)] static extern int vkQueueSubmit(IntPtr q, uint n, void* submits, ulong fence);
         [DllImport(Dll)] static extern int vkQueueWaitIdle(IntPtr q);
         [DllImport(Dll)] static extern int vkDeviceWaitIdle(IntPtr dev);
+        [DllImport(Dll)] static extern IntPtr vkGetInstanceProcAddr(IntPtr inst, string name);
+        [DllImport(Dll)] static extern IntPtr vkGetDeviceProcAddr(IntPtr dev, string name);
+        [DllImport(Dll)] static extern void vkGetPhysicalDeviceProperties2(IntPtr pd, byte* props);
 
         IntPtr _inst, _pd, _dev, _queue, _cb;
         ulong _ssbo, _ssboMem, _ubo, _uboMem, _set0Layout, _set1Layout, _pipeLayout, _pool, _cmdPool;
@@ -70,7 +73,14 @@ namespace Hwcheck
         static void U64(byte* p, int off, ulong v) => *(ulong*)(p + off) = v;
         static void Ptr(byte* p, int off, void* v) => *(void**)(p + off) = v;
 
-        public VkRunner(int bytes)
+        /// VK_KHR_cooperative_matrix properties (M, N, K, A, B, C, result type, saturating, scope) when made with coopMat.
+        public readonly System.Collections.Generic.List<(uint m, uint n, uint k, uint a, uint b, uint c, uint r, uint sat, uint scope)> CoopMatProps = new();
+        public uint SubgroupSize { get; private set; }
+
+        public VkRunner(int bytes) : this(bytes, false) { }
+
+        /// coopMat: also enables VK_KHR_cooperative_matrix and reads its properties (CoopMat.cs).
+        public VkRunner(int bytes, bool coopMat)
         {
             _bytes = bytes;
             byte* app = Z(48);
@@ -107,6 +117,13 @@ namespace Hwcheck
             U32(f11, 0, 49); Ptr(f11, 8, f12);
             U32(f12, 0, 51); Ptr(f12, 8, f13);
             U32(f13, 0, 53);
+            byte* fcm = Z(32);
+            byte* fpe = Z(32);
+            if (coopMat)
+            {
+                U32(fcm, 0, 1000506000); Ptr(f13, 8, fcm);   // VkPhysicalDeviceCooperativeMatrixFeaturesKHR
+                U32(fpe, 0, 1000269000); Ptr(fcm, 8, fpe);   // VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR (PipelineStats)
+            }
             vkGetPhysicalDeviceFeatures2(_pd, f2);
 
             float prio = 1;
@@ -114,6 +131,37 @@ namespace Hwcheck
             U32(qci, 0, 2); U32(qci, 20, family); U32(qci, 24, 1); Ptr(qci, 32, &prio);
             byte* dci = Z(72);
             U32(dci, 0, 3); Ptr(dci, 8, f2); U32(dci, 20, 1); Ptr(dci, 24, qci);
+            if (coopMat)
+            {
+                if (*(uint*)(fcm + 16) == 0) throw new Exception("cooperativeMatrix feature not supported");
+                byte* extName = Z(64);
+                byte[] en = Encoding.ASCII.GetBytes("VK_KHR_cooperative_matrix");
+                for (int i = 0; i < en.Length; i++) extName[i] = en[i];
+                byte* extName2 = Z(64);
+                byte[] en2 = Encoding.ASCII.GetBytes("VK_KHR_pipeline_executable_properties");
+                for (int i = 0; i < en2.Length; i++) extName2[i] = en2[i];
+                byte** extNames = (byte**)Z(16);
+                extNames[0] = extName;
+                extNames[1] = extName2;
+                U32(dci, 48, 2); Ptr(dci, 56, extNames);
+                var getProps = (delegate* unmanaged<IntPtr, uint*, byte*, int>)vkGetInstanceProcAddr(_inst, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
+                if (getProps == null) throw new Exception("no vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
+                uint pn = 0;
+                getProps(_pd, &pn, null);
+                byte* pp = Z((int)pn * 56 + 8);
+                for (uint i = 0; i < pn; i++) U32(pp + i * 56, 0, 1000506001);
+                getProps(_pd, &pn, pp);
+                for (uint i = 0; i < pn; i++)
+                {
+                    uint* q = (uint*)(pp + i * 56 + 16);
+                    CoopMatProps.Add((q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8]));
+                }
+                byte* sp = Z(64), p2 = Z(1024);
+                U32(sp, 0, 1000094000);   // VkPhysicalDeviceSubgroupProperties
+                U32(p2, 0, 1000059001); Ptr(p2, 8, sp);
+                vkGetPhysicalDeviceProperties2(_pd, p2);
+                SubgroupSize = *(uint*)(sp + 16);
+            }
             Check(vkCreateDevice(_pd, dci, null, out _dev), "vkCreateDevice");
             vkGetDeviceQueue(_dev, family, 0, out _queue);
 
@@ -238,6 +286,84 @@ namespace Hwcheck
                 if (pipe != 0) vkDestroyPipeline(_dev, pipe, null);
                 if (module != 0) vkDestroyShaderModule(_dev, module, null);
             }
+        }
+
+        /// The driver's statistics of a compute module (VK_KHR_pipeline_executable_properties; made with coopMat). `types`: the
+        /// descriptor types of binding 0.. of each set (one array per set), as the module declares them.
+        public System.Collections.Generic.List<string> PipelineStats(byte[] spirv, uint[][] types)
+        {
+            var res = new System.Collections.Generic.List<string>();
+            ulong module = 0, pipe = 0, layout = 0;
+            var setLayouts = new ulong[types.Length];
+            try
+            {
+                for (int s = 0; s < types.Length; s++)
+                {
+                    byte* b = Z(24 * Math.Max(1, types[s].Length));
+                    for (int i = 0; i < types[s].Length; i++) { U32(b + 24 * i, 0, (uint)i); U32(b + 24 * i, 4, types[s][i]); U32(b + 24 * i, 8, 1); U32(b + 24 * i, 12, 0x20); }
+                    byte* ci = Z(32);
+                    U32(ci, 0, 32); U32(ci, 20, (uint)types[s].Length); Ptr(ci, 24, b);
+                    Check(vkCreateDescriptorSetLayout(_dev, ci, null, out setLayouts[s]), "set layout");
+                }
+                fixed (ulong* sl = setLayouts)
+                {
+                    byte* plci = Z(48);
+                    U32(plci, 0, 30); U32(plci, 20, (uint)types.Length); Ptr(plci, 24, sl);
+                    Check(vkCreatePipelineLayout(_dev, plci, null, out layout), "pipeline layout");
+                }
+                fixed (byte* code = spirv)
+                {
+                    byte* smci = Z(40);
+                    U32(smci, 0, 16); U64(smci, 24, (ulong)spirv.Length); Ptr(smci, 32, code);
+                    Check(vkCreateShaderModule(_dev, smci, null, out module), "vkCreateShaderModule");
+                }
+                byte* name = Z(8);
+                name[0] = (byte)'m'; name[1] = (byte)'a'; name[2] = (byte)'i'; name[3] = (byte)'n';
+                byte* cpci = Z(96);
+                U32(cpci, 0, 29); U32(cpci, 16, 0x40 /* CAPTURE_STATISTICS */);
+                U32(cpci, 24, 18); U32(cpci, 24 + 20, 0x20); U64(cpci, 24 + 24, module); Ptr(cpci, 24 + 32, name);
+                U64(cpci, 72, layout);
+                *(int*)(cpci + 88) = -1;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                Check(vkCreateComputePipelines(_dev, 0, 1, cpci, null, out pipe), "vkCreateComputePipelines");
+                res.Add($"pipeline built in {sw.ElapsedMilliseconds} ms");
+                var getExe = (delegate* unmanaged<IntPtr, byte*, uint*, byte*, int>)vkGetDeviceProcAddr(_dev, "vkGetPipelineExecutablePropertiesKHR");
+                var getStat = (delegate* unmanaged<IntPtr, byte*, uint*, byte*, int>)vkGetDeviceProcAddr(_dev, "vkGetPipelineExecutableStatisticsKHR");
+                byte* pi = Z(24);
+                U32(pi, 0, 1000269001); U64(pi, 16, pipe);
+                uint ne = 0;
+                getExe(_dev, pi, &ne, null);
+                byte* ep = Z((int)ne * 536 + 8);
+                for (uint i = 0; i < ne; i++) U32(ep + i * 536, 0, 1000269002);
+                getExe(_dev, pi, &ne, ep);
+                for (uint e = 0; e < ne; e++)
+                {
+                    res.Add($"executable {e}: {Marshal.PtrToStringAnsi((IntPtr)(ep + e * 536 + 20))}, subgroup size {*(uint*)(ep + e * 536 + 532)}");
+                    byte* ei = Z(32);
+                    U32(ei, 0, 1000269003); U64(ei, 16, pipe); U32(ei, 24, e);
+                    uint ns = 0;
+                    getStat(_dev, ei, &ns, null);
+                    byte* st = Z((int)ns * 544 + 8);
+                    for (uint i = 0; i < ns; i++) U32(st + i * 544, 0, 1000269004);
+                    getStat(_dev, ei, &ns, st);
+                    for (uint i = 0; i < ns; i++)
+                    {
+                        byte* x = st + i * 544;
+                        uint fmt = *(uint*)(x + 528);
+                        string v = fmt switch { 0 => (*(uint*)(x + 536) != 0).ToString(), 1 => (*(long*)(x + 536)).ToString(), 2 => (*(ulong*)(x + 536)).ToString(), _ => (*(double*)(x + 536)).ToString("0.###") };
+                        res.Add($"  {Marshal.PtrToStringAnsi((IntPtr)(x + 16))} = {v}");
+                    }
+                }
+            }
+            catch (Exception ex) { res.Add("error: " + ex.Message); }
+            finally
+            {
+                if (pipe != 0) vkDestroyPipeline(_dev, pipe, null);
+                if (module != 0) vkDestroyShaderModule(_dev, module, null);
+                if (layout != 0) vkDestroyPipelineLayout(_dev, layout, null);
+                foreach (ulong l in setLayouts) if (l != 0) vkDestroyDescriptorSetLayout(_dev, l, null);
+            }
+            return res;
         }
 
         public void Dispose()

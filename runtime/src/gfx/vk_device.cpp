@@ -23,6 +23,7 @@
 #include "nxrt/log.h"
 #include "nxrt/platform.h"
 #include "vk_gauges.h"
+#include "vk_coopmat_probe.h"
 #include "extras/temporal.h"
 
 #include <vk_mem_alloc.h>
@@ -554,6 +555,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkPhysicalDevicePresentIdFeaturesKHR apid = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
     VkPhysicalDeviceAntiLagFeaturesAMD aal = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ANTI_LAG_FEATURES_AMD};
     VkPhysicalDeviceFaultFeaturesEXT afault = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR acm = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
     std::vector<const char*> dev_exts;
     void* chain = nullptr;
     auto add_ext = [&](const char* name, void* feat_struct) {
@@ -596,6 +598,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     const bool x_fault = config_get_bool("gfx", "device_fault", true) && add_ext(VK_EXT_DEVICE_FAULT_EXTENSION_NAME, &afault);
     const bool x_cp = config_get_bool("gfx", "device_diagnostics", false) && has_dext(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
     if (x_cp) dev_exts.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    // tensor-core HMMA of translated compute shaders (the cooperative-matrix variant of a block, vk_coopmat_probe.cpp)
+    const bool x_cm = config_get_bool("gfx", "cooperative_matrix", true) && add_ext(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME, &acm);
     features_.external_memory_host = has_dext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     if (features_.external_memory_host) dev_exts.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     if (has_dext(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) { dev_exts.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME); features_.push_descriptor = true; }
@@ -616,6 +620,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     amesh.multiviewMeshShader = VK_FALSE;
     amesh.primitiveFragmentShadingRateMeshShader = VK_FALSE;
     amesh.meshShaderQueries = VK_FALSE;
+    acm.cooperativeMatrixRobustBufferAccess = VK_FALSE;   // the translated shaders never load or store matrices
     VkPhysicalDeviceFeatures2& en = avail;
     const VkPhysicalDeviceFeatures& af = avail.features;
     features_.bc = af.textureCompressionBC;
@@ -783,6 +788,17 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     if (vkCreateCommandPool(device_, &cpi, nullptr, &impl_->once_pool) == VK_SUCCESS) vk_gauge_command_pools().add(1);
     VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (vkCreateFence(device_, &fci, nullptr, &impl_->once_fence) == VK_SUCCESS) vk_gauge_fences().add(1);
+
+    {
+        std::string why;
+        if (!x_cm) why = config_get_bool("gfx", "cooperative_matrix", true) ? "no VK_KHR_cooperative_matrix" : "off ([gfx] cooperative_matrix)";
+        else if (!acm.cooperativeMatrix) why = "cooperativeMatrix feature not supported";
+        else if (!a12.shaderFloat16) why = "no shaderFloat16";
+        else if (limits_.subgroup_size != 32) why = "subgroup size " + std::to_string(limits_.subgroup_size) + ", not 32";
+        else features_.cooperative_matrix_hmma = coopmat_hmma_probe(*this, &why);
+        set_coopmat_hmma_enabled(features_.cooperative_matrix_hmma);
+        NXLOG_I(kTag, "cooperative matrices for HMMA: %s%s", features_.cooperative_matrix_hmma ? "on" : "off: ", why.c_str());
+    }
 
     NXLOG_I(kTag, "device ready: %s, queue family %u, validation %s, %s", props_.deviceName, queue_family_, validation_ ? "on" : "off",
             headless ? "headless" : "window surface");

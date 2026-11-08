@@ -1,0 +1,15 @@
+Ryujinx StructuredProgram: the Ampere front end's cooperative-matrix instruction (ampere-coopmat-instruction.patch) returns its
+destination registers as one vector, like TextureSample. Same file as structured-program-cfg-check.patch: the csproj applies this
+one to that patch's output (ShaderPatch metadata `Then`). The Ryujinx code in the context lines is MIT.
+--- a/StructuredIr/StructuredProgram.cs
++++ b/StructuredIr/StructuredProgram.cs
+@@ -424,7 +424,8 @@
+             return inst switch
+             {
+                 Instruction.ImageLoad or
+-                Instruction.TextureSample => true,
++                Instruction.TextureSample or
++                Instruction.CooperativeMatrixMulAdd => true,   // Ampere front end: one word per destination register
+                 _ => false,
+             };
+         }

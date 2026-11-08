@@ -2,10 +2,10 @@
 // Tensor-core instructions (HMMA, LDSM, MOVM) as subgroup emulation: every lane gathers the matrix elements it needs from the
 // lanes that hold them (IDX shuffles over the 32-lane warp) and does the arithmetic itself.
 //
-// Why not VK_KHR_cooperative_matrix: a SASS warp matrix lives in ordinary registers with a fixed per-lane layout (below), and
-// the shaders move those registers through plain ALU code between the matrix instructions. A cooperative-matrix object's
-// per-invocation layout is opaque (implementation-defined), so it cannot be built from or taken apart into those registers
-// without a round trip through memory; the scalar form keeps the register file exact.
+// This is the portable form. A block with HMMA also gets a cooperative-matrix variant (AmpereCoopMat.cs, <hash>.cm.spv): a SASS
+// warp matrix lives in ordinary registers with a fixed per-lane layout (below), and a cooperative matrix's per-invocation layout is
+// implementation-defined, so that variant relies on the device's order measured by a probe (hwcheck --coopmat; the runtime checks
+// it again at start) and the runtime falls back to this form elsewhere.
 //
 // Fragment layouts (PTX ISA, "Matrix fragments for mma.m16n8k16 / m16n8k8 with floating point type", ldmatrix, movmatrix;
 // g = lane >> 2, t = lane & 3; a 32-bit register holds two 16-bit elements, the lower-numbered column/k in the low half):
@@ -52,9 +52,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (bf16) throw Unsup("HMMA .BF16 (denormal inputs not emulated)");
             foreach (Op x in o) if (x.Kind != OperandKind.Reg) throw Unsup("HMMA operand");
             int K = k16 ? 16 : 8, aRegs = k16 ? 4 : 2, bRegs = k16 ? 2 : 1;
+            IrOperand Reg(Op x, int q) => x.Reg >= 255 ? Const(0) : Gpr(x.Reg + q);
+            // the cooperative-matrix variant of a block (AmpereCoopMat.cs): one tensor-core multiply-add
+            if (Ryujinx.Graphics.Shader.CodeGen.Spirv.AmpereCoopMat.TryEmit(ctx, i, Reg, (q, v) => { if (o[0].Reg < 255) DstWord(ctx, o[0], q, v); }))
+                return;
             IrOperand lane = LaneIdAmpere(ctx);
             IrOperand g = ctx.ShiftRightU32(lane, Const(2)), t = ctx.BitwiseAnd(lane, Const(3));
-            IrOperand Reg(Op x, int q) => x.Reg >= 255 ? Const(0) : Gpr(x.Reg + q);
 
             // A rows g and g + 8, B columns 2t and 2t + 1, each over k = 0..K-1
             var a = new IrOperand[2, K];

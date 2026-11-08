@@ -46,7 +46,10 @@
     <!-- Goto elimination: a break/continue enclosed by a later do-while keeps its loop (OoT A8 endless loops); see the patch header. -->
     <ShaderPatch Include="structured-goto-loop-exits.patch" File="StructuredIr/GotoElimination.cs" />
     <!-- Structurizer check hooks (NXRT_HARNESS_CFG_CHECK, off by default): StructuredCfgCheck.cs. -->
-    <ShaderPatch Include="structured-program-cfg-check.patch" File="StructuredIr/StructuredProgram.cs" />
+    <ShaderPatch Include="structured-program-cfg-check.patch" File="StructuredIr/StructuredProgram.cs" Then="structured-coopmat-vector-dest.patch" />
+    <!-- HMMA on VK_KHR_cooperative_matrix (ampere/frontend/AmpereCoopMat.cs): a new IR instruction and its types. -->
+    <ShaderPatch Include="ampere-coopmat-instruction.patch" File="IntermediateRepresentation/Instruction.cs" />
+    <ShaderPatch Include="ampere-coopmat-instruction-info.patch" File="StructuredIr/InstructionInfo.cs" />
     <ShaderPatch Include="structured-context-node-blocks.patch" File="StructuredIr/StructuredProgramContext.cs" />
     <!-- Task/mesh programs (AmpereMesh.cs): end-of-program epilogue at the return of main, task payload pointers.
          Then: float Clamp/Min/Max as NClamp/NMin/NMax (FMNMX / .SAT NaN semantics); same file, applied after it. -->
@@ -59,7 +62,7 @@
 
   <ItemGroup>
     <Compile Include="$(ShaderSrc)**/*.cs"
-             Exclude="$(ShaderSrc)bin/**;$(ShaderSrc)obj/**;$(ShaderSrc)CodeGen/Spirv/SpirvGenerator.cs;$(ShaderSrc)Instructions/InstEmitFloatArithmetic.cs;$(ShaderSrc)IntermediateRepresentation/IoVariable.cs;$(ShaderSrc)CodeGen/Spirv/IoMap.cs;$(ShaderSrc)CodeGen/Glsl/Instructions/IoMap.cs;$(ShaderSrc)CodeGen/Spirv/Declarations.cs;$(ShaderSrc)Instructions/InstEmit.cs;$(ShaderSrc)Decoders/RegisterConsts.cs;$(ShaderSrc)StructuredIr/AstOptimizer.cs;$(ShaderSrc)Translation/Optimizations/GlobalToStorage.cs;$(ShaderSrc)Translation/Optimizations/BindlessElimination.cs;$(ShaderSrc)StructuredIr/GotoElimination.cs;$(ShaderSrc)StructuredIr/StructuredProgram.cs;$(ShaderSrc)StructuredIr/StructuredProgramContext.cs;$(ShaderSrc)CodeGen/Spirv/Instructions.cs;$(ShaderSrc)Translation/Optimizations/Optimizer.cs;$(ShaderSrc)Translation/HelperFunctionManager.cs" />
+             Exclude="$(ShaderSrc)bin/**;$(ShaderSrc)obj/**;$(ShaderSrc)CodeGen/Spirv/SpirvGenerator.cs;$(ShaderSrc)Instructions/InstEmitFloatArithmetic.cs;$(ShaderSrc)IntermediateRepresentation/IoVariable.cs;$(ShaderSrc)CodeGen/Spirv/IoMap.cs;$(ShaderSrc)CodeGen/Glsl/Instructions/IoMap.cs;$(ShaderSrc)CodeGen/Spirv/Declarations.cs;$(ShaderSrc)Instructions/InstEmit.cs;$(ShaderSrc)Decoders/RegisterConsts.cs;$(ShaderSrc)StructuredIr/AstOptimizer.cs;$(ShaderSrc)Translation/Optimizations/GlobalToStorage.cs;$(ShaderSrc)Translation/Optimizations/BindlessElimination.cs;$(ShaderSrc)StructuredIr/GotoElimination.cs;$(ShaderSrc)StructuredIr/StructuredProgram.cs;$(ShaderSrc)StructuredIr/StructuredProgramContext.cs;$(ShaderSrc)CodeGen/Spirv/Instructions.cs;$(ShaderSrc)Translation/Optimizations/Optimizer.cs;$(ShaderSrc)Translation/HelperFunctionManager.cs;$(ShaderSrc)IntermediateRepresentation/Instruction.cs;$(ShaderSrc)StructuredIr/InstructionInfo.cs" />
     <Compile Include="$(PatchedDir)CodeGen/Spirv/SpirvGenerator.cs" />
     <Compile Include="$(PatchedDir)Instructions/InstEmitFloatArithmetic.cs" />
     <Compile Include="$(PatchedDir)IntermediateRepresentation/IoVariable.cs" />
@@ -77,6 +80,8 @@
     <Compile Include="$(PatchedDir)CodeGen/Spirv/Instructions.cs" />
     <Compile Include="$(PatchedDir)Translation/Optimizations/Optimizer.cs" />
     <Compile Include="$(PatchedDir)Translation/HelperFunctionManager.cs" />
+    <Compile Include="$(PatchedDir)IntermediateRepresentation/Instruction.cs" />
+    <Compile Include="$(PatchedDir)StructuredIr/InstructionInfo.cs" />
     <!-- Structurizer check (NXRT_HARNESS_CFG_CHECK): random walks through the structured code against the block graph. -->
     <Compile Include="$(MSBuildThisFileDirectory)StructuredCfgCheck.cs" />
     <!-- Ampere front end: SassInst -> Ryujinx IR (partial InstEmit and translator internals, hence in this assembly). -->

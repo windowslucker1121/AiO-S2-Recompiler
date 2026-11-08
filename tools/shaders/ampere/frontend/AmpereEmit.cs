@@ -1380,15 +1380,18 @@ namespace Ryujinx.Graphics.Shader.Instructions
             IrOperand[] a = HalfFtz(ctx, ftz, HalfPair(ctx, o, ref k));
             IrOperand[] b = HalfFtz(ctx, ftz, HalfPair(ctx, o, ref k));
             IrOperand[] r = new IrOperand[2];
+            // the cooperative-matrix variant of a block computes half results in float16 itself (AmpereCoopMat.TryHalf)
+            bool f16 = !Has(i, "F32") && Ryujinx.Graphics.Shader.CodeGen.Spirv.AmpereCoopMat.Active;
             switch (i.Opcode)
             {
-                case "HADD2": for (int n = 0; n < 2; n++) r[n] = ctx.FPAdd(a[n], b[n]); break;
-                case "HMUL2": for (int n = 0; n < 2; n++) r[n] = ctx.FPMultiply(a[n], b[n]); break;
+                case "HADD2": for (int n = 0; n < 2; n++) r[n] = f16 ? Ryujinx.Graphics.Shader.CodeGen.Spirv.AmpereCoopMat.TryHalf(ctx, 0, a[n], b[n], null) : ctx.FPAdd(a[n], b[n]); break;
+                case "HMUL2": for (int n = 0; n < 2; n++) r[n] = f16 ? Ryujinx.Graphics.Shader.CodeGen.Spirv.AmpereCoopMat.TryHalf(ctx, 1, a[n], b[n], null) : ctx.FPMultiply(a[n], b[n]); break;
                 case "HFMA2":
                     {
                         IrOperand[] c = HalfFtz(ctx, ftz, HalfPair(ctx, o, ref k));
                         for (int n = 0; n < 2; n++)
                         {
+                            if (f16) { r[n] = Ryujinx.Graphics.Shader.CodeGen.Spirv.AmpereCoopMat.TryHalf(ctx, 2, a[n], b[n], c[n]); continue; }
                             r[n] = ctx.FPFusedMultiplyAdd(a[n], b[n], c[n]);
                             // fp16 FMA done in fp32 rounds twice (fp32, then fp16 when packed). Rounding the fp32 result to odd
                             // instead (24 >= 11 + 2 bits) makes the second rounding the correct one (hwcheck: HFMA2 was 1 ulp off in

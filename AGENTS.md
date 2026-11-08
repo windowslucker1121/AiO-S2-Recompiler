@@ -59,6 +59,17 @@ generic scan (OoT uses zstd). Translate:
 run the game with `NXRT_NVN_SHADER_CACHE=<repo>\work\shaders\oot\spirv`, `NXRT_NVN_SHADER_CORPUS=<repo>\work\shaders\oot\corpus` and
 `NXRT_NVN_SHADER_TRANSLATOR=<repo>\tools\shaders\build\bin\Release\net10.0\spirv_harness.exe` (the MCP `launch` takes them as `env`).
 A few blocks the game uses are not in the corpus; the on-demand translator gets them.
+**Tensor-core variants (`<hash>.cm.spv`, 2026-11-08):** a compute block with HMMA.16816 also gets a second module: each HMMA as one
+`OpCooperativeMatrixMulAddKHR` (VK_KHR_cooperative_matrix) built from the lane's own fragment registers, and HADD2/HMUL2/HFMA2 in
+native float16 (`tools/shaders/ampere/frontend/AmpereCoopMat.cs`; the harness writes it in single, batch and serve mode, and
+`merge_results.py` carries it). The element order of a cooperative matrix is implementation-defined: `hwcheck --coopmat`
+(`tools/shaders/hwcheck/README.md`) measures it on the GPU (RTX 4080: A registers 1 and 2 swapped) and checks the translation; the
+runtime runs the same module as a probe at start (`runtime/src/gfx/vk_coopmat_probe.cpp`, log `cooperative matrices for HMMA: on`)
+and only then loads `.cm.spv` files (`[gfx] cooperative_matrix`). Rerun `hwcheck --coopmat --header runtime\src\gfx\vk_coopmat_probe_spv.h`
+after changing the HMMA path. OoT's network passes fea98fe7 / 49659bca / f90d726d are "runtime" blocks (not in the corpus, code in
+`work\shaders\oot\missing`): translate them with the single mode (`spirv_harness code_<h>.bin ctrl_<h>.bin -o <cache>\<h>.spv`
+writes `<h>.cm.spv` next to it; the scalar `.spv` stays byte-identical). fea98fe7 on the village capture: 2.1 ms -> 0.05 ms of GPU
+per frame, final picture SSIM 0.9999 against the scalar module (within replay-to-replay noise).
 
 Batch translation (cache in `work\shaders\oot\spirv`): 46,357 of 47,428 rows ok (was 37,576 before the bindless work, 2026-11-06);
 236 unsupported (mostly "runtime"-group compute blocks whose range runs into ASCII names: `.UNKNOWN_656`, `e6e`, ... are text), 833

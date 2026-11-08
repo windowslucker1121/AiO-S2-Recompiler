@@ -1,5 +1,6 @@
 """Merge a re-translation into a shader cache: rows of <new>/results.tsv whose status is ok or ok-retry replace the cache's row
-for the same hash, and their <hash>.spv files are copied over. Use after translating a subset again (a corpus folder with a
+for the same hash, and their <hash>.spv files are copied over (with <hash>.cm.spv, the cooperative-matrix variant, where
+there is one). Use after translating a subset again (a corpus folder with a
 filtered unique.tsv, see AGENTS.md).
 
 Usage: python -I merge_results.py <new dir> <cache dir>
@@ -26,6 +27,12 @@ def main():
         if line.split('\t')[4] not in ('ok', 'ok-retry'):
             continue
         shutil.copyfile(os.path.join(new_dir, h + '.spv'), os.path.join(cache_dir, h + '.spv'))
+        # the cooperative-matrix variant (blocks with HMMA, AmpereCoopMat.cs) goes with it; an old one without a new one is stale
+        cm_new, cm_cache = os.path.join(new_dir, h + '.cm.spv'), os.path.join(cache_dir, h + '.cm.spv')
+        if os.path.exists(cm_new):
+            shutil.copyfile(cm_new, cm_cache)
+        elif os.path.exists(cm_cache):
+            os.remove(cm_cache)
         cache[h] = line
         taken += 1
     tmp = os.path.join(cache_dir, 'results.tsv.tmp')
