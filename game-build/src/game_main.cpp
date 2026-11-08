@@ -128,7 +128,7 @@ std::unique_ptr<nxrt::gfx::Renderer> g_gfx_renderer;
 #ifdef GAME_GUI_SUBSYSTEM
     char msg[1024];     // a double-clicked exe has no console: say what is wrong in a box
     std::snprintf(msg, sizeof msg, fmt, a, b);
-    MessageBoxA(nullptr, msg, nxrt::game::info().title, MB_OK | MB_ICONERROR);
+    MessageBoxA(nullptr, msg, nxrt::game::window_title(), MB_OK | MB_ICONERROR);
 #endif
     TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
     for (;;) {}
@@ -690,7 +690,7 @@ int main(int argc, char** argv) {
             nxrt::play::DisplayConfig disp;
             // First start (or after a cancelled one): the "Preparing shaders" window translates and compiles every shader before the game runs.
             if (!headless && replay_capture.empty()) {
-                const bool go = nxrt::nvn::shader_setup_before_start(nxrt::game::info().title, [](const std::function<bool(uint64_t, uint64_t)>& progress) {
+                const bool go = nxrt::nvn::shader_setup_before_start(nxrt::game::window_title(), [](const std::function<bool(uint64_t, uint64_t)>& progress) {
                     nxrt::nvn::ShaderPrepareOptions po;
                     po.only_if_needed = true;
                     po.progress = progress;
@@ -709,8 +709,8 @@ int main(int argc, char** argv) {
                 disp = nxrt::play::display();       // controls.ini: window size, present mode, frame cap
                 nxrt::platform::init();
                 nxrt::platform::WindowDesc wd;
-                const std::string title = nxrt::instance_active() ? std::string(nxrt::game::info().title) + " [" + nxrt::instance_name() + "]"
-                                                                  : std::string(nxrt::game::info().title);
+                const std::string title = nxrt::instance_active() ? std::string(nxrt::game::window_title()) + " [" + nxrt::instance_name() + "]"
+                                                                  : std::string(nxrt::game::window_title());
                 wd.title = title.c_str();
                 wd.width = disp.width;
                 wd.height = disp.height;

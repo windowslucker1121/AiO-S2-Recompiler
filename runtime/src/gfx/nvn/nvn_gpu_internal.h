@@ -228,7 +228,9 @@ uint64_t out_flush(VkCommandBuffer cb, uint64_t addr, uint64_t size, int why);
 void out_end_submit(VkCommandBuffer cb, uint64_t serial);
 // Any thread: the CPU will read [addr, +size) (nvnMemoryPool/BufferInvalidateMappedRange; a guard fault calls it too): results held
 // there are copied back now (waiting for the GPU), and later results there go back at the end of their submission.
-void out_fetch(uint64_t addr, uint64_t size, bool by_fault);
+// access: a mem::ww::GuardAccess for a guard fault or an OS call (host_pc: the faulting instruction), -1 otherwise (an invalidate, or
+// the render thread's cpu_view); diagnostics only.
+void out_fetch(uint64_t addr, uint64_t size, bool by_fault, int access = -1, uint64_t host_pc = 0);
 uint64_t out_bytes_total();                                        // bytes copied back so far (statistics)
 void out_reset();                                                  // replay shutdown: drops every entry (guards off)
 

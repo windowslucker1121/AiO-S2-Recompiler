@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// ZBIC frames of the three synthetic segments of test_extract.cpp (zbic_pattern), made once with the ZBIC encoder of
+// ZBIC frames of the three synthetic segments of test_plain_nso.cpp (zbic_pattern), made once with the ZBIC encoder of
 // kinnay/zbic 11b08f2 (ZSTD_compress level 3, ZSTD_ZBIC_SUPPORT 1). Synthetic data only.
 // segment 0: 12288 -> 1438
 const uint8_t kSeg0[] = {

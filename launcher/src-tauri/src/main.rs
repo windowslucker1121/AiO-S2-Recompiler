@@ -7,9 +7,9 @@ mod gamebuild;
 mod ini;
 mod manifest;
 mod play;
-mod rawdump;
 mod settings;
 mod shaders;
+mod zbic;
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -29,11 +29,6 @@ struct Config {
     /// Folder with the game exe. Empty: the folder the launcher is in.
     game_dir: String,
     minimize_on_play: bool,
-    /// Raw dump mode: the player's NSP / XCI files. When set, Set up first extracts them into `<game>/dump` (rawdump.rs), which is
-    /// then `dump_dir`. Choosing a dump folder clears it.
-    raw_inputs: Vec<String>,
-    /// prod.keys and optionally title.keys for raw_inputs (paths only; the launcher never reads them).
-    key_files: Vec<String>,
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -121,8 +116,6 @@ fn save_dump(app: AppHandle, path: String) -> Result<dump::DumpReport, String> {
     let m = manifest::get()?;
     let mut cfg = load_config(&app);
     cfg.dump_dir = report.path.clone();
-    cfg.raw_inputs.clear();
-    cfg.key_files.clear();
     save_config(app.clone(), cfg.clone())?;
     settings::apply(
         &game_dir_of(&cfg),
@@ -133,34 +126,6 @@ fn save_dump(app: AppHandle, path: String) -> Result<dump::DumpReport, String> {
         ],
     )?;
     Ok(report)
-}
-
-#[tauri::command]
-async fn pick_files(app: AppHandle, title: String, filter_name: String, extensions: Vec<String>, multiple: bool) -> Vec<String> {
-    let exts: Vec<&str> = extensions.iter().map(|e| e.as_str()).collect();
-    let dlg = app.dialog().file().set_title(title).add_filter(filter_name, &exts);
-    let picked = if multiple { dlg.blocking_pick_files().unwrap_or_default() } else { dlg.blocking_pick_file().into_iter().collect() };
-    picked.into_iter().filter_map(|p| p.into_path().ok()).map(|p| dump::fwd(&p)).collect()
-}
-
-/// Raw dump mode: what the dump files hold, read with the player's keys (nothing is written).
-#[tauri::command]
-async fn check_raw(inputs: Vec<String>, keys: Vec<String>) -> Result<rawdump::Found, String> {
-    let tool = rawdump::find_tool(&exe_dir().join("tools"))?;
-    let title_id = manifest::get()?.game.title_id.clone();
-    tauri::async_runtime::spawn_blocking(move || rawdump::check(&tool, &inputs, &keys, &title_id)).await.map_err(|e| e.to_string())?
-}
-
-/// Raw dump mode: checks and stores the dump files and keys; Set up extracts them into `<game>/dump` and uses that folder.
-#[tauri::command]
-async fn save_raw(app: AppHandle, inputs: Vec<String>, keys: Vec<String>) -> Result<rawdump::Found, String> {
-    let found = check_raw(inputs.clone(), keys.clone()).await?;
-    let mut cfg = load_config(&app);
-    cfg.raw_inputs = inputs;
-    cfg.key_files = keys;
-    cfg.dump_dir = dump::fwd(&game_dir_of(&cfg).join(rawdump::OUT_REL));
-    save_config(app, cfg)?;
-    Ok(found)
 }
 
 #[tauri::command]
@@ -225,24 +190,21 @@ fn setup_status(app: AppHandle, state: State<Arc<SetupState>>) -> Result<SetupSt
     Ok(SetupStatus { progress, complete: built && shaders::is_complete(&dir), started, playable: built && dir.join(&m.files.exe).is_file(), shaders_done, shaders_total })
 }
 
-/// First-run setup: (0) in raw dump mode, the NSP / XCI files extracted into `<game>/dump` (rawdump.rs), (a) the game ini paths,
+/// First-run setup: (a) the game ini paths,
 /// (b) in a model (b) release, the game exe built from the player's dump (gamebuild.rs; ZBIC modules converted to plain NSOs first),
 /// (c) the shader cache in shader_cache/spirv, on a worker thread with "setup-status" events.
 #[tauri::command]
 fn start_setup(app: AppHandle, state: State<Arc<SetupState>>) -> Result<(), String> {
     let m = manifest::get()?;
     let cfg = load_config(&app);
-    let raw = !cfg.raw_inputs.is_empty();
-    if !raw {
-        dump::scan(&cfg.dump_dir).chosen.ok_or_else(|| "Choose usable game files first.".to_string())?;
-    }
+    dump::scan(&cfg.dump_dir).chosen.ok_or_else(|| "Choose usable game files first.".to_string())?;
     let dir = game_dir_of(&cfg);
     let tools_dir = exe_dir().join("tools");
     let package_b = gamebuild::is_package_b(&tools_dir);
     if !package_b && !dir.join(&m.files.exe).is_file() {
         return Err(format!("{0} was not found in {1}. Put the launcher next to {0} or set the game folder in Settings.", m.files.exe, dump::fwd(&dir)));
     }
-    let extract_tool = if raw { Some(rawdump::find_tool(&tools_dir)?) } else { rawdump::find_tool(&tools_dir).ok() };
+    let zbic_tool = zbic::find_tool(&tools_dir).ok();
     {
         let mut p = state.progress.lock().unwrap();
         if p.state == "running" {
@@ -259,28 +221,11 @@ fn start_setup(app: AppHandle, state: State<Arc<SetupState>>) -> Result<(), Stri
             let _ = app.emit("setup-status", p);
         };
         let result = (|| -> Result<bool, String> {
-            if raw {
-                let out = dir.join(rawdump::OUT_REL);
-                if !rawdump::is_extracted(&out, &cfg.raw_inputs) {
-                    let tool = extract_tool.as_deref().ok_or("The dump extractor is missing.")?;
-                    let done = rawdump::extract(tool, &cfg.raw_inputs, &cfg.key_files, &m.game.title_id, &out, &st.cancel, |t| {
-                        let message = match t.phase.as_str() {
-                            "verify" => "Checking your dump files...".to_string(),
-                            "romfs" => "Extracting the game data from your dump...".to_string(),
-                            _ => t.message,
-                        };
-                        emit(shaders::Progress { state: "running".into(), phase: "dump".into(), done: t.done, total: t.total, message })
-                    })?;
-                    if !done {
-                        return Ok(false);
-                    }
-                }
-            }
             let report = dump::scan(&cfg.dump_dir);
             let chosen = report.chosen.ok_or_else(|| format!("The game files at {} are not usable: {}", cfg.dump_dir, report.errors.join(" ")))?;
             settings::ensure_play_paths(&dir, &m.files.ini, &chosen.exefs, &chosen.romfs)?;
             // the lifter and the shader extractor read plain NSOs; the runtime reads ZBIC itself, so the ini keeps the dump's ExeFS
-            let exefs = rawdump::exefs_for_build(extract_tool.as_deref(), &PathBuf::from(&chosen.exefs), &dir)?;
+            let exefs = zbic::exefs_for_build(zbic_tool.as_deref(), &PathBuf::from(&chosen.exefs), &dir)?;
             if package_b && !gamebuild::is_built(&dir, &m.files.exe) {
                 let tools = gamebuild::find_tools(&tools_dir, &m.runtime_lib())?;
                 let build_job = gamebuild::Job { game_dir: dir.clone(), exefs: exefs.clone(), jobs: jobs + 1 };
@@ -391,9 +336,6 @@ fn main() {
             save_config,
             get_overview,
             pick_folder,
-            pick_files,
-            check_raw,
-            save_raw,
             validate_dump,
             save_dump,
             read_settings,

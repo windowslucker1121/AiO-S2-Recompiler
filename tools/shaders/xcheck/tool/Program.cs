@@ -71,7 +71,7 @@ namespace Nx.Shaders.XCheck
             return 0;
         }
 
-        /// the Switch2-Recomp folder: the nearest parent of the working directory or of the tool that holds work\shaders.
+        /// the repository folder: the nearest parent of the working directory or of the tool that holds work\shaders.
         static string FindRoot()
         {
             foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })

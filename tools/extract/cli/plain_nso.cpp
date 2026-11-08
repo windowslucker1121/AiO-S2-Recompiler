@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// nx_plain_nso: `nx_extract --plain-nso` without the container readers of tools/setup, so it builds from this repository alone.
+// nx_plain_nso: ZBIC NSO -> plain NSO for the lifter. Reads already-decrypted ExeFS files only (no keys, no containers).
 // Writes every file of an ExeFS folder to <out>: ZBIC NSOs (runtime/docs/zbic.md) become plain NSOs (segments stored, compressed
-// sizes = sizes, bits 0-2 and 7 cleared, hash bits and hashes kept), everything else is copied. Same output as extract.cpp
-// nso_to_plain; each decoded segment is checked against its hash in the NSO header.
+// sizes = sizes, bits 0-2 and 7 cleared, hash bits and hashes kept), everything else is copied.
+// Each decoded segment is checked against its hash in the NSO header.
 //   nx_plain_nso <exefs folder> <out folder>
-// Exit codes as nx_extract: 0 done, 1 error, 2 bad dump, 4 disk.
+// Exit codes: 0 done, 1 error, 2 bad dump (a damaged NSO), 4 disk.
 #include <windows.h>
 #include <bcrypt.h>
 

@@ -4174,15 +4174,17 @@ bool upscaler_dispatch(const std::string& hash) {
         const uint64_t pr = counters().presents.load(std::memory_order_relaxed);
         if (!chain_pass_ready()) {
             if (g_chain_broken_present == ~0ull || g_chain_broken_present + 1 < pr)
-                NXLOG_I(kTag, "upscaler fallback: %s cannot run yet: the scaled copy stands in for the game's chain", hash.c_str());
+                NXLOG_I(kTag, "upscaler fallback: %s cannot run yet (present %llu): the scaled copy stands in for the game's chain", hash.c_str(),
+                        static_cast<unsigned long long>(pr));
             g_chain_broken_present = pr;
         }
         const bool copy_mode = g_chain_broken_present != ~0ull && g_chain_broken_present + 1 >= pr;
+        static uint64_t resumed_at = ~0ull;    // the present the chain last took over again (logged once per fallback period)
         if (!copy_mode) {
-            static bool told = false;
-            if (!told && g_chain_broken_present != ~0ull) {
-                told = true;
-                NXLOG_I(kTag, "upscaler fallback: every pass of the chain runs: the game's own chain from now on");
+            if (g_chain_broken_present != ~0ull && resumed_at != g_chain_broken_present) {
+                resumed_at = g_chain_broken_present;
+                NXLOG_I(kTag, "upscaler fallback: every pass of the chain runs again (present %llu, the copy stood in last at present %llu)",
+                        static_cast<unsigned long long>(pr), static_cast<unsigned long long>(g_chain_broken_present));
             }
             return false;
         }

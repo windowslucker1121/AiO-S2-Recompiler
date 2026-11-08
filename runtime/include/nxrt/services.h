@@ -128,5 +128,9 @@ uint64_t language_code_u64(Language l);  // the same string as the little-endian
 // use) and the folder save data lives in ([fs] save_dir, default %APPDATA%\<game save folder>\save, nxrt/game.h).
 std::string romfs_dir();
 std::string save_dir();
+// base\folder, the APPDATA folder save_dir uses. While it does not exist, the first of the ";"-separated old names (game::Info
+// old_save_folders) that exists under base is renamed to it, so saves made under an earlier name keep working. When the rename fails (a
+// file held open elsewhere) the old folder is returned and used as it is.
+std::string migrate_save_folder(const std::string& base, const std::string& folder, const std::string& old_names);
 
 }  // namespace nxrt::services

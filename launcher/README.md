@@ -1,6 +1,6 @@
-# Pokopia Launcher
+# Recomp Launcher
 
-Tauri 2 launcher for the Pokopia PC port (`pkp.exe`). It ships no game files and never changes yours. It reads the game
+Tauri 2 launcher for a game module's exe (here module `pkp`, `pkp.exe`; names come from the module's `game.toml`). It ships no game files and never changes yours. It reads the game
 files you extracted from your own copy, writes `pkp.ini` next to `pkp.exe` and builds the shader cache from your romfs.
 
 ## First run
@@ -36,7 +36,7 @@ The launcher looks for its tools in `tools\` next to its own exe. A release fold
 
 ```
 pkp.exe                     the game (game-build, -Release)
-PokopiaLauncher.exe         this launcher (npm run tauri build)
+pkp_launcher.exe            this launcher (<launcher.product_name>.exe) (npm run tauri build)
 Play.bat                    release\Play.bat (optional)
 tools\
   spirv_harness\            self-contained publish of nx tools/shaders/harness:
@@ -44,6 +44,7 @@ tools\
                                 --self-contained true -o <release>\tools\spirv_harness     (~84 MB)
                             (stage the Ryujinx sources first: tools\shaders\scripts\setup_ryujinx.ps1)
   shaders\extract_corpus.py nx tools/shaders/ampere/extract_corpus.py
+  extract\nx_plain_nso.exe  nx tools/extract (only for games whose ExeFS uses ZBIC compression; tools\extract\scripts\build.ps1)
   python\python.exe         optional: Python 3 (for example the embeddable package) with the lz4 package installed.
                             Without it the first python.exe on PATH that can `import lz4.block` is used.
 ```

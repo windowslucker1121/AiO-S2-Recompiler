@@ -16,8 +16,9 @@ are responsible for using it lawfully where you live. Nothing here is legal advi
 
 - You need a game you bought and own, and a dump you made yourself from your own console and your own copy.
 - Whether making and using such a dump is allowed depends on the law of your country. Follow it.
-- The supported input is a dump that is already decrypted. The library app does not decrypt game containers and does not ask for
-  console keys.
+- The supported input is a dump that is already decrypted: an extracted folder (`exefs` + `romfs`) or a `.nup` package. No part
+  of the project decrypts game containers, reads console keys or circumvents any protection; encrypted NSP, XCI, NSZ and XCZ files are
+  not supported.
 - What the tools build from your dump (recompiled code, extracted files, shader caches, captures, bug bundles) contains the game's
   copyrighted material. It is for your own use on your own PC. Do not upload, share or sell it.
 

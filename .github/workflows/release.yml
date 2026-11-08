@@ -1,0 +1,164 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Builds the game library release package (recomp_library.exe + translator + bundled Python + game manifests, tools/release/package.ps1)
+# and publishes it as a GitHub release.
+#   - push a tag v1.2.3            -> build + release "v1.2.3" (pre-release when the tag has a suffix, e.g. v0.2.0-rc1)
+#   - Actions tab, "Run workflow"  -> build; with a version given, also a release (tag created on the chosen commit)
+#   - pull requests / pushes       -> build only (the zip is kept as a workflow artifact)
+# The package holds no game data and no lifted code (LEGAL.md); a game exe is not part of it.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'runtime/apps/setup/**'
+      - 'runtime/apps/launcher/keymap_win.*'
+      - 'game-build/res/setup.*'
+      - 'tools/release/**'
+      - 'tools/shaders/harness/**'
+      - 'tools/extract/nup_extract.py'
+      - 'tools/shaders/scripts/extract_generic.py'
+      - 'tools/shaders/scripts/bnsh_programs.py'
+      - 'recomp/games/*/game.toml'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.1.0). Empty: build only, no release.'
+        required: false
+        default: ''
+      prerelease:
+        description: 'Mark the release as a pre-release'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      release: ${{ steps.ver.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # refs/ryubing (Ryujinx's shader translator, MIT)
+          fetch-depth: 1
+
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = ''
+          $rel = 'false'
+          if ('${{ github.ref_type }}' -eq 'tag') { $v = '${{ github.ref_name }}' -replace '^v', ''; $rel = 'true' }
+          elseif ('${{ github.event_name }}' -eq 'workflow_dispatch' -and '${{ inputs.version }}' -ne '') { $v = '${{ inputs.version }}' -replace '^v', ''; $rel = 'true' }
+          else { $v = "0.0.0-ci.${{ github.run_number }}+$('${{ github.sha }}'.Substring(0, 7))" }
+          if ($rel -eq 'true' -and $v -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$') { throw "not a version: $v" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "release=$rel" >> $env:GITHUB_OUTPUT
+          Write-Host "version $v, release $rel"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: ilammy/msvc-dev-cmd@v1   # rc.exe, the Windows SDK and the MSVC libraries for clang-cl
+        with:
+          arch: x64
+
+      - name: Tools
+        shell: pwsh
+        run: |
+          clang-cl --version
+          cmake --version
+          ninja --version
+          dotnet --version
+          python --version
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ hashFiles('tools/shaders/harness/**/*.csproj', 'refs/ryubing/Directory.Packages.props') }}
+
+      - name: Package
+        shell: pwsh
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\release\package.ps1
+          -Version "${{ steps.ver.outputs.version }}" -Out "${{ runner.temp }}\release" -HostPython python
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $pkg = Get-ChildItem "${{ runner.temp }}\release" -Directory | Where-Object Name -like 'recomp-library-*' | Select-Object -First 1
+          foreach ($f in 'recomp_library.exe', 'tools\spirv_harness\spirv_harness.exe', 'tools\python\python.exe',
+                         'tools\scripts\nup_extract.py', 'tools\scripts\extract_generic.py', 'tools\scripts\bnsh_programs.py', 'LICENSE') {
+            if (-not (Test-Path (Join-Path $pkg.FullName $f))) { throw "missing in the package: $f" }
+          }
+          if (-not (Get-ChildItem (Join-Path $pkg.FullName 'games') -Recurse -Filter game.toml)) { throw 'no game manifests in the package' }
+          & (Join-Path $pkg.FullName 'tools\python\python.exe') -I (Join-Path $pkg.FullName 'tools\scripts\nup_extract.py') --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'nup_extract.py --help failed with the bundled Python' }
+          # Nothing from a game may ever be in a release (LEGAL.md): refuse console/game file types outright.
+          $bad = Get-ChildItem $pkg.FullName -Recurse -File | Where-Object { $_.Extension -in '.nso', '.nro', '.nca', '.nsp', '.xci', '.nup', '.bfsha', '.bnsh', '.spv', '.keys' -or $_.Name -in 'main', 'sdk', 'rtld', 'main.npdm' }
+          if ($bad) { throw "game/console files in the package: $($bad.FullName -join ', ')" }
+          Write-Host "package ok: $($pkg.Name)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recomp-library-${{ steps.ver.outputs.version }}
+          path: |
+            ${{ runner.temp }}\release\*.zip
+            ${{ runner.temp }}\release\*.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: build
+    if: needs.build.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: recomp-library-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || contains(needs.build.outputs.version, '-') }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          cat > notes.md <<EOF
+          Recomp Library ${VERSION} for Windows x64.
+
+          Unzip and start \`recomp_library.exe\`, then add your own dump of a supported game.
+          The package contains no game files, no game code and no keys (see LEGAL.md). Bundled: the shader translator
+          (.NET runtime included), an embeddable Python with zstandard and lz4, and the game manifests.
+
+          SHA-256: \`$(cut -d' ' -f1 dist/*.zip.sha256)\`
+          EOF
+          flags=(--title "Recomp Library ${VERSION}" --notes-file notes.md)
+          if [ "${PRERELEASE}" = "true" ]; then flags+=(--prerelease); fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.zip dist/*.zip.sha256 --clobber
+          else
+            gh release create "$tag" dist/*.zip dist/*.zip.sha256 --target "${{ github.sha }}" "${flags[@]}"
+          fi

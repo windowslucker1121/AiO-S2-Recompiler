@@ -378,12 +378,50 @@ uint64_t language_code_u64(Language l) {
 
 std::string romfs_dir() { return config_get_str("fs", "romfs", "game/romfs"); }
 
+std::string migrate_save_folder(const std::string& base, const std::string& folder, const std::string& old_names) {
+    const std::string target = base + "\\" + folder;
+    if (old_names.empty() || GetFileAttributesA(target.c_str()) != INVALID_FILE_ATTRIBUTES) return target;
+    size_t p = 0;
+    while (p <= old_names.size()) {
+        size_t e = old_names.find(';', p);
+        if (e == std::string::npos) e = old_names.size();
+        std::string name = old_names.substr(p, e - p);
+        p = e + 1;
+        while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.pop_back();
+        while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front()))) name.erase(name.begin());
+        if (name.empty() || name == folder) continue;
+        const std::string old = base + "\\" + name;
+        const DWORD a = GetFileAttributesA(old.c_str());
+        if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (MoveFileExA(old.c_str(), target.c_str(), 0)) {
+            NXLOG_I("fs", "save folder moved from %s to %s (the save folder's old name)", old.c_str(), target.c_str());
+            return target;
+        }
+        NXLOG_W("fs", "could not move the old save folder %s to %s (error %lu): using the old folder", old.c_str(), target.c_str(),
+                static_cast<unsigned long>(GetLastError()));
+        return old;
+    }
+    return target;
+}
+
 std::string save_dir() {
     std::string d = config_get_str("fs", "save_dir", "");
     if (!d.empty()) return d;
     const char* appdata = std::getenv("APPDATA");
-    const char* folder = game::info().save_folder;
-    return std::string(appdata && *appdata ? appdata : ".") + "\\" + (folder && *folder ? folder : "nxrt") + "\\save";
+    const game::Info& g = game::info();
+    const std::string base = appdata && *appdata ? appdata : ".";
+    const std::string folder = g.save_folder && *g.save_folder ? g.save_folder : "nxrt";
+    const std::string olds = g.old_save_folders ? g.old_save_folders : "";
+    // The move is tried once per base / name pair (save_dir is asked often).
+    static std::mutex mu;
+    static std::string key, dir;
+    std::lock_guard<std::mutex> lk(mu);
+    const std::string k = base + "|" + folder + "|" + olds;
+    if (k != key) {
+        dir = migrate_save_folder(base, folder, olds);
+        key = k;
+    }
+    return dir + "\\save";
 }
 
 }  // namespace nxrt::services

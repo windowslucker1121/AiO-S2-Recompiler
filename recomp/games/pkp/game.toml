@@ -19,7 +19,8 @@ schema = 1
 id = "pkp"                                  # short id: folder names, CMake targets, environment variable prefix (PKP_EXEFS, PKP_GAME), logs
 title = "Pokémon Pokopia"                   # the game's own name (log, error boxes, window title of the game)
 short_title = "Pokopia"                     # short name in messages
-product = "Pokémon Pokopia PC"              # the PC port's name (exe properties)
+product = "Recomp module: pkp"              # neutral build name (exe properties, shortcuts); never the game's name
+window_title = "Pokopia (unofficial recompilation)"   # the game window and its dialogs (empty: title)
 title_id = "0400A3A01EE4C000"               # Switch program id
 version = "2.0.1"                           # the game version the hooks were found in
 platform = "switch2"
@@ -33,7 +34,8 @@ log = "pkp.log"
 setup_exe = "pkp_setup.exe"
 launcher_ini = "pkp_launcher.ini"
 shader_pack = "shader_cache.pkpshc"
-save_folder = "PokopiaRecompPC"             # under %APPDATA%; also names the one-game-per-folder mutex
+save_folder = "pkp-recomp"                  # under %APPDATA%; also names the one-game-per-folder mutex
+old_save_folders = "PokopiaRecompPC"        # earlier save_folder names (";"-separated): moved to save_folder at the first start
 
 [dump]
 version = "2.0.1 (update 655360)"           # the supported dump, as shown in the build check
@@ -99,9 +101,9 @@ extractor = "generic"
 extractor_script = "tools/shaders/scripts/extract_generic.py"
 
 [launcher]
-name = "Pokopia Launcher"                   # headings and the navigation brand
-window_title = "Pokopia Launcher"
-product_name = "PokopiaLauncher"            # the launcher exe in the package is <product_name>.exe
+name = "Recomp Launcher"                    # headings and the navigation brand (neutral: no game name)
+window_title = "Recomp Launcher (pkp)"
+product_name = "pkp_launcher"               # the launcher exe in the package is <product_name>.exe
 identifier = "org.pkp-recomp.launcher"      # app id: the launcher settings folder under %APPDATA%
-package_name = "PokopiaRecomp"              # release folder and zip: <package_name>-<version>
+package_name = "pkp-recomp"                 # release folder and zip: <package_name>-<version>
 disclaimer = "Nintendo, The Pokemon Company, or Koei Tecmo"   # "not affiliated with or endorsed by ..."

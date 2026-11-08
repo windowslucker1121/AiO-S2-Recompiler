@@ -20,7 +20,15 @@
  * SOFTWARE.
  */
 
-// NVN types reconstructed from Darksiders II DWARF information.
+// PROVENANCE (recorded 2026-11-08; also runtime/THIRD_PARTY_NOTICES.md, "NVN header (MIT)"):
+//   - Author: h1k421 (MIT licence above). The declarations were reconstructed by the author from the DWARF debug information of a
+//     retail game (Darksiders II), as the original note below says. They are not Nintendo SDK source or documentation.
+//   - Copied into this repository from the mp1r-practice-mod repository, file src_framework/nvn/nvn.h. That repository as a whole is
+//     GPL-2.0; this file carries its own MIT notice, which is kept unchanged above.
+//   - Content: only interface declarations (types, enums, structs, function pointer typedefs) the runtime needs to answer the game's NVN
+//     calls; no implementation. Changes made here are marked "NXRT NOTE".
+//
+// Original note: NVN types reconstructed from Darksiders II DWARF information.
 // NXRT NOTE: nvnMemoryPoolBuilderGetMemory and nvnCommandBufferGetMemoryCallbackData return void* (the original typedefs said void).
 // NXRT NOTE: copied from mp1r-practice-mod src_framework/nvn/nvn.h (MIT, notice above). One correction: the three
 // *GetMemoryPool typedefs returned NVNmemoryPool by value in the original; the driver returns a pointer (smo-recomp,

@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """nup_extract: turns a NUP package (.nup: a decrypted Switch 1/2 dump, base game plus updates and DLC in one file; format:
-https://github.com/a55uka/nup/blob/meow/SPEC.md) into the extracted layout nx_extract writes (src/extract.h):
+https://github.com/a55uka/nup/blob/meow/SPEC.md) into the extracted layout the lifter, the runtime and the library app read:
   <out>/base/exefs/                 the base game's ExeFS (always)
   <out>/updates/<version>/exefs/    the newest update's ExeFS
   <out>/updates/<version>/romfs/    the newest update's RomFS over the base's (the whole game), or <out>/base/romfs/ without one
   <out>/extract.json                written last; its presence means complete (not written with --exefs-only)
 NUP content is plaintext, so there are no keys. Every file is checked against its SHA-256 in the TOC; a second run keeps files whose
-size already matches. ZBIC NSOs are written as stored (convert with nx_extract --plain-nso).
+size already matches. ZBIC NSOs are written as stored (convert with nx_plain_nso, tools/extract).
 
   python tools/extract/nup_extract.py game.nup D:\\Game\\dump [--exefs-only]
   python tools/extract/nup_extract.py game.nup --list
