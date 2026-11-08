@@ -158,6 +158,10 @@ namespace Ryujinx.Graphics.Shader.Translation
         // entries; offsets below 4 GiB). Not mapped jumps to `miss`. Returns the device address of (aLo, aHi).
         public const int PageTableC0 = 0xfe0;
         public const int MaxLevels = 4;
+        /// NXRT_HARNESS_GMEM_WINDOW=1 (experiment E3): the flat window check before the walk; its words are c[0] WindowC0..+0xf (the runtime's
+        /// [nvn] exp_gmem_window). Without the runtime key the words are 0 and every access walks as before.
+        public const int WindowC0 = 0xff0;
+        static readonly bool Window = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_WINDOW") == "1";
 
         // The device address of (aLo, aHi): the page cache (CacheMemory) when it holds the address's span, else a walk of the page table
         // (layout above). One loop without early exits and a single branch to `miss` at its end: NVIDIA's compiler (driver 610.88) crashed
@@ -185,6 +189,23 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 c.Copy(pLo, Const(0));
                 c.Copy(pHi, Const(0));
+            }
+            if (Window)
+            {
+                // E3 / bet 2 experiment (NXRT_HARNESS_GMEM_WINDOW=1): a flat window (c[0] WindowC0: guest base >> 16, size >> 16, device
+                // address) where device address = window + (guest - base), one add and no walk; addresses outside it walk as before.
+                Operand wBase = Cbuf(0, WindowC0 / 4), wSize = Cbuf(0, WindowC0 / 4 + 1);
+                Operand wLo = Cbuf(0, WindowC0 / 4 + 2), wHi = Cbuf(0, WindowC0 / 4 + 3);
+                // offset = address - (base << 16), as 64 bits: in the window when its high part is 0 and the low part below size << 16
+                Operand bLo = c.ShiftLeft(wBase, Const(16)), bHi = c.ShiftRightU32(wBase, Const(16));
+                Operand oLo = c.ISubtract(aLo, bLo);
+                Operand oHi = c.ISubtract(c.ISubtract(aHi, bHi), c.ConditionalSelect(c.ICompareLessUnsigned(aLo, bLo), Const(1), Const(0)));
+                Operand inWin = c.BitwiseAnd(c.BitwiseAnd(c.ICompareEqual(oHi, Const(0)), c.ICompareLessUnsigned(c.ShiftRightU32(oLo, Const(16)), wSize)),
+                                             c.BitwiseNot(hit));
+                Operand rLo = c.IAdd(wLo, oLo);
+                c.Copy(pLo, c.ConditionalSelect(inWin, rLo, pLo));
+                c.Copy(pHi, c.ConditionalSelect(inWin, c.IAdd(wHi, Carry(c, rLo, wLo)), pHi));
+                hit = c.BitwiseOr(hit, inWin);
             }
             c.Copy(found, hit);
             Operand tableOk = c.ICompareNotEqual(c.BitwiseOr(tLo, tHi), Const(0));

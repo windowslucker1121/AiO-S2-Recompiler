@@ -536,4 +536,152 @@ void render_frame_tick() {
     tsc_at_last = tsc;
 }
 
+// ---- E3: flat window -----------------------------------------------------------------------------------------------------------
+namespace {
+struct Window {
+    bool tried = false, ready = false;
+    uint64_t base = 0, size = 0;
+    VkBuffer buf = VK_NULL_HANDLE;
+    uint64_t dev = 0;
+    std::vector<VkDeviceMemory> blocks;
+    uint64_t block_used = 0, block_size = 64ull << 20, align = 65536;
+    std::vector<std::pair<uint64_t, uint64_t>> bound;        // window offsets bound, [lo, hi)
+    std::vector<std::pair<uint64_t, uint64_t>> pools;        // guest ranges copied in
+    uint32_t type = 0;
+    uint64_t last_present = ~0ull, refreshes = 0, bytes = 0;
+};
+Window& win() { static Window w; return w; }
+
+bool window_parse(uint64_t& base, uint64_t& size) {
+    const std::string v = config_get_str("nvn", "exp_gmem_window", "");
+    if (v.empty() || v == "0") return false;
+    if (v == "1") { base = 0x7800000000ull; size = 12ull << 30; return true; }
+    const size_t c = v.find(':');
+    if (c == std::string::npos) return false;
+    base = std::strtoull(v.substr(0, c).c_str(), nullptr, 16) & ~0xffffull;
+    size = (std::strtoull(v.substr(c + 1).c_str(), nullptr, 16) + 0xffff) & ~0xffffull;
+    return size != 0;
+}
+
+bool window_bind(Window& w, uint64_t lo, uint64_t hi) {     // window offsets [lo, hi), 64 KiB aligned; binds what is not bound yet
+    std::vector<VkSparseMemoryBind> binds;
+    for (uint64_t a = lo; a < hi; a += w.align) {
+        bool have = false;
+        for (const auto& [b0, b1] : w.bound) if (a >= b0 && a < b1) { have = true; break; }
+        if (have) continue;
+        if (w.blocks.empty() || w.block_used + w.align > w.block_size) {
+            VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            ai.allocationSize = w.block_size;
+            ai.memoryTypeIndex = w.type;
+            VkDeviceMemory m = VK_NULL_HANDLE;
+            if (vkAllocateMemory(gpu::vkdev(), &ai, nullptr, &m) != VK_SUCCESS) { NXLOG_W(kTag, "E3 window: out of video memory"); return false; }
+            w.blocks.push_back(m);
+            w.block_used = 0;
+        }
+        VkSparseMemoryBind mb = {};
+        mb.resourceOffset = a;
+        mb.size = w.align;
+        mb.memory = w.blocks.back();
+        mb.memoryOffset = w.block_used;
+        w.block_used += w.align;
+        if (!binds.empty() && binds.back().resourceOffset + binds.back().size == a && binds.back().memory == mb.memory &&
+            binds.back().memoryOffset + binds.back().size == mb.memoryOffset)
+            binds.back().size += w.align;
+        else
+            binds.push_back(mb);
+    }
+    if (binds.empty()) return true;
+    VkSparseBufferMemoryBindInfo sb = {w.buf, static_cast<uint32_t>(binds.size()), binds.data()};
+    VkBindSparseInfo bs = {VK_STRUCTURE_TYPE_BIND_SPARSE_INFO};
+    bs.bufferBindCount = 1;
+    bs.pBufferBinds = &sb;
+    VkResult r;
+    {
+        std::lock_guard<std::mutex> lk(gpu::device().queue_mutex());
+        r = vkQueueBindSparse(gpu::device().queue(), 1, &bs, VK_NULL_HANDLE);
+    }
+    if (r != VK_SUCCESS) { NXLOG_W(kTag, "E3 window: vkQueueBindSparse %d", (int)r); return false; }
+    w.bound.emplace_back(lo, hi);
+    return true;
+}
+
+bool window_create(Window& w) {
+    if (!window_parse(w.base, w.size)) return false;
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
+    bi.size = w.size;
+    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+               VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    if (vkCreateBuffer(gpu::vkdev(), &bi, nullptr, &w.buf) != VK_SUCCESS) { NXLOG_W(kTag, "E3 window: no sparse buffer"); return false; }
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(gpu::vkdev(), w.buf, &req);
+    w.align = std::max<uint64_t>(req.alignment, 65536);
+    VkPhysicalDeviceMemoryProperties mp{};
+    vkGetPhysicalDeviceMemoryProperties(gpu::device().physical(), &mp);
+    w.type = UINT32_MAX;
+    for (uint32_t t = 0; t < mp.memoryTypeCount; ++t)
+        if ((req.memoryTypeBits & (1u << t)) && (mp.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) { w.type = t; break; }
+    if (w.type == UINT32_MAX) return false;
+    w.dev = gpu::device().buffer_address(w.buf);
+    NXLOG_I(kTag, "E3 window: guest 0x%llx + 0x%llx at device address 0x%llx", (unsigned long long)w.base, (unsigned long long)w.size,
+            (unsigned long long)w.dev);
+    return w.dev != 0;
+}
+}  // namespace
+
+bool gmem_window_on() {
+    static const bool on = !config_get_str("nvn", "exp_gmem_window", "").empty() && config_get_str("nvn", "exp_gmem_window", "") != "0";
+    return on;
+}
+
+void gmem_window_refresh(gpu::Frame& f) {
+    if (!gmem_window_on()) return;
+    Window& w = win();
+    if (!w.tried) { w.tried = true; if (!window_create(w)) return; }
+    if (!w.dev) return;
+    const uint64_t now = gpu::counters().presents.load(std::memory_order_relaxed);
+    static const uint64_t every = static_cast<uint64_t>(std::max<int64_t>(1, config_get_int("nvn", "exp_gmem_window_every", 1)));
+    if (w.ready && (now == w.last_present || now % every)) return;
+    w.last_present = now;
+    std::vector<Ref<MemoryPool>> pools;
+    pool_collect(pools);
+    uint64_t bytes = 0, n = 0;
+    std::vector<VkBufferCopy> copies;
+    for (const auto& p : pools) {
+        if (!p || p->is_virtual || !p->base || p->dead.load()) continue;
+        const uint64_t g0 = p->gpu_base, g1 = p->gpu_base + p->size;
+        if (g0 < w.base || g1 > w.base + w.size) continue;
+        if (!window_bind(w, (g0 - w.base) & ~(w.align - 1), ((g1 - w.base) + w.align - 1) & ~(w.align - 1))) continue;
+        // copy the pool's bytes from its imports (a chunked pool resolves chunk by chunk)
+        for (uint64_t g = g0; g < g1;) {
+            const gpu::BufRef br = gpu::resolve_buffer(g, std::min<uint64_t>(g1 - g, 4096));
+            if (!br.ok || !br.avail) break;
+            const uint64_t len = std::min<uint64_t>(g1 - g, br.avail);
+            VkBufferCopy c = {br.offset, g - w.base, len};
+            vkCmdCopyBuffer(f.cb, br.buffer, w.buf, 1, &c);
+            bytes += len;
+            g += len;
+        }
+        ++n;
+    }
+    gpu::memory_barrier(f.cb);
+    w.ready = true;
+    w.bytes += bytes;
+    if (w.refreshes++ < 3 || (w.refreshes % 300) == 0)
+        NXLOG_I(kTag, "E3 window: %llu pools, %.1f MiB copied in (refresh %llu), %zu blocks of video memory", (unsigned long long)n, bytes / 1048576.0,
+                (unsigned long long)w.refreshes, w.blocks.size());
+}
+
+void gmem_window_words(uint8_t* c0) {
+    Window& w = win();
+    uint32_t v[4] = {0, 0, 0, 0};
+    if (w.ready && w.dev) {
+        v[0] = static_cast<uint32_t>(w.base >> 16);
+        v[1] = static_cast<uint32_t>(w.size >> 16);
+        v[2] = static_cast<uint32_t>(w.dev);
+        v[3] = static_cast<uint32_t>(w.dev >> 32);
+    }
+    std::memcpy(c0, v, 16);
+}
+
 }  // namespace nxrt::nvn::be::archexp

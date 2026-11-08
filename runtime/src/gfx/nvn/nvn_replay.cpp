@@ -37,6 +37,7 @@
 #include "nvn_mask_clear.h"
 #include "nvn_capture.h"
 #include "nvn_gpu_internal.h"
+#include "nvn_arch_exp.h"
 #include "nvn_tess_gen.h"
 #include "nxrt/lowlat.h"
 #include "nxrt/gaps.h"
@@ -2370,6 +2371,7 @@ void pool_table_words(uint8_t* c0, bool old_table) {
         std::memcpy(c0 + kPageTableC0, w, 8);
         std::memcpy(c0 + kPageTableC0 + 8, &a, 8);
     }
+    if (!old_table && archexp::gmem_window_on()) archexp::gmem_window_words(c0 + 0xff0);   // E3 (measurement only)
     if (!old_table) return;
     static Frame* frame = nullptr;
     static uint64_t gen = ~0ull, addr = 0;
@@ -5735,6 +5737,7 @@ void replay_begin_submit(Frame& f) {
         g_pass_unsafe = false;
         mirror_begin_submit(f, on);
     }
+    if (archexp::gmem_window_on()) archexp::gmem_window_refresh(f);   // E3 (measurement only)
     S.window_origin = window_origin_mode();
     S.depth_mode = depth_mode();
     g_draw_idx = 0;

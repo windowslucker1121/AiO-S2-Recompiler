@@ -15,6 +15,8 @@
 
 #include "nvn_cmd.h"
 
+namespace nxrt::nvn::be::gpu { struct Frame; }
+
 namespace nxrt::nvn::be::archexp {
 
 // E1
@@ -29,6 +31,14 @@ void note_invalidate(uint64_t addr, uint64_t size);    // nvnMemoryPool/BufferIn
 void note_gpu_write(uint64_t addr, uint64_t size);     // a command may write pool memory (render thread)
 void submit_sample(const std::vector<Ref<CmdList>>& lists);   // nvnQueueSubmitCommands (game thread)
 void note_guard_fault(uint64_t addr, int access, int pool_flags);   // a CPU access of a held compute result (any thread)
+
+// E3 [nvn] exp_gmem_window = <base hex>:<size hex> (or 1: the heap's primary view, 12 GiB): a sparse device-local buffer over that guest
+// range with every pool in it copied in (refreshed every [nvn] exp_gmem_window_every presents, default 1). Shaders translated with
+// NXRT_HARNESS_GMEM_WINDOW=1 then reach those pools with one add instead of the page walk. Their pointer stores land in the copy only: for
+// timing pointer-reading draws (capture replays), not for playing.
+bool gmem_window_on();
+void gmem_window_refresh(gpu::Frame& f);              // replay_begin_submit (render thread, no pass open)
+void gmem_window_words(uint8_t* c0_0xff0);             // the 16 bytes of c[0] 0xff0 (AmpereGlobal.WindowC0); zeros until the window exists
 
 // E4
 bool emit_on();
