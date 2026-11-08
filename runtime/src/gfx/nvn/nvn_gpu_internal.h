@@ -40,6 +40,7 @@ struct Counters {
     std::atomic<uint64_t> passes{0}, pass_breaks{0}, pipelines_created{0}, pipeline_cache_hits{0}, descriptor_sets{0};
     std::atomic<uint64_t> textures_created{0}, texture_uploads{0}, texture_upload_bytes{0}, bc7_transcodes{0}, textures_failed{0};
     std::atomic<uint64_t> pools_imported{0}, unresolved_addresses{0}, unsupported_ops{0}, submit_replay_ns{0};
+    std::atomic<uint64_t> submit_chunks{0};   // parts of submissions sent to the GPU while their recording went on ([nvn] submit_chunk_draws)
 };
 Counters& counters();
 Counters* counters_if();   // null before the GPU is up
@@ -86,6 +87,8 @@ struct Frame {
 // Splits the submission being recorded (nvn_gpu.cpp): runs what is recorded so far, waits for the GPU, and goes on in a fresh command buffer
 // (f.cb changes, the serial does not). Render thread only; false when it cannot. The caller ends its pass / queries first and re-binds after.
 bool frame_split(Frame& f);
+// Sends what is recorded so far to the GPU without waiting and goes on in a fresh command buffer of the slot (same serial; nvn_gpu.cpp).
+bool frame_chunk(Frame& f);
 
 // Destruction: fn runs once every submission made so far (and the one being recorded) has completed.
 void defer_destroy(std::function<void()> fn);

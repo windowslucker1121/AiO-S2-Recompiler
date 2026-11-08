@@ -545,7 +545,33 @@ are no longer split (`[nvn] compute_out_split_min_kb`): write-fault-handler hitc
 (`[nvn] compute_out_invalidate = guard`). A/B with flags on one exe (first scene 20-180 s, alone): 34.7 fps / 1% lows 19.1 (old) vs 34.2 /
 20.8 (new); fps runs here vary by +-4 fps between runs, so compare flags back to back.
 Measuring tips: give `[prof] trace_events` 20000000 for runs past ~110 s (the default 6M fills up); per-10-s fps from the log: hitch lines `N frames in X s`.
-`gfx_nvn_scene_state`: passed in every full test run of this session (no flake seen).
+`gfx_nvn_scene_state`: passed in every full test run of this session (no flake seen). Later the same day it segfaulted in about 1 of 5
+single-group runs in `clear_color_partial_mask_known_gap`, with the main checkout's test exe too (not from the changes below);
+`gfx_pacing.offscreen_loop_holds_240fps` misses its rate while other work runs on the machine.
+
+**Session 2026-11-08 (render thread / GPU overlap):** the frame model fits the traces: frame time ~ max(P, R, G, (G + R + P) / 2), because
+the big submission reached the GPU only after its whole recording (R and P in series inside the game's two-frame window). Measured with the
+zone trace, no gpu_passes, 854x480 internal size in every run (new log line `render size: pass sizes with the most draws ...` in the
+statistics block; compare fps only at equal sizes), warm pipeline cache (runs right after the gpt re-translation still built pipelines,
+`lib.build` 15-22 ms per frame on nvn-gpl, and were 5-10 fps slower: check that zone before trusting a run). Medians per frame before the
+changes: first scene R 19.7 / P 24.5 / main's nvnSyncWait 12.0 / frame 26.7 ms (35 fps); Link's house R 20.5 / P 21.0 / wait 11.1 /
+frame 24.8 ms (39 fps); Kokiri walk R 17.9 / P 20.8 / wait 10.1 / frame 24.6 ms (36 fps). New: (1) `[nvn] submit_chunk_draws` (default
+256): the recorded part of a submission goes to the GPU without waiting at the next point with no open pass once 256 draws/dispatches were
+recorded (`frame_chunk`, nvn_gpu.cpp; ~2.4 parts per frame in OoT, long passes are not cut: `submit_chunk_pass_draws` would). (2) `[nvn]
+set_reuse` (default on): read-only graphics descriptor sets are bound again without resolving when their raw inputs and the resolve epoch
+are unchanged (15-20% of the sets in game; `verify` mode found no difference); the per-draw held-result checks of the bound buffers
+(`out_draw_bindings`) are skipped under the same condition. Paired A/B in one run (`[nvn] cpuperf_ab = 300`, ftrace marks `cpuperf.on/off`):
+first scene 30.1 -> 34.0 fps (chunks alone) and 29.1 -> 32.8 (both), Kokiri walk 26.9 -> 32.3 (chunks) and 31.1 -> 35.3 (both), Link's
+house (static view) 46.6 -> 48.2 (both). Most of the gain is the chunks; set reuse adds ~1-2 fps where the render thread matters. After it
+the first scene and the house are GPU-bound (P ~ frame time). The biggest render-thread item left is `out_overlaps` (nvn_gpu_pool.cpp, ~15%
+of nvn-render samples, its own loop under a mutex), then build_set (~20%, half of it pool_lookup / resolve_in_pool / out_add).
+After the merge with the coherence work (1769f1f), all of it on vs off in one run: first scene 36.7 -> 39.2 fps, Kokiri walk 36.0 -> 43.0.
+`[nvn] pass_lookahead` (settle the coming draws' reads over held results before a pass begins, so they do not break it) works (replay
+SSIM 1.0) but gained nothing in paired runs (first scene 34.7 -> 33.8, Kokiri 29.4 -> 28.7): the "fill failed" reads still go back
+whole, only earlier. It is off by default. Testing pitfall: after merging header changes into this worktree, 4 test groups and possibly the
+game exe had stale sccache objects (bugcapture/kernel_sync segfaults); `ninja -t clean` in runtime\build\release and game-build\build\release
+fixed it (all 172 pass). A sccache server another worktree started can point at a deleted worktree's clang-cl: set `SCCACHE_SERVER_PORT`
+to a free port for your own builds.
 
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
