@@ -1417,6 +1417,9 @@ struct OutEntry {
     uint64_t serial = 0;                // the submission whose result the copy holds (0: only the one being recorded)
     uint64_t flushed = 0;               // a copy-back is recorded in this submission: the guard goes when it completes
     bool partial = false;               // some of its pages went back already (out_split): copy-backs take only the pages still newer (gpu_new)
+    uint64_t id = 0;                    // unique, so out_fetch finds it again after the lock was free
+    uint64_t gen = 0;                   // moves when a later write takes it over again (out_add): the result out_fetch copied is no longer the newest
+    bool fetching = false;              // out_fetch copies it back with the lock free: other fetches wait (g_out_cv), retire and unregister leave it
 };
 
 std::mutex g_out_mu;                    // g_out, g_out_mirrors; never held while touching guest memory
@@ -1424,6 +1427,34 @@ std::vector<OutEntry> g_out;
 std::vector<Mirror*> g_out_mirrors;
 std::atomic<size_t> g_out_n{0};
 std::atomic<uint64_t> g_out_lo{UINT64_MAX}, g_out_hi{0};   // address bounds of the entries (render thread; a quick filter)
+std::condition_variable g_out_cv;       // an entry stopped fetching
+std::atomic<uint64_t> g_fetch_busy_waits{0}, g_fetch_overtaken{0};   // fetches that waited for another one; entries written again meanwhile
+bool fetch_unlocked_on() {
+    static const bool on = config_get_bool("nvn", "out_fetch_unlocked", true);
+    static const int64_t ab = config_get_int("nvn", "out_fetch_ab", 0);
+    if (!on) return false;
+    if (ab <= 0) return true;
+    return ((counters().presents.load(std::memory_order_relaxed) / static_cast<uint64_t>(ab)) & 1) != 0;
+}
+uint64_t g_out_next_id = 1;             // g_out_mu held
+
+// Render-thread waits for g_out_mu (the 10 s line): the guard handler used to hold it across a whole submission's fence wait.
+std::atomic<uint64_t> g_lock_wait_ns{0}, g_lock_waits{0}, g_lock_wait_max_ns{0};
+struct OutLock {
+    std::unique_lock<std::mutex> lk;
+    OutLock() : lk(g_out_mu, std::defer_lock) {
+        if (lk.try_lock()) return;
+        const auto t0 = std::chrono::steady_clock::now();
+        lk.lock();
+        if (!on_render_thread()) return;
+        const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+        g_lock_wait_ns.fetch_add(ns, std::memory_order_relaxed);
+        g_lock_waits.fetch_add(1, std::memory_order_relaxed);
+        uint64_t m = g_lock_wait_max_ns.load(std::memory_order_relaxed);
+        while (ns > m && !g_lock_wait_max_ns.compare_exchange_weak(m, ns, std::memory_order_relaxed)) {}
+    }
+};
+
 
 // statistics (bytes and counts; the 10 s line)
 std::atomic<uint64_t> g_ob_end{0}, g_ob_gpu{0}, g_ob_fault{0}, g_ob_inval{0};
@@ -1506,7 +1537,7 @@ void fetch_note(int src, uint64_t addr, uint64_t size, uint64_t host_pc, uint64_
 }
 
 void out_register(Mirror* m) {
-    std::lock_guard<std::mutex> lk(g_out_mu);
+    OutLock ol;
     g_out_mirrors.push_back(m);
     static std::once_flag once;
     std::call_once(once, [] {
@@ -1522,6 +1553,9 @@ bool overlaps(const OutEntry& e, uint64_t lo, uint64_t hi) {      // page granul
     const uint64_t a0 = e.addr & ~(kPageBytes - 1), a1 = (e.addr + e.size + kPageBytes - 1) & ~(kPageBytes - 1);
     return a0 < hi && lo < a1;
 }
+
+bool live(const OutEntry& e) { return !e.flushed || e.pending; }   // not copied back in this submission, or written again since
+
 
 // After entries of m covering [first, last] were removed or changed (lock held): pages no entry covers any more are not newer in the
 // copy; pages no guarded entry covers lose their guard.
@@ -1567,6 +1601,42 @@ void copy_barrier_host(VkCommandBuffer cb) {                         // the copi
     di.memoryBarrierCount = 1;
     di.pMemoryBarriers = &b;
     vkCmdPipelineBarrier2(cb, &di);
+}
+
+// One copy of a held result back to the pool (collect_copies), recorded later (record_jobs), maybe with the lock free.
+struct CopyJob { VkBuffer src, dst; VkBufferCopy c; };
+
+// The copies record_copies would make for the entries at idx (lock held).
+void collect_copies(const std::vector<size_t>& idx, std::vector<CopyJob>& out) {
+    for (size_t i : idx) {
+        const OutEntry& e = g_out[i];
+        if (e.partial && e.m) {                 // only the pages still newer in the copy
+            const uint64_t base = reinterpret_cast<uint64_t>(e.m->pg->base);
+            auto newer = [&](uint64_t p) { return ((e.m->gpu_new[static_cast<size_t>(p >> 6)].load(std::memory_order_relaxed) >> (p & 63)) & 1) != 0; };
+            for (uint64_t p = e.first; p <= e.last;) {
+                if (!newer(p)) { ++p; continue; }
+                uint64_t q = p + 1;
+                while (q <= e.last && newer(q)) ++q;
+                const uint64_t lo = std::max(e.addr, base + p * kPageBytes), hi = std::min(e.addr + e.size, base + q * kPageBytes);
+                out.push_back({e.mbuf, e.hbuf, VkBufferCopy{e.moff + (lo - e.addr), e.hoff + (lo - e.addr), hi - lo}});
+                p = q;
+            }
+            continue;
+        }
+        out.push_back({e.mbuf, e.hbuf, VkBufferCopy{e.moff, e.hoff, e.size}});
+    }
+}
+
+uint64_t record_jobs(VkCommandBuffer cb, const std::vector<CopyJob>& jobs) {
+    if (jobs.empty()) return 0;
+    copy_barrier_in(cb);
+    uint64_t bytes = 0;
+    for (const CopyJob& j : jobs) {
+        vkCmdCopyBuffer(cb, j.src, j.dst, 1, &j.c);
+        bytes += j.c.size;
+    }
+    copy_barrier_host(cb);
+    return bytes;
 }
 
 uint64_t record_copies(VkCommandBuffer cb, const std::vector<size_t>& idx) {
@@ -1637,9 +1707,10 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
         const PoolHit hit = pool_lookup(addr);
         m = hit.pool && hit.pool->gpu ? hit.pool->gpu->mirror : nullptr;
     }
-    std::lock_guard<std::mutex> lk(g_out_mu);
+    OutLock ol;
     for (OutEntry& e : g_out)
         if (e.addr == addr && e.size == size && e.m == m) {
+            ++e.gen;                                // a newer result than one a fetch may be copying back
             e.pending = true;
             e.partial = false;
             e.mbuf = mbuf; e.moff = moff; e.hbuf = host.buffer; e.hoff = host.offset;
@@ -1650,6 +1721,7 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
     e.addr = addr; e.size = size; e.m = m;
     e.mbuf = mbuf; e.moff = moff; e.hbuf = host.buffer; e.hoff = host.offset;
     e.pending = true;
+    e.id = g_out_next_id++;
     if (m) {
         const uint64_t base = reinterpret_cast<uint64_t>(m->pg->base);
         e.first = (addr - base) / kPageBytes;
@@ -1665,7 +1737,7 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
 
 bool out_exact(uint64_t addr, VkDeviceSize size, VkBuffer* buf, VkDeviceSize* off, bool* in_mirror) {
     if (!out_any()) return false;
-    std::lock_guard<std::mutex> lk(g_out_mu);
+    OutLock ol;
     for (const OutEntry& e : g_out)
         if (e.addr == addr && e.size == size && e.mbuf) {
             // a copy-back recorded in this submission (flushed) leaves the copy as current as the pool: still the right place
@@ -1681,7 +1753,7 @@ bool out_touches(uint64_t addr, uint64_t size) {
     if (!out_any() || !size) return false;
     const uint64_t lo = addr & ~(kPageBytes - 1), hi = size >= UINT64_MAX - addr ? UINT64_MAX : (addr + size + kPageBytes - 1) & ~(kPageBytes - 1);
     if (hi <= (g_out_lo.load(std::memory_order_relaxed) & ~(kPageBytes - 1)) || lo >= g_out_hi.load(std::memory_order_relaxed) + kPageBytes) return false;
-    std::lock_guard<std::mutex> lk(g_out_mu);
+    OutLock ol;
     for (const OutEntry& e : g_out)
         if (overlaps(e, lo, hi)) return true;
     return false;
@@ -1691,9 +1763,9 @@ bool out_overlaps_shadow(uint64_t addr, uint64_t size) {
     if (!out_any() || !size) return false;
     const uint64_t lo = addr & ~(kPageBytes - 1), hi = size >= UINT64_MAX - addr ? UINT64_MAX : (addr + size + kPageBytes - 1) & ~(kPageBytes - 1);
     if (hi <= (g_out_lo.load(std::memory_order_relaxed) & ~(kPageBytes - 1)) || lo >= g_out_hi.load(std::memory_order_relaxed) + kPageBytes) return false;
-    std::lock_guard<std::mutex> lk(g_out_mu);
+    OutLock ol;
     for (const OutEntry& e : g_out)
-        if (!e.m && (!e.flushed || e.pending) && overlaps(e, lo, hi)) return true;
+        if (!e.m && live(e) && overlaps(e, lo, hi)) return true;
     return false;
 }
 
@@ -1701,10 +1773,9 @@ bool out_overlaps(uint64_t addr, uint64_t size) {
     if (!out_any() || !size) return false;
     const uint64_t lo = addr & ~(kPageBytes - 1), hi = size >= UINT64_MAX - addr ? UINT64_MAX : (addr + size + kPageBytes - 1) & ~(kPageBytes - 1);
     if (hi <= (g_out_lo.load(std::memory_order_relaxed) & ~(kPageBytes - 1)) || lo >= g_out_hi.load(std::memory_order_relaxed) + kPageBytes) return false;
-    std::lock_guard<std::mutex> lk(g_out_mu);
+    OutLock ol;
     for (const OutEntry& e : g_out)
-        if (!e.flushed || e.pending)
-            if (overlaps(e, lo, hi)) return true;
+        if (live(e) && overlaps(e, lo, hi)) return true;
     return false;
 }
 
@@ -1725,7 +1796,7 @@ bool out_servable(uint64_t addr, uint64_t size) {
 
 // A result written by the submission being recorded (pending) covers page `page` of m.
 bool out_pending_on_page(const Mirror* m, uint64_t page) {
-    std::lock_guard<std::mutex> lk(g_out_mu);
+    OutLock ol;
     for (const OutEntry& e : g_out)
         if (e.m == m && e.pending && page >= e.first && page <= e.last) return true;
     return false;
@@ -1739,7 +1810,7 @@ uint64_t out_flush(VkCommandBuffer cb, uint64_t addr, uint64_t size, int why) {
     std::vector<std::pair<uint64_t, uint64_t>> rearm;     // results copied back in queue order: tracked again (mirror_span_written)
     uint64_t bytes = 0;
     {
-        std::lock_guard<std::mutex> lk(g_out_mu);
+        OutLock ol;
         std::vector<size_t> idx, gone;
         for (size_t i = 0; i < g_out.size(); ++i) {
             const OutEntry& e = g_out[i];
@@ -1757,7 +1828,7 @@ uint64_t out_flush(VkCommandBuffer cb, uint64_t addr, uint64_t size, int why) {
             }
         for (size_t i : idx) {
             OutEntry& e = g_out[i];
-            if (e.guarded) {                                // the CPU may still read old bytes until the copy has run: guarded until then;
+            if (e.guarded || e.fetching) {                  // the CPU may still read old bytes until the copy has run: guarded until then;
                 e.pending = false;                          // the copy stays as current as the pool for it (gpu_new kept until retired)
                 e.flushed = cur;
             } else {
@@ -1835,7 +1906,7 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
     if (!out_any()) return;
     std::vector<std::pair<uint64_t, uint64_t>> rearm;
     {
-        std::lock_guard<std::mutex> lk(g_out_mu);
+        OutLock ol;
         std::vector<size_t> eager, gone;
         std::vector<VkBufferCopy> part_copies;          // split entries: the parts that go back now
         std::vector<std::pair<VkBuffer, VkBuffer>> part_bufs;
@@ -1894,7 +1965,7 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
         for (size_t i : eager) {
             OutEntry& e = g_out[i];
             e.pending = false;
-            if (e.guarded) { e.flushed = serial; e.serial = serial; }   // guarded from before: the guard goes when this submission is done
+            if (e.guarded || e.fetching) { e.flushed = serial; e.serial = serial; }   // guarded from before: the guard goes when this submission is done
             else { if (e.m) rearm.emplace_back(e.addr, e.size); gone.push_back(i); }
         }
         remove_entries(gone);
@@ -1902,7 +1973,37 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
     for (const auto& r : rearm) mirror_span_written(r.first, r.second);
 }
 
+// Paired measurement windows of [nvn] out_fetch_ab (N presents each, the feature off in even windows): one line per window with
+// fps, 1% low, the median frame and the render thread's replay / idle time per frame, so a single run gives back-to-back pairs of one scene.
+void out_ab_tick() {
+    static const int64_t ab_i = 0, ab_f = config_get_int("nvn", "out_fetch_ab", 0);
+    const int64_t ab = ab_i > 0 ? ab_i : ab_f;
+    if (ab <= 0) return;
+    const uint64_t pres = counters().presents.load(std::memory_order_relaxed);
+    const uint64_t w = pres / static_cast<uint64_t>(ab);
+    static uint64_t cur_w = ~0ull, p0 = 0;
+    static std::chrono::steady_clock::time_point t0;
+    static double r0 = 0, i0 = 0, s0 = 0;
+    static uint64_t lw0 = 0;
+    if (w == cur_w) return;
+    const auto now = std::chrono::steady_clock::now();
+    const double r = nxrt::hitch_phase_seconds(nxrt::kHpRenderReplay), i = nxrt::hitch_phase_seconds(nxrt::kHpRenderIdle),
+                 s = nxrt::hitch_phase_seconds(nxrt::kHpGameSyncWait);
+    const uint64_t lw = g_lock_wait_ns.load(std::memory_order_relaxed);
+    if (cur_w != ~0ull && pres > p0) {
+        const double secs = std::chrono::duration<double>(now - t0).count();
+        const double fr = static_cast<double>(pres - p0);
+        const nxrt::FrameTimeStats st = nxrt::frame_time_stats(secs);
+        NXLOG_I(kTag, "ab window %s%s%s (presents %llu-%llu, %.1f s): %.1f fps, 1%% low %.1f, median %.2f ms, worst %.1f ms; per frame: render thread replay %.2f ms, "
+                      "idle %.2f ms, game GPU sync waits %.2f ms, waits for the compute-out lock %.3f ms", (cur_w & 1) ? "on" : "off", ab_i > 0 ? " [out_index]" : "", ab_f > 0 ? " [out_fetch_unlocked]" : "",
+                (unsigned long long)p0, (unsigned long long)pres, secs, fr / secs, st.low1_fps, st.median_ms, st.worst_ms, (r - r0) * 1000.0 / fr,
+                (i - i0) * 1000.0 / fr, (s - s0) * 1000.0 / fr, (lw - lw0) / 1e6 / fr);
+    }
+    cur_w = w; p0 = pres; t0 = now; r0 = r; i0 = i; s0 = s; lw0 = lw;
+}
+
 void out_retire() {
+    out_ab_tick();
     // [nvn] out_cpu_read_reset_s = N (diagnostic, default 0: off): every N s the CPU-read marks are cleared, so the next CPU touch of each held
     // result faults again and shows up in the fetch lines (who reads, read or write, how long it waits). Costs fps while on.
     static const int64_t reset_s = config_get_int("nvn", "out_cpu_read_reset_s", 0);
@@ -1911,7 +2012,7 @@ void out_retire() {
         const auto now = std::chrono::steady_clock::now();
         if (now - last >= std::chrono::seconds(reset_s)) {
             last = now;
-            std::lock_guard<std::mutex> lk(g_out_mu);
+            OutLock ol;
             for (Mirror* m : g_out_mirrors)
                 for (size_t i = 0; i < static_cast<size_t>((m->npages + 63) / 64); ++i) m->cpu_read[i].store(0, std::memory_order_relaxed);
             NXLOG_I(kTag, "compute out: CPU-read marks cleared (out_cpu_read_reset_s)");
@@ -1921,11 +2022,11 @@ void out_retire() {
     const uint64_t done = poll_completed();
     std::vector<std::pair<uint64_t, uint64_t>> rearm;
     {
-        std::lock_guard<std::mutex> lk(g_out_mu);
+        OutLock ol;
         std::vector<size_t> gone;
         for (size_t i = 0; i < g_out.size(); ++i) {
             OutEntry& e = g_out[i];
-            if (!e.flushed || e.pending || e.flushed > done) continue;
+            if (!e.flushed || e.pending || e.flushed > done || e.fetching) continue;   // fetching: out_fetch retires it
             e.guarded = false;
             rearm.emplace_back(e.addr, e.size);
             gone.push_back(i);
@@ -1954,7 +2055,8 @@ void out_fetch(uint64_t addr, uint64_t size, bool by_fault, int access, uint64_t
         g_on_inval_skipped.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    std::unique_lock<std::mutex> lk(g_out_mu);
+    OutLock ol;
+    std::unique_lock<std::mutex>& lk = ol.lk;
     // later results in these pages go back at the end of their submission
     uint64_t new_pages = 0;
     for (Mirror* m : g_out_mirrors) {
@@ -1979,17 +2081,24 @@ void out_fetch(uint64_t addr, uint64_t size, bool by_fault, int access, uint64_t
         // rebuilt after every wait: entries may have changed or gone while the lock was free
         std::vector<size_t> idx, copy;
         uint64_t need = 0;
+        bool busy = false;
         const bool rt = on_render_thread();
         const uint64_t cur = rt ? current_serial() : 0;
-        for (size_t i = 0; i < g_out.size(); ++i) {
+        for (size_t i = 0; i < g_out.size() && !busy; ++i) {
             const OutEntry& e = g_out[i];
             if (!overlaps(e, lo, hi) || !(e.guarded || e.serial)) continue;   // only in the submission being recorded: it goes back at its end
+            if (e.fetching) { busy = true; break; }
             idx.push_back(i);
             // a copy-back is recorded already (flushed): once that submission is done the pool is current, and later pool writes there
             // (a clear, a copy, an update) must not be overwritten with the held result. Only when this thread is the one recording it
             // (the render thread) can it not wait: then the result is copied now, before those later writes run.
             if (e.flushed && !e.pending && !(rt && e.flushed >= cur)) need = std::max(need, e.flushed);
             else { copy.push_back(i); need = std::max(need, e.serial); }
+        }
+        if (busy) {                     // another thread is copying one of them back with the lock free: when it is done, look again
+            g_fetch_busy_waits.fetch_add(1, std::memory_order_relaxed);
+            g_out_cv.wait(lk);
+            continue;
         }
         if (idx.empty()) {
             lk.unlock();
@@ -2007,36 +2116,60 @@ void out_fetch(uint64_t addr, uint64_t size, bool by_fault, int access, uint64_t
             ++waits;
             continue;
         }
+        // The copies are recorded from the entries now; the submission and its fence wait (behind everything the queue holds: a whole frame
+        // or more) run with the lock free, so the render thread is not stopped meanwhile. The entries are marked fetching: another fetch of
+        // them waits for this one, out_retire and out_unregister leave them alone. Afterwards they are found again by id. [nvn]
+        // out_fetch_unlocked = false (or the off windows of out_fetch_ab = N presents) keeps the lock across the submission as before.
+        std::vector<CopyJob> jobs;
+        collect_copies(copy, jobs);
+        struct Took { uint64_t id, gen; };
+        std::vector<Took> took;
+        took.reserve(idx.size());
+        for (size_t i : idx) { g_out[i].fetching = true; took.push_back({g_out[i].id, g_out[i].gen}); }
         uint64_t bytes = 0;
-        if (!copy.empty()) device().submit_once([&](VkCommandBuffer cb) { bytes = record_copies(cb, copy); });
+        const bool unlocked = fetch_unlocked_on();
+        if (!jobs.empty()) {
+            if (unlocked) lk.unlock();
+            device().submit_once([&](VkCommandBuffer cb) { bytes = record_jobs(cb, jobs); });
+            if (unlocked) lk.lock();
+        }
         (by_fault ? g_ob_fault : g_ob_inval).fetch_add(bytes, std::memory_order_relaxed);
         (by_fault ? g_on_fault : g_on_inval).fetch_add(1, std::memory_order_relaxed);
         std::vector<size_t> gone;
         struct Span { Mirror* m; uint64_t first, last; };
         std::vector<Span> spans;
-        for (size_t i : idx) {
+        for (const Took& t : took) {
+            size_t i = 0;
+            while (i < g_out.size() && g_out[i].id != t.id) ++i;
+            if (i == g_out.size()) continue;               // gone meanwhile (cannot happen while fetching; kept for safety)
             OutEntry& e = g_out[i];
+            e.fetching = false;
             if (e.pending) {                               // written again by the submission being recorded: it stays out, unguarded
                 e.guarded = false;
                 e.flushed = 0;
                 e.serial = 0;
                 if (e.m) spans.push_back({e.m, e.first, e.last});
+            } else if (e.gen != t.gen) {                   // written again and its submission ended meanwhile: that newer result is the
+                g_fetch_overtaken.fetch_add(1, std::memory_order_relaxed);   // entry's now (sent back at the end of it: CPU-read pages)
             } else {
                 gone.push_back(i);
             }
         }
         for (const Span& s : spans)
-        if (s.m) settle(s.m, s.first, s.last);
+            if (s.m) settle(s.m, s.first, s.last);
         remove_entries(gone);
         d_bytes = bytes;
         lk.unlock();
+        g_out_cv.notify_all();
         finish();
         return;
     }
 }
-
 void out_unregister(Mirror* m) {
-    std::lock_guard<std::mutex> lk(g_out_mu);
+    OutLock ol;
+    // a fetch copying from this pool's copy with the lock free: the buffers must outlive its submission
+    if (!g_out_cv.wait_for(ol.lk, std::chrono::seconds(10), [m] { for (const OutEntry& e : g_out) if (e.m == m && e.fetching) return false; return true; }))
+        NXLOG_W(kTag, "compute out: a fetch from a pool copy being destroyed did not finish in 10 s");
     g_out_mirrors.erase(std::remove(g_out_mirrors.begin(), g_out_mirrors.end(), m), g_out_mirrors.end());
     // the pool is going away: its held results with it (the region's destruction makes every page writable again)
     g_out.erase(std::remove_if(g_out.begin(), g_out.end(), [m](const OutEntry& e) { return e.m == m; }), g_out.end());
@@ -2044,7 +2177,9 @@ void out_unregister(Mirror* m) {
 }
 
 void out_reset() {
-    std::lock_guard<std::mutex> lk(g_out_mu);
+    OutLock ol;
+    if (!g_out_cv.wait_for(ol.lk, std::chrono::seconds(10), [] { for (const OutEntry& e : g_out) if (e.fetching) return false; return true; }))   // a guest thread
+        NXLOG_W(kTag, "compute out: a fetch did not finish in 10 s at shutdown");                                                    // stopped mid-fetch
     std::vector<size_t> all(g_out.size());
     for (size_t i = 0; i < all.size(); ++i) { all[i] = i; g_out[i].guarded = false; }
     remove_entries(all);
@@ -2065,7 +2200,7 @@ void out_log() {
     size_t held = 0;
     uint64_t held_bytes = 0;
     {
-        std::lock_guard<std::mutex> lk(g_out_mu);
+        OutLock ol;
         for (const OutEntry& e : g_out)
             if (e.guarded && !e.flushed) { ++held; held_bytes += e.size; }
     }
@@ -2080,7 +2215,7 @@ void out_log() {
     {
         std::vector<EagerDiag> v;
         {
-            std::lock_guard<std::mutex> lk(g_out_mu);
+            OutLock ol;
             for (const auto& kv : g_eager_diag) v.push_back(kv.second);
             g_eager_diag.clear();
         }
@@ -2096,7 +2231,7 @@ void out_log() {
     {   // GPU-reader copy-backs by result
         std::vector<FlushDiag> v;
         {
-            std::lock_guard<std::mutex> lk(g_out_mu);
+            OutLock ol;
             for (const auto& kv : g_flush_diag) v.push_back(kv.second);
             g_flush_diag.clear();
         }
@@ -2141,6 +2276,14 @@ void out_log() {
         pw_b[w] = b; pw_n[w] = n;
     }
     if (!why.empty()) NXLOG_I(kTag, "compute out: copy-backs by reason (KiB/flushes over %.1f s): %s", secs, why.c_str());
+    {   // the lock (render thread) and the fetches
+        static uint64_t p_lw = 0, p_lwns = 0, p_bw = 0, p_ov = 0;
+        const uint64_t lw = g_lock_waits.load(), lwns = g_lock_wait_ns.load(), bw = g_fetch_busy_waits.load(), ov = g_fetch_overtaken.load();
+        NXLOG_I(kTag, "compute out lock over %.1f s: render thread waited %llu times %.2f ms in all (max %.2f ms since start); fetches that waited for another "
+                      "%llu, entries written again during a fetch %llu", secs, (unsigned long long)(lw - p_lw), (lwns - p_lwns) / 1e6, g_lock_wait_max_ns.load() / 1e6,
+                (unsigned long long)(bw - p_bw), (unsigned long long)(ov - p_ov));
+        p_lw = lw; p_lwns = lwns; p_bw = bw; p_ov = ov;
+    }
     static uint64_t p_skip = 0;
     const uint64_t skip = g_on_inval_skipped.load(std::memory_order_relaxed);
     if (skip != p_skip) NXLOG_I(kTag, "compute out: %llu invalidates left to the guards over %.1f s", (unsigned long long)(skip - p_skip), secs);
