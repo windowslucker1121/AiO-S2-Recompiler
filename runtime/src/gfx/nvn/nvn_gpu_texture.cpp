@@ -708,6 +708,7 @@ void move_layout(Frame& f, TexGpu& g, VkImageLayout to) {
     const uint32_t layer_count = g.type == VK_IMAGE_TYPE_3D ? VK_REMAINING_ARRAY_LAYERS : g.layers;
     image_barrier(f.cb, g.img.image, g.layout, to, g.aspect, 0, g.levels, 0, layer_count);
     g.layout = to;
+    g_tex_state_gen.fetch_add(1, std::memory_order_acq_rel);
 }
 
 // Copies buffer regions (already offset to the staging buffer) into every level of the image, then leaves it readable by shaders.
@@ -1443,6 +1444,7 @@ bool tex_rescale(Texture* t, Frame& f, float to, const char* why) {
     g->img = ni;
     g->base = s.base;
     g->layout = nl;
+    g_tex_state_gen.fetch_add(1, std::memory_order_acq_rel);
     g->scale = to;
     if (to == 1.0f) g->scale_blocked = true;
     return true;

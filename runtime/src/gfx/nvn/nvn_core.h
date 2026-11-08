@@ -142,6 +142,24 @@ static_assert(sizeof(BufferData) <= sizeof(NVNbuffer), "buffer layout fits NVNbu
 // ---- textures --------------------------------------------------------------------------------------------------------------
 struct TexGpu;    // Vulkan side of a texture (nvn_gpu_texture.cpp)
 
+// Counts every change that can make a sampled texture need work before a draw: a texture marked CPU-dirty, a layout change of a texture's image
+// (nvn_gpu_texture.cpp). The replay skips its per-draw walk over the pool arrays' textures while it has not moved (prepare_textures).
+inline std::atomic<uint64_t> g_tex_state_gen{0};
+// Texture::cpu_dirty: an atomic flag whose setting counts in g_tex_state_gen.
+struct DirtyFlag {
+    std::atomic<bool> v{true};
+    bool load(std::memory_order o = std::memory_order_seq_cst) const { return v.load(o); }
+    void store(bool b, std::memory_order o = std::memory_order_seq_cst) {
+        v.store(b, o);
+        if (b) g_tex_state_gen.fetch_add(1, std::memory_order_acq_rel);
+    }
+    bool exchange(bool b, std::memory_order o = std::memory_order_seq_cst) {
+        const bool was = v.exchange(b, o);
+        if (b) g_tex_state_gen.fetch_add(1, std::memory_order_acq_rel);
+        return was;
+    }
+};
+
 struct Texture : Obj {
     static constexpr Kind kKind = Kind::Texture;
     Texture() : Obj(kKind) {}
@@ -158,7 +176,7 @@ struct Texture : Obj {
     bool cpu_coherent = false;              // in a CPU_UNCACHED pool: the CPU writes it without FlushMappedRange (watched by page protection)
     uint32_t levels = 1, layers = 1;        // levels clamped to the size; layers = array size / cube faces * count
     uint32_t id = 0;                        // unique, for logs
-    std::atomic<bool> cpu_dirty{true};      // the CPU may have written the storage since the last upload
+    DirtyFlag cpu_dirty;                    // the CPU may have written the storage since the last upload
     std::atomic<bool> destroyed{false};     // finalized by the game
     // Background preparation of the upload data (nvn_texprep.cpp). prep_gen counts the CPU-write notifications; a prepared result is only used
     // when the count has not moved since the job read the storage.

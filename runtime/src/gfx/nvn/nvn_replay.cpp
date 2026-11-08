@@ -1278,6 +1278,8 @@ struct PoolSet {
     std::vector<uint32_t> live;         // texture sets: entries with a real view
     uint64_t synced = ~0ull;
     bool failed = false;
+    // prepare_textures found every live texture current and in its sampled layout at this g_tex_state_gen (and this sync): nothing to check
+    uint64_t clean_gen = ~0ull, clean_synced = ~0ull, clean_pass = ~0ull;   // clean_pass: the pass and attachments it was checked for
 };
 struct PoolSetKey {
     const void* owner;
@@ -1468,17 +1470,31 @@ void prepare_textures(const ProgLayout& pl) {
         if (pb.sampler || !pool_arrays_on()) continue;
         PoolSet* st = pool_set_sync(pb);
         if (!st) continue;
+        const uint64_t gen = g_tex_state_gen.load(std::memory_order_acquire);
         const bool cs = pb.shader && pb.shader->stage == ShaderStage::Compute;
+        // the entries left out below depend on the render targets: the check holds for these targets (for compute, this depth target)
+        uint64_t pass_key = (cs ? 0x8000000000000001ull : 0x1234567ull) ^ reinterpret_cast<uint64_t>(S.depth_tex.get());
+        if (!cs)
+            for (uint32_t c = 0; c < S.ncolor; ++c) pass_key = (pass_key ^ reinterpret_cast<uint64_t>(S.color_tex[c].get())) * 0x100000001b3ull;
+        if (st->clean_gen == gen && st->clean_synced == st->synced && st->clean_pass == pass_key) continue;   // nothing changed since all were ready
+        bool clean = true;
         for (uint32_t i : st->live) {
             Texture* t = st->tex[i].get();
-            if (!t || !tex_gpu(t)) continue;
+            if (!t || !tex_gpu(t)) { clean = false; continue; }
+            if (!t->cpu_dirty.load() && tex_layout(t) == tex_sampled_layout(t)) continue;
             if (shares_image(t, S.depth_tex.get()) || (!cs && is_color_feedback(t))) continue;
+            clean = false;
             if (t->cpu_dirty.load() || tex_layout(t) != tex_sampled_layout(t))
                 if (std::find(need.begin(), need.end(), t) == need.end()) {
                     need.push_back(t);
                     char d[96];
                     TRACE("    pool array: entry %u %s to the sampled layout", i, tex_desc(t, d, sizeof d));
                 }
+        }
+        if (clean) {
+            st->clean_gen = gen;
+            st->clean_synced = st->synced;
+            st->clean_pass = pass_key;
         }
     }
     if (need.empty() && need_storage.empty()) return;
@@ -2148,13 +2164,25 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_tabl
 // where the NVN driver keeps them (0x110 + 0x100 * hardware stage + 0x10 * slot; task 0x650, mesh 0x770; storage_slot_for). 4 KiB per descriptor
 // set built for such a shader; other draws keep the shared static buffer.
 constexpr VkDeviceSize kGraphicsC0Bytes = 0x1000;
+// The tables of this submission by content: draws that bind the same storage buffers share one (no new upload, and the descriptor set cache
+// finds the set again).
+std::unordered_map<uint64_t, UploadAlloc> g_c0_tables;
+uint64_t g_ubo_unaligned_n = 0, g_ubo_unaligned_bytes = 0;
+uint64_t g_c0_made_n = 0, g_c0_reused_n = 0;
 bool graphics_c0(VkDescriptorBufferInfo& bi, bool old_table) {
     const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
-    UploadAlloc u = F->upload(kGraphicsC0Bytes, std::max<VkDeviceSize>(align, 256));
-    if (!u) return false;
-    VkDeviceSize range = 0;
-    if (driver_constants_buffer(&range) && driver_constants_ptr()) std::memcpy(u.ptr, driver_constants_ptr(), static_cast<size_t>(kGraphicsC0Bytes));
-    else std::memset(u.ptr, 0, static_cast<size_t>(kGraphicsC0Bytes));
+    alignas(16) static uint8_t scratch[kGraphicsC0Bytes];
+    UploadAlloc u;
+    u.ptr = scratch;
+    // the static driver constants, read once: their buffer is upload memory (write-combined), slow to read from every draw
+    alignas(16) static uint8_t consts[kGraphicsC0Bytes];
+    static bool have_consts = false;
+    if (!have_consts) {
+        VkDeviceSize range = 0;
+        if (driver_constants_buffer(&range) && driver_constants_ptr()) std::memcpy(consts, driver_constants_ptr(), static_cast<size_t>(kGraphicsC0Bytes));
+        have_consts = true;
+    }
+    std::memcpy(u.ptr, consts, static_cast<size_t>(kGraphicsC0Bytes));
     static const int kStagesWithStorage[] = {kVertex, kTessCtl, kTessEval, kGeometry, kFragment, kTask, kMesh};
     for (int st : kStagesWithStorage) {
         const int base = storage_c0_base(st);
@@ -2167,7 +2195,25 @@ bool graphics_c0(VkDescriptorBufferInfo& bi, bool old_table) {
         }
     }
     pool_table_words(u.ptr, old_table);
-    bi = {u.buffer, u.offset, kGraphicsC0Bytes};
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < kGraphicsC0Bytes; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, scratch + i, 8);
+        h = (h ^ w) * 1099511628211ull;
+        h ^= h >> 29;
+    }
+    auto it = g_c0_tables.find(h);
+    if (it != g_c0_tables.end()) {
+        ++g_c0_reused_n;
+        bi = {it->second.buffer, it->second.offset, kGraphicsC0Bytes};
+        return true;
+    }
+    UploadAlloc up = F->upload(kGraphicsC0Bytes, std::max<VkDeviceSize>(align, 256));
+    if (!up) return false;
+    std::memcpy(up.ptr, scratch, static_cast<size_t>(kGraphicsC0Bytes));
+    g_c0_tables.emplace(h, up);
+    ++g_c0_made_n;
+    bi = {up.buffer, up.offset, kGraphicsC0Bytes};
     return true;
 }
 
@@ -2260,6 +2306,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                         } else if (br.ok) {
                             // unaligned binding: copy into the upload ring
                             const VkDeviceSize n = std::min<VkDeviceSize>(bind.size ? bind.size : 65536, 65536);
+                            ++g_ubo_unaligned_n; g_ubo_unaligned_bytes += n;
                             UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(align, 256));
                             if (u) {
                                 std::memcpy(u.ptr, host_ptr(bind.addr), n);
@@ -5257,13 +5304,16 @@ void replay_begin_submit(Frame& f) {
     g_support = f.upload(sizeof(SupportBuffer), 256);
     g_support_scaled.clear();
     g_upd_snaps.clear();
+    g_c0_tables.clear();
     {
         static uint64_t last_log = 0;
-        if (f.serial - last_log > 600 && (g_upd_fast || g_upd_slow || g_occ_fast || g_occ_slow)) {
+        if (f.serial - last_log > 600) {
             last_log = f.serial;
             NXLOG_I(kTag, "uniform updates: %llu at record time, %llu on the GPU; %zu update ranges; bindings: %llu snapshots made, %llu reused, %llu from game memory",
                     (unsigned long long)g_upd_fast, (unsigned long long)g_upd_slow, g_upd.size(), (unsigned long long)g_upd_snapped,
                     (unsigned long long)g_upd_snap_hits, (unsigned long long)g_upd_direct);
+            NXLOG_I(kTag, "graphics c[0] tables: %llu made, %llu shared; unaligned uniform copies %llu (%llu KiB)", (unsigned long long)g_c0_made_n,
+                    (unsigned long long)g_c0_reused_n, (unsigned long long)g_ubo_unaligned_n, (unsigned long long)(g_ubo_unaligned_bytes >> 10));
             NXLOG_I(kTag, "occlusion reports: %llu in their pass, %llu with a pass break; %llu queries ended early by a pass break (split)",
                     (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
         }
