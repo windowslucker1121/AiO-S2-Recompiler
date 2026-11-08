@@ -881,6 +881,12 @@ int update_hook(::Ctx*, uint64_t, void*) {
     const GamePlay* gp = game_play();
     if (gp && gp->frame_begin) gp->frame_begin();
     if (st.engine) st.engine->frame_tick();
+    // A game without an input hook that takes the mouse as its right stick (GamePlay::mouse_stick_rad_s): every frame is play.
+    const bool mouse_stick = gp && gp->mouse_stick_rad_s > 0;
+    if (mouse_stick) {
+        st.last_pi_ns.store(now);
+        st.last_pi_frame.store(st.frames.load());
+    }
 
     // what the game is doing: the context, the cycle hint, the pointer
     const uint64_t pi = st.last_pi_ns.load();
@@ -955,6 +961,16 @@ int update_hook(::Ctx*, uint64_t, void*) {
             const float dx = std::max(-1.f, std::min(1.f, (pp.x() - px) * k)), dy = std::max(-1.f, std::min(1.f, (pp.y() - py) * k));
             if (pp.held()) { lx = dx; ly = -dy; }
             else { rx = dx; ry = -dy; }
+        }
+        // the mouse as the right stick (GamePlay::mouse_stick_rad_s): its turn rate over the frame, full stick at that rate
+        if (mouse_stick && playing && platform::relative_mouse() && have && !on_map) {
+            const double dt = std::max(1e-3, static_cast<double>(now - last_ns) / 1e9);
+            const input::MouseDelta d = input::mouse_delta_take();
+            const MouseSettings& ms = st.settings.mouse;
+            const double sx = d.dx * ms.yaw_rad / dt / gp->mouse_stick_rad_s * (ms.invert_x ? -1 : 1);
+            const double sy = -d.dy * ms.pitch_rad / dt / gp->mouse_stick_rad_s * (ms.invert_y ? -1 : 1);
+            rx = static_cast<float>(std::max(-1.0, std::min(1.0, sx)));
+            ry = static_cast<float>(std::max(-1.0, std::min(1.0, sy)));
         }
         px = pp.x();
         py = pp.y();

@@ -75,6 +75,9 @@ const play::GamePlay& game_play() {
     static const play::GamePlay t = [] {
         play::GamePlay p;
         p.frame_update = kFrameUpdate;
+        // No input hook yet: the mouse turns the camera as the right stick (full stick at about 3 rad/s; not measured against the game's
+        // own camera speed).
+        p.mouse_stick_rad_s = 3.0;
         return p;
     }();
     return t;
