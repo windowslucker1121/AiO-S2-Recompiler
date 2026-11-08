@@ -69,9 +69,14 @@ namespace Nx.Shaders.Ampere
         {
             // TEX bits 79..80: .F16.RN / .F16.RZ (fp16 results packed in pairs), 3 is reserved [xcheck probe; 2 Pokopia TEX.SCR.F16.RN words]
             Action<Ctx> texMods = c => { c.Mod(79, 2, null, "F16.RN", "F16.RZ", "INVALID3"); c.Mod(87, 3, TexLod); c.Mod(c.B(76), "AOFFI"); c.Mod(c.B(78), "DC"); c.Mod(c.B(77), "NDV"); };
-            Action<Ctx> tldMods = c => { c.Mod(87, 3, TexLod); c.Mod(c.B(76), "AOFFI"); c.Mod(c.B(78), "MS"); c.Mod(c.B(77), "CL"); };
-            Action<Ctx> tld4Mods = c => { c.Mod(87, 2, "R", "G", "B", "A"); c.Mod(76, 2, null, "AOFFI", "PTP", "?3"); c.Mod(c.B(78), "DC"); };
-            Action<Ctx> txdMods = c => { c.Mod(c.B(76), "AOFFI"); };
+            // TLD, TLD4 and TXD have the same .F16.RN / .F16.RZ field at 79..80 [nvdisasm 13.3 probe, 2026-11-08]: printed after SCR
+            // (TLD: before the LOD mode; TLD4: after the component, before PTP/AOFFI; TXD: first). It was missing here, so OoT's
+            // upscaler f90d726d / 02dcb888 ("TLD4.SCR.R.F16.RN.PTP R13, R12, R10, R0, 0x0, 0x30, 2D") were translated as fp32 gathers
+            // that wrote four registers (Rd, Rd+1, Rd2, Rd2+1) instead of two half pairs and clobbered live registers.
+            Action<Ctx> f16Mod = c => c.Mod(79, 2, null, "F16.RN", "F16.RZ", "INVALID3");
+            Action<Ctx> tldMods = c => { f16Mod(c); c.Mod(87, 3, TexLod); c.Mod(c.B(76), "AOFFI"); c.Mod(c.B(78), "MS"); c.Mod(c.B(77), "CL"); };
+            Action<Ctx> tld4Mods = c => { c.Mod(87, 2, "R", "G", "B", "A"); f16Mod(c); c.Mod(76, 2, null, "AOFFI", "PTP", "?3"); c.Mod(c.B(78), "DC"); };
+            Action<Ctx> txdMods = c => { f16Mod(c); c.Mod(c.B(76), "AOFFI"); };
             Op12(0xb60, c => TexCommon(c, "TEX", false, texMods));
             Op12(0x361, c => TexCommon(c, "TEX", true, texMods));
             Op12(0xf60, c => TexCommon(c, "TEX", false, texMods));   // handle in URn (TexHandle); bit 91 set in every word seen
