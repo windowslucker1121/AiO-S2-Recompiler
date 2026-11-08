@@ -203,6 +203,7 @@ bool out_touches(uint64_t addr, uint64_t size);
 bool out_overlaps_shadow(uint64_t addr, uint64_t size);
 // Some page of [addr, +size) holds a result that is newer in the copy than in the pool.
 bool out_overlaps(uint64_t addr, uint64_t size);
+uint64_t out_version();   // moves whenever the set of held results changes (an entry added, pending again, or taken out)
 // out_overlaps for a pointer window (gmem_before_op): render thread; "no overlap" answers are remembered until the held results change.
 bool out_overlaps_window(uint64_t page, uint64_t size);
 // resolve_read would bind the copy for [addr, +size) (every page current there).

@@ -159,12 +159,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16 };
+enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024 };
 uint32_t ab_mask() {
     static const uint32_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
-                                                                 {"lookahead", kAbLookahead}};
+                                                                 {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
+                                                                 {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}};
         uint32_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -359,13 +361,15 @@ UploadAlloc ubo_snapshot(uint64_t addr, uint64_t n, VkDeviceSize align) {
     return u;
 }
 
+uint64_t g_bump_use[9] = {};   // statistics: epoch moves by GPU writes, by use (0-5 note_gpu_write uses, 8 update ranges)
 void gpu_wrote(uint64_t addr, uint64_t size, int use) {
     // [nvn] set_reuse: a write changes how bindings resolve only when it makes copied pages stale or marks an update range written
-    if (upd_note_gpu_write(addr, size)) desc_epoch_bump(kBumpWrite);
+    if (upd_note_gpu_write(addr, size)) { desc_epoch_bump(kBumpWrite); ++g_bump_use[8]; }
     note_gw(addr, size);
     capture::note_gpu_write(addr, size);
     if (note_gpu_write(addr, size, use)) {
         desc_epoch_bump(kBumpWrite);
+        ++g_bump_use[static_cast<unsigned>(use) % 8];
         g_dirty |= kVb | kDesc;
         g_mirror_stale = true;
     }
@@ -845,6 +849,11 @@ float attach_targets(bool fix) {
     return lo;
 }
 
+bool memo_pass_keep() {
+    static const bool on = nxrt::config_get_bool("nvn", "memo_pass_keep", true);
+    return on && ab_on(kAbMemoPass);
+}
+
 // Starts a pass on the current render targets if none is open for them. False when there is nothing to render to.
 void pass_lookahead();   // below: settles the reads of the coming draws before the pass begins
 bool ensure_pass(bool depth_ro = false) {
@@ -949,7 +958,9 @@ bool ensure_pass(bool depth_ro = false) {
     if (g_occ_want) occ_reset_ahead();          // outside the pass still: a slot for the counter's part in it
     vkCmdBeginRendering(F->cb, &ri);
     P.open = true;
-    desc_epoch_bump(kBumpPass);     // attachments, layouts and feedback changed: sets resolve anew
+    // attachments, layouts and feedback changed: sets resolve anew. [nvn] memo_pass_keep (default on): not needed for the set memo, whose
+    // signature holds the render targets (feedback dummies) and whose epoch holds g_tex_image_gen (views), while sampled layouts are fixed per format
+    if (!memo_pass_keep()) desc_epoch_bump(kBumpPass);
     if (g_occ_want) occ_begin_in_pass();
     counters().passes.fetch_add(1, std::memory_order_relaxed);
     g_bound_pipeline = VK_NULL_HANDLE;
@@ -1100,7 +1111,28 @@ uint32_t eval_handle_expr(const BindingDesc& d, const std::vector<HandleExprOp>&
 // Textures resolve_texture finds: bound in c[2], a handle in a uniform block, a handle the draw computes.
 bool texture_source(NvnSource s) { return s == NvnSource::SamplerBinding || s == NvnSource::HandleInUniform || s == NvnSource::HandleExpr; }
 
+// [nvn] resolve_cache (default on): one command resolves each texture binding up to five times (samples_depth_target, prepare_textures,
+// feedback_prepare, build_set, support_for_draw), each with the two pools' shared locks; the result is kept for the rest of the command
+// (g_resolve_gen moves with every command run_list starts).
+uint64_t g_resolve_gen = 1;
+struct ResolveSlot { const BindingDesc* d = nullptr; uint64_t gen = 0; TexResolved r; };
+ResolveSlot g_rslots[64];
+bool resolve_cache_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "resolve_cache", true);
+    return on;
+}
+TexResolved resolve_texture_uncached(const BindingDesc& d);
 TexResolved resolve_texture(const BindingDesc& d) {
+    if (!resolve_cache_on() || !ab_on(kAbResolveCache)) return resolve_texture_uncached(d);
+    ResolveSlot& s = g_rslots[(reinterpret_cast<uintptr_t>(&d) >> 4) & 63];
+    if (s.d == &d && s.gen == g_resolve_gen) return s.r;
+    s.r = resolve_texture_uncached(d);
+    s.d = &d;
+    s.gen = g_resolve_gen;
+    return s.r;
+}
+
+TexResolved resolve_texture_uncached(const BindingDesc& d) {
     TexResolved r;
     const DescriptorBinding& b = d.shader->refl.bindings[d.index];
     uint64_t handle = 0;
@@ -1825,7 +1857,7 @@ uint64_t g_dr_fail[3] = {}, g_dr_fail_bytes[3] = {};
 void out_draw_read(uint64_t addr, uint64_t size, bool copy_ok, int why) {
     if (!addr) return;
     if (!size) size = 65536;
-    if (!out_overlaps(addr, size)) return;
+    if (!(ab_on(kAbOverlapCache) ? out_overlaps_window(addr, size) : out_overlaps(addr, size))) return;   // the same bindings are checked draw after draw: no-overlap answers are cached per index version
     if (copy_ok && out_servable(addr, size)) return;
     const bool span = copy_ok && out_lazy() && draw_fill_on() && mirror_span(addr, size).buf;
     const int fail = !copy_ok ? 0 : (!span ? 1 : 2);
@@ -1992,7 +2024,7 @@ void gmem_before_op(bool compute) {
 uint64_t g_odb_ver = ~0ull, g_odb_epoch = 0, g_odb_skipped = 0;
 void out_draw_bindings() {
     const bool memo = set_reuse_mode() != SetReuse::Off && ab_on(kAbOdb);
-    if (memo && g_odb_ver == g_buf_ver && g_odb_epoch == g_desc_epoch * 0x100000001b3ull + out_bytes_total()) { ++g_odb_skipped; return; }
+    if (memo && g_odb_ver == g_buf_ver && g_odb_epoch == (g_desc_epoch * 0x100000001b3ull + out_bytes_total()) * 31 + out_version()) { ++g_odb_skipped; return; }
     for (const GState::Bind& b : S.vtx) out_draw_read(b.addr, b.size, true, kOutDrawBuffer);
     const VkDeviceSize ualign = device().properties().limits.minUniformBufferOffsetAlignment;
     for (int st = 0; st < kStages; ++st) {
@@ -2002,7 +2034,7 @@ void out_draw_bindings() {
     }
     for (const GState::Bind& b : S.xfb) out_draw_read(b.addr, b.size, false, kOutStorageXfb);
     g_odb_ver = g_buf_ver;   // taken after the checks: a result they sent back moved out_bytes_total already
-    g_odb_epoch = g_desc_epoch * 0x100000001b3ull + out_bytes_total();
+    g_odb_epoch = (g_desc_epoch * 0x100000001b3ull + out_bytes_total()) * 31 + out_version();
 }
 
 // ---- look-ahead before a pass ([nvn] pass_lookahead) -----------------------------------------------------------------------------
@@ -2695,7 +2727,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                         // [nvn] storage_min_range (bytes) widens small bindings to that much of the memory behind them (diagnosis switch).
                         static const VkDeviceSize min_range = static_cast<VkDeviceSize>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "storage_min_range", 0)));
                         bi = {br.buffer, br.offset, std::min<VkDeviceSize>(std::max<VkDeviceSize>(bind.size ? bind.size : br.avail, min_range), br.avail)};
-                        if (!g_shadowing && br.ok && out_lazy() && out_overlaps(bind.addr, bi.range)) {   // a draw over a held compute result: the copy
+                        if (!g_shadowing && br.ok && out_lazy() && out_overlaps_window(bind.addr, bi.range)) {   // a draw over a held compute result: the copy
                             const BufRef hb = held_or_pool(bind.addr, bi.range, kOutStorageXfb, false);
                             if (hb.buffer != br.buffer) {
                                 bi.buffer = hb.buffer;
@@ -2992,6 +3024,11 @@ uint64_t set_signature(const ProgLayout& pl, uint32_t set) {
     mix(reinterpret_cast<uint64_t>(&pl));   // two programs may share a pipeline layout but read other state
     mix(reinterpret_cast<uint64_t>(g_draw_support.buffer)); mix(g_draw_support.offset);
     mix(reinterpret_cast<uint64_t>(S.tpool.get())); mix(reinterpret_cast<uint64_t>(S.spool.get()));
+    if (memo_pass_keep()) {   // a sampled colour attachment of these targets gets the dummy view (is_color_feedback)
+        mix(S.ncolor);
+        for (uint32_t i = 0; i < S.ncolor && i < 8; ++i) mix(reinterpret_cast<uint64_t>(S.color_tex[i].get()));
+        mix(reinterpret_cast<uint64_t>(S.depth_tex.get()));
+    }
     for (const BindingDesc& d : pl.bindings) {
         if (d.set != set) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
@@ -3031,8 +3068,8 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
     if (mode != SetReuse::Off && g_fb_use.empty() && g_vol3d_use.empty() && !g_su_view && !g_trace &&
         !nxrt::gfx::tuning().ufs_hash.load(std::memory_order_relaxed) && !extras::temporal_wanted()) {
         reusable = set_reuse_mask(pl);
-        const uint64_t tg = g_tex_state_gen.load(std::memory_order_relaxed), ob = out_bytes_total();
-        const uint64_t epoch = g_desc_epoch * 0x100000001b3ull ^ tg * 0x9e3779b97f4a7c15ull ^ ob;
+        const uint64_t tg = memo_pass_keep() ? g_tex_image_gen.load(std::memory_order_relaxed) ^ 0x5bd1e995ull : g_tex_state_gen.load(std::memory_order_relaxed), ob = out_bytes_total();
+        const uint64_t epoch = g_desc_epoch * 0x100000001b3ull ^ tg * 0x9e3779b97f4a7c15ull ^ ob ^ out_version() * 0xc2b2ae3d27d4eb4full;
         if (epoch != g_set_memo_epoch) {
             if (!g_set_memo.empty()) {   // statistics: what cleared a memo that held sets
                 if (g_desc_epoch != g_memo_last[0]) ++g_memo_clr[0];
@@ -5213,7 +5250,49 @@ void do_submit_device_commands(const P_SubmitDeviceCommands& p, int depth) {
 // [nvn] set_reuse: commands after which every binding resolves as before (state binds, draws, counters, debug labels). Anything else
 // (copies, clears, dispatches, uniform updates, barriers, render target changes, ...) moves the resolve epoch. GPU writes of draws move it
 // through gpu_wrote.
+// [nvn] barrier_keep_pass (default on): a game barrier inside an open pass whose draws wrote nothing but its attachments (no storage
+// buffers or images, no stream-out: g_pass_unsafe) leaves the pass open. Everything the barrier orders is then ordered anyway: the pass's
+// attachment writes reach later draws of the same pass in rasterization order, a later draw that samples one of them is a feedback draw
+// (its own copy, made outside the pass) or a depth read (a read-only pass of its own), and a texture that needs another layout ends the pass
+// with that transition (prepare_textures); every command before the pass that writes memory (copies, fills, dispatches, memory writes)
+// ends with a full barrier, and occlusion reports in the pass are written when it ends and read only by the CPU. Any other barrier ends
+// the pass with a full barrier, as before (off: every barrier).
+uint64_t g_bar_n = 0, g_bar_in_pass = 0, g_bar_kept = 0, g_bar_unsafe = 0;   // statistics
+uint32_t g_bar_bits_kept = 0, g_bar_bits_all = 0;
+void do_barrier(uint32_t bits) {
+    static const bool keep = nxrt::config_get_bool("nvn", "barrier_keep_pass", true);
+    ++g_bar_n;
+    g_bar_bits_all |= bits;
+    if (P.open) {
+        ++g_bar_in_pass;
+        if (g_pass_unsafe) ++g_bar_unsafe;
+        else if (keep && ab_on(kAbBarrierKeep) && !g_trace) {
+            ++g_bar_kept;
+            g_bar_bits_kept |= bits;
+            return;
+        }
+    }
+    end_pass();
+    memory_barrier(F->cb);
+}
+
+// [nvn] epoch_keep (default on): also Barrier (a kept one leaves the pass open; an honoured one ends it, and the next pass moves the
+// epoch), WaitEvent (a no-op here), SetRenderTargets (new attachments take effect through the next pass, which moves the epoch) and
+// ClearColor / ClearDepthStencil (vkCmdClearAttachments in the pass; feedback reads of attachments never reuse sets).
+bool epoch_keep_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "epoch_keep", true);
+    return on && ab_on(kAbEpochKeep);
+}
 bool op_keeps_sets(Op op) {
+    switch (op) {
+        case Op::Barrier: case Op::WaitEvent: case Op::SetRenderTargets: case Op::ClearColor: case Op::ClearDepthStencil:
+            return epoch_keep_on();
+        case Op::Dispatch: case Op::DispatchIndirect: {   // what a dispatch changes for draws: its GPU writes (gpu_wrote moves the epoch) and the held results (out_version is in the memo's epoch)
+            static const bool on = nxrt::config_get_bool("nvn", "epoch_keep_dispatch", true);
+            return on && epoch_keep_on() && ab_on(kAbEpochDispatch);
+        }
+        default: break;
+    }
     switch (op) {
         case Op::Nop: case Op::BindProgram: case Op::BindBuffers: case Op::BindTextures: case Op::BindImages: case Op::BindVertexAttribs:
         case Op::BindVertexStreams: case Op::BindBlend: case Op::BindColor: case Op::BindChannelMask: case Op::BindDepthStencil: case Op::BindPolygon:
@@ -5237,6 +5316,7 @@ void run_list(const CmdList& list, int depth) {
     for (RecordReader r(list); r.next();) {
         g_rd_cur[depth] = &r;
         g_rd_depth = depth;
+        ++g_resolve_gen;   // resolve_cache: results hold for one command
         chunk_at_op();
         if (!op_keeps_sets(r.op())) { desc_epoch_bump(kBumpOp); ++g_bump_op[static_cast<size_t>(r.op()) & 255]; }
         mark_dirty(r);
@@ -5593,7 +5673,7 @@ void run_list(const CmdList& list, int depth) {
                 }
                 break;
             }
-            case Op::Barrier: end_pass(); memory_barrier(F->cb); break;
+            case Op::Barrier: do_barrier(r.payload<P_Barrier>().bits); break;
             case Op::FenceSync: {
                 const auto& p = r.payload<P_Sync>();
                 if (p.sync) { p.sync->serial.store(F->serial); p.sync->armed.store(true); }
@@ -5842,6 +5922,8 @@ void replay_begin_submit(Frame& f) {
                     (unsigned long long)(g_dr_fail_bytes[1] >> 10), (unsigned long long)g_dr_fail[2], (unsigned long long)(g_dr_fail_bytes[2] >> 10));
             NXLOG_I(kTag, "occlusion reports: %llu in their pass, %llu with a pass break; %llu queries ended early by a pass break (split)",
                     (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
+            NXLOG_I(kTag, "game barriers: %llu, %llu in an open pass: %llu kept the pass (barrier_keep_pass, bits seen %x), %llu ended it after storage or stream-out writes (bits of all %x)",
+                    (unsigned long long)g_bar_n, (unsigned long long)g_bar_in_pass, (unsigned long long)g_bar_kept, g_bar_bits_kept, (unsigned long long)g_bar_unsafe, g_bar_bits_all);
             NXLOG_I(kTag, "submissions: %llu, parts sent ahead while recording (submit_chunk_draws): %llu; draw buffer checks skipped %llu; pass look-aheads %llu settled %llu ranges; descriptor sets resolved %llu, %llu of them already in the submission's cache; %llu bound again without resolving (set_reuse), %llu differed (verify); resolve epoch moves: commands %llu, GPU writes %llu, passes %llu; set memo cleared by the epoch %llu, texture state %llu, results sent back %llu",
                     (unsigned long long)counters().submits.load(), (unsigned long long)counters().submit_chunks.load(), (unsigned long long)g_odb_skipped, (unsigned long long)g_la_scans, (unsigned long long)g_la_settled, (unsigned long long)g_sets_built, (unsigned long long)g_sets_cached,
                     (unsigned long long)g_sets_reused, (unsigned long long)g_sets_verify_bad, (unsigned long long)g_bump_n[kBumpOp],
@@ -5853,7 +5935,9 @@ void replay_begin_submit(Frame& f) {
                 std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
                 std::string s;
                 for (size_t i = 0; i < v.size() && i < 8; ++i) s += std::string(i ? ", " : "") + op_name(static_cast<Op>(v[i].second)) + " " + std::to_string(v[i].first);
-                NXLOG_I(kTag, "resolve epoch moves by command: %s", s.c_str());
+                NXLOG_I(kTag, "resolve epoch moves by command: %s; by GPU write use: %llu %llu %llu %llu %llu %llu %llu %llu, update ranges %llu", s.c_str(),
+                        (unsigned long long)g_bump_use[0], (unsigned long long)g_bump_use[1], (unsigned long long)g_bump_use[2], (unsigned long long)g_bump_use[3],
+                        (unsigned long long)g_bump_use[4], (unsigned long long)g_bump_use[5], (unsigned long long)g_bump_use[6], (unsigned long long)g_bump_use[7], (unsigned long long)g_bump_use[8]);
             }
             {   // the three pass sizes with the most draws
                 std::vector<std::pair<uint64_t, uint64_t>> v(g_pass_size_draws.begin(), g_pass_size_draws.end());
@@ -5987,6 +6071,7 @@ void replay_shutdown() {
     g_set_memo.clear();
     pipeline_shutdown();
     S = GState();
+    ++g_resolve_gen;
     P = Pass();
     g_pending.clear();
     out_reset();
@@ -6032,6 +6117,7 @@ bool replay_state_restore(const std::vector<uint8_t>& pod, const ReplayStateRefs
     n.depth_tex = Ref<Texture>::share(static_cast<Texture*>(refs.depth));
     for (int i = 0; i < kStages; ++i) n.stage[i] = refs.stage[i];
     S = n;
+    ++g_resolve_gen;
     // the raw copy's Refs in n are released by n's destructor: they hold the references taken just above, S took its own
     g_dirty = kAllDirty;
     return true;
