@@ -186,6 +186,12 @@ struct GameSvcTimer {
     GameSvcTimer& operator=(const GameSvcTimer&) = delete;
 };
 }
+// [prof] trace_svc_min_us (default 100): svcs at least this long go into the frame trace as "svc" events (0: every svc).
+static uint64_t trace_svc_min_ns() {
+    static const uint64_t ns = static_cast<uint64_t>(config_get_int("prof", "trace_svc_min_us", 100)) * 1000;
+    return ns;
+}
+
 void svc_set_busy_hook(void (*fn)()) { g_busy_hook.store(fn, std::memory_order_release); }
 
 void svc_dispatch(::Ctx* c, uint32_t number, uint64_t pc) {
@@ -206,14 +212,14 @@ void svc_dispatch(::Ctx* c, uint32_t number, uint64_t pc) {
         h(c);
         const uint64_t t1 = ft::now_ns();
         if (t1 - t0 >= 20000) wait_site_record(c, number, req, t0, t1);
-        if (ft::on() && t1 - t0 >= 100000) { static const uint16_t z = ft::zone_id("svc"); ft::event(z, t0, t1, number); }
+        if (ft::on() && t1 - t0 >= trace_svc_min_ns()) { static const uint16_t z = ft::zone_id("svc"); ft::event(z, t0, t1, number); }
         return;
     }
     if (ft::on()) {
         const uint64_t t0 = ft::now_ns();
         h(c);
         const uint64_t t1 = ft::now_ns();
-        if (t1 - t0 >= 100000) { static const uint16_t z = ft::zone_id("svc"); ft::event(z, t0, t1, number); }
+        if (t1 - t0 >= trace_svc_min_ns()) { static const uint16_t z = ft::zone_id("svc"); ft::event(z, t0, t1, number); }
         return;
     }
     h(c);

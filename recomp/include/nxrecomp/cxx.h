@@ -15,6 +15,56 @@
 
 #define NX_BASE_UNUSED 0
 
+// ---- function-local NZCV (nxrecomp/program.py localize_flags) ------------------------------------------------------
+// A lifted function keeps the flags in a local NxFlags `nf` and passes &nf where the flag helpers take the context; the
+// overloads below have the same bodies as ctx.h's. nxf_load / nxf_store move the flags between the local and the context.
+struct NxFlags {
+    uint32_t N, Z, C, V;
+};
+NX_HELPER void nxf_load(NxFlags &f, const Ctx *c) { f.N = c->N; f.Z = c->Z; f.C = c->C; f.V = c->V; }
+NX_HELPER void nxf_store(const NxFlags &f, Ctx *c) { c->N = f.N; c->Z = f.Z; c->C = f.C; c->V = f.V; }
+NX_HELPER uint64_t adds64(NxFlags *c, uint64_t a, uint64_t b, uint32_t cin) {
+    uint64_t r = a + b + cin;
+    c->N = (uint32_t)(r >> 63);
+    c->Z = r == 0;
+    c->C = (r < a) || (cin && r == a);
+    c->V = (uint32_t)(((a ^ r) & (b ^ r)) >> 63);
+    return r;
+}
+NX_HELPER uint32_t adds32(NxFlags *c, uint32_t a, uint32_t b, uint32_t cin) {
+    uint64_t wide = (uint64_t)a + b + cin;
+    uint32_t r = (uint32_t)wide;
+    c->N = r >> 31;
+    c->Z = r == 0;
+    c->C = (uint32_t)(wide >> 32);
+    c->V = ((a ^ r) & (b ^ r)) >> 31;
+    return r;
+}
+NX_HELPER uint64_t logic64(NxFlags *c, uint64_t r) { c->N = (uint32_t)(r >> 63); c->Z = r == 0; c->C = 0; c->V = 0; return r; }
+NX_HELPER uint32_t logic32(NxFlags *c, uint32_t r) { c->N = r >> 31; c->Z = r == 0; c->C = 0; c->V = 0; return r; }
+NX_HELPER void set_nzcv(NxFlags *c, int f) { c->N = (f >> 3) & 1; c->Z = (f >> 2) & 1; c->C = (f >> 1) & 1; c->V = f & 1; }
+NX_HELPER uint64_t get_nzcv(const NxFlags *c) { return ((uint64_t)c->N << 31) | ((uint64_t)c->Z << 30) | ((uint64_t)c->C << 29) | ((uint64_t)c->V << 28); }
+NX_HELPER int cond(const NxFlags *c, int cc) {
+    int r;
+    switch (cc >> 1) {
+    case 0: r = c->Z; break;
+    case 1: r = c->C; break;
+    case 2: r = c->N; break;
+    case 3: r = c->V; break;
+    case 4: r = c->C && !c->Z; break;
+    case 5: r = c->N == c->V; break;
+    case 6: r = c->N == c->V && !c->Z; break;
+    default: return 1;
+    }
+    return (cc & 1) ? !r : r;
+}
+NX_HELPER void fcmp(NxFlags *c, double a, double b) {
+    if (a != a || b != b) set_nzcv(c, 3);
+    else if (a == b) set_nzcv(c, 6);
+    else if (a < b) set_nzcv(c, 8);
+    else set_nzcv(c, 2);
+}
+
 namespace nx {
 
 using ::adds64; using ::adds32; using ::logic64; using ::logic32; using ::set_nzcv; using ::get_nzcv;
@@ -129,13 +179,12 @@ NX_INLINE void barrier() { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
 
 NX_INLINE uint64_t subs64(Ctx *c, uint64_t a, uint64_t b) { return adds64(c, a, ~b, 1); }
 NX_INLINE uint32_t subs32(Ctx *c, uint32_t a, uint32_t b) { return adds32(c, a, ~b, 1); }
+NX_INLINE uint64_t subs64(NxFlags *c, uint64_t a, uint64_t b) { return adds64(c, a, ~b, 1); }
+NX_INLINE uint32_t subs32(NxFlags *c, uint32_t a, uint32_t b) { return adds32(c, a, ~b, 1); }
 
-
-
-
-
-template <typename F>
-NX_INLINE void fcmp(Ctx *c, F a, F b) {
+// Ctx or NxFlags (local flags)
+template <typename F, typename H>
+NX_INLINE void fcmp(H *c, F a, F b) {
     if (std::isnan(a) || std::isnan(b))
         set_nzcv(c, 0b0011);
     else if (a == b)
