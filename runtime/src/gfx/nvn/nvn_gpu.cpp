@@ -39,7 +39,7 @@ namespace {
 constexpr const char* kTag = "nvn.gpu";
 constexpr uint32_t kSlots = 36;                  // about three frames of submissions (the game submits ~11 times a frame): with fewer, recording waits on
                                                  // the GPU for a submission of a recent frame and the CPU cannot get frames ahead
-constexpr uint32_t kGpMax = 8192;      // GPU pass profiler: timestamps per submission (the first scene's main submission needs ~3,000)
+constexpr uint32_t kGpMax = 32768;     // GPU pass profiler: timestamps per submission (the first scene's main submission needs ~3,000; ~16,000 with [prof] gpu_draws)
 constexpr VkDeviceSize kUploadBytes = 8ull << 20;   // per slot; larger uploads get their own staging buffer
 
 // Live-count gauges of this file (leak monitor, nxrt/gauge.h).

@@ -818,6 +818,7 @@ std::atomic<int64_t> g_st_dev_binds{0}, g_st_host_binds{0}, g_st_copied{0}, g_st
 int64_t g_use_dev[3] = {}, g_use_host[3] = {}, g_use_skip[3] = {};
 int64_t g_skip_why[5] = {};          // binds not eligible: outside a pool (or past its end), over 64 MiB, pool without a copy, two chunks, no chunk
 int64_t g_wr_pages[6] = {}, g_wr_calls[6] = {};
+int64_t g_fill_fail[3] = {};         // mirror_fill refused: banned pages, arming over budget or refused, not servable after the fill
 
 MirrorMode mirror_mode() {
     static const MirrorMode m = [] {
@@ -977,8 +978,10 @@ void log_summary(uint32_t now) {
             (long long)g_use_dev[2], (long long)g_use_host[2], (long long)g_use_skip[2], (long long)g_wr_calls[0], (long long)g_wr_pages[0], (long long)g_wr_calls[1],
             (long long)g_wr_pages[1], (long long)g_wr_calls[2], (long long)g_wr_pages[2], (long long)g_wr_calls[3], (long long)g_wr_pages[3], (long long)g_wr_calls[4],
             (long long)g_wr_pages[4], (long long)g_wr_calls[5], (long long)g_wr_pages[5]);
-    NXLOG_I(kTag, "pool mirror binds not eligible: outside a pool %lld, over 64 MiB %lld, pool without a copy %lld, across two chunks %lld, no chunk %lld",
-            (long long)g_skip_why[0], (long long)g_skip_why[1], (long long)g_skip_why[2], (long long)g_skip_why[3], (long long)g_skip_why[4]);
+    NXLOG_I(kTag, "pool mirror binds not eligible: outside a pool %lld, over 64 MiB %lld, pool without a copy %lld, across two chunks %lld, no chunk %lld; "
+            "fills refused: banned %lld, arming %lld (deferred arms %llu), not servable after %lld",
+            (long long)g_skip_why[0], (long long)g_skip_why[1], (long long)g_skip_why[2], (long long)g_skip_why[3], (long long)g_skip_why[4],
+            (long long)g_fill_fail[0], (long long)g_fill_fail[1], (unsigned long long)g_st_arm_deferred.load(), (long long)g_fill_fail[2]);
     std::vector<const Mirror*> top(g_mirrors.begin(), g_mirrors.end());
     std::sort(top.begin(), top.end(), [](const Mirror* a, const Mirror* b) { return a->st_copied > b->st_copied; });
     for (size_t i = 0; i < top.size() && i < 6; ++i) {
@@ -1155,7 +1158,7 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
     if (!src) return false;
     const uint32_t now = presents_now();
     for (uint64_t p = first; p <= last; ++p)      // pages with another view (banned) cannot be tracked: the range stays in the pool
-        if (!page_valid(m, p) && mem::ww::page_banned(m.ww, p)) return false;
+        if (!page_valid(m, p) && mem::ww::page_banned(m.ww, p)) { g_fill_fail[0]++; return false; }
     static std::vector<VkBufferCopy> copies;
     copies.clear();
     const uint64_t base = (first / chunk_pages) * kChunkBytes;
@@ -1184,6 +1187,7 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
             copy = true;
         } else {
             ok = false;
+            g_fill_fail[1]++;
         }
         if (copy) {
             copies.push_back(VkBufferCopy{p * kPageBytes - src_base, p * kPageBytes - base, (q - p) * kPageBytes});
@@ -1196,6 +1200,7 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
     if (!copies.empty()) vkCmdCopyBuffer(cb, src, chunk, static_cast<uint32_t>(copies.size()), copies.data());
     if (!ok) return false;
     if (range_valid(m, first, last - first + 1) || new_servable(m, first, last)) return true;
+    g_fill_fail[2]++;
     return false;
 }
 
@@ -1360,6 +1365,8 @@ std::atomic<uint64_t> g_out_lo{UINT64_MAX}, g_out_hi{0};   // address bounds of 
 std::atomic<uint64_t> g_ob_end{0}, g_ob_gpu{0}, g_ob_fault{0}, g_ob_inval{0};
 std::atomic<uint64_t> g_why_bytes[kOutWhyCount], g_why_n[kOutWhyCount];   // GPU-reader copy-backs by reason
 std::atomic<uint64_t> g_on_split{0};   // entries split at the end of their submission (out_split)
+struct EagerDiag { uint64_t addr = 0, size = 0, bytes = 0, n = 0; bool cpu_read = false; };
+std::unordered_map<uint64_t, EagerDiag> g_eager_diag;   // g_out_mu held
 std::atomic<uint64_t> g_on_fault{0}, g_on_inval{0}, g_on_deferred{0}, g_on_eager_read{0}, g_on_eager_noguard{0}, g_on_gpu_flush{0};
 
 void bits_set(std::atomic<uint64_t>* bm, uint64_t first, uint64_t last, bool on) {
@@ -1705,6 +1712,12 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
                 eager.push_back(i);
             }
         }
+        for (size_t i : eager) {               // diagnosis (the 10 s line): which results go back at the end of their submission
+            const OutEntry& e = g_out[i];
+            auto& d = g_eager_diag[e.addr ^ (e.size << 40)];
+            d.addr = e.addr; d.size = e.size; d.bytes += e.size; d.n++;
+            d.cpu_read = e.m && bits_any(e.m->cpu_read.get(), e.first, e.last);
+        }
         uint64_t bytes = record_copies(cb, eager);
         if (!part_copies.empty()) {
             copy_barrier_in(cb);
@@ -1846,6 +1859,18 @@ void out_log() {
             (unsigned long long)page_size_kb(inval - p_inval), (unsigned long long)(ni - pn_inval), (unsigned long long)(gfaults - p_gfaults), held,
             (unsigned long long)(held_bytes >> 10), (unsigned long long)(nd - pn_def), (unsigned long long)(nr - pn_read), (unsigned long long)(ng - pn_ng),
             (unsigned long long)g_on_split.load(std::memory_order_relaxed));
+    {
+        std::vector<EagerDiag> v;
+        {
+            std::lock_guard<std::mutex> lk(g_out_mu);
+            for (const auto& kv : g_eager_diag) v.push_back(kv.second);
+            g_eager_diag.clear();
+        }
+        std::sort(v.begin(), v.end(), [](const EagerDiag& a, const EagerDiag& b) { return a.bytes > b.bytes; });
+        for (size_t i = 0; i < v.size() && i < 8; ++i)
+            NXLOG_I(kTag, "  sent back at submission end: 0x%llx +0x%llx, %llu times, %llu KiB%s", (unsigned long long)v[i].addr, (unsigned long long)v[i].size,
+                    (unsigned long long)v[i].n, (unsigned long long)(v[i].bytes >> 10), v[i].cpu_read ? " (CPU-read pages)" : "");
+    }
     static uint64_t pw_b[kOutWhyCount] = {}, pw_n[kOutWhyCount] = {};
     static const char* const kWhyName[kOutWhyCount] = {"reader", "submit end", "copies off", "dispatch", "draw vertex/index/uniform", "draw storage/xfb",
                                                        "indirect", "buffer write", "buffer read", "texture upload", "event", "other",

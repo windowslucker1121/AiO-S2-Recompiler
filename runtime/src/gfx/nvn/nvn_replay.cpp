@@ -597,6 +597,17 @@ void xfb_end_in_pass() {
 void gstamp(const char* label) {
     if (gpass_on()) gpass_stamp(*F, label, 0);
 }
+// [prof] gpu_draws (with gpu_passes): a stamp after every draw, labelled "d <fragment shader> <vertex or mesh shader>". The stamps
+// serialize the draws, so each interval is that draw's whole time without overlap: they rank draws (their sum is about the pass time).
+void draw_stamp() {
+    static const bool on = nxrt::config_get_bool("prof", "gpu_draws", false);
+    if (!on || !gpass_on()) return;
+    const ShaderInfo* fs = S.stage[kFragment];
+    const ShaderInfo* vs = S.stage[kVertex] ? S.stage[kVertex] : S.stage[kMesh];
+    char b[64];
+    std::snprintf(b, sizeof b, "d %.8s %.8s", fs ? fs->hash.c_str() : "-", vs ? vs->hash.c_str() : "-");
+    gpass_stamp(*F, b, 0);
+}
 
 // Two texture objects over one image (as shares_image further down, which this code cannot see yet).
 bool same_image(Texture* a, Texture* b) { return a == b || (a && b && a->gpu && a->gpu == b->gpu); }
@@ -1683,12 +1694,17 @@ bool draw_fill_on() {
     return on;
 }
 uint64_t g_draw_fills = 0, g_draw_fill_bytes = 0;
+// why the copy could not serve a draw's read over held results (the 10 s line): copy not allowed, no copy span (no copy for the pool, two
+// chunks, over 64 MiB), the fill failed
+uint64_t g_dr_fail[3] = {}, g_dr_fail_bytes[3] = {};
 void out_draw_read(uint64_t addr, uint64_t size, bool copy_ok, int why) {
     if (!addr) return;
     if (!size) size = 65536;
     if (!out_overlaps(addr, size)) return;
     if (copy_ok && out_servable(addr, size)) return;
-    if (copy_ok && out_lazy() && draw_fill_on() && mirror_span(addr, size).buf) {
+    const bool span = copy_ok && out_lazy() && draw_fill_on() && mirror_span(addr, size).buf;
+    const int fail = !copy_ok ? 0 : (!span ? 1 : 2);
+    if (span) {
         end_pass();
         memory_barrier(F->cb);                     // earlier writes to the pool there before the copies read it
         uint64_t bytes = 0;
@@ -1700,6 +1716,8 @@ void out_draw_read(uint64_t addr, uint64_t size, bool copy_ok, int why) {
             return;
         }
     }
+    ++g_dr_fail[fail];
+    g_dr_fail_bytes[fail] += size;
     compute_out_guard(addr, size, why);
 }
 
@@ -3501,6 +3519,7 @@ void do_draw_arrays(const P_DrawArrays& p) {
     }
     counters().draws.fetch_add(1, std::memory_order_relaxed);
     g_pass_draws++;
+    draw_stamp();
     g_pass_verts += static_cast<uint64_t>(p.count) * std::max<uint32_t>(1, p.instance_count);
     trace_snap_after_draw();
 }
@@ -3589,6 +3608,7 @@ void do_draw_elements(const P_DrawElements& p) {
     }
     counters().draws.fetch_add(1, std::memory_order_relaxed);
     g_pass_draws++;
+    draw_stamp();
     g_pass_verts += static_cast<uint64_t>(p.count) * std::max<uint32_t>(1, p.instance_count);
     trace_snap_after_draw();
 }
@@ -3665,6 +3685,7 @@ void draw_indirect_cpu(const P_DrawIndirect& p, PrimConversion conv, uint32_t is
     if (drew) {
         counters().draws.fetch_add(1, std::memory_order_relaxed);
         g_pass_draws++;
+        draw_stamp();
     } else {
         counters().draws_skipped.fetch_add(1);
     }
@@ -3704,6 +3725,7 @@ void do_draw_indirect(const P_DrawIndirect& p) {
     }
     counters().draws.fetch_add(1, std::memory_order_relaxed);
     g_pass_draws++;
+    draw_stamp();
     trace_snap_after_draw();
 }
 
@@ -3774,6 +3796,7 @@ void do_draw_mesh(const P_DrawMesh& p) {
     }
     counters().draws.fetch_add(1, std::memory_order_relaxed);
     g_pass_draws++;
+    draw_stamp();
     trace_snap_after_draw();
 }
 
@@ -3800,6 +3823,7 @@ void do_draw_xfb(const P_DrawXfb& p) {
     vkCmdDrawIndirectByteCountEXT(F->cb, 1, 0, g_xfb_counter.buffer, static_cast<VkDeviceSize>(slot) * kXfbSlotBytes, 0, stride);
     counters().draws.fetch_add(1, std::memory_order_relaxed);
     g_pass_draws++;
+    draw_stamp();
     trace_snap_after_draw();
 }
 
@@ -5346,6 +5370,9 @@ void replay_begin_submit(Frame& f) {
             NXLOG_I(kTag, "graphics c[0] tables: %llu made, %llu shared; unaligned uniform copies %llu (%llu KiB); draws over held results served by filling the copy %llu (%llu KiB)",
                     (unsigned long long)g_c0_made_n, (unsigned long long)g_c0_reused_n, (unsigned long long)g_ubo_unaligned_n, (unsigned long long)(g_ubo_unaligned_bytes >> 10),
                     (unsigned long long)g_draw_fills, (unsigned long long)(g_draw_fill_bytes >> 10));
+            NXLOG_I(kTag, "draw reads over held results not served by the copy: copy not allowed %llu (%llu KiB), no copy span %llu (%llu KiB), fill failed %llu (%llu KiB)",
+                    (unsigned long long)g_dr_fail[0], (unsigned long long)(g_dr_fail_bytes[0] >> 10), (unsigned long long)g_dr_fail[1],
+                    (unsigned long long)(g_dr_fail_bytes[1] >> 10), (unsigned long long)g_dr_fail[2], (unsigned long long)(g_dr_fail_bytes[2] >> 10));
             NXLOG_I(kTag, "occlusion reports: %llu in their pass, %llu with a pass break; %llu queries ended early by a pass break (split)",
                     (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
         }
