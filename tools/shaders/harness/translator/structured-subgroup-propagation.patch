@@ -1,0 +1,70 @@
+Ryujinx shader translator: AstOptimizer folded a single-assignment value into its uses even when the value is a cross-lane
+operation (ballot, vote, shuffle): a unary operation of an operand counts as "worth propagating" for any number of uses, so a
+ballot the SASS runs with the whole warp was moved into each use, also into an if that only some lanes enter. There it ran
+with those lanes only. Seen in OoT's GPU culling (AGENTS.md A18): f2422a7a appends with "VOTE.ALL R13, PT, P0; @lane!=0 skip;
+POPC R13 -> ATOMG.ADD count; SHFL base from lane 0; slot = base + POPC(R13 & ltmask)"; the translated code took the ballot
+inside the lane-0 branch, so lane 0 reserved one slot per warp while every lane with P0 wrote its record at base + rank: the
+records overwrote each other differently every frame (46 records per frame, which ones varied), and the mesh draw counts
+after it changed from replay loop to replay loop (foliage flicker). Such a value is now propagated only into the next
+statements of the same block with no block in between (the rule spirv-call-args.patch uses for memory reads); otherwise it
+stays in its local, computed where the SASS computes it. Applied after spirv-call-args.patch. The Ryujinx code in the
+context lines is MIT.
+--- a/StructuredIr/AstOptimizer.cs
++++ b/StructuredIr/AstOptimizer.cs
+@@ -55,7 +55,12 @@
+                 return true;
+             }
+ 
+-            if (!ReadsMemory(assignment.Source))
++            // A cross-lane operation (ballot, vote, shuffle) depends on which lanes run it: folded into a use inside another block (an
++            // if that only some lanes enter) it runs with those lanes only (structured-subgroup-propagation.patch). It is propagated only
++            // into the next statements of the same block, as a memory read is, with no block in between.
++            bool readsLanes = ReadsLanes(assignment.Source);
++
++            if (!readsLanes && !ReadsMemory(assignment.Source))
+             {
+                 return false;
+             }
+@@ -79,7 +84,7 @@
+                     return false;
+                 }
+ 
+-                if (n.Value is AstBlock || WritesMemory(n.Value))
++                if (n.Value is AstBlock || (ReadsMemory(assignment.Source) && WritesMemory(n.Value)))
+                 {
+                     return true;
+                 }
+@@ -88,6 +93,33 @@
+             return true;
+         }
+ 
++        /// The value depends on the other lanes of the subgroup and on which of them are active where it runs.
++        private static bool ReadsLanes(IAstNode node)
++        {
++            if (node is not AstOperation op)
++            {
++                return false;
++            }
++
++            Instruction inst = op.Inst & Instruction.Mask;
++
++            if (inst is Instruction.Ballot or Instruction.VoteAll or Instruction.VoteAllEqual or Instruction.VoteAny or
++                Instruction.Shuffle or Instruction.ShuffleDown or Instruction.ShuffleUp or Instruction.ShuffleXor)
++            {
++                return true;
++            }
++
++            for (int index = 0; index < op.SourcesCount; index++)
++            {
++                if (ReadsLanes(op.GetSource(index)))
++                {
++                    return true;
++                }
++            }
++
++            return false;
++        }
++
+         private static bool ReadsMemory(IAstNode node)
+         {
+             if (node is not AstOperation op)

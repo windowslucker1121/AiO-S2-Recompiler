@@ -145,22 +145,27 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   The runtime binds its persistent pool sets there (`runtime/src/gfx/nvn/nvn_pool_sets.cpp`, `pool_set_sync` in `nvn_replay.cpp`).
 - Off: `NXRT_HARNESS_POOL_BINDLESS=0` or `--no-pool-bindless` (the sample is dropped as before).
 
-## Warp-aggregated atomics as per-lane atomics (OoT A18)
+## Ballots, votes and shuffles stay where the SASS runs them (OoT A18)
 
-- NVN compute code counts with warp-aggregated atomics: `VOTE[U].ANY|ALL Rd, PT` (the active mask), leader = FLO of it, one ATOMG/RED
-  by the leader with POPC(mask) or REDUX.SUM, SHFL.IDX of the result from the leader, rank = POPC(mask & lanemask_lt). On the console
-  BSSY/BSYNC/WARPSYNC keep the warp's lanes together there; the translated structured code has no such guarantee on a PC GPU, and lanes
-  apart at the ballot, the add and the shuffle lost or doubled counts. OoT's GPU culling (4c1e8564 and the compute chain after it, all
-  from `main`) counted differently every frame: its mesh draw records summed to 520-1,160 items per frame on replays of one captured
-  frame, and grass, bushes and leaves flickered.
-- In compute programs `VOTE Rd, PT` is now the lane's own bit and `REDUX` the lane's own value (`AmpereEmit.cs`): every lane is a warp of
-  one, its own leader with its own add and shuffle, which is right under any active mask. The records then sum to ~94,700 items per
-  frame (+-0.5% from loop to loop). Mesh and task programs keep the real ballot (they use the active mask for output compaction: with the
-  own bit 45 mesh blocks drew streaks of garbage triangles). Off: `NXRT_HARNESS_VOTE_SELF=0`.
-- Ruled out on the way (replays of capture `20261107-230737-nb3-alias_kid`, 8 traced loops each): the pool mirror, the storage
-  shadows and held compute results (`pool_mirror = off`, `compute_shadows = 0`, `compute_out_lazy = 0`), volatile device-pointer
-  accesses, maximal reconvergence (VK_KHR_shader_maximal_reconvergence on every module with subgroup operations), and memory the replay
-  does not reset (`[capture] reset_full`).
+- NVN compute code counts with warp-aggregated atomics: `VOTE[U].ANY|ALL Rd, PT|Pp` (the active mask or a ballot), leader = FLO of it or
+  lane 0, one ATOMG/RED by the leader with POPC(mask) or REDUX.SUM, SHFL.IDX of the result from the leader, rank = POPC(mask &
+  lanemask_lt). The SASS runs the VOTE with every lane of the warp before the branch to the leader.
+- Ryujinx's `AstOptimizer` folded a single-assignment value into its uses; a unary operation of an operand (a ballot) counts as worth
+  folding for any number of uses, so the ballot moved into each use, also into the leader-only branch, where it ran with the leader
+  alone. OoT's GPU culling (4c1e8564 and the compute chain after it, all from `main`) then reserved one slot per warp while every lane
+  wrote its record at base + rank: records overwrote each other differently every frame (f2422a7a: 46 records instead of 548), the mesh
+  draw counts changed from replay loop to replay loop, and grass, bushes and leaves flickered.
+- `structured-subgroup-propagation.patch` (after `spirv-call-args.patch`): a value that contains a ballot, vote or shuffle is folded only
+  into the next statements of its own block with no block in between; otherwise it stays in its local, computed where the SASS
+  computes it. With it the chain's results are the same in every replay loop (mesh draw x counts and f2422a7a's records equal as sets;
+  only list positions written by atomics differ in order).
+- `NXRT_HARNESS_VOTE_SELF=1` (diagnosis, off by default): in compute programs `VOTE Rd, PT` is the lane's own bit and `REDUX` the lane's own
+  value. That was the first stopgap for the culling counts (2026-11-08); it changes warp-wide results the game relies on (a max over the
+  object's 32 lanes became each lane's own value) and left +-0.5% of loop-to-loop variation.
+- Ruled out on the way (replays of capture `20261107-230737-nb3-alias_kid`): the pool mirror, the storage shadows and held compute
+  results, volatile device-pointer accesses, maximal reconvergence, memory the replay does not reset (`[capture] reset_full`), barriers
+  between dispatches (every dispatch already ends with a full memory barrier), and the chain's inputs (the same up to the order of
+  atomically appended lists).
 
 ## Cache completeness (S40)
 

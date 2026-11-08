@@ -3780,8 +3780,19 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
         // is not followed): snapa_<n>_<cs>_<address>.bin. For memory a shader reaches through pointers (A17), which trace_snap_ssbo misses.
         static const std::string spec = nxrt::config_get_str("nvn", "trace_snap_after", "");
         const size_t colon = spec.find(':');
-        if (colon != std::string::npos && cs->hash.compare(0, colon, spec, 0, colon) == 0) {
+        // Several prefixes separated by '|', "*" matches every compute program (A18: which dispatch of a chain first writes a varying
+        // value); the numbers restart each present, so trace_snap_per_frame folders of several frames compare by name.
+        bool match = false;
+        for (size_t q = 0; colon != std::string::npos && q < colon && !match;) {
+            size_t qe = spec.find('|', q);
+            if (qe == std::string::npos || qe > colon) qe = colon;
+            match = (qe - q == 1 && spec[q] == '*') || (qe > q && cs->hash.compare(0, qe - q, spec, q, qe - q) == 0);
+            q = qe + 1;
+        }
+        if (match) {
             static int na = 0;
+            static uint64_t na_present = ~0ull;
+            if (counters().presents.load() != na_present) { na_present = counters().presents.load(); na = 0; }
             const int n_this = na++;
             size_t p = colon + 1;
             while (p < spec.size()) {

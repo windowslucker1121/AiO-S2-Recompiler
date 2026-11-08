@@ -4,6 +4,7 @@
 #include <SDL3/SDL.h>
 
 #include "gfx_test_util.h"
+#include "nxrt/extras.h"
 NXTEST_GROUP(gfx_scene)
 
 using namespace gfxtest;
@@ -95,13 +96,21 @@ NXTEST(headless_screenshot_matches_the_reference) {
 
 NXTEST(windowed_screenshot_matches_the_same_reference) {
     // The swapchain path (B8G8R8A8 swapchain image, window size) gives the same picture as the offscreen path.
+    // SDR output pinned: with [hdr] mode = auto and Windows HDR on, the swapchain is HDR10 (PQ) and the screenshot holds PQ-encoded
+    // values (mean abs 26.5 against the SDR reference on the RTX 4080 machine with HDR on, 2026-11-08); HDR output has its own tests.
+    const nxrt::extras::Settings saved = nxrt::extras::settings();   // read once per process: earlier window tests already did
+    nxrt::extras::Settings sdr = saved;
+    sdr.hdr.mode = nxrt::extras::HdrMode::Off;
+    nxrt::extras::set_settings(sdr);
     SceneRunDesc d = base_desc();
     d.headless = false;
     d.width = 640;
     d.height = 360;
     std::vector<uint8_t> px;
     uint32_t w = 0, h = 0;
-    REQUIRE(capture_scene(d, &px, &w, &h));
+    const bool captured = capture_scene(d, &px, &w, &h);
+    nxrt::extras::set_settings(saved);
+    REQUIRE(captured);
     std::vector<uint8_t> ref;
     uint32_t rw = 0, rh = 0;
     REQUIRE(load_png_rgba(kRefPath, &ref, &rw, &rh));

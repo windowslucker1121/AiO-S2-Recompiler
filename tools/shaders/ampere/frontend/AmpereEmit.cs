@@ -2328,7 +2328,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Dst(ctx, o[0], valid);
         }
 
-        internal static bool VoteSelf = System.Environment.GetEnvironmentVariable("NXRT_HARNESS_VOTE_SELF") != "0";
+        // A18 diagnosis switch, off by default: NXRT_HARNESS_VOTE_SELF=1 makes VOTE Rd, PT the lane's own bit and REDUX the lane's own value
+        // in compute programs. That was the first stopgap for OoT's culling counts; the cause was the translator folding ballots into
+        // branches (structured-subgroup-propagation.patch), and the own bit changes warp-wide results the game relies on (a max over the
+        // warp became the lane's own value).
+        internal static bool VoteSelf = System.Environment.GetEnvironmentVariable("NXRT_HARNESS_VOTE_SELF") == "1";
 
         static void EmitVoteAmpere(EmitterContext ctx, SassInst i)
         {
@@ -2336,14 +2340,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             IReadOnlyList<Op> o = i.Operands;
             VoteMode mode = Has(i, "ANY") ? VoteMode.Any : Has(i, "ALL") ? VoteMode.All : Has(i, "EQ") ? VoteMode.Eq : throw Unsup();
             IrOperand pred = Src(ctx, o[^1]);
-            // A18: VOTE[U].ANY/ALL Rd, PT (Rd = the warp's active mask) as the lane's own bit. NVN code uses it for warp-aggregated atomics (leader =
-            // FLO(mask), count = POPC(mask), one ATOMG by the leader, SHFL.IDX of the result, rank = POPC(mask & lanemask_lt)); the console
-            // runs that with the warp's lanes together (BSSY/BSYNC/WARPSYNC), the translated structured code gives no such guarantee on a PC
-            // GPU, and lanes apart at the ballot, the add or the shuffle lost or doubled counts: OoT's GPU culling counted differently every
-            // frame (foliage flicker). With the own bit every lane is its own leader, adds its own count and reads its own result, which is
-            // right under any active mask (also for loops over the active lanes). NXRT_HARNESS_VOTE_SELF=0: the real ballot.
-            // Compute only: mesh and task programs use the active mask for other things (45 mesh and 2 task blocks of OoT changed with it, and
-            // their output drew streaks of garbage triangles).
+            // NXRT_HARNESS_VOTE_SELF=1 (diagnosis, compute only): VOTE[U].ANY/ALL Rd, PT as the lane's own bit, so every lane is the leader of
+            // a warp-aggregated atomic (leader = FLO(mask), count = POPC(mask), SHFL.IDX of the result) under any active mask.
             if (o.Count == 3 && VoteSelf && ctx.TranslatorContext.Definitions.Stage == ShaderStage.Compute && IsPredKind(o[^1]) && o[^1].Reg == 7 &&
                 !o[^1].Not)   // Rd = ballot(PT) in every mode (VOTE.ALL Rd, PT, PT too)
                 Dst(ctx, o[0], ctx.ShiftLeft(Const(1), LaneIdAmpere(ctx)));
@@ -2363,9 +2361,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             IrOperand v = Src(ctx, o[1]);
             if (VoteSelf && ctx.TranslatorContext.Definitions.Stage == ShaderStage.Compute)
             {
-                // A18: with VOTE Rd, PT as the lane's own bit every lane is a warp of one, so the reduction over the active lanes is the
-                // lane's own value (OoT's culling: leader = FLO(VOTEU.ALL), REDUX.SUM, RED.ADD by the leader; summed over the warp, every
-                // lane would add the warp's total)
+                // NXRT_HARNESS_VOTE_SELF=1: every lane is a warp of one, so the reduction is the lane's own value
                 Dst(ctx, o[0], v);
                 return;
             }
