@@ -1418,7 +1418,8 @@ void remove_entries(std::vector<size_t> idx) {
         spans.push_back({e.m, e.first, e.last});
         g_out.erase(g_out.begin() + static_cast<std::ptrdiff_t>(idx[k]));
     }
-    for (const Span& s : spans) settle(s.m, s.first, s.last);
+    for (const Span& s : spans)
+        if (s.m) settle(s.m, s.first, s.last);
     recompute_bounds();
 }
 
@@ -1438,10 +1439,13 @@ uint64_t out_bytes_total() {
            g_ob_inval.load(std::memory_order_relaxed);
 }
 
-bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff, const BufRef& host) {
+bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff, const BufRef& host, bool in_mirror) {
     if (!size || !host.ok) return false;
-    const PoolHit hit = pool_lookup(addr);
-    Mirror* m = hit.pool && hit.pool->gpu ? hit.pool->gpu->mirror : nullptr;
+    Mirror* m = nullptr;
+    if (in_mirror) {
+        const PoolHit hit = pool_lookup(addr);
+        m = hit.pool && hit.pool->gpu ? hit.pool->gpu->mirror : nullptr;
+    }
     std::lock_guard<std::mutex> lk(g_out_mu);
     for (OutEntry& e : g_out)
         if (e.addr == addr && e.size == size && e.m == m) {
@@ -1467,7 +1471,7 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
     return false;
 }
 
-bool out_exact(uint64_t addr, VkDeviceSize size, VkBuffer* buf, VkDeviceSize* off) {
+bool out_exact(uint64_t addr, VkDeviceSize size, VkBuffer* buf, VkDeviceSize* off, bool* in_mirror) {
     if (!out_any()) return false;
     std::lock_guard<std::mutex> lk(g_out_mu);
     for (const OutEntry& e : g_out)
@@ -1475,8 +1479,19 @@ bool out_exact(uint64_t addr, VkDeviceSize size, VkBuffer* buf, VkDeviceSize* of
             // a copy-back recorded in this submission (flushed) leaves the copy as current as the pool: still the right place
             *buf = e.mbuf;
             *off = e.moff;
+            if (in_mirror) *in_mirror = e.m != nullptr;
             return true;
         }
+    return false;
+}
+
+bool out_overlaps_shadow(uint64_t addr, uint64_t size) {
+    if (!out_any() || !size) return false;
+    const uint64_t lo = addr & ~(kPageBytes - 1), hi = size >= UINT64_MAX - addr ? UINT64_MAX : (addr + size + kPageBytes - 1) & ~(kPageBytes - 1);
+    if (hi <= (g_out_lo.load(std::memory_order_relaxed) & ~(kPageBytes - 1)) || lo >= g_out_hi.load(std::memory_order_relaxed) + kPageBytes) return false;
+    std::lock_guard<std::mutex> lk(g_out_mu);
+    for (const OutEntry& e : g_out)
+        if (!e.m && (!e.flushed || e.pending) && overlaps(e, lo, hi)) return true;
     return false;
 }
 
@@ -1529,7 +1544,7 @@ uint64_t out_flush(VkCommandBuffer cb, uint64_t addr, uint64_t size, int why) {
                 e.pending = false;                          // the copy stays as current as the pool for it (gpu_new kept until retired)
                 e.flushed = cur;
             } else {
-                rearm.emplace_back(e.addr, e.size);
+                if (e.m) rearm.emplace_back(e.addr, e.size);   // a shadow's result (no e.m) left the copy's pages invalid: they stay so
                 gone.push_back(i);
             }
         }
@@ -1572,7 +1587,7 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
             OutEntry& e = g_out[i];
             e.pending = false;
             if (e.guarded) { e.flushed = serial; e.serial = serial; }   // guarded from before: the guard goes when this submission is done
-            else { rearm.emplace_back(e.addr, e.size); gone.push_back(i); }
+            else { if (e.m) rearm.emplace_back(e.addr, e.size); gone.push_back(i); }
         }
         remove_entries(gone);
     }
@@ -1650,7 +1665,8 @@ void out_fetch(uint64_t addr, uint64_t size, bool by_fault) {
                 gone.push_back(i);
             }
         }
-        for (const Span& s : spans) settle(s.m, s.first, s.last);
+        for (const Span& s : spans)
+        if (s.m) settle(s.m, s.first, s.last);
         remove_entries(gone);
         return;
     }

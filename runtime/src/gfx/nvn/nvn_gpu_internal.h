@@ -187,9 +187,13 @@ void mirror_destroy(PoolGpu* p);
 bool out_lazy();
 bool out_any();                                                    // any thread (a hint)
 // The direct binding [addr, +size) at (mbuf, moff) of the copy was written (host: the pool's buffer). True: the same range was out already.
-bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff, const BufRef& host);
-// The same range is out: its place in the copy.
-bool out_exact(uint64_t addr, VkDeviceSize size, VkBuffer* buf, VkDeviceSize* off);
+// in_mirror false: (mbuf, moff) is a buffer of its own (a compute shadow), not the pool copy: the entry marks no pages of the copy, never
+// stays past its submission and is not tracked again when it goes back (the pool copy's pages there were invalidated by gpu_wrote).
+bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff, const BufRef& host, bool in_mirror = true);
+// The same range is out: its place in the copy (*in_mirror, optional: whether that is the pool copy or a shadow).
+bool out_exact(uint64_t addr, VkDeviceSize size, VkBuffer* buf, VkDeviceSize* off, bool* in_mirror = nullptr);
+// Some held shadow result (out_add with in_mirror false) shares a page with [addr, +size).
+bool out_overlaps_shadow(uint64_t addr, uint64_t size);
 // Some page of [addr, +size) holds a result that is newer in the copy than in the pool.
 bool out_overlaps(uint64_t addr, uint64_t size);
 // resolve_read would bind the copy for [addr, +size) (every page current there).

@@ -1384,17 +1384,23 @@ int storage_slot_for(int nvn_stage, int c0_offset) {
 // dispatch stay in the pool.
 struct Shadow { gfx::Buffer buf; VkDeviceSize size = 0; uint64_t last = 0; };
 std::unordered_map<uint64_t, Shadow> g_shadows;            // by GPU address and size
-struct ShadowUse { uint64_t addr; VkDeviceSize size; BufRef host; VkBuffer buf; VkDeviceSize off; bool writes; bool direct; MirrorSpan mirror; };
+struct ShadowUse { uint64_t addr; VkDeviceSize size; BufRef host; VkBuffer buf; VkDeviceSize off; bool writes; bool direct; MirrorSpan mirror; bool own = false; };   // own: in a shadow buffer
 std::vector<ShadowUse> g_shadow_uses;                       // this dispatch
 // Results of direct bindings still only in the pool copy: nvn_gpu_pool.cpp (out_add ... out_end_submit, "compute out").
 bool g_shadowing = false;
 bool g_sh_barrier = false, g_sh_copied = false;             // this dispatch: the barrier before the copies in is recorded / some copy in is
 uint64_t g_sh_uses = 0, g_sh_from_mirror = 0, g_sh_bytes_mirror = 0, g_sh_bytes_pool = 0, g_sh_bytes_out = 0, g_sh_no_span = 0;   // summary line
+uint64_t g_sh_held = 0;   // bound from a shadow that holds an earlier dispatch's result
 uint64_t g_sh_direct = 0, g_sh_direct_filled = 0, g_sh_bytes_fill = 0, g_sh_bytes_dout = 0, g_sh_merged = 0, g_sh_flushes = 0;
 constexpr VkDeviceSize kShadowMax = 16ull << 20;
 
 bool compute_shadows_on() {
     static const bool on = nxrt::config_get_bool("nvn", "compute_shadows", true);
+    return on;
+}
+// [nvn] compute_shadow_hold (default on): a shadow's result stays in the shadow (out_add) instead of being copied back after its dispatch.
+bool shadow_hold_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "compute_shadow_hold", true);
     return on;
 }
 bool compute_direct_on() {
@@ -1711,16 +1717,18 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
     {
         VkBuffer ob = VK_NULL_HANDLE;
         VkDeviceSize oo = 0;
-        if (out_exact(addr, size, &ob, &oo)) {
+        bool in_mirror = true;
+        if (out_exact(addr, size, &ob, &oo, &in_mirror)) {
             ++g_sh_uses;
-            ++g_sh_direct;
-            g_shadow_uses.push_back({addr, size, host, ob, oo, writes, true, MirrorSpan{ob, oo, true}});
+            ++(in_mirror ? g_sh_direct : g_sh_held);
+            g_shadow_uses.push_back({addr, size, host, ob, oo, writes, true, MirrorSpan{ob, oo, true}, !in_mirror});
             BufRef r = host; r.buffer = ob; r.offset = oo; r.avail = size;
             return r;
         }
     }
     if (!out_lazy()) compute_out_guard(addr, size, kOutDispatch);
     if (size > kShadowMax) { compute_out_guard(addr, size, kOutDispatch); return host; }
+    if (out_overlaps_shadow(addr, size)) compute_out_guard(addr, size, kOutDispatch);   // the pool copy and the pool lack a shadow's held result
     const MirrorSpan ms = mirror_span(addr, size);    // pages holding a compute result count as current there (compute_out_lazy)
     if (ms.buf && compute_direct_on()) {
         bool ok = ms.valid;
@@ -1763,7 +1771,7 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
     VkBufferCopy c = {ms.valid ? ms.offset : host.offset, 0, size};
     vkCmdCopyBuffer(F->cb, ms.valid ? ms.buf : host.buffer, sh.buf.buffer, 1, &c);
     g_sh_copied = true;
-    g_shadow_uses.push_back({addr, size, host, sh.buf.buffer, 0, writes, false, ms});
+    g_shadow_uses.push_back({addr, size, host, sh.buf.buffer, 0, writes, false, ms, true});
     BufRef r = host;
     r.buffer = sh.buf.buffer;
     r.offset = 0;
@@ -1777,8 +1785,10 @@ void shadows_after_dispatch() {
     bool any = false;
     for (const ShadowUse& u : g_shadow_uses) {
         if (!u.writes) continue;
-        if (u.direct) {
-            if (out_add(u.addr, u.size, u.buf, u.off, u.host)) ++g_sh_merged;   // written again before it went back: one copy out for both
+        if (u.direct || (u.own && shadow_hold_on())) {
+            // written again before it went back: one copy out for both. A shadow's result is held in the shadow the same way until something
+            // else reads the pool there or the submission ends (out_end_submit), so dispatches over the same range share one copy in and out.
+            if (out_add(u.addr, u.size, u.buf, u.off, u.host, !u.own)) ++g_sh_merged;
             continue;
         }
         if (!any) { memory_barrier(F->cb); any = true; }
@@ -1798,11 +1808,11 @@ void shadows_after_dispatch() {
     if (F->serial - last_sweep > 600) {
         last_sweep = F->serial;
         NXLOG_I("nvn.replay", "compute shadows: %llu bound (%llu from the pool copy, %llu with no copy), in from the copy %llu MiB, in from the pool %llu MiB, out %llu MiB; "
-                "direct to the pool copy %llu (%llu after filling pages, in %llu MiB, out %llu MiB in %llu flushes, %llu writes merged)",
+                "direct to the pool copy %llu (%llu after filling pages, in %llu MiB, out %llu MiB in %llu flushes, %llu writes merged), %llu from a shadow holding a result",
                 (unsigned long long)g_sh_uses, (unsigned long long)g_sh_from_mirror, (unsigned long long)g_sh_no_span, (unsigned long long)(g_sh_bytes_mirror >> 20),
                 (unsigned long long)(g_sh_bytes_pool >> 20), (unsigned long long)(g_sh_bytes_out >> 20), (unsigned long long)g_sh_direct,
                 (unsigned long long)g_sh_direct_filled, (unsigned long long)(g_sh_bytes_fill >> 20), (unsigned long long)(out_bytes_total() >> 20),
-                (unsigned long long)g_sh_flushes, (unsigned long long)g_sh_merged);
+                (unsigned long long)g_sh_flushes, (unsigned long long)g_sh_merged, (unsigned long long)g_sh_held);
         uint64_t spans = 0, pages = 0;
         page_table_stats(&spans, &pages);
         NXLOG_I("nvn.replay", "global memory: %llu held-result flushes for pointer shaders, %llu write windows marked; page table %llu spans of 2 MiB, %llu pages",
