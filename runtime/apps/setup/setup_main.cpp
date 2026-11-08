@@ -7,6 +7,8 @@
 // Games come from their manifests at run time (setup_games.h: <exe dir>\games\<id>\game.toml, or recomp\games in a development build); the
 // player's games and their folders are in <exe dir>\library.ini. A game's preparation steps are the existing tools, run as child processes:
 //   extract    python nup_extract.py <nup> <data>\dump                                    (tools/extract)
+//   build      python game_build.py --exefs <game>\exefs --game <data>\program ...         (release packages only: the game exe is
+//              built from the player's own dump with the bundled lifter and Zig; game-build/release_b/game_build.py)
 //   corpus     python extract_generic.py --romfs --exefs --out <data>\shader_cache\corpus  (tools/shaders/scripts)
 //   translate  <game>.exe --translate-shaders                                              (the "Preparing shaders" window's step 1, headless)
 //   programs   python bnsh_programs.py --romfs --out <data>\shader_cache\programs.bin
@@ -54,6 +56,12 @@ namespace {
 constexpr wchar_t kClass[] = L"NxrtGameLibrary";
 constexpr wchar_t kCardsClass[] = L"NxrtGameCards";
 constexpr wchar_t kAppName[] = L"Recomp Library";
+#ifndef RECOMP_LIBRARY_VERSION
+#define RECOMP_LIBRARY_VERSION "dev"
+#endif
+#ifndef RECOMP_LIBRARY_REPO
+#define RECOMP_LIBRARY_REPO "https://github.com/windowslucker1121/AiO-S2-Recompiler"
+#endif
 constexpr UINT kMsgLine = WM_APP + 1;     // wParam: GameItem*, lParam: std::string* (one output line of its running step)
 constexpr UINT kMsgExit = WM_APP + 2;     // wParam: GameItem*, lParam: exit code
 constexpr UINT kMsgCheck = WM_APP + 3;    // wParam: GameItem*, lParam: std::string* (the prepare check's answer)
@@ -78,8 +86,8 @@ void banner_colors(const std::string& id, COLORREF* a, COLORREF* b) {
 
 // ---- steps and games --------------------------------------------------------------------------------------------------------------
 enum Page { P_LIB, P_GAME, P_SET, P_PC, P_COUNT };
-enum StepId { S_EXTRACT, S_CORPUS, S_TRANSLATE, S_PROGRAMS, S_PREPARE, S_COUNT };
-const wchar_t* kStepName[S_COUNT] = {L"Extract the game files", L"Find the game's shaders", L"Translate the shaders",
+enum StepId { S_EXTRACT, S_BUILD, S_CORPUS, S_TRANSLATE, S_PROGRAMS, S_PREPARE, S_COUNT };
+const wchar_t* kStepName[S_COUNT] = {L"Extract the game files", L"Build the game program", L"Find the game's shaders", L"Translate the shaders",
                                      L"List the shader programs", L"Compile the shaders for your graphics card"};
 
 struct GameItem {
@@ -92,6 +100,7 @@ struct GameItem {
     State st;
     GameId gid;
     std::wstring exe;                    // the game exe (may not exist: not built)
+    GameBuild build;                     // how this release builds the exe (build.ok false: it cannot)
     bool need[S_COUNT] = {};
     std::wstring why[S_COUNT];
     bool retranslate_all = false;
@@ -128,7 +137,7 @@ enum Id : int {
     ID_CARDS = 100, ID_STEPS, ID_LOG, ID_REQ_LIST, ID_REQ_FIX,
     ID_PLAY, ID_PREP, ID_CANCEL, ID_REBUILD, ID_SRC_NUP, ID_SRC_FOLDER, ID_DATA, ID_OPEN_DATA, ID_SHORTCUT, ID_REMOVE,
     ID_RECHECK, ID_COPY, ID_OPEN_INI, ID_ADD, ID_SETTINGS, ID_MORE, ID_DETAILS,
-    IDM_ADD = 1000, IDM_EXIT, IDM_RECHECK, IDM_ABOUT, IDM_PAGE0,
+    IDM_ADD = 1000, IDM_EXIT, IDM_RECHECK, IDM_ABOUT, IDM_REPORT, IDM_PAGE0,
 };
 
 class App {
@@ -159,6 +168,7 @@ private:
     // games
     void load_games();
     GameItem* sel();
+    std::string first_added();
     GameItem* item(const std::string& id);
     void select(const std::string& id);
     void save_lib();
@@ -188,6 +198,7 @@ private:
     void play(GameItem& g);
     void make_shortcut(GameItem& g);
     void about();
+    void report(GameItem* g);
     void more_menu();
     void primary(GameItem& g);           // the one button: add the dump, set up, or play
     std::wstring primary_label(const GameItem& g, bool* enabled) const;
@@ -262,20 +273,30 @@ void App::load_games() {
         g.cfg.source = e ? e->source : L"";
         g.cfg.data_dir = e ? e->data_dir : default_data_dir(g.id);
         g.cfg.game_ini = g.def ? widen(g.def->ini) : L"game.ini";
-        g.exe = g.def ? game_exe_path(tools_, *g.def) : L"";
+        g.exe = g.def ? game_exe_for(tools_, *g.def, g.cfg) : L"";
         evaluate(g);
     }
-    if (!item(lib_.selected)) lib_.selected = games_.empty() ? std::string() : games_.front()->id;
+    if (!sel()) lib_.selected = first_added();
+}
+
+// the first game the player added (the library lists only those), or none
+std::string App::first_added() {
+    for (auto& g : games_) if (g->in_library()) return g->id;
+    return {};
 }
 
 GameItem* App::item(const std::string& id) {
     for (auto& g : games_) if (g->id == id) return g.get();
     return nullptr;
 }
-GameItem* App::sel() { return item(lib_.selected); }
+// only a game the player added can be selected: known games without a dump stay hidden until a dump of them is added
+GameItem* App::sel() {
+    GameItem* g = item(lib_.selected);
+    return g && g->in_library() ? g : nullptr;
+}
 
 void App::select(const std::string& id) {
-    if (!item(id)) return;
+    if (GameItem* g = item(id); !g || !g->in_library()) return;
     lib_.selected = id;
     save_lib();
     GameItem& g = *sel();
@@ -330,7 +351,7 @@ void App::evaluate(GameItem& g) {
     g.lay = layout_of(g.cfg);
     g.st = load_state(g.lay.state_file);
     g.gid = game_id_of(g.lay.game);
-    if (g.def) g.exe = game_exe_path(tools_, *g.def);
+    if (g.def) { g.build = game_build_of(tools_, *g.def); g.exe = game_exe_for(tools_, *g.def, g.cfg); }
     for (int i = 0; i < S_COUNT; ++i) { g.need[i] = false; g.why[i].clear(); }
     const SourceKind sk = source_kind(g.cfg.source);
     const std::string gid = g.gid.ok ? g.gid.text() : std::string();
@@ -345,9 +366,16 @@ void App::evaluate(GameItem& g) {
     }
     const bool known = g.gid.ok && !g.need[S_EXTRACT];
     auto later = [&](int s, const std::wstring& w) { g.need[s] = true; if (g.why[s].empty()) g.why[s] = w; };
+    if (!g.build.ok) g.why[S_BUILD] = g.exe_ok() ? L"Not needed: the game program is there" : L"This package cannot build it";
     if (!known) {
         for (int s : {S_CORPUS, S_TRANSLATE, S_PROGRAMS, S_PREPARE}) later(s, L"after the game files");
+        if (g.build.ok) later(S_BUILD, L"after the game files");
         return;
+    }
+    if (g.build.ok) {
+        if (!g.exe_ok()) later(S_BUILD, L"from your dump, once (15-40 minutes)");
+        else if (g.st.built_for != gid + "|" + g.build.stamp) later(S_BUILD, L"a new release or another game version");
+        else g.why[S_BUILD] = L"Built from your dump";
     }
     if (g.st.corpus_game != gid || !file_exists(join(g.lay.corpus, L"unique.tsv")))
         later(S_CORPUS, g.st.corpus_game.empty() ? L"" : L"the game changed (an update)");
@@ -357,8 +385,8 @@ void App::evaluate(GameItem& g) {
     else if (g.need[S_CORPUS] || g.st.translated_game != gid || g.st.translated_with != ts)
         later(S_TRANSLATE, g.st.translated_game.empty() || g.need[S_CORPUS] ? L"" : L"new shaders of the game update");
     if (g.st.programs_game != gid || !file_exists(g.lay.programs)) later(S_PROGRAMS, g.st.programs_game.empty() ? L"" : L"the game changed");
-    if (!g.exe_ok()) {
-        for (int s : {S_TRANSLATE, S_PREPARE}) later(s, L"needs the game program (not built)");
+    if (!g.exe_ok() || g.need[S_BUILD]) {
+        for (int s : {S_TRANSLATE, S_PREPARE}) later(s, g.build.ok ? L"after the game program" : L"needs the game program (not built)");
     }
     if (g.need[S_CORPUS] || g.need[S_TRANSLATE] || g.need[S_PROGRAMS]) later(S_PREPARE, L"after the steps above");
     else if (g.prep_check == L"ready") g.why[S_PREPARE] = L"Done for this graphics card and driver";
@@ -390,7 +418,7 @@ Status App::status_of(const GameItem& g) const {
     }
     if (g.queued) { s.text = L"Waiting"; s.color = kAccentHi; s.progress = 0; return s; }
     if (!g.error.empty()) { s.text = L"Problem"; s.color = kBad; return s; }
-    if (!g.exe_ok()) { s.text = L"Not built yet"; s.color = kWarn; return s; }
+    if (!g.exe_ok() && !g.build.ok) { s.text = L"Not built yet"; s.color = kWarn; return s; }
     if (g.ready()) { s.text = L"Ready"; s.color = kOk; return s; }
     s.text = L"Setup needed";
     s.color = kWarn;
@@ -402,7 +430,7 @@ std::wstring App::primary_label(const GameItem& g, bool* enabled) const {
     if (!g.def) { *enabled = false; return L"No port yet"; }
     if (!g.in_library()) return L"Add dump";
     if (g.running || g.queued) { *enabled = false; return L"Setting up"; }
-    if (!g.exe_ok()) { *enabled = false; return L"Not built yet"; }
+    if (!g.exe_ok() && !g.build.ok) { *enabled = false; return L"Not built yet"; }
     return L"Play";
 }
 
@@ -457,6 +485,13 @@ void App::add_game() {
 
 // quiet: no questions or notes (the --add command line option).
 void App::add_dump(const std::wstring& path, bool quiet) {
+    if (source_kind(path) == SourceKind::unsupported) {
+        if (!quiet)
+            MessageBoxW(wnd_, L"NSP, XCI, NSZ and XCZ files are encrypted, and this program does not handle console keys.\r\n\r\n"
+                              L"Extract the game with your own tools into a folder with the decrypted exefs and romfs (the update's, if you have it), "
+                              L"or make a .nup package, and add that.", kAppName, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     SetCursor(LoadCursor(nullptr, IDC_WAIT));
     const DumpInfo info = identify_dump(path, tools_.python, tools_.python_args, tools_.nup_extract);
     if (!info.ok) {
@@ -579,10 +614,12 @@ void App::remove_game(GameItem& g) {
     if (!g.def) {
         const std::string id = g.id;
         games_.erase(std::remove_if(games_.begin(), games_.end(), [&](const auto& p) { return p->id == id; }), games_.end());
-        if (!item(lib_.selected)) lib_.selected = games_.empty() ? std::string() : games_.front()->id;
+    } else evaluate(g);
+    if (!sel()) {
+        lib_.selected = first_added();
         save_lib();
         show_page(P_LIB);
-    } else evaluate(g);
+    }
     refresh();
     InvalidateRect(wnd_, nullptr, FALSE);
 }
@@ -721,6 +758,7 @@ void App::next_step(GameItem& g) {
         finish(s == S_EXTRACT ? "the dump folder is not a game folder" : "the game files are not there");
         return;
     }
+    if (s == S_BUILD && (!g.build.ok || tools_.python.empty())) { finish("this package cannot build the game program"); return; }
     if ((s == S_TRANSLATE || s == S_PREPARE) && !g.exe_ok()) {
         log(g, L"--- the game program is not built: " + g.exe + L" ---");
         finish("the game program is not built yet");
@@ -738,6 +776,12 @@ void App::next_step(GameItem& g) {
     if (s == S_EXTRACT) {
         exe = tools_.python;
         args = py_args(tools_.nup_extract, quote(g.cfg.source) + L" " + quote(g.lay.dump));
+    } else if (s == S_BUILD) {
+        fs::create_directories(parent_of(g.exe), ec);
+        exe = tools_.python;
+        args = py_args(tools_.game_build, L"--exefs " + quote(join(g.lay.game, L"exefs")) + L" --game " + quote(parent_of(g.exe)) +
+                       L" --manifest " + quote(g.def->manifest) + L" --sdk " + quote(g.build.sdk) + L" --runtime " + quote(g.build.runtime) +
+                       L" --jobs " + std::to_wstring(std::max(1u, hw > 1 ? hw - 1 : 1)));
     } else if (s == S_CORPUS) {
         fs::remove(fs::path(g.lay.corpus) / L"unique.tsv", ec);   // a scan that stops before its end must not count
         fs::remove(fs::path(g.lay.corpus) / L"unique_all.tsv", ec);
@@ -810,6 +854,7 @@ void App::step_exit(GameItem& g, DWORD code) {
     bool ok = code == 0 && (!g.cancel_requested || g.result_ok || s == S_PROGRAMS || s == S_CORPUS);
     if (ok) {
         if (s == S_EXTRACT) g.st.extracted_from = nup_stamp(g.cfg.source);
+        else if (s == S_BUILD) { ok = file_exists(g.exe); if (ok) g.st.built_for = game_id_of(g.lay.game).text() + "|" + g.build.stamp; }
         else if (s == S_CORPUS) { ok = file_exists(join(g.lay.corpus, L"unique.tsv")); if (ok) g.st.corpus_game = game_id_of(g.lay.game).text(); }
         else if (s == S_TRANSLATE) { g.st.translated_game = game_id_of(g.lay.game).text(); g.st.translated_with = translator_stamp(tools_.translator); }
         else if (s == S_PROGRAMS) { ok = file_exists(g.lay.programs); if (ok) g.st.programs_game = game_id_of(g.lay.game).text(); }
@@ -935,11 +980,53 @@ void App::make_shortcut(GameItem& g) {
 }
 
 void App::about() {
-    std::wstring t = std::wstring(kAppName) + L"\r\n\r\nGames known: " + std::to_wstring(defs_.size()) + L"\r\nTranslator: " +
+    std::wstring t = std::wstring(kAppName) + L" " + widen(RECOMP_LIBRARY_VERSION) + L"\r\n\r\nGames known: " + std::to_wstring(defs_.size()) + L"\r\nTranslator: " +
                      (tools_.translator.empty() ? L"(missing)" : tools_.translator) + L"\r\nPython: " + (tools_.python.empty() ? L"(missing)" : tools_.python) +
                      L"\r\nLibrary: " + library_path();
     for (const GameDef& d : defs_) t += L"\r\n  " + widen(d.title) + L" (" + widen(d.title_id) + L"): " + d.manifest;
     MessageBoxW(wnd_, t.c_str(), L"About", MB_OK | MB_ICONINFORMATION);
+}
+
+// Opens a GitHub issue form (.github/ISSUE_TEMPLATE) in the browser with the game, the library version and this PC filled in.
+// The library sends nothing itself: the player reads the form and submits it (or not) on GitHub. No paths, logs or game data go into it.
+void App::report(GameItem* g) {
+    TASKDIALOG_BUTTON b[] = {{201, L"Game bug\nSomething is wrong while the game runs: picture, sound, controls, a crash, speed."},
+                             {202, L"Recompiler / library bug\nThis app, adding a dump, building the game program, preparing shaders."},
+                             {203, L"Game status\nTell how well a game runs, for the list of games."}};
+    TASKDIALOGCONFIG c{sizeof c};
+    c.hwndParent = wnd_;
+    c.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+    c.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    c.pszWindowTitle = kAppName;
+    c.pszMainInstruction = L"Report a bug";
+    c.pszContent = L"Opens a form on GitHub (needs a GitHub account) with the game and this PC filled in. "
+                   L"Never attach game files, saves, keys or screenshots of the game.";
+    c.cButtons = 3;
+    c.pButtons = b;
+    int pick = 0;
+    if (FAILED(TaskDialogIndirect(&c, &pick, nullptr, nullptr)) || pick < 201 || pick > 203) return;
+    auto enc = [](const std::wstring& w) {
+        static const char* hex = "0123456789ABCDEF";
+        std::string out;
+        for (unsigned char ch : narrow(w)) {
+            if ((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '-' || ch == '_' || ch == '.' || ch == '~')
+                out += static_cast<char>(ch);
+            else { out += '%'; out += hex[ch >> 4]; out += hex[ch & 15]; }
+        }
+        return widen(out);
+    };
+    std::wstring system;
+    for (const wchar_t* name : {L"Graphics card (Vulkan 1.3)", L"Windows", L"Memory"})
+        for (const Check& k : sys_checks_)
+            if (k.item == name && !k.detail.empty()) system += (system.empty() ? L"" : L"; ") + k.detail;
+    std::wstring game;
+    if (g && g->def) game = widen(g->def->id) + L", " + widen(g->title_id) + L", " + widen(g->def->display_version);
+    else if (g) game = L"no port yet, " + widen(g->title_id);
+    const wchar_t* tpl = pick == 201 ? L"bug_game.yml" : pick == 202 ? L"bug_recompiler.yml" : L"game_status.yml";
+    std::wstring url = widen(RECOMP_LIBRARY_REPO) + L"/issues/new?template=" + tpl + L"&app=" + enc(widen(RECOMP_LIBRARY_VERSION));
+    if (!system.empty()) url += L"&system=" + enc(system);
+    if (!game.empty()) url += L"&game=" + enc(game);
+    ShellExecuteW(wnd_, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 // ---- controls -----------------------------------------------------------------------------------------------------------------------
@@ -1142,6 +1229,8 @@ void App::more_menu() {
     item(ID_SHORTCUT, L"Desktop shortcut", g->playable());
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     item(ID_REMOVE, L"Remove from library", idle && g->in_library());
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    item(IDM_REPORT, L"Report a bug...", true);
     RECT r;
     GetWindowRect(b_more_, &r);
     const int id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_TOPALIGN, r.right, r.bottom + S(4), 0, wnd_, nullptr);
@@ -1363,10 +1452,9 @@ void App::paint_cards(HWND h, HDC hdc) {
         g.ReleaseHDC(fdc);
         const float pad = Sf(32), gap = Sf(20), cw = Sf(300), ch = Sf(280);
         const int cols = std::max(1, static_cast<int>((static_cast<float>(rc.right) - 2 * pad + gap) / (cw + gap)));
-        // the player's games first, then the known games without a dump, then "add"
+        // the player's games, then "add" (a known game shows up once a dump of it is added)
         std::vector<GameItem*> order;
         for (auto& gi : games_) if (gi->in_library()) order.push_back(gi.get());
-        for (auto& gi : games_) if (!gi->in_library() && gi->def) order.push_back(gi.get());
         const int n = static_cast<int>(order.size()) + 1;
         content_h_ = static_cast<int>(pad + ((n + cols - 1) / cols) * (ch + gap));
         const float oy = -static_cast<float>(scroll_);
@@ -1589,6 +1677,7 @@ void App::command(int id, int code) {
         }
         case ID_ADD: case IDM_ADD: add_game(); break;
         case IDM_ABOUT: about(); break;
+        case IDM_REPORT: report(g); break;
         case IDM_EXIT: PostMessageW(wnd_, WM_CLOSE, 0, 0); break;
         default:
             if (id >= IDM_PAGE0 && id < static_cast<int>(IDM_PAGE0) + P_COUNT) show_page(id - static_cast<int>(IDM_PAGE0));
@@ -1854,6 +1943,7 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"E&xit");
     const wchar_t* pages[P_COUNT] = {L"&Library\tCtrl+1", L"&Game\tCtrl+2", L"&Settings\tCtrl+3", L"&This PC\tCtrl+4"};
     for (int i = 0; i < P_COUNT; ++i) AppendMenuW(view, MF_STRING, IDM_PAGE0 + i, pages[i]);
+    AppendMenuW(help, MF_STRING, IDM_REPORT, L"&Report a bug...");
     AppendMenuW(help, MF_STRING, IDM_ABOUT, L"&About");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&View");
@@ -1885,7 +1975,7 @@ int App::run(HINSTANCE inst, int show) {
         else if (a == L"--add" && more) add_paths_.push_back(fs::absolute(argv[++i]).wstring());
     }
     if (argv) LocalFree(argv);
-    if (GameItem* g = sel(); g && (!data.empty() || !source.empty())) {
+    if (GameItem* g = item(lib_.selected); g && (!data.empty() || !source.empty())) {
         if (!data.empty()) g->cfg.data_dir = data;
         if (!source.empty()) {
             g->cfg.source = source;

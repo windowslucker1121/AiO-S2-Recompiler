@@ -100,6 +100,7 @@ bool load_game_def(const std::wstring& manifest, GameDef* g, std::string* error)
     g->version = t.get("game", "version");
     g->platform = t.get("game", "platform", "switch2");
     g->exe = t.get("files", "exe", g->id + ".exe");
+    g->runtime_dll = t.get("files", "runtime_dll", g->id + "_rt.dll");
     g->ini = t.get("files", "ini", g->id + ".ini");
     g->log = t.get("files", "log", g->id + ".log");
     g->save_folder = t.get("files", "save_folder", g->id);

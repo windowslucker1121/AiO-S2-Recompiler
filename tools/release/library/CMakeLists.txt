@@ -49,7 +49,8 @@ add_executable(recomp_library WIN32
     "${APP}/launcher/keymap_win.cpp" "${GEN}/setup.rc")
 target_include_directories(recomp_library PRIVATE "${GEN}" "${APP}/setup" "${APP}/launcher"
                            "${vulkan_headers_SOURCE_DIR}/include" "${sdl3_SOURCE_DIR}/include")
-target_compile_definitions(recomp_library PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_compile_definitions(recomp_library PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS
+                           RECOMP_LIBRARY_VERSION="${LIBRARY_VERSION}")
 if(LIBRARY_DEV_ROOT)
     target_compile_definitions(recomp_library PRIVATE SETUP_DEV_ROOT="${REPO}")
 endif()

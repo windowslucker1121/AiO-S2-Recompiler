@@ -38,10 +38,20 @@ struct Tools {
     std::wstring translator;       // spirv_harness.exe
     std::wstring python;           // python.exe found, or empty
     std::wstring python_args;      // "-3" for the py.exe launcher
+    std::wstring game_build;       // tools\build\game_build.py of a release (with its Zig and lifter), else empty
 };
 Tools find_tools();
 // The game's exe: <exe dir>\<files.exe>; a development build also looks in the checkout's game-build\build\release.
 std::wstring game_exe_path(const Tools& t, const GameDef& g);
+
+// The player-side build of the game exe (release packages: games\<id>\sdk + runtime, tools\build\game_build.py). A release never
+// carries a game exe: the player builds it from their own dump into <data>\program.
+struct GameBuild {
+    bool ok = false;               // this release can build the game's exe
+    std::wstring sdk, runtime;     // games\<id>\sdk (stub, import library), games\<id>\runtime (runtime DLL and what it loads)
+    std::string stamp;             // names, sizes and times of the sdk and runtime files: a new release builds the exe again
+};
+GameBuild game_build_of(const Tools& t, const GameDef& g);
 
 // ---- one game's choices (from the library, setup_games.h) ----------------------------------------------------------------------
 struct Config {
@@ -59,6 +69,10 @@ struct Layout {
     std::wstring game;   // the game folder the exe runs (exefs + romfs); empty while the dump is not extracted
 };
 Layout layout_of(const Config& c);
+
+struct Config;
+// The exe a game runs: the one the player built (<data>\program\<exe>) when this release builds it, else game_exe_path.
+std::wstring game_exe_for(const Tools& t, const GameDef& g, const Config& c);
 
 // The game in a game folder: main's build id (hex, from the NSO header) and what the extraction recorded.
 struct GameId {
@@ -79,6 +93,7 @@ struct State {
     std::string translated_game;  // the corpus (GameId) every block of which was sent to the translator
     std::string translated_with;  // translator_stamp of that translation
     std::string programs_game;    // the GameId programs.bin was listed from
+    std::string built_for;        // "<GameId>|<GameBuild stamp>" the game exe in <data>\program was built for
 };
 State load_state(const std::wstring& path);
 bool save_state(const std::wstring& path, const State& s);

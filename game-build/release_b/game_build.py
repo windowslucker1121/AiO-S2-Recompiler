@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """First-run game build of release model (b): turns the player's own dump into the game exe on their PC.
 
-    python -I tools/build/game_build.py --exefs <dump>/updates/<v>/exefs --game <install folder> [--jobs N] [--keep] [--manifest game.toml]
+    python -I tools/build/game_build.py --exefs <dump>/updates/<v>/exefs --game <output folder> [--jobs N] [--keep]
+                                        [--manifest games/<id>/game.toml] [--sdk games/<id>/sdk] [--runtime games/<id>/runtime]
 
 Game independent: everything about the game (id, exe and runtime DLL names, supported dump hashes and build ID, modules with their
 load addresses) comes from the game manifest, game.toml in the package root (two folders above this script) unless --manifest says
 otherwise. The package ships no game code. This script
   1. verifies the dump's ExeFS against the manifest (the supported build: sha256 of every file + main's build ID),
+     and writes plain copies of ZBIC-compressed NSOs (Switch 2 main modules) with the bundled nx_plain_nso.exe,
   2. lifts the NSOs with the bundled lifter (recomp/nxrecomp) into <game>/build/lift,
   3. compiles the generated C++ with the bundled Zig (zig c++, mingw target) into <game>/build/obj, in parallel,
   4. links the exe = sdk/stub.cpp + the lifted objects + sdk/<runtime stem>.lib (the runtime, the DLL of the package),
-  5. deletes the generated sources and objects (unless --keep) and records the result in <game>/build/done.json.
+  5. copies the runtime files (the runtime DLL, the ASTC decoder DLLs, fonts/) of --runtime next to the exe,
+  6. deletes the generated sources and objects (unless --keep) and records the result in <game>/build/done.json.
 
 Resumable: a module's lift counts once its marker file is written, an object once it is renamed into place, so a stopped
 build continues where it stopped. A file named <game>/build/cancel stops it (the launcher's Pause).
@@ -30,8 +33,10 @@ from concurrent.futures import ThreadPoolExecutor, FIRST_COMPLETED, wait
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RECOMP = os.path.join(HERE, 'recomp')
-SDK = os.path.join(HERE, 'sdk')
+SDK = os.path.join(HERE, 'sdk')                # --sdk: stub.cpp, rt_api.h, game.rc, game.manifest.in and <runtime stem>.lib of the game
+RUNTIME = ''                                   # --runtime: the files the exe runs with (copied next to it)
 ZIG = os.path.join(HERE, 'zig', 'zig.exe')
+PLAIN_NSO = os.path.join(HERE, 'nx_plain_nso.exe')
 FORMAT = 2          # bump when the build layout or the runtime API (sdk/rt_api.h) changes: older partial builds are then started over
                     # (the launcher also treats an exe whose done.json has another format as not built: gamebuild.rs BUILD_FORMAT)
 
@@ -132,6 +137,9 @@ class Runner:
                 with self.lock:
                     for p in list(self.procs):
                         try:
+                            # the whole tree: `zig c++` runs its clang as a child process, which p.kill() would leave running
+                            subprocess.run(['taskkill', '/F', '/T', '/PID', str(p.pid)], stdout=subprocess.DEVNULL,
+                                           stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
                             p.kill()
                         except OSError:
                             pass
@@ -159,6 +167,42 @@ class Runner:
             self.procs.discard(p)
         self.check()
         return rc, '\n'.join(tail)
+
+
+def plain_exefs(runner, exefs, build):
+    """The lifter reads plain NSOs: ZBIC-compressed ones (NSO flag bit 7) are converted into <build>/plain first."""
+    zbic = []
+    for name, nso, _, _, _, _ in MODULES:
+        with open(os.path.join(exefs, nso), 'rb') as f:
+            head = f.read(0x10)
+        if int.from_bytes(head[12:16], 'little') & 0x80:
+            zbic.append(nso)
+    if not zbic:
+        return exefs
+    out = os.path.join(build, 'plain')
+    if all(os.path.isfile(os.path.join(out, n)) for _, n, _, _, _, _ in MODULES) and os.path.isfile(os.path.join(out, '.done')):
+        return out
+    if not os.path.isfile(PLAIN_NSO):
+        raise Fail('The bundled NSO converter is missing (%s). Extract the release zip again.' % PLAIN_NSO)
+    progress('verify', 0, 1, 'Unpacking the compressed game code (%s)' % ', '.join(zbic))
+    shutil.rmtree(out, ignore_errors=True)
+    rc, tail = runner.run([PLAIN_NSO, exefs, out])
+    if rc != 0:
+        raise Fail('Unpacking the game code failed (exit %d):\n%s' % (rc, tail))
+    open(os.path.join(out, '.done'), 'w').write('ok\n')
+    return out
+
+
+def copy_runtime(game):
+    """The runtime DLL and what it loads next to the exe (DLL search order: the exe's folder first)."""
+    if not RUNTIME:
+        return
+    for root, _, files in os.walk(RUNTIME):
+        rel = os.path.relpath(root, RUNTIME)
+        dst = game if rel == '.' else os.path.join(game, rel)
+        os.makedirs(dst, exist_ok=True)
+        for f in files:
+            shutil.copy2(os.path.join(root, f), os.path.join(dst, f))
 
 
 def lift(runner, exefs, gen, jobs):
@@ -303,6 +347,8 @@ def main():
     ap.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument('--keep', action='store_true', help='keep the generated sources and objects')
     ap.add_argument('--manifest', default=os.path.join(HERE, '..', '..', 'game.toml'), help='the game manifest (default: game.toml in the package root)')
+    ap.add_argument('--sdk', help='folder with stub.cpp, rt_api.h, game.rc, game.manifest.in and the runtime import library (default: sdk next to this script)')
+    ap.add_argument('--runtime', help='folder whose files (runtime DLL, decoder DLLs, fonts) are copied next to the exe')
     ap.add_argument('--lift-one', help=argparse.SUPPRESS)
     a = ap.parse_args()
     if a.lift_one:                       # child process: one lifter run (keeps the lifter's own pool out of this process)
@@ -312,6 +358,11 @@ def main():
     if not a.exefs or not a.game:
         ap.error('--exefs and --game are required')
     load_manifest(a.manifest)
+    global SDK, RUNTIME
+    if a.sdk:
+        SDK = os.path.abspath(a.sdk)
+    if a.runtime:
+        RUNTIME = os.path.abspath(a.runtime)
     game = os.path.abspath(a.game)
     build = os.path.join(game, 'build')
     os.makedirs(build, exist_ok=True)
@@ -329,7 +380,7 @@ def main():
         state_p = os.path.join(build, 'state.json')
         old = json.load(open(state_p)) if os.path.isfile(state_p) else None
         if old != stamp:                 # another dump or another release: start over
-            for d in ('lift', 'obj'):
+            for d in ('lift', 'obj', 'plain'):
                 shutil.rmtree(os.path.join(build, d), ignore_errors=True)
             json.dump(stamp, open(state_p, 'w'), indent=1)
         times['verify'] = round(time.time() - t0, 1)
@@ -339,17 +390,18 @@ def main():
         env['ZIG_LOCAL_CACHE_DIR'] = os.path.join(build, 'zig-cache')
         gen, obj = os.path.join(build, 'lift'), os.path.join(build, 'obj')
         t = time.time()
-        lift(runner, a.exefs, gen, a.jobs)
+        lift(runner, plain_exefs(runner, a.exefs, build), gen, a.jobs)
         times['lift'] = round(time.time() - t, 1)
         t = time.time()
         compile_all(runner, gen, obj, a.jobs, env)
         times['compile'] = round(time.time() - t, 1)
         t = time.time()
         exe = link(runner, obj, game, env, write_gen(build))
+        copy_runtime(game)
         times['link'] = round(time.time() - t, 1)
         if not a.keep:
             progress('finish', 0, 1, 'Removing the build files')
-            for d in ('lift', 'obj', 'zig-cache', 'gen'):
+            for d in ('lift', 'obj', 'zig-cache', 'gen', 'plain'):
                 shutil.rmtree(os.path.join(build, d), ignore_errors=True)
         done = dict(stamp, exe_sha256=sha256(exe), seconds=times, finished=time.strftime('%Y-%m-%d %H:%M:%S'))
         json.dump(done, open(os.path.join(build, 'done.json'), 'w'), indent=1)

@@ -1,0 +1,77 @@
+name: Game bug
+description: Something is wrong while a game runs (graphics, sound, input, a crash or freeze in game, speed).
+title: "[Game bug] "
+labels: [bug, game]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The library's **Report a bug** entry (the "•••" menu of a game) opens this form with the game and your PC filled in.
+        Do **not** attach game files, extracted data, save files, shader caches, frame captures, screenshots of the game or whole
+        bug bundles, and do not ask for or share dumps, keys or firmware: such issues are closed and removed. See LEGAL.md.
+        Problems with the library app, adding a dump or building the game program: use **Recompiler / library bug** instead.
+  - type: checkboxes
+    id: ownership
+    attributes:
+      label: Your copy
+      options:
+        - label: I own this game and dumped it myself from my own console.
+          required: true
+        - label: This issue contains no game files, keys, firmware or links to them.
+          required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of problem
+      options:
+        - Graphics (missing, wrong or flickering picture)
+        - Sound
+        - Controller, keyboard or mouse
+        - Crash or freeze
+        - Speed (frame rate, stutter)
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead. Describe the picture in words.
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where in the game
+      placeholder: e.g. the intro movie, Link's house, Kokiri Forest at night
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game, title ID and version
+      description: As the library's game page shows them.
+      placeholder: e.g. oot, 0400486024DEC000, 2.0.0
+    validations:
+      required: true
+  - type: input
+    id: app
+    attributes:
+      label: Library version
+      description: Help > About in the library, or the commit you built.
+      placeholder: e.g. 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: GPU, driver and Windows version
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt
+      description: The relevant lines of the game log, pasted as text (the logs folder of the game's data folder, or log.txt of an
+        F9 bug bundle). Text only; leave out the bundle's save, capture and image files.
+      render: text

@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Builds the game library release package (recomp_library.exe + translator + bundled Python + game manifests, tools/release/package.ps1)
+# Builds the game library release package (tools/release/package.ps1: recomp_library.exe, the shader translator, a bundled Python,
+# the game manifests and the player-side game build kit: lifter, Zig, NSO converter, each game's runtime DLL + import library)
 # and publishes it as a GitHub release.
 #   - push a tag v1.2.3            -> build + release "v1.2.3" (pre-release when the tag has a suffix, e.g. v0.2.0-rc1)
 #   - Actions tab, "Run workflow"  -> build; with a version given, also a release (tag created on the chosen commit)
 #   - pull requests / pushes       -> build only (the zip is kept as a workflow artifact)
-# The package holds no game data and no lifted code (LEGAL.md); a game exe is not part of it.
+# The package holds no game data and no lifted code (LEGAL.md). A game exe is never part of it: the library builds it on the
+# player's PC from their own dump (game-build/release_b/game_build.py).
 name: Release
 
 on:
@@ -12,9 +14,12 @@ on:
     tags: ['v*']
   pull_request:
     paths:
-      - 'runtime/apps/setup/**'
-      - 'runtime/apps/launcher/keymap_win.*'
-      - 'game-build/res/setup.*'
+      - 'runtime/**'
+      - 'recomp/nxrecomp/**'
+      - 'recomp/include/**'
+      - 'game-build/**'
+      - 'tools/extract/**'
+      - 'tools/textures/**'
       - 'tools/release/**'
       - 'tools/shaders/harness/**'
       - 'tools/extract/nup_extract.py'
@@ -43,7 +48,9 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 150
+    env:
+      VCPKG_COMMIT: 661e42cd1600603016ced1d76a15359e7dade9f5   # the vcpkg the development machines use (AGENTS.md, machine setup)
     outputs:
       version: ${{ steps.ver.outputs.version }}
       release: ${{ steps.ver.outputs.release }}
@@ -88,6 +95,35 @@ jobs:
           dotnet --version
           python --version
 
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-bin
+          key: vcpkg-bin-${{ env.VCPKG_COMMIT }}-dav1d-libvpx-opus
+
+      - name: Media libraries (vcpkg dav1d, libvpx, opus; static)
+        shell: pwsh
+        run: |
+          $bin = Join-Path $env:RUNNER_TEMP 'vcpkg-bin'
+          New-Item -ItemType Directory -Force $bin | Out-Null
+          $env:VCPKG_BINARY_SOURCES = "clear;files,$bin,readwrite"
+          $v = Join-Path $env:GITHUB_WORKSPACE 'tools\vcpkg'      # runtime/cmake/media_deps.cmake looks here
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git $v
+          git -C $v checkout $env:VCPKG_COMMIT
+          & "$v\bootstrap-vcpkg.bat" -disableMetrics
+          & "$v\vcpkg.exe" install dav1d:x64-windows-static libvpx:x64-windows-static opus:x64-windows-static
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg install failed' }
+
+      - name: ASTC transcoder (tools/textures)
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\textures\scripts\fetch_third_party.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'fetch_third_party failed' }
+          cmake -S tools\textures -B tools\textures\build\release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+          if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
+          cmake --build tools\textures\build\release
+          if ($LASTEXITCODE -ne 0) { throw 'build failed' }
+
       - name: Cache NuGet packages
         uses: actions/cache@v4
         with:
@@ -105,14 +141,21 @@ jobs:
         run: |
           $pkg = Get-ChildItem "${{ runner.temp }}\release" -Directory | Where-Object Name -like 'recomp-library-*' | Select-Object -First 1
           foreach ($f in 'recomp_library.exe', 'tools\spirv_harness\spirv_harness.exe', 'tools\python\python.exe',
-                         'tools\scripts\nup_extract.py', 'tools\scripts\extract_generic.py', 'tools\scripts\bnsh_programs.py', 'LICENSE') {
+                         'tools\scripts\nup_extract.py', 'tools\scripts\extract_generic.py', 'tools\scripts\bnsh_programs.py', 'LICENSE',
+                         'tools\build\game_build.py', 'tools\build\zig\zig.exe', 'tools\build\nx_plain_nso.exe',
+                         'tools\build\recomp\nxrecomp\__main__.py', 'games\oot\sdk\oot_rt.lib', 'games\oot\sdk\stub.cpp',
+                         'games\oot\runtime\oot_rt.dll') {
             if (-not (Test-Path (Join-Path $pkg.FullName $f))) { throw "missing in the package: $f" }
           }
           if (-not (Get-ChildItem (Join-Path $pkg.FullName 'games') -Recurse -Filter game.toml)) { throw 'no game manifests in the package' }
           & (Join-Path $pkg.FullName 'tools\python\python.exe') -I (Join-Path $pkg.FullName 'tools\scripts\nup_extract.py') --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'nup_extract.py --help failed with the bundled Python' }
+          & (Join-Path $pkg.FullName 'tools\python\python.exe') -I (Join-Path $pkg.FullName 'tools\build\game_build.py') --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'game_build.py --help failed with the bundled Python' }
+          # the runtime DLL must carry the AV1 movie decoder, or the game waits forever at its title movie
+          if (-not (Select-String -Path (Join-Path $pkg.FullName 'games\oot\runtime\oot_rt.dll') -Pattern 'dav1d' -SimpleMatch -Quiet)) { throw 'oot_rt.dll was built without dav1d' }
           # Nothing from a game may ever be in a release (LEGAL.md): refuse console/game file types outright.
-          $bad = Get-ChildItem $pkg.FullName -Recurse -File | Where-Object { $_.Extension -in '.nso', '.nro', '.nca', '.nsp', '.xci', '.nup', '.bfsha', '.bnsh', '.spv', '.keys' -or $_.Name -in 'main', 'sdk', 'rtld', 'main.npdm' }
+          $bad = Get-ChildItem $pkg.FullName -Recurse -File | Where-Object { $_.Extension -in '.nso', '.nro', '.nca', '.nsp', '.xci', '.nup', '.bfsha', '.bnsh', '.spv', '.keys' -or $_.Name -in 'main', 'sdk', 'rtld', 'main.npdm', 'oot.exe', 'pkp.exe' }
           if ($bad) { throw "game/console files in the package: $($bad.FullName -join ', ')" }
           Write-Host "package ok: $($pkg.Name)"
 
@@ -150,8 +193,13 @@ jobs:
           Recomp Library ${VERSION} for Windows x64.
 
           Unzip and start \`recomp_library.exe\`, then add your own dump of a supported game.
-          The package contains no game files, no game code and no keys (see LEGAL.md). Bundled: the shader translator
-          (.NET runtime included), an embeddable Python with zstandard and lz4, and the game manifests.
+          Add your own dump: a .nup package or a folder with the decrypted game files (exefs and romfs). The first Play
+          builds the game program from your dump on your PC (once, 15-40 minutes), prepares the shaders, then starts the game.
+          NSP/XCI files are not read: they are encrypted, and this project does not handle keys.
+
+          The package contains no game files, no game code, no game program and no keys (see LEGAL.md). Bundled: the shader
+          translator (.NET runtime included), an embeddable Python, Zig and the recompiler for the game build, the runtime
+          DLL, and the game manifests.
 
           SHA-256: \`$(cut -d' ' -f1 dist/*.zip.sha256)\`
           EOF

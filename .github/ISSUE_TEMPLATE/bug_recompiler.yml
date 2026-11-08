@@ -1,0 +1,69 @@
+name: Recompiler / library bug
+description: Something is wrong in the library app, adding a dump, building the game program, preparing shaders, or the recompiler.
+title: "[Recompiler bug] "
+labels: [bug, recompiler]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The library's **Report a bug** entry (the "•••" menu of a game) opens this form with your PC filled in.
+        Do **not** attach game files, extracted data, generated code, save files, shader caches or whole bug bundles, and do not
+        ask for or share dumps, keys or firmware: such issues are closed and removed. See LEGAL.md.
+        NSP and XCI files are not supported (they are encrypted; this project handles no keys): that is not a bug.
+  - type: checkboxes
+    id: ownership
+    attributes:
+      label: Your copy
+      options:
+        - label: The dump I used is my own (dumped from my own console), or no dump was involved.
+          required: true
+        - label: This issue contains no game files, keys, firmware or links to them.
+          required: true
+  - type: dropdown
+    id: part
+    attributes:
+      label: Which part
+      options:
+        - The library app (pages, settings, buttons)
+        - Adding a dump (.nup or folder)
+        - Building the game program
+        - Shader steps (scan, translate, prepare)
+        - Starting the game from the library
+        - The recompiler or runtime itself (building from source)
+        - Release package or download
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead. The step and its message, if one failed.
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game, title ID and version (if a game is involved)
+      placeholder: e.g. oot, 0400486024DEC000, 2.0.0
+  - type: input
+    id: app
+    attributes:
+      label: Library version
+      description: Help > About in the library, or the commit you built.
+      placeholder: e.g. 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: GPU, driver and Windows version
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt
+      description: The relevant lines as text (the library's "Show details" log of the step, or the build log in the game's data
+        folder). Text only.
+      render: text

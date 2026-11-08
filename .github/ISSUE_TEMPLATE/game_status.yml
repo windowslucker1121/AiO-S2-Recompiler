@@ -1,0 +1,63 @@
+name: Game status
+description: Tell us how a game or version runs, so its state in GAMES.md can be updated, or that one is missing there.
+title: "[Game status] "
+labels: [game-status]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Only for games you own. Do not attach game files, extracted data, saves or screenshots of the game, and do not ask for or
+        share dumps, keys, firmware or links to them. Requests for games you do not own are closed. The states are those of
+        GAMES.md.
+  - type: checkboxes
+    id: ownership
+    attributes:
+      label: Your copy
+      options:
+        - label: I own this game and dumped it myself from my own console.
+          required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game, title ID and version
+      description: As the library's game page shows them (a dump without a port shows "No port yet" with its title ID).
+      placeholder: e.g. oot, 0400486024DEC000, 2.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: state
+    attributes:
+      label: State
+      options:
+        - Playable (start to end, small problems only)
+        - In game (graphics problems, low frame rate or missing features)
+        - Boots (starts, but does not get into the game)
+        - Does not start
+        - No port (the library shows "No port yet")
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What you saw
+      description: How far you got, what works, what does not. Problems you found deserve their own Game bug issue.
+    validations:
+      required: true
+  - type: input
+    id: fps
+    attributes:
+      label: Frame rate
+      placeholder: e.g. 30-38 fps in the first scene, 20 fps in Kokiri Forest
+  - type: input
+    id: app
+    attributes:
+      label: Library version
+      placeholder: e.g. 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: GPU, driver, CPU, RAM and Windows version
+    validations:
+      required: true

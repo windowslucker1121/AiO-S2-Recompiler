@@ -105,6 +105,13 @@ endif()
 target_link_libraries(game_setup PRIVATE comctl32 uxtheme shell32 ole32 shlwapi gdiplus dwmapi)
 target_link_options(game_setup PRIVATE /MANIFEST:NO /DEBUG)   # res/setup.rc carries the manifest
 
+# gen/build_id.h: the commit this exe (or runtime DLL) is built from and whether tracked files had changes (bug capture bundles record it, nxrt/bugcapture.h).
+# Rewritten only when it changes, at every build.
+find_package(Git QUIET)
+set(_game_build_id_args "-DGIT=${GIT_EXECUTABLE}" "-DROOT=${GAME_ROOT}" "-DOUT=${GAME_GEN}/build_id.h" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_id.cmake")
+execute_process(COMMAND "${CMAKE_COMMAND}" ${_game_build_id_args})
+add_custom_target(game_build_id COMMAND "${CMAKE_COMMAND}" ${_game_build_id_args} BYPRODUCTS "${GAME_GEN}/build_id.h" VERBATIM)
+
 # Release model (b) (GAME_BUILD_RT_DLL=ON, docs/RELEASE.md): no game code in anything built here. The runtime and the boot code become
 # the runtime DLL (+ the import library of the same stem); the game exe is linked on the player PC from the libraries lifted out of
 # their own dump and src/stub.cpp (tools/build/game_build.py in the package, with the bundled Zig). Nothing lifted is imported here.
@@ -116,6 +123,7 @@ if(GAME_BUILD_RT_DLL)
     target_include_directories(game_rt PRIVATE "${GAME_GEN}" src)
     target_compile_definitions(game_rt PRIVATE GAME_AS_DLL=1 GAME_GUI_SUBSYSTEM=1 GAME_EXEFS_DEFAULT="exefs")
     target_link_libraries(game_rt PRIVATE nxrt_game_${GM_ID} nxrt_gfx nxrt)
+    add_dependencies(game_rt game_build_id)
     # /DEBUG off: no .pdb path in the DLL. Low host allocations as for the exe (guest ranges at 0x71_0000_0000 stay free).
     target_link_options(game_rt PRIVATE /HIGHENTROPYVA:NO /DEBUG:NONE /Brepro)
     target_compile_options(game_rt PRIVATE "-clang:-ffile-prefix-map=${GAME_ROOT}=.")
@@ -129,12 +137,6 @@ if(GAME_BUILD_RT_DLL)
 endif()
 
 add_executable(game_exe src/game_main.cpp "${GAME_GEN}/game.rc")
-# gen/build_id.h: the commit this exe is built from and whether tracked files had changes (bug capture bundles record it, nxrt/bugcapture.h).
-# Rewritten only when it changes, at every build.
-find_package(Git QUIET)
-set(_game_build_id_args "-DGIT=${GIT_EXECUTABLE}" "-DROOT=${GAME_ROOT}" "-DOUT=${GAME_GEN}/build_id.h" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_id.cmake")
-execute_process(COMMAND "${CMAKE_COMMAND}" ${_game_build_id_args})
-add_custom_target(game_build_id COMMAND "${CMAKE_COMMAND}" ${_game_build_id_args} BYPRODUCTS "${GAME_GEN}/build_id.h" VERBATIM)
 add_dependencies(game_exe game_build_id)
 set_target_properties(game_exe PROPERTIES OUTPUT_NAME "${GM_EXE_STEM}")
 set_source_files_properties(src/game_main.cpp PROPERTIES COMPILE_DEFINITIONS "GAME_RELEASE_VERSION=\"${GAME_VERSION}\"")

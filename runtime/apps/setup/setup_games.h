@@ -32,6 +32,7 @@ struct GameDef {
     std::wstring manifest;        // path of its game.toml
     std::string id, title, short_title, product, window_title, title_id, version, platform;
     std::string exe, ini, log, save_folder;      // [files]
+    std::string runtime_dll;                      // [files] runtime_dll (release builds: the runtime as a DLL)
     std::string dump_version, display_version, main_build_id;   // [dump]
     std::string shader_extractor;                 // [shaders] extractor
     std::vector<std::string> modules;             // [[module]] names

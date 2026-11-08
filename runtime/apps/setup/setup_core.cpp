@@ -145,6 +145,7 @@ Tools find_tools() {
     // The game's own default for the translator is <exe dir>\tools\spirv_harness\spirv_harness.exe (nvn_shaders.cpp start_translator).
     t.translator = pick({join(rel, L"spirv_harness\\spirv_harness.exe"),
                          dev.empty() ? L"" : join(dev, L"tools\\shaders\\build\\bin\\Release\\net10.0\\spirv_harness.exe")});
+    if (file_exists(join(rel, L"build\\zig\\zig.exe"))) t.game_build = pick({join(rel, L"build\\game_build.py")});
     t.python = pick({join(rel, L"python\\python.exe"), dev.empty() ? L"" : join(dev, L"tools\\.venv\\Scripts\\python.exe")});
     if (t.python.empty()) {
         // the py launcher first: the python.exe on PATH may be the Microsoft Store stub, which only opens the Store
@@ -162,6 +163,44 @@ std::wstring game_exe_path(const Tools& t, const GameDef& g) {
     if (file_exists(here) || t.dev_root.empty()) return here;
     const std::wstring dev = join(t.dev_root, L"game-build\\build\\release\\" + exe);
     return file_exists(dev) ? dev : here;
+}
+
+GameBuild game_build_of(const Tools& t, const GameDef& g) {
+    GameBuild b;
+    if (t.game_build.empty() || g.manifest.empty()) return b;
+    const std::wstring dir = parent_of(g.manifest);
+    b.sdk = join(dir, L"sdk");
+    b.runtime = join(dir, L"runtime");
+    std::string rt = g.runtime_dll.empty() ? g.id + "_rt.dll" : g.runtime_dll;
+    const std::wstring lib = join(b.sdk, widen(rt.substr(0, rt.find_last_of('.')) + ".lib"));
+    if (!file_exists(lib) || !file_exists(join(b.runtime, widen(rt))) || !file_exists(join(b.sdk, L"stub.cpp"))) return b;
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&](const void* p, size_t n) {
+        const unsigned char* c = static_cast<const unsigned char*>(p);
+        for (size_t i = 0; i < n; ++i) h = (h ^ c[i]) * 1099511628211ull;
+    };
+    for (const std::wstring& d : {b.sdk, b.runtime, parent_of(t.game_build)}) {
+        WIN32_FIND_DATAW fd;
+        const HANDLE f = FindFirstFileW(join(d, L"*").c_str(), &fd);
+        if (f == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            mix(fd.cFileName, wcslen(fd.cFileName) * sizeof(wchar_t));
+            mix(&fd.nFileSizeLow, sizeof fd.nFileSizeLow);
+            mix(&fd.ftLastWriteTime, sizeof fd.ftLastWriteTime);
+        } while (FindNextFileW(f, &fd));
+        FindClose(f);
+    }
+    char hex[17];
+    std::snprintf(hex, sizeof hex, "%016llx", static_cast<unsigned long long>(h));
+    b.stamp = hex;
+    b.ok = true;
+    return b;
+}
+
+std::wstring game_exe_for(const Tools& t, const GameDef& g, const Config& c) {
+    if (game_build_of(t, g).ok) return join(join(c.data_dir, L"program"), widen(g.exe));
+    return game_exe_path(t, g);
 }
 
 SourceKind source_kind(const std::wstring& src) {
@@ -278,6 +317,7 @@ State load_state(const std::wstring& path) {
     s.translated_game = kv["translated_game"];
     s.translated_with = kv["translated_with"];
     s.programs_game = kv["programs_game"];
+    s.built_for = kv["built_for"];
     return s;
 }
 
@@ -288,6 +328,7 @@ bool save_state(const std::wstring& path, const State& s) {
     t += "translated_game = " + s.translated_game + "\n";
     t += "translated_with = " + s.translated_with + "\n";
     t += "programs_game = " + s.programs_game + "\n";
+    t += "built_for = " + s.built_for + "\n";
     return write_atomic(path, t);
 }
 
@@ -435,6 +476,7 @@ uint64_t remaining_disk_need(const Config& c, const State& s) {
     if (source_kind(c.source) == SourceKind::nup && l.game.empty()) need += size_of(c.source);
     if (!file_exists(join(l.corpus, L"unique.tsv"))) need += 1'000'000'000ull;
     if (s.translated_game.empty()) need += 5'500'000'000ull;
+    if (s.built_for.empty()) need += 4'000'000'000ull;   // the game build's generated C++ and objects (removed when it is done)
     if (!file_exists(join(l.shaders, L"pipeline_cache.bin"))) need += 5'000'000'000ull;
     return need;
 }
@@ -594,7 +636,8 @@ std::vector<Check> run_system_checks(const Tools& t) {
 
 std::vector<Check> run_game_checks(const Tools& t, const GameDef& g, const Config& c, uint64_t disk_need) {
     std::vector<Check> out;
-    const std::wstring game_exe = game_exe_path(t, g);
+    const std::wstring game_exe = game_exe_for(t, g, c);
+    const bool buildable = game_build_of(t, g).ok;
     const std::wstring game_dir = parent_of(game_exe);
     const std::wstring exe_name = widen(g.exe);
     const std::wstring title = widen(g.title);
@@ -614,11 +657,16 @@ std::vector<Check> run_game_checks(const Tools& t, const GameDef& g, const Confi
     // The game exe and the DLLs it imports (the Visual C++ runtime is linked in statically; this finds whatever else is missing)
     {
         Check k{L"Game program", L"", L"", L"", Level::ok};
-        if (!file_exists(game_exe)) {
+        if (!file_exists(game_exe) && buildable) {
+            k.level = Level::info;
+            k.state = L"Not built yet";
+            k.detail = game_exe;
+            k.fix = L"Built from your dump on this PC the first time you press Play (once, 15-40 minutes).";
+        } else if (!file_exists(game_exe)) {
             k.level = Level::bad;
             k.state = L"Missing";
             k.detail = game_exe;
-            k.fix = exe_name + L" is not built or not installed. A release has it next to this program; a development checkout builds it with game-build\\scripts\\build.ps1 -Manifest <its game.toml>.";
+            k.fix = exe_name + L" is not built. This package cannot build it (no games\\<id>\\sdk or tools\\build): unpack the whole release archive again. A development checkout builds it with game-build\\scripts\\build.ps1 -Manifest <its game.toml>.";
         } else {
             std::vector<std::wstring> missing;
             std::vector<std::wstring> mods = {game_exe};
@@ -669,8 +717,8 @@ std::vector<Check> run_game_checks(const Tools& t, const GameDef& g, const Confi
             k.level = Level::bad;
             k.state = L"Not supported";
             k.detail = c.source;
-            k.fix = L"NSP, XCI, NSZ and XCZ files are not supported: they are encrypted, and this program decrypts nothing. Choose an "
-                    L"already decrypted dump: a folder with exefs\\ and romfs\\, or a .nup package.";
+            k.fix = L"NSP, XCI, NSZ and XCZ files are encrypted, and this program does not handle console keys. Extract the game with your own "
+                    L"tools into a folder with the decrypted exefs\\ and romfs\\ (the update's, if you have it), or make a .nup package, and choose that.";
         } else {
             const GameId gi = game_id_of(l.game);
             if (!gi.ok) {

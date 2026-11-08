@@ -25,10 +25,15 @@ ID** of the game's `main` program). A dump of another version shows a warning an
 
 ## Known problems
 
-- **Ocarina of Time**: still runs at about half speed, because the game advances one step per frame and the frame rate is below 60. Some
+- **Ocarina of Time**: the game runs at real speed at any frame rate (since 2026-11-08), but the frame rate is still below 60 and some
   scenes are not checked yet. Details in [AGENTS.md](AGENTS.md) (the artifact table).
+- **Pokopia**: the port exists in the repository, but the release package does not carry it (its runtime is not built there), so the
+  library shows a Pokopia dump as "No port yet".
 
-## Report a game
+## Report a game or a bug
 
-Tried a game or version that is not listed, or one that runs better or worse than its state says?
-[Open an issue](../../issues/new/choose) with the title ID, the version and what you saw. The library's game page shows the title ID.
+Tried a game or version that is not listed, or one that runs better or worse than its state says? Open a
+[Game status](../../issues/new?template=game_status.yml) issue. Something wrong while a game runs:
+[Game bug](../../issues/new?template=bug_game.yml); in the library, adding a dump or building the game program:
+[Recompiler / library bug](../../issues/new?template=bug_recompiler.yml). The library's **Report a bug...** (Help menu, or a game's
+"•••" menu) opens these forms with the game, its title ID and version, the library version and your PC filled in.

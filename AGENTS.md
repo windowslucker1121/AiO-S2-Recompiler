@@ -138,7 +138,10 @@ took 25 min for 117,981 parts (both raster sets); a forced second one loads the 
   serves every game; `library.ini` next to the exe; dumps identified by title id (`nup_extract.py --list` or ACI0 of `main.npdm`), unknown
   titles stay as "No port yet". One button per game, **Play**: the five preparation steps below run once as one queued job (one game at a
   time, the others wait), then the game starts. Status words only; extras in the "•••" menu; This PC lists only problems; drag and drop
-  adds a dump. Settings page (`setup_settings.cpp`): Graphics, Display, Controller, Keyboard & mouse (press-to-bind, SDL key names from
+  adds a dump. **The library page lists only games the player added** (user, 2026-11-08: known games without a dump stay hidden; `sel()`
+  returns only added games). **Report a bug...** (Help menu and "•••") opens a GitHub issue form (`.github/ISSUE_TEMPLATE`: `bug_game.yml`,
+  `bug_recompiler.yml`, `game_status.yml`) with `game`, `app` (version, `RECOMP_LIBRARY_VERSION` from the standalone CMake) and `system`
+  (GPU/driver, Windows, memory from the This PC checks) prefilled by query parameters; nothing is sent by the app. Settings page (`setup_settings.cpp`): Graphics, Display, Controller, Keyboard & mouse (press-to-bind, SDL key names from
   `setup_keynames.inc`), Audio; edits the game folder's `controls.ini` in place (only changed keys). User preference: minimal text.
   Test route: `recomp\scripts\nx_env.cmd work\build\library\build.cmd` (standalone build, needs game-build's fetched Vulkan and SDL
   headers), `recomp_library.exe --add <dump>`, `runtime\apps\setup\tests\winshot.py` (shot, cmd ids of the `Id` enum, close).
@@ -147,11 +150,20 @@ took 25 min for 117,981 parts (both raster sets); a forced second one loads the 
   **Release package / CI (2026-11-08):** `.github/workflows/release.yml` builds `tools/release/package.ps1` on `windows-latest` (tag
   `v*` or "Run workflow" with a version -> GitHub release with the zip + `.sha256`; PRs touching the library -> build only, zip as a
   workflow artifact). The package: `recomp_library.exe` (standalone CMake `tools/release/library`, no game or runtime needed, no
-  `SETUP_DEV_ROOT`), `games\<id>\game.toml`, `tools\scripts` (3 .py), `tools\spirv_harness` (self-contained `dotnet publish`),
-  `tools\python` (python.org embeddable 3.13.17, SHA-256 pinned, + zstandard/lz4 wheels), licences. **No game exe** (it holds lifted
-  code; a player-side build is still missing), so a release can add dumps and run the extraction/shader steps but not Play yet.
-  Local run (49 MB zip, ~2 min warm): `recomp\scripts\nx_env.cmd powershell -File tools\release\package.ps1 -Version 0.1.0 -Out <dir>
-  -HostPython <a Python with pip>` (the venv has no pip; system 3.11 works). Checked locally 2026-11-08, not yet on GitHub's runners.
+  `SETUP_DEV_ROOT`), `games\<id>\game.toml` (only the `-RtGames` games, default `oot`: a game without its runtime DLL cannot be built
+  from the package), `tools\scripts` (3 .py), `tools\spirv_harness` (self-contained `dotnet publish`),
+  `tools\python` (python.org embeddable 3.13.17, SHA-256 pinned, + zstandard/lz4/capstone wheels), licences, and the **player-side
+  game build** (release model b): `tools\build\` = `game_build.py` (game-build/release_b), the lifter (`recomp\nxrecomp`, `include`,
+  `games\<id>\*.py|*.sites`), Zig 0.17.0 (SHA-256 from ziglang.org's index), `nx_plain_nso.exe` (ZBIC main -> plain NSO before the
+  lift); `games\<id>\sdk\` (stub.cpp, rt_api.h, game.rc, game.manifest.in, `<id>_rt.lib`) and `games\<id>\runtime\` (`<id>_rt.dll`
+  from game-build with `GAME_BUILD_RT_DLL=ON GAME_RELEASE=ON`, astcdec DLLs, fonts). **A game exe is never in a release** (it holds
+  lifted code): the library's step 2 "Build the game program" runs game_build.py on the player's own dump into `<data>\program`
+  (exe + runtime files), recorded as `built_for` (GameId + a stamp of the sdk/runtime/tools files) in setup_state.ini; a new release
+  or game version builds again. Inputs: `.nup` or a folder with decrypted exefs/romfs; NSP/XCI are refused (encrypted; no key
+  handling, LEGAL.md). CI also builds tools/textures (fetch_third_party.ps1) and vcpkg dav1d/libvpx/opus at commit 661e42cd into
+  `tools\vcpkg` (cached binaries), and checks that `oot_rt.dll` contains dav1d. Local run: `recomp\scripts\nx_env.cmd powershell -File
+  tools\release\package.ps1 -Version 0.1.0 -Out <dir> -HostPython <a Python with pip> [-RtBuildDir work\build\rtdll]` (the venv has no
+  pip; system 3.11 works).
 The text below describes the preparation steps and checks, which the library keeps.
 **Initial Setup (`oot_setup.exe`, since 2026-11-07; `runtime/apps/setup`, target `game_setup`, name from `game.toml` `files.setup_exe`)**:
 the player's first program, native Win32 (menu bar, four pages: Requirements, Game files, Prepare, Play; task dialog for Rebuild).
