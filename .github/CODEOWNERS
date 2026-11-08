@@ -1,0 +1,9 @@
+# Reviewers GitHub asks for on every pull request. With the branch rule "Require review from Code Owners" on oot-nup, a pull
+# request needs their approval before it can be merged. Add maintainers here (one line per path; the last matching line wins).
+*                       @windowslucker1121
+
+# Legal and release files: changes here need the owner's review in any case.
+/LEGAL.md               @windowslucker1121
+/LICENSE                @windowslucker1121
+/.github/               @windowslucker1121
+/tools/release/         @windowslucker1121

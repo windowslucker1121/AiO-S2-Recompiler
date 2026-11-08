@@ -1,0 +1,10 @@
+# Keeps the GitHub Actions the workflows use up to date (pull requests once a week). Other dependencies are pinned on purpose
+# (vcpkg commit, Zig, Python, SDL, Vulkan headers with SHA-256 checks in the build files) and are updated by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "CI"

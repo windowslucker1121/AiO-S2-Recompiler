@@ -5,9 +5,15 @@ Thanks for helping. Bug reports, tests on other GPUs and code are all welcome.
 ## Report a bug
 
 1. Note what you did and where in the game it happened.
-2. In the game press **F9**. It saves a bug bundle (log, screenshot, state) and asks for a short note.
-3. [Open an issue](../../issues/new/choose) with the relevant lines of the log (`log.txt` in the bundle) as text, your GPU, driver and
-   Windows version, and the commit you built. Keep the bundle's save, capture and image files to yourself: they contain game data.
+2. In the library, choose **Report a bug...** (Help menu, or a game's "•••" menu). It asks whether it is a **game bug** (something wrong
+   while the game runs) or a **recompiler / library bug** (the app, adding a dump, building the game program, preparing shaders), then
+   opens the matching GitHub form with the game, its version, the library version and your PC filled in. Without the library:
+   [open an issue](../../issues/new/choose) and pick the form yourself.
+3. Paste the relevant lines of the log as text. In the game, **F9** saves a bug bundle with a log (`log.txt`); keep the bundle's save,
+   capture and image files to yourself: they contain game data.
+
+How well a game runs (for [GAMES.md](GAMES.md)) goes into a **Game status** issue. Security problems go privately through the Security
+tab ([SECURITY.md](SECURITY.md)).
 
 ## Set up a development machine
 
@@ -36,7 +42,12 @@ Read [AGENTS.md](AGENTS.md) before you start. It has the current state, known pr
 
 ## Open a pull request
 
-Say what it changes, and what you tested on which GPU. Add before and after screenshots for anything you can see.
+Say what it changes, and what you tested on which GPU. For a visible change, describe in words what looked wrong before and how it
+looks now (where in the game, which effect). Do not attach screenshots, videos or frame captures of a game: they are game material
+(LEGAL.md). Pictures of this project's own programs (the library app, test patterns) are fine.
+
+`oot-nup` is protected: changes land through pull requests, which the maintainers review (`.github/CODEOWNERS`). Contributions are made
+under the repository's licence (GPL-3.0), and everyone follows the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## Rules
 

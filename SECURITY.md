@@ -6,10 +6,12 @@ If you find one, report it privately through the repository's Security tab ("Rep
 
 Things we treat as security problems:
 
-- a crafted NSO, NSZ, ROM or save file that crashes or runs code in the loader, the runtime or the setup tool
-- the setup tool writing outside the folder you chose
+- a crafted `.nup` package, dump folder, NSO module, RomFS file or save file that crashes or runs code in the loader, the runtime,
+  the game build or the library app (`recomp_library.exe`)
+- the library app or the game build writing outside the folders you chose
 - the recompiler or a tool executing something from an input file
+- a release package that contains something other than what `tools/release/package.ps1` puts in it
 
 Everything else (crashes with normal files, graphics bugs, wrong behaviour) goes through the normal issue forms.
 
-Only the current `main` branch gets fixes.
+Fixes go to the default branch `oot-nup` and the next release. Older releases get no fixes.

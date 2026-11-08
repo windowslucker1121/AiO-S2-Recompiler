@@ -48,7 +48,9 @@ To build from source, follow [DEVELOPMENT_SETUP.md](DEVELOPMENT_SETUP.md).
 ## Contributing
 
 Bug reports, tests on other GPUs and code are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). **Never commit or upload game files**,
-extracted data, or logs and bug bundles that contain game data.
+extracted data, or logs and bug bundles that contain game data. Bugs: **Report a bug...** in the library, or the
+[issue forms](../../issues/new/choose). Everyone follows the [code of conduct](CODE_OF_CONDUCT.md); security problems go privately
+through [SECURITY.md](SECURITY.md).
 
 ## Licence and credits
 
