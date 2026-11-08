@@ -5,6 +5,20 @@ Repository basics are in `README.md`, the recompiler in `recomp/README.md`, the 
 **Start with this file** (state, artifacts, next steps) and `DEVELOPMENT_SETUP.md` (everything a development machine needs). Keep both
 current. How to contribute: `CONTRIBUTING.md`.
 
+## Legal rules (always; details in `LEGAL.md`)
+
+- **Never commit anything from a game, the console or Nintendo's SDK**: game files or anything extracted or generated from them (NSO/NRO,
+  RomFS files, bfsha/BNSH shaders, shader corpora, translated SPIR-V, pipeline caches, textures, audio, movies, fonts, game text, saves,
+  lifted C++), keys, firmware, SDK code, headers or documentation, logos, box art, and screenshots, frame captures or bug bundles of a
+  game. Facts are fine: title IDs, build IDs, hashes, offsets, symbol names, short notes about formats.
+- Test fixtures and sample data are synthetic or come from openly licensed projects, with their licence recorded.
+- No piracy help: no links to dumps, keys or firmware, no key derivation or decryption, no instructions beyond "dump your own copy".
+  Do not add code that decrypts game containers or reads console keys.
+- **Names:** game and Nintendo names only to say what a module is for ("module for <game>"). Never in product, app, exe, window or
+  package names, and no Nintendo or game logos, icons or art styles. New game ids are short neutral ids (`oot`, `pkp`).
+- Copied code needs a licence compatible with GPL-3.0 and an entry in the notices (`runtime/THIRD_PARTY_NOTICES.md` or the folder's
+  `licenses/`). Never ask users to upload game files or logs that contain game data.
+
 ## State (branch `oot-nup`, 2026-11-06)
 
 Porting **The Legend of Zelda: Ocarina of Time** (Switch 2, program `0400486024DEC000`, update 2.0.0 / `131072`) next to the

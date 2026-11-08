@@ -1,0 +1,20 @@
+name: Rights holder contact
+description: For rights holders and their representatives with a concern about material in this repository.
+title: Rights holder contact
+labels: [legal]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reaching out. Give contact details here; you do not need to describe the material publicly. You can also use
+        GitHub's DMCA process: https://docs.github.com/en/site-policy/content-removal-policies/dmca-takedown-policy
+  - type: input
+    id: contact
+    attributes:
+      label: How we can reach you
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Files, commits or rights concerned (optional)

@@ -1,16 +1,21 @@
-# Recomp Library
+# AiO Switch 2 Recompiler
 
-An unofficial app to play Nintendo Switch 2 games you own on Windows. It recompiles the game code from your own dump to PC code.
-It contains no game files or keys, and it never downloads any.
+An all-in-one, open-source tool set that runs Nintendo Switch 2 games **you own** natively on Windows. It statically recompiles the
+game's program code from your own dump into PC code, and its runtime and shader translator do the rest. One library app manages every
+supported game.
+
+Unofficial. Not affiliated with or endorsed by Nintendo or any publisher. The repository contains no game files, keys, firmware or
+Nintendo code, and the app never downloads any. See [LEGAL.md](LEGAL.md).
 
 ![Library](docs/images/library.png)
 
 ## What it does
 
-- **One app for every game.** Add a dump. The library recognises the game and shows it as a card.
-- **Play.** The first press sets the game up once (extract, translate and compile the shaders for your graphics card), then starts it.
-- **Settings for each game.** Graphics, display, controller, keyboard and mouse (press a key to bind it), and audio.
-- **This PC.** Checks your PC and only tells you when something is missing.
+- **Recognises your dump.** Add it to the library; it identifies the game and version and shows it as a card.
+- **Builds the PC version on your PC.** The first **Play** recompiles the game code and translates the shaders for your graphics card,
+  once. Everything it builds stays on your PC.
+- **Plays it.** Settings for each game: graphics, display, controller, keyboard and mouse, audio.
+- **Checks your PC** and says only when something is missing.
 
 | Game page | Settings | This PC |
 |---|---|---|
@@ -18,44 +23,41 @@ It contains no game files or keys, and it never downloads any.
 
 ## What you need
 
-- Windows 10 (1809) or 11, 64-bit
-- A graphics card with Vulkan 1.3 and a current driver
-- 16 GB of RAM
-- About 40 GB of free disk space per game
-- Your own dump of the game, made from your console: a `.nup` file or an extracted folder (`exefs` + `romfs`)
+- Windows 10 (1809) or 11, 64-bit; a graphics card with Vulkan 1.3; 16 GB of RAM; about 40 GB of free disk space per game.
+- A game you own and **your own dump of it, made from your console**: a `.nup` file or an extracted folder (`exefs` + `romfs`),
+  already decrypted. This project does not help you get dumps, keys or firmware.
 
-## How to use it
+Which games and versions work, and how well: [GAMES.md](GAMES.md).
+
+## How to run it
 
 1. Start `recomp_library.exe`.
 2. Press **Add a game**, or drop your `.nup` file or game folder onto the window.
 3. Press **Play**.
 
-## Games
+To build from source, follow [DEVELOPMENT_SETUP.md](DEVELOPMENT_SETUP.md).
 
-Which games and versions work, and how well: [GAMES.md](GAMES.md).
-
-## Contributing
-
-Bug reports, tests on other GPUs and code are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the details. In short:
-
-1. **Report bugs**: press **F9** in the game, then [open an issue](../../issues/new/choose) with the bundle, your GPU and the commit.
-2. **Set up**: follow [DEVELOPMENT_SETUP.md](DEVELOPMENT_SETUP.md), then read [AGENTS.md](AGENTS.md) for the current state.
-3. **Change**: branch from `oot-nup`, one fix per pull request, run the runtime tests, and say what you tested on which GPU.
-4. **Never commit game files.**
+## How it is built
 
 | Part | Folder |
 |---|---|
-| Recompiler | `recomp/` |
-| Runtime (shared by all games) | `runtime/` |
-| Game-specific code | `recomp/games/<id>/`, `runtime/games/<id>/` |
+| Recompiler (ARM64 to C++, game independent) | `recomp/` |
+| Runtime shared by every game (OS, services, graphics) | `runtime/` |
+| One small module per game | `recomp/games/<id>/`, `runtime/games/<id>/` |
 | Library app | `runtime/apps/setup/` |
 | Shader translator | `tools/shaders/` |
 
-## Credits and licence
+## Contributing
 
-Built on [nxrecomp](https://github.com/drakolordx7/nxrecomp). Uses code from [Ryujinx](https://github.com/Ryubing/Ryujinx), [Mesa](https://gitlab.freedesktop.org/mesa/mesa), smo-recomp, ScarletNX, ssbu-recomp, SuperMarioWonderRecomp, Eden, libnx, [astc-encoder](https://github.com/ARM-software/astc-encoder), [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo), [libvpx](https://chromium.googlesource.com/webm/libvpx), [dav1d](https://code.videolan.org/videolan/dav1d), [Opus](https://opus-codec.org), AMD FidelityFX, NVIDIA Image Scaling, [SDL3](https://github.com/libsdl-org/SDL), [Zig](https://ziglang.org) and Python, plus [Kenney input prompts](https://kenney.nl/assets/input-prompts) and DejaVu fonts. Their licences are in `runtime/THIRD_PARTY_NOTICES.md`, `recomp/THIRD_PARTY.md`, `tools/shaders/licenses/` and `tools/textures/THIRD_PARTY.md`.
+Bug reports, tests on other GPUs and code are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). **Never commit or upload game files**,
+extracted data, or logs and bug bundles that contain game data.
 
-GPL-3.0. Third-party code keeps its own licence.
+## Licence and credits
 
-Not affiliated with or endorsed by Nintendo or any game publisher. Game names are trademarks of their owners and are used only to say
-which games the app works with. See [LEGAL.md](LEGAL.md).
+GPL-3.0 ([LICENSE](LICENSE)). Third-party code keeps its own licence; notices are in `runtime/THIRD_PARTY_NOTICES.md`,
+`recomp/THIRD_PARTY.md`, `tools/shaders/licenses/`, `tools/tiling/licenses/` and `tools/textures/THIRD_PARTY.md`. Built on
+[nxrecomp](https://github.com/drakolordx7/nxrecomp) and work from Ryujinx, Mesa, smo-recomp, ScarletNX, ssbu-recomp,
+SuperMarioWonderRecomp, yuzu/Eden, libnx and others named in those notices.
+
+Nintendo Switch 2 and the game names are trademarks of their owners. They are used only to say which hardware and games the project
+works with.

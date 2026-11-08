@@ -6,7 +6,8 @@ Thanks for helping. Bug reports, tests on other GPUs and code are all welcome.
 
 1. Note what you did and where in the game it happened.
 2. In the game press **F9**. It saves a bug bundle (log, screenshot, state) and asks for a short note.
-3. [Open an issue](../../issues/new/choose) with the bundle or the game's log, your GPU, driver and Windows version, and the commit you built.
+3. [Open an issue](../../issues/new/choose) with the relevant lines of the log (`log.txt` in the bundle) as text, your GPU, driver and
+   Windows version, and the commit you built. Keep the bundle's save, capture and image files to yourself: they contain game data.
 
 ## Set up a development machine
 
@@ -40,6 +41,9 @@ Say what it changes, and what you tested on which GPU. Add before and after scre
 ## Rules
 
 - **Never commit game files**: dumps, extracted files, lifted code, shader caches (`game/`, `work/` and `*.nup` are ignored for that).
+  Nor keys, firmware, Nintendo SDK code, logos or screenshots and captures of a game. The full list is in `AGENTS.md`, "Legal rules",
+  and [LEGAL.md](LEGAL.md).
+- Game names only say which game a module is for; never use them, or Nintendo's marks, in product, exe or window names.
 - Tools go into git-ignored folders and come from official releases with checksum checks.
 - Do not change system or security settings in scripts; say what the user should run.
 - Code is GPL-3.0. Code you copy from elsewhere must have a compatible licence; name its source and add it to the notices.

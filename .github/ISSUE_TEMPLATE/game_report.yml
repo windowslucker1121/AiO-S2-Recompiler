@@ -1,0 +1,30 @@
+name: Game report
+description: Tell us how a game or version runs, or that one is missing from GAMES.md.
+labels: [game-report]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Only for games you own. Do not attach game files, extracted data or saves, and do not ask for or share dumps, keys,
+        firmware or links to them. Requests for games you do not own are closed.
+  - type: checkboxes
+    id: ownership
+    attributes:
+      label: Your copy
+      options:
+        - label: I own this game and dumped it myself from my own console.
+          required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game, title ID and version
+      description: As the library's game page shows them.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What you saw
+      description: How far it gets, frame rate, problems. Your GPU and the commit you built.
+    validations:
+      required: true
