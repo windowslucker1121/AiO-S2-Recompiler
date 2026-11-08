@@ -22,7 +22,10 @@
 #include "nvn_core.h"
 #include "nvn_gpu_internal.h"
 #include "nxrt/config.h"
+#include "nxrt/ftrace.h"
 #include "nxrt/log.h"
+
+namespace nxrt::nvn::be { extern std::atomic<int> g_pool_snapshot_ab; }
 
 namespace nxrt::nvn::be::archexp {
 namespace {
@@ -50,6 +53,8 @@ struct ListStats {
     uint64_t lists = 0, bytes = 0, draws = 0, frames = 0, hash_ns = 0;
     uint64_t hit_draws[kVariants] = {}, hit_lists[kVariants] = {};
     uint64_t empty_lists = 0;
+    std::unordered_map<const CmdList*, uint64_t> rec_frame;   // list -> game frame it was recorded in
+    uint64_t sub_draws_new = 0, sub_draws_old = 0, sub_draws_unknown = 0, sub_lists = 0;
     std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
 };
 ListStats& ls() { static ListStats s; return s; }
@@ -338,6 +343,8 @@ void list_recorded(const CmdList& l) {
     s.draws += l.draw_count;
     s.hash_ns += ns;
     if (!l.draw_count) s.empty_lists++;
+    s.rec_frame[&l] = g_game_frame.load(std::memory_order_relaxed);
+    if (s.rec_frame.size() > 200000) s.rec_frame.clear();
     for (int v = 0; v < ListStats::kVariants; ++v) {
         bool hit = s.cur[v].count(h[v]) != 0;    // the same list twice in a frame counts too
         for (const auto& f : s.past) if (!hit && f[v].count(h[v])) hit = true;
@@ -346,8 +353,36 @@ void list_recorded(const CmdList& l) {
     }
 }
 
-void game_present() {
-    g_game_frame.fetch_add(1, std::memory_order_relaxed);
+namespace {
+void count_submitted(ListStats& s, const CmdList& l, uint64_t now, int depth) {
+    s.sub_lists++;
+    const auto it = s.rec_frame.find(&l);
+    if (it == s.rec_frame.end()) s.sub_draws_unknown += l.draw_count;
+    else if (now - it->second <= 1) s.sub_draws_new += l.draw_count;
+    else s.sub_draws_old += l.draw_count;
+    if (depth > 4) return;
+    for (RecordReader r(l); r.next();) {
+        if (r.op() != Op::CallCommands) continue;
+        const auto& p = r.payload<P_CallCommands>();
+        const uint8_t* b = r.blob<P_CallCommands>();
+        for (uint32_t i = 0; i < p.count; ++i) {
+            uint64_t h;
+            std::memcpy(&h, b + i * 8, 8);
+            if (Ref<CmdList> sub = handle_lookup(h)) count_submitted(s, *sub, now, depth + 1);
+        }
+    }
+}
+}  // namespace
+
+void lists_submitted(const std::vector<Ref<CmdList>>& lists) {
+    if (!lists_on()) return;
+    ListStats& s = ls();
+    std::lock_guard<std::mutex> lk(s.mu);
+    const uint64_t now = g_game_frame.load(std::memory_order_relaxed);
+    for (const auto& l : lists) if (l) count_submitted(s, *l, now, 0);
+}
+
+void game_present() {    g_game_frame.fetch_add(1, std::memory_order_relaxed);
     if (!lists_on()) return;
     ListStats& s = ls();
     std::lock_guard<std::mutex> lk(s.mu);
@@ -364,6 +399,9 @@ void game_present() {
             (unsigned long long)s.frames, double(s.lists) / s.frames, double(s.bytes) / 1024.0 / s.frames, double(s.draws) / s.frames,
             s.hash_ns / 1e6 / s.frames, ListStats::kWindow, pct(s.hit_draws[0], s.draws), pct(s.hit_draws[1], s.draws), pct(s.hit_draws[2], s.draws),
             pct(s.hit_lists[0], s.lists), pct(s.hit_lists[1], s.lists), pct(s.hit_lists[2], s.lists), pct(s.empty_lists, s.lists));
+    NXLOG_I(kTag, "E1 submitted per frame: %.1f lists (called ones included), draws in lists recorded this or the last frame %.0f, earlier %.0f, before the count began %.0f",
+            double(s.sub_lists) / s.frames, double(s.sub_draws_new) / s.frames, double(s.sub_draws_old) / s.frames, double(s.sub_draws_unknown) / s.frames);
+    s.sub_lists = s.sub_draws_new = s.sub_draws_old = s.sub_draws_unknown = 0;
     s.lists = s.bytes = s.draws = s.frames = s.hash_ns = s.empty_lists = 0;
     for (int v = 0; v < ListStats::kVariants; ++v) s.hit_draws[v] = s.hit_lists[v] = 0;
 }
@@ -629,6 +667,11 @@ bool window_create(Window& w) {
 }
 }  // namespace
 
+bool gmem_no_slots() {
+    static const bool on = config_get_bool("nvn", "exp_gmem_no_slots", false);
+    return on;
+}
+
 bool gmem_window_on() {
     static const bool on = !config_get_str("nvn", "exp_gmem_window", "").empty() && config_get_str("nvn", "exp_gmem_window", "") != "0";
     return on;
@@ -682,6 +725,25 @@ void gmem_window_words(uint8_t* c0) {
         v[3] = static_cast<uint32_t>(w.dev >> 32);
     }
     std::memcpy(c0, v, 16);
+}
+
+// ---- D3 A/B windows ---------------------------------------------------------------------------------------------------------------
+// [nvn] d3_ab = N (measurement only): the D3 switches set to "ab" are on in odd windows of N presents and off in even ones; the frame trace
+// gets d3.on / d3.off marks, so one run gives paired fps windows of the same scene.
+bool d3_ab_on() {
+    static const bool on = config_get_int("nvn", "d3_ab", 0) > 0;
+    return on;
+}
+void d3_ab_tick() {
+    static const int64_t n = config_get_int("nvn", "d3_ab", 0);
+    if (n <= 0) return;
+    static int last = -1;
+    const uint64_t p = gpu::counters().presents.load(std::memory_order_relaxed);
+    const int on = ((p / static_cast<uint64_t>(n)) & 1) ? 1 : 0;
+    if (on == last) return;
+    last = on;
+    g_pool_snapshot_ab.store(on, std::memory_order_relaxed);
+    ft::mark(on ? "d3.on" : "d3.off", static_cast<uint32_t>(p));
 }
 
 }  // namespace nxrt::nvn::be::archexp

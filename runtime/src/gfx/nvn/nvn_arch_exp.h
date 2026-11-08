@@ -22,6 +22,7 @@ namespace nxrt::nvn::be::archexp {
 // E1
 bool lists_on();
 void list_recorded(const CmdList& l);                 // nvnCommandBufferEndRecording (any thread)
+void lists_submitted(const std::vector<Ref<CmdList>>& lists);   // nvnQueueSubmitCommands (game thread): draws by the age of their list
 void game_present();                                   // nvnQueuePresentTexture (game thread): the frame boundary of E1 and E2a
 
 // E2a
@@ -37,8 +38,13 @@ void note_guard_fault(uint64_t addr, int access, int pool_flags);   // a CPU acc
 // NXRT_HARNESS_GMEM_WINDOW=1 then reach those pools with one add instead of the page walk. Their pointer stores land in the copy only: for
 // timing pointer-reading draws (capture replays), not for playing.
 bool gmem_window_on();
+bool gmem_no_slots();                                  // [nvn] exp_gmem_no_slots: graphics slot masks 0 (no bound-descriptor search; reads held results stale)
 void gmem_window_refresh(gpu::Frame& f);              // replay_begin_submit (render thread, no pass open)
 void gmem_window_words(uint8_t* c0_0xff0);             // the 16 bytes of c[0] 0xff0 (AmpereGlobal.WindowC0); zeros until the window exists
+
+// D3 paired windows ([nvn] d3_ab = N presents)
+bool d3_ab_on();
+void d3_ab_tick();                                     // render thread, once per present
 
 // E4
 bool emit_on();

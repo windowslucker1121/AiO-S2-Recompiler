@@ -70,6 +70,7 @@ void present_on_render_thread(Window* w, int index) {
     if (!t) return;
     counters().presents.fetch_add(1, std::memory_order_relaxed);
     if (archexp::emit_on()) archexp::render_frame_tick();   // E4 (measurement only)
+    if (archexp::d3_ab_on()) archexp::d3_ab_tick();
     { NXFT("present.frame_tick"); diag_frame_tick(); }   // the freeze watchdog counts presented frames (and the test runner its frames)
     if (!rend || !pp) return;
     { NXFT("present.tex"); if (!tex_gpu(t)) return; }

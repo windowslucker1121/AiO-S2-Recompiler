@@ -281,6 +281,7 @@ void nvnQueueSubmitCommands(NVNqueue* queue, int count, const NVNcommandHandle* 
         }
     }
     if (be::archexp::coherence_on()) be::archexp::submit_sample(lists);
+    if (be::archexp::lists_on()) be::archexp::lists_submitted(lists);
     be::gpu::submit(lists);
 }
 
