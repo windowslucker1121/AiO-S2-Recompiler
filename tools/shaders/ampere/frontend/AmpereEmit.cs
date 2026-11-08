@@ -388,15 +388,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
                         {
                             // Which side of r the exact product lies on: the sign of e = fma(a, b, -r) = a*b - r, which is exact in
                             // fp32 (the error of a rounded product is representable) as long as it does not fall below FLT_MIN.
-                            // That needs |r| >= 2^-79 (|e| >= |r| * 2^-47); below 2^-78 the smaller operand and r are scaled by 2^64
-                            // first, exactly (such a product's smaller operand is below 2^-39). No fp64: FMUL.FTZ.RZ is in 25,000
-                            // of OoT's fragment shaders (the x / 2pi before MUFU.SIN/COS, about 20 in each hot material shader),
-                            // and the earlier fp64 compare cost five fp64 operations each (1/64 rate on GeForce). hwcheck checks it.
+                            // That needs |r| >= 2^-79 (|e| >= |r| * 2^-47); below 2^-78 both operands are scaled by 2^32 and r by 2^64
+                            // first, exactly: an operand above 2^96 there means the other is below FLT_MIN, so r is 0 (left alone) and
+                            // an infinite e changes nothing. No fp64: FMUL.FTZ.RZ is in 25,000 of OoT's fragment shaders (the x / 2pi
+                            // before MUFU.SIN/COS, about 20 in each hot material shader), and the earlier fp64 compare cost five fp64
+                            // operations each (1/64 rate on GeForce). hwcheck checks it.
                             IrOperand tiny = ctx.FPCompareLess(ctx.FPAbsolute(r), ConstF(MathF.ScaleB(1f, -78)));
+                            IrOperand k = ctx.ConditionalSelect(tiny, ConstF(MathF.ScaleB(1f, 32)), ConstF(1));
                             IrOperand k2 = ctx.ConditionalSelect(tiny, ConstF(MathF.ScaleB(1f, 64)), ConstF(1));
-                            IrOperand aSmall = ctx.FPCompareLess(ctx.FPAbsolute(fa), ctx.FPAbsolute(fb));
-                            IrOperand sa = ctx.FPMultiply(ctx.ConditionalSelect(aSmall, fa, fb), k2), sb = ctx.ConditionalSelect(aSmall, fb, fa);
-                            IrOperand e = ctx.FPFusedMultiplyAdd(sa, sb, ctx.FPNegate(ctx.FPMultiply(r, k2)));
+                            IrOperand e = ctx.FPFusedMultiplyAdd(ctx.FPMultiply(fa, k), ctx.FPMultiply(fb, k), ctx.FPNegate(ctx.FPMultiply(r, k2)));
                             r = DirectedRound(ctx, i, r, ctx.FPCompareLess(e, ConstF(0)), ctx.FPCompareLess(ConstF(0), e), AllFinite(ctx, Raw(ctx, o[1]), Raw(ctx, o[2])));
                         }
                         if (!Has(i, "FTZ"))

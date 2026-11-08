@@ -143,7 +143,7 @@ sums, the tensor core's own rounding; F32: bit-identical to the scalar emulation
   other modifiers, or the GPU raises an illegal instruction) in both translations alike. The device reports shaderFloat16 and
   shaderDenormPreserveFloat16 / shaderSignedZeroInfNanPreserveFloat16, which the variant's execution modes need.
 - **FMUL with a directed rounding mode** (`--only "^(@!?P )?FMUL\..*(RZ|RM|RP)"`, seeds 1-3): the error term as one fp32 fused
-  multiply-add (scaled by 2^64 for products below 2^-78) instead of an fp64 product: every FMUL.FTZ.RZ form passes (register and
+  multiply-add (operands scaled by 2^32 and the product by 2^64 below 2^-78) instead of an fp64 product: every FMUL.FTZ.RZ form passes (register and
   immediate operands, the 1/(2 pi) scaling before MUFU.SIN/COS).
 
 ## Findings (2026-11-04, RTX 3080, driver 617.42)

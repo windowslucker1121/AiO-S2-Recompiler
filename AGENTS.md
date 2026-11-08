@@ -70,6 +70,23 @@ after changing the HMMA path. OoT's network passes fea98fe7 / 49659bca / f90d726
 `work\shaders\oot\missing`): translate them with the single mode (`spirv_harness code_<h>.bin ctrl_<h>.bin -o <cache>\<h>.spv`
 writes `<h>.cm.spv` next to it; the scalar `.spv` stays byte-identical). fea98fe7 on the village capture: 2.1 ms -> 0.05 ms of GPU
 per frame, final picture SSIM 0.9999 against the scalar module (within replay-to-replay noise).
+**Float16 variants (`<hash>.f16.spv`, 2026-11-08):** a block with HADD2/HMUL2/HFMA2 with a half result also gets a module that computes
+them in native float16 in any stage (DenormPreserve 16 + SignedZeroInfNanPreserve 16); the runtime loads it when the device has
+shaderFloat16 and both float16 float-controls properties (`[gfx] float16_shaders`, log `float16 shader variants: on`); the
+cooperative-matrix variant now needs the same. OoT's corpus has only 11 such blocks, all compute HMMA blocks (they also got `.cm.spv`,
+which wins on the RTX 4080): **OoT's fragment shaders use no half-result math** (only HADD2.F32 conversions). The ~100 fp64 operations
+in each hot material fragment shader (957527e8, 4097c13f, dcfaa938, ...) came from **FMUL.FTZ.RZ** (the x / 2pi before MUFU.SIN/COS;
+39,126 corpus blocks), whose directed rounding compared against an fp64 product; it now uses the sign of `fma(a, b, -r)` in fp32
+(AmpereEmit.cs FMUL). Both checked bit for bit with `hwcheck --game-corpus` on the RTX 4080 (hwcheck README, findings 2026-11-08;
+the CUDA tools are the 13.3 redistributables in `tools\nvdisasm\cuda_path\bin`, `CUDA_PATH` set to that folder's parent).
+Measured on the village capture (`20261108-000413-a9g1-village`, `[capture] reset = 0`, `[prof] gpu_draws`, median per draw over
+137-2,300 loops after every pipeline was built; old-vs-old noise -0.3 ms): draw stamps 40.2 -> 38.5 ms per loop, mostly fs 86d325e2
+(1.74 -> 0.60 ms); 4097c13f / 40478981 +0.09 ms each (the fp32 sequence is longer than the fp64 one there); the fern 957527e8 is
+unchanged (its FMUL.RZ is not on the hot path; with reset 0 its mesh counts accumulate, with reset 1 its fastest loop is 1.04 ms both
+ways). Picture pixel-identical (SSIM 1.000, old vs new screenshots). **Not merged into `work\shaders\oot\spirv` yet** (only the 11
+float16-variant blocks are, backup `work\shaders\d1s\backup_f16`): the 39,061 changed blocks need their pipelines built again (290 s
+for the village frame's ~1,000 parts on the replay) or a preparation. The translated cache is `work\shaders\d1s\full2` (complete:
+corpus re-translated plus the main cache's non-corpus rows); merge with `merge_results.py work\shaders\d1s\full2 work\shaders\oot\spirv`.
 
 Batch translation (cache in `work\shaders\oot\spirv`): 46,357 of 47,428 rows ok (was 37,576 before the bindless work, 2026-11-06);
 236 unsupported (mostly "runtime"-group compute blocks whose range runs into ASCII names: `.UNKNOWN_656`, `e6e`, ... are text), 833
