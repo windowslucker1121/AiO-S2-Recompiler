@@ -327,11 +327,94 @@ uint32_t g_key_attr_count = 0;
 uint8_t g_key_binding[16] = {};
 // Occlusion counter (NVN_COUNTER_TYPE_SAMPLES_PASSED): ResetCounter starts a Vulkan occlusion query outside any pass; it stays active across
 // the passes that follow (the console counts continuously); ReportCounter ends it and copies its 64-bit result into the report.
-constexpr uint32_t kOccSlots = 256;
+// [nvn] occlusion_in_pass (default on; OoT makes ~700 reset/draw/report triples per frame, and each one ended the render pass twice): only
+// draws pass samples, and draws are inside passes, so the query is begun inside the pass instead: at ResetCounter when a pass is open, else
+// when the next pass begins (g_occ_want), on a slot reset beforehand (runs of slots are reset whenever the replay is outside a pass anyway).
+// A pass that ends ends the query with it ("part"); the next pass begins another part. The report ends the active part, and its write and the
+// copy of the query result wait in g_occ_pend until the pass ends (end_pass: one barrier and one run of updates and copies for all of
+// them). Only the CPU reads these reports (conditional rendering on a samples-passed report is decided at record time and renders), so no
+// GPU work misses them. The report gets the result of the part with draws; when several parts have draws (rare: "split" in the stats line;
+// counts cannot be added on the GPU without a shader) it gets kOccSplitCount, as if the test geometry were visible: an occluded object is
+// then drawn (and stays hidden behind its occluder) rather than a visible one left out.
+constexpr uint32_t kOccSlots = 4096;
+constexpr uint32_t kOccResetRun = 256;
+constexpr uint64_t kOccSplitCount = 1u << 20;
 VkQueryPool g_occ_pool = VK_NULL_HANDLE;
 bool g_occ_tried = false;
-uint32_t g_occ_next = 0;
+uint32_t g_occ_next = 0;             // the next slot to use (a counter; slot = value % kOccSlots)
+uint32_t g_occ_reset_hi = 0;         // slots [g_occ_next, g_occ_reset_hi) are reset already and unused
 int32_t g_occ_active = -1, g_occ_last = -1;
+bool g_occ_in_pass = false;          // the active query was begun inside the open pass
+bool g_occ_want = false;             // a reset counter is counting: the next pass begins a part
+int32_t g_occ_result_slot = -1, g_occ_any_slot = -1;   // this counter's last part with draws, its last part
+uint32_t g_occ_parts_drawn = 0;      // parts of this counter with draws
+uint32_t g_occ_begin_draws = 0;      // g_pass_draws when the active part began
+struct OccReport { uint64_t addr; uint64_t timestamp; int32_t slot; uint64_t counter = 0; };   // counter: written when slot < 0
+std::vector<OccReport> g_occ_pend;   // reports made in the open pass: written when it ends
+uint64_t g_occ_fast = 0, g_occ_slow = 0, g_occ_split = 0;   // statistics
+
+bool occlusion_in_pass_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "occlusion_in_pass", true);
+    return on;
+}
+
+// The reports of the pass that just ended (outside any pass now): their {0, timestamp} words, then the query results over the counters.
+void occ_flush_pending() {
+    if (g_occ_pend.empty()) return;
+    memory_barrier(F->cb);
+    for (const OccReport& q : g_occ_pend) {
+        const BufRef b = resolve_buffer(q.addr, 16);
+        if (!b.ok) continue;
+        struct { uint64_t counter, timestamp; } rep = {q.slot < 0 ? q.counter : 0, q.timestamp};
+        vkCmdUpdateBuffer(F->cb, b.buffer, b.offset, sizeof rep, &rep);
+    }
+    memory_barrier(F->cb);
+    for (const OccReport& q : g_occ_pend) {
+        if (q.slot < 0) continue;
+        const BufRef b = resolve_buffer(q.addr, 16);
+        if (b.ok) vkCmdCopyQueryPoolResults(F->cb, g_occ_pool, static_cast<uint32_t>(q.slot), 1, b.buffer, b.offset, 16, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+    }
+    memory_barrier(F->cb);
+    g_occ_pend.clear();
+}
+
+// Outside a pass: resets the next run of slots so that queries can begin inside the passes that follow.
+void occ_reset_ahead() {
+    if (!g_occ_pool || !occlusion_in_pass_on() || static_cast<int32_t>(g_occ_reset_hi - g_occ_next) >= static_cast<int32_t>(kOccResetRun / 4)) return;
+    occ_flush_pending();                 // copies of results must read their slots before any slot is reset again
+    const uint32_t from = static_cast<int32_t>(g_occ_reset_hi - g_occ_next) > 0 ? g_occ_reset_hi : g_occ_next;
+    const uint32_t to = g_occ_next + kOccResetRun;
+    for (uint32_t a = from; a != to;) {
+        const uint32_t slot = a % kOccSlots;
+        const uint32_t n = std::min(to - a, kOccSlots - slot);
+        vkCmdResetQueryPool(F->cb, g_occ_pool, slot, n);
+        a += n;
+    }
+    g_occ_reset_hi = to;
+}
+
+// Inside the open pass: begins a part of the counting counter on a slot reset ahead. False: no such slot.
+bool occ_begin_in_pass() {
+    if (!P.open || static_cast<int32_t>(g_occ_reset_hi - g_occ_next) <= 0) return false;
+    const uint32_t slot = g_occ_next++ % kOccSlots;
+    vkCmdBeginQuery(F->cb, g_occ_pool, slot, device().features().occlusion_query_precise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
+    g_occ_active = static_cast<int32_t>(slot);
+    g_occ_in_pass = true;
+    g_occ_want = false;
+    g_occ_begin_draws = g_pass_draws;
+    return true;
+}
+
+// The active in-pass part was ended (vkCmdEndQuery recorded).
+void occ_part_done() {
+    if (g_pass_draws > g_occ_begin_draws) {
+        g_occ_result_slot = g_occ_active;
+        ++g_occ_parts_drawn;
+    }
+    g_occ_any_slot = g_occ_active;
+    g_occ_active = -1;
+    g_occ_in_pass = false;
+}
 
 bool occ_ready() {
     if (g_occ_pool) return true;
@@ -530,8 +613,15 @@ void end_pass(bool to_pass = false) {
         return;
     }
     xfb_end_in_pass();
+    if (g_occ_active >= 0 && g_occ_in_pass) {      // a part begun in this pass ends with it; the next pass begins another
+        vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
+        occ_part_done();
+        g_occ_want = true;
+    }
     vkCmdEndRendering(F->cb);
     P.open = false;
+    occ_flush_pending();
+    if (g_occ_pool && g_occ_want) occ_reset_ahead();
     if (gpass_on()) {
         char b[112];
         std::snprintf(b, sizeof b, "pass %ux%u c%u:%d d%d%s", P.extent.width, P.extent.height, P.ncolor, static_cast<int>(P.color_fmt[0]), static_cast<int>(P.depth_fmt),
@@ -721,8 +811,10 @@ bool ensure_pass(bool depth_ro = false) {
     }
     (void)last;
     gstamp("pass setup");
+    if (g_occ_want) occ_reset_ahead();          // outside the pass still: a slot for the counter's part in it
     vkCmdBeginRendering(F->cb, &ri);
     P.open = true;
+    if (g_occ_want) occ_begin_in_pass();
     counters().passes.fetch_add(1, std::memory_order_relaxed);
     g_bound_pipeline = VK_NULL_HANDLE;
     return true;
@@ -4815,7 +4907,29 @@ void run_list(const CmdList& list, int depth) {
             case Op::ReportCounter: {
                 const auto& p = r.payload<P_Counter>();
                 struct { uint64_t counter, timestamp; } rep = {1, timestamp_ns()};   // counters other than the ones handled below are reported as non-zero
+                if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready() && occlusion_in_pass_on() && (g_occ_active < 0 || g_occ_in_pass)) {
+                    if (g_occ_active >= 0) {
+                        vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
+                        occ_part_done();
+                    }
+                    const bool split = g_occ_parts_drawn > 1;
+                    if (split) ++g_occ_split;
+                    const int32_t slot = g_occ_result_slot >= 0 ? g_occ_result_slot : g_occ_any_slot >= 0 ? g_occ_any_slot : g_occ_last;
+                    g_occ_last = slot;
+                    g_occ_want = false;
+                    g_occ_result_slot = g_occ_any_slot = -1;
+                    g_occ_parts_drawn = 0;
+                    if (p.address) {
+                        g_reports[p.address] = kReportUnknown;   // the query result lands on the GPU
+                        gpu_wrote(p.address, sizeof rep, kWriteUpdate);
+                        g_occ_pend.push_back({p.address, rep.timestamp, split ? -1 : slot, split ? kOccSplitCount : 0});
+                        if (!P.open) occ_flush_pending();
+                    }
+                    ++g_occ_fast;
+                    break;
+                }
                 if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready()) {
+                    ++g_occ_slow;
                     end_pass();
                     if (g_occ_active >= 0) {
                         vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
@@ -4878,13 +4992,32 @@ void run_list(const CmdList& list, int depth) {
             }
             case Op::ResetCounter: {
                 const auto& p = r.payload<P_Counter>();
-                if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready()) {
+                if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready() && occlusion_in_pass_on() && (g_occ_active < 0 || g_occ_in_pass)) {
+                    if (g_occ_active >= 0) {                      // an unreported count is dropped
+                        vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
+                        g_occ_active = -1;
+                        g_occ_in_pass = false;
+                    }
+                    g_occ_result_slot = g_occ_any_slot = g_occ_last = -1;
+                    g_occ_parts_drawn = 0;
+                    g_occ_want = true;
+                    if (P.open && !occ_begin_in_pass()) {
+                        ++g_occ_slow;
+                        end_pass();                                // no slot reset ahead: one pass break to reset a run (the part begins with the next pass)
+                        occ_reset_ahead();
+                    } else if (!P.open) {
+                        occ_reset_ahead();
+                    }
+                } else if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready()) {
                     end_pass();
                     if (g_occ_active >= 0) vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
+                    const bool ready = static_cast<int32_t>(g_occ_reset_hi - g_occ_next) > 0;
                     const uint32_t slot = g_occ_next++ % kOccSlots;
-                    vkCmdResetQueryPool(F->cb, g_occ_pool, slot, 1);
+                    if (!ready) vkCmdResetQueryPool(F->cb, g_occ_pool, slot, 1);
+                    occ_reset_ahead();                     // outside the pass now: slots for the queries of the passes to come
                     vkCmdBeginQuery(F->cb, g_occ_pool, slot, device().features().occlusion_query_precise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
                     g_occ_active = static_cast<int32_t>(slot);
+                    g_occ_in_pass = false;
                     g_occ_last = -1;
                 } else if (p.type == NVN_COUNTER_TYPE_PRIMITIVES_GENERATED || p.type == NVN_COUNTER_TYPE_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN) {
                     const bool gen = p.type == NVN_COUNTER_TYPE_PRIMITIVES_GENERATED;
@@ -5126,11 +5259,13 @@ void replay_begin_submit(Frame& f) {
     g_upd_snaps.clear();
     {
         static uint64_t last_log = 0;
-        if (f.serial - last_log > 600 && (g_upd_fast || g_upd_slow)) {
+        if (f.serial - last_log > 600 && (g_upd_fast || g_upd_slow || g_occ_fast || g_occ_slow)) {
             last_log = f.serial;
             NXLOG_I(kTag, "uniform updates: %llu at record time, %llu on the GPU; %zu update ranges; bindings: %llu snapshots made, %llu reused, %llu from game memory",
                     (unsigned long long)g_upd_fast, (unsigned long long)g_upd_slow, g_upd.size(), (unsigned long long)g_upd_snapped,
                     (unsigned long long)g_upd_snap_hits, (unsigned long long)g_upd_direct);
+            NXLOG_I(kTag, "occlusion reports: %llu in their pass, %llu with a pass break; %llu queries ended early by a pass break (split)",
+                    (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
         }
     }
     g_draw_support = UploadAlloc();
@@ -5237,6 +5372,11 @@ void replay_shutdown() {
     g_occ_pool = VK_NULL_HANDLE;
     g_occ_tried = false;
     g_occ_active = g_occ_last = -1;
+    g_occ_in_pass = g_occ_want = false;
+    g_occ_result_slot = g_occ_any_slot = -1;
+    g_occ_parts_drawn = 0;
+    g_occ_next = g_occ_reset_hi = 0;
+    g_occ_pend.clear();
     g_prims_generated = g_prims_xfb = 0;
     g_mask.shutdown();
     g_mask_ready = false;
