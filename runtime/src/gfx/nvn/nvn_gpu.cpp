@@ -559,10 +559,12 @@ void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImag
 }
 
 void memory_barrier(VkCommandBuffer cb) {
+
     g_gauge_barriers_mem.add(1);
     VkMemoryBarrier2 b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+
     b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
     VkDependencyInfo di = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
@@ -1209,3 +1211,15 @@ BackendStats backend_stats() {
 std::string backend_unsupported_report() { return be::gpu::unsupported_report(); }
 
 }  // namespace nxrt::nvn
+
+// CPU time of the calling thread in microseconds (kernel + user), for the paired A/B windows ([nvn] cpuperf_ab). Last in the file: windows.h
+// would otherwise define min/max over the code above.
+#include <windows.h>
+namespace nxrt::nvn::be::gpu {
+uint64_t thread_cpu_us() {
+    FILETIME c{}, e{}, k{}, u{};
+    if (!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u)) return 0;
+    auto v = [](const FILETIME& f) { return (static_cast<uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime; };
+    return (v(k) + v(u)) / 10;
+}
+}  // namespace nxrt::nvn::be::gpu
