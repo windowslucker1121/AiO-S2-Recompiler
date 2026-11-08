@@ -448,6 +448,10 @@ bool reflect_spirv(const uint32_t* words, size_t count, ShaderReflection& out, s
     };
     std::vector<Chain> chains;   // access chains (block members of built-in blocks: builtins_used_*)
     std::unordered_set<uint32_t> referenced;  // ids some instruction takes as an operand (approximation, see below)
+    // Which variables the code may write through: pointers derived from a variable (access chains, copies) are followed; a load, an atomic
+    // load or an array length only reads, any other instruction that takes such a pointer counts as a write (stores, atomics, calls, phis).
+    std::unordered_map<uint32_t, uint32_t> root;   // pointer id -> the variable it points into
+    std::unordered_set<uint32_t> written_vars;
     uint32_t entry_id = 0;
     bool have_entry = false;
 
@@ -460,7 +464,21 @@ bool reflect_spirv(const uint32_t* words, size_t count, ShaderReflection& out, s
         // literal-only instructions are not: they never reference a variable through an id.
         if (!(op <= 7 || op == 10 || op == 11 || op == 14 || op == 15 || op == 16 || op == 17 || (op >= 19 && op <= 40) ||
               (op >= 43 && op <= 52) || op == 59 || (op >= 71 && op <= 75) || op == 103))
+        {
             for (size_t k = 0; k < n; k++) referenced.insert(w[k]);
+            if (!root.empty()) {
+                if ((op == OpAccessChain || op == OpInBoundsAccessChain || op == 67 /* PtrAccessChain */ || op == 70 /* InBoundsPtrAccessChain */ ||
+                     op == 83 /* CopyObject */) && n >= 3) {
+                    if (auto it = root.find(w[2]); it != root.end()) root[w[1]] = it->second;
+                } else if ((op == 61 /* Load */ || op == 227 /* AtomicLoad */ || op == 68 /* ArrayLength */) && n >= 3) {
+                    // reads (memory operands after the pointer are literals)
+                } else {
+                    for (size_t k = 0; k < n; k++)
+                        if (auto it = root.find(w[k]); it != root.end()) written_vars.insert(it->second);
+                }
+            }
+        }
+        if (op == OpVariable && n >= 2) root[w[1]] = w[1];
         switch (op) {
         case OpEntryPoint:
             if (!have_entry && n >= 3) {
@@ -589,6 +607,7 @@ bool reflect_spirv(const uint32_t* words, size_t count, ShaderReflection& out, s
         b.set = uint32_t(d->set);
         b.binding = uint32_t(d->binding);
         b.used = referenced.count(v.id) != 0;
+        b.written = written_vars.count(v.id) != 0;
         if (auto it = names.find(v.id); it != names.end()) b.name = it->second;
         uint32_t inner = pointee;
         for (const Type* t = type(inner); t && (t->op == OpTypeArray || t->op == OpTypeRuntimeArray); t = type(inner)) {

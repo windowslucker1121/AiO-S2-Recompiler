@@ -156,6 +156,9 @@ struct DescriptorBinding {
     // without using it; the harness's record lists only used resources (checked on the whole cache), so
     // describe_like_harness skips the unused ones.
     bool used = false;
+    // Some instruction may write through it (a store, an atomic, or the pointer escapes into a call or a phi). False: the code only reads
+    // it (storage buffers whose bindings then need no copy-back and leave the pool copy valid).
+    bool written = true;
 };
 
 struct ShaderIo {

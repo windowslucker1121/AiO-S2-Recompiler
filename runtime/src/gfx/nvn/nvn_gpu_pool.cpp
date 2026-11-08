@@ -753,6 +753,9 @@ struct Mirror {
     // compute out (below): pages where a compute result in the copy is newer than the pool, and pages the CPU has read compute results
     // from (any thread sets them; atomics)
     std::unique_ptr<std::atomic<uint64_t>[]> gpu_new, cpu_read;
+    // pages mirror_fill copied in this submission without tracking them (hot): current in the copy until the submission ends (render thread)
+    std::unique_ptr<std::atomic<uint64_t>[]> fresh;
+    bool any_fresh = false;
 };
 
 namespace {
@@ -808,6 +811,8 @@ bool arm_timed(mem::ww::Region* r, uint64_t first, uint64_t count) {
     return ok;
 }
 
+std::vector<Mirror*> g_fresh_mirrors;   // mirrors with fresh pages in this submission
+std::atomic<int64_t> g_st_hot_fill{0};   // hot pages copied into the copy for one compute use (mirror_fill)
 std::atomic<int64_t> g_st_dev_binds{0}, g_st_host_binds{0}, g_st_copied{0}, g_st_hot{0}, g_st_live_bytes{0};
 // statistics for the summary line (render thread): binds by use (to the copy / to the pool / not eligible), pages made stale by GPU writes by use
 int64_t g_use_dev[3] = {}, g_use_host[3] = {}, g_use_skip[3] = {};
@@ -905,7 +910,12 @@ Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
     m->pool_bytes = pg->size;
     m->gpu_new.reset(new std::atomic<uint64_t>[words]);
     m->cpu_read.reset(new std::atomic<uint64_t>[words]);
-    for (size_t i = 0; i < words; ++i) { m->gpu_new[i].store(0, std::memory_order_relaxed); m->cpu_read[i].store(0, std::memory_order_relaxed); }
+    m->fresh.reset(new std::atomic<uint64_t>[words]);
+    for (size_t i = 0; i < words; ++i) {
+        m->gpu_new[i].store(0, std::memory_order_relaxed);
+        m->cpu_read[i].store(0, std::memory_order_relaxed);
+        m->fresh[i].store(0, std::memory_order_relaxed);
+    }
     out_register(m.get());
     NXLOG_I(kTag, "pool %p: device-local copy (%llu KiB in %zu chunks made on demand, pool flags 0x%x, %s)", static_cast<void*>(pg->base),
             static_cast<unsigned long long>(pg->size >> 10), m->chunks.size(), static_cast<unsigned>(mp->flags), "writes tracked");
@@ -940,6 +950,7 @@ void absorb_writes(Mirror& m, uint32_t now) {
     }
 }
 
+bool fresh_get(const Mirror& m, uint64_t p) { return (m.fresh[static_cast<size_t>(p >> 6)].load(std::memory_order_acquire) >> (p & 63)) & 1; }
 bool new_get(const Mirror& m, uint64_t p) { return (m.gpu_new[static_cast<size_t>(p >> 6)].load(std::memory_order_acquire) >> (p & 63)) & 1; }
 
 bool copyable(const Mirror& m, uint64_t i, uint32_t now) {
@@ -1110,12 +1121,18 @@ void mirror_span_written(uint64_t gpu_address, uint64_t size) {
     const uint64_t first = (poff + kPageBytes - 1) / kPageBytes, end = (poff + size) / kPageBytes;   // pages wholly inside
     if (first >= end || end > m.npages) return;
     const uint32_t now = presents_now();
-    for (uint64_t p = first; p < end; ++p)
-        if (m.hot_until[static_cast<size_t>(p)] > now || mem::ww::page_banned(m.ww, p)) return;     // per-frame CPU data: leave it untracked
-    if (!arm_in_budget() || !arm_timed(m.ww, first, end - first)) return;   // not armed: the pages stay invalid and are read from the pool
-    for (uint64_t p = first; p < end; ++p) {
-        m.copied_at[static_cast<size_t>(p)] = now ? now : 1;
-        bit_put(m.want, p, false);
+    // per-frame CPU data (hot) and pages with another view (banned) stay untracked; the runs of other pages are tracked again
+    auto skip = [&](uint64_t p) { return m.hot_until[static_cast<size_t>(p)] > now || mem::ww::page_banned(m.ww, p); };
+    for (uint64_t p = first; p < end;) {
+        if (skip(p)) { ++p; continue; }
+        uint64_t q = p + 1;
+        while (q < end && !skip(q)) ++q;
+        if (!arm_in_budget() || !arm_timed(m.ww, p, q - p)) return;   // not armed: the pages stay invalid and are read from the pool
+        for (uint64_t i = p; i < q; ++i) {
+            m.copied_at[static_cast<size_t>(i)] = now ? now : 1;
+            bit_put(m.want, i, false);
+        }
+        p = q;
     }
 }
 
@@ -1137,33 +1154,49 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
     const VkBuffer src = mirror_src(m, first, &src_base);
     if (!src) return false;
     const uint32_t now = presents_now();
-    for (uint64_t p = first; p <= last; ++p)      // per-frame CPU data (hot) or pages with another view (banned) stay in the pool
-        if (!page_valid(m, p) && (m.hot_until[static_cast<size_t>(p)] > now || mem::ww::page_banned(m.ww, p))) return false;
+    for (uint64_t p = first; p <= last; ++p)      // pages with another view (banned) cannot be tracked: the range stays in the pool
+        if (!page_valid(m, p) && mem::ww::page_banned(m.ww, p)) return false;
     static std::vector<VkBufferCopy> copies;
     copies.clear();
     const uint64_t base = (first / chunk_pages) * kChunkBytes;
     bool ok = true;
+    auto hot = [&](uint64_t p) { return m.hot_until[static_cast<size_t>(p)] > now; };
     for (uint64_t p = first; p <= last;) {
-        if (page_valid(m, p) || new_get(m, p)) { ++p; continue; }
+        auto have = [&](uint64_t x) { return page_valid(m, x) || new_get(m, x) || (m.any_fresh && fresh_get(m, x)); };
+        if (have(p)) { ++p; continue; }
+        // a run of pages to copy in, all hot or all not
+        const bool h = hot(p);
         uint64_t q = p + 1;
-        while (q <= last && !page_valid(m, q) && !new_get(m, q)) ++q;
-        if (arm_in_budget() && arm_timed(m.ww, p, q - p)) {   // valid from now until the CPU writes a page; the copy below reads the pool when it runs
+        while (q <= last && !have(q) && hot(q) == h) ++q;
+        bool copy = h;
+        if (h) {
+            // per-frame CPU data: copied without tracking (arming pages the CPU rewrites every frame costs a fault each), current in the copy
+            // for the rest of this submission (fresh); the rest of the range stays tracked, so only these pages cross PCIe again next time
+            for (uint64_t i = p; i < q; ++i) m.fresh[static_cast<size_t>(i >> 6)].fetch_or(uint64_t{1} << (i & 63), std::memory_order_acq_rel);
+            if (!m.any_fresh) { m.any_fresh = true; g_fresh_mirrors.push_back(&m); }
+            g_st_hot_fill.fetch_add(static_cast<int64_t>(q - p), std::memory_order_relaxed);
+        } else if (arm_in_budget() && arm_timed(m.ww, p, q - p)) {   // valid from now until the CPU writes a page; the copy below reads the pool when it runs
             for (uint64_t i = p; i < q; ++i) {
                 m.copied_at[static_cast<size_t>(i)] = now ? now : 1;
                 bit_put(m.used, i, true);
                 bit_put(m.want, i, false);
             }
+            copy = true;
+        } else {
+            ok = false;
+        }
+        if (copy) {
             copies.push_back(VkBufferCopy{p * kPageBytes - src_base, p * kPageBytes - base, (q - p) * kPageBytes});
             m.st_copied += static_cast<int64_t>(q - p);
             g_st_copied.fetch_add(static_cast<int64_t>((q - p) * kPageBytes), std::memory_order_relaxed);
             if (bytes) *bytes += (q - p) * kPageBytes;
-        } else {
-            ok = false;
         }
         p = q;
     }
     if (!copies.empty()) vkCmdCopyBuffer(cb, src, chunk, static_cast<uint32_t>(copies.size()), copies.data());
-    return ok && (range_valid(m, first, last - first + 1) || new_servable(m, first, last));
+    if (!ok) return false;
+    if (range_valid(m, first, last - first + 1) || new_servable(m, first, last)) return true;
+    return false;
 }
 
 bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
@@ -1177,13 +1210,21 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
     const uint64_t first = off / kPageBytes, last = std::min<uint64_t>((off + size - 1) / kPageBytes, m.npages - 1);
     g_wr_calls[use % 6]++;
     g_wr_pages[use % 6] += static_cast<int64_t>(last - first + 1);
-    const bool stale = mem::ww::any_valid(m.ww, first, last - first + 1);
+    bool stale = mem::ww::any_valid(m.ww, first, last - first + 1);
     mem::ww::invalidate(m.ww, first, last - first + 1);
+    if (m.any_fresh) {             // the pool there is written: what fill copied is old now
+        for (uint64_t p = first; p <= last; ++p) stale |= ((m.fresh[static_cast<size_t>(p >> 6)].fetch_and(~(uint64_t{1} << (p & 63)), std::memory_order_acq_rel) >> (p & 63)) & 1) != 0;
+    }
     bits_put(m.want, first, last, false);
     return stale;
 }
 
 void mirror_begin_submit(Frame& f, bool on) {
+    for (Mirror* m : g_fresh_mirrors) {           // fresh pages are current for one submission
+        for (size_t i = 0; i < static_cast<size_t>((m->npages + 63) / 64); ++i) m->fresh[i].store(0, std::memory_order_relaxed);
+        m->any_fresh = false;
+    }
+    g_fresh_mirrors.clear();
     g_mirror_on = on && mirror_mode() != MirrorMode::Off;
     out_retire();
     out_log();
@@ -1268,6 +1309,7 @@ void mirror_destroy(PoolGpu* p) {
     Mirror* m = p->mirror;
     if (!m) return;
     p->mirror = nullptr;
+    g_fresh_mirrors.erase(std::remove(g_fresh_mirrors.begin(), g_fresh_mirrors.end(), m), g_fresh_mirrors.end());
     out_unregister(m);
     g_mirrors.erase(std::remove(g_mirrors.begin(), g_mirrors.end(), m), g_mirrors.end());
     if (m->ww) mem::ww::region_destroy(m->ww);
@@ -1305,6 +1347,7 @@ struct OutEntry {
     bool guarded = false;               // its pages are guarded
     uint64_t serial = 0;                // the submission whose result the copy holds (0: only the one being recorded)
     uint64_t flushed = 0;               // a copy-back is recorded in this submission: the guard goes when it completes
+    bool partial = false;               // some of its pages went back already (out_split): copy-backs take only the pages still newer (gpu_new)
 };
 
 std::mutex g_out_mu;                    // g_out, g_out_mirrors; never held while touching guest memory
@@ -1316,6 +1359,7 @@ std::atomic<uint64_t> g_out_lo{UINT64_MAX}, g_out_hi{0};   // address bounds of 
 // statistics (bytes and counts; the 10 s line)
 std::atomic<uint64_t> g_ob_end{0}, g_ob_gpu{0}, g_ob_fault{0}, g_ob_inval{0};
 std::atomic<uint64_t> g_why_bytes[kOutWhyCount], g_why_n[kOutWhyCount];   // GPU-reader copy-backs by reason
+std::atomic<uint64_t> g_on_split{0};   // entries split at the end of their submission (out_split)
 std::atomic<uint64_t> g_on_fault{0}, g_on_inval{0}, g_on_deferred{0}, g_on_eager_read{0}, g_on_eager_noguard{0}, g_on_gpu_flush{0};
 
 void bits_set(std::atomic<uint64_t>* bm, uint64_t first, uint64_t last, bool on) {
@@ -1338,8 +1382,8 @@ void out_register(Mirror* m) {
     std::call_once(once, [] { mem::ww::set_guard_handler([](uint64_t addr) { out_fetch(addr, kPageBytes, true); }); });
 }
 
-bool new_servable(const Mirror& m, uint64_t first, uint64_t last) {   // every page valid, or newer in the copy and armed (the CPU has not written it since)
-    return mem::ww::all_valid_or_armed(m.ww, first, last - first + 1, m.gpu_new.get());
+bool new_servable(const Mirror& m, uint64_t first, uint64_t last) {   // every page valid, newer in the copy and armed (the CPU has not written it
+    return mem::ww::all_valid_or_armed(m.ww, first, last - first + 1, m.gpu_new.get(), m.any_fresh ? m.fresh.get() : nullptr);   // since), or fresh
 }
 
 bool overlaps(const OutEntry& e, uint64_t lo, uint64_t hi) {      // page granular: [lo, hi) of addresses
@@ -1399,6 +1443,21 @@ uint64_t record_copies(VkCommandBuffer cb, const std::vector<size_t>& idx) {
     uint64_t bytes = 0;
     for (size_t i : idx) {
         const OutEntry& e = g_out[i];
+        if (e.partial && e.m) {                 // only the pages still newer in the copy
+            const uint64_t base = reinterpret_cast<uint64_t>(e.m->pg->base);
+            auto newer = [&](uint64_t p) { return ((e.m->gpu_new[static_cast<size_t>(p >> 6)].load(std::memory_order_relaxed) >> (p & 63)) & 1) != 0; };
+            for (uint64_t p = e.first; p <= e.last;) {
+                if (!newer(p)) { ++p; continue; }
+                uint64_t q = p + 1;
+                while (q <= e.last && newer(q)) ++q;
+                const uint64_t lo = std::max(e.addr, base + p * kPageBytes), hi = std::min(e.addr + e.size, base + q * kPageBytes);
+                VkBufferCopy c = {e.moff + (lo - e.addr), e.hoff + (lo - e.addr), hi - lo};
+                vkCmdCopyBuffer(cb, e.mbuf, e.hbuf, 1, &c);
+                bytes += hi - lo;
+                p = q;
+            }
+            continue;
+        }
         VkBufferCopy c = {e.moff, e.hoff, e.size};
         vkCmdCopyBuffer(cb, e.mbuf, e.hbuf, 1, &c);
         bytes += e.size;
@@ -1450,6 +1509,7 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
     for (OutEntry& e : g_out)
         if (e.addr == addr && e.size == size && e.m == m) {
             e.pending = true;
+            e.partial = false;
             e.mbuf = mbuf; e.moff = moff; e.hbuf = host.buffer; e.hoff = host.offset;
             if (m) bits_set(m->gpu_new.get(), e.first, e.last, true);    // a copy-back recorded earlier in this submission cleared them
             return true;
@@ -1569,16 +1629,70 @@ uint64_t out_flush(VkCommandBuffer cb, uint64_t addr, uint64_t size, int why) {
     return bytes;
 }
 
+// [nvn] compute_out_split (default on): a result whose range holds pages the CPU has read (cpu_read) or that cannot be guarded (hot pages,
+// never tracked) used to go back whole at the end of every submission. OoT's big compute buffers (up to 16 MB) have such pages, and ~50 MB
+// per frame went back over PCIe. Now only those pages go back; the entry stays held and guarded for the others (OutEntry::partial).
+bool out_split_on() {
+    static const bool on = config_get_bool("nvn", "compute_out_split", true);
+    return on;
+}
+
+// Lock held. Pending entry i (lazy, not guarded yet) whose pages are of both kinds: the pages that must go back now (the CPU read them, or they
+// are not tracked) are copied (parts, their ranges into rearm) and are no longer newer in the copy; the runs of other pages are guarded and the
+// entry is held for them (partial). 0: one kind only, the caller handles the entry whole; 1: held; 2: every page went back (remove it).
+int out_split(size_t i, uint64_t serial, std::vector<VkBufferCopy>& parts, std::vector<std::pair<VkBuffer, VkBuffer>>& bufs,
+              std::vector<std::pair<uint64_t, uint64_t>>& rearm) {
+    OutEntry& e = g_out[i];
+    Mirror* m = e.m;
+    const uint64_t base = reinterpret_cast<uint64_t>(m->pg->base);
+    auto back = [&](uint64_t p) { return ((m->cpu_read[static_cast<size_t>(p >> 6)].load(std::memory_order_relaxed) >> (p & 63)) & 1) || !mem::ww::all_armed(m->ww, p, 1); };
+    bool any_back = false, any_hold = false;
+    for (uint64_t p = e.first; p <= e.last && !(any_back && any_hold); ++p) (back(p) ? any_back : any_hold) = true;
+    if (!any_back || !any_hold) return 0;
+    bool held = false;
+    for (uint64_t p = e.first; p <= e.last;) {
+        const bool b = back(p);
+        uint64_t q = p + 1;
+        while (q <= e.last && back(q) == b) ++q;
+        if (!b && mem::ww::guard(m->ww, p, q - p)) {
+            held = true;
+        } else {
+            const uint64_t lo = std::max(e.addr, base + p * kPageBytes), hi = std::min(e.addr + e.size, base + q * kPageBytes);
+            parts.push_back(VkBufferCopy{e.moff + (lo - e.addr), e.hoff + (lo - e.addr), hi - lo});
+            bufs.emplace_back(e.mbuf, e.hbuf);
+            rearm.emplace_back(lo, hi - lo);
+            bits_set(m->gpu_new.get(), p, q - 1, false);   // current in the pool once the copy has run: a later copy-back leaves them alone
+        }
+        p = q;
+    }
+    g_on_split.fetch_add(1, std::memory_order_relaxed);
+    if (!held) return 2;
+    e.partial = true;
+    e.guarded = true;
+    e.pending = false;
+    e.serial = serial;
+    e.flushed = 0;
+    return 1;
+}
+
 void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
     if (!out_any()) return;
     std::vector<std::pair<uint64_t, uint64_t>> rearm;
     {
         std::lock_guard<std::mutex> lk(g_out_mu);
         std::vector<size_t> eager, gone;
-        for (size_t i = 0; i < g_out.size(); ++i) {
+        std::vector<VkBufferCopy> part_copies;          // split entries: the parts that go back now
+        std::vector<std::pair<VkBuffer, VkBuffer>> part_bufs;
+        const size_t n0 = g_out.size();
+        for (size_t i = 0; i < n0; ++i) {
             OutEntry& e = g_out[i];
             if (!e.pending) continue;
             bool hold = out_lazy() && e.m && e.m->ww;
+            if (hold && !e.guarded && e.last > e.first && out_split_on()) {
+                const int sp = out_split(i, serial, part_copies, part_bufs, rearm);
+                if (sp == 1) { g_on_deferred.fetch_add(1, std::memory_order_relaxed); continue; }   // held for its guarded pages
+                if (sp == 2) { gone.push_back(i); continue; }                                       // every page went back (part_copies)
+            }
             if (hold && bits_any(e.m->cpu_read.get(), e.first, e.last)) { hold = false; g_on_eager_read.fetch_add(1, std::memory_order_relaxed); }
             else if (hold && !e.guarded && !mem::ww::guard(e.m->ww, e.first, e.last - e.first + 1)) { hold = false; g_on_eager_noguard.fetch_add(1, std::memory_order_relaxed); }
             if (hold) {
@@ -1591,7 +1705,15 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
                 eager.push_back(i);
             }
         }
-        const uint64_t bytes = record_copies(cb, eager);
+        uint64_t bytes = record_copies(cb, eager);
+        if (!part_copies.empty()) {
+            copy_barrier_in(cb);
+            for (size_t k = 0; k < part_copies.size(); ++k) {
+                vkCmdCopyBuffer(cb, part_bufs[k].first, part_bufs[k].second, 1, &part_copies[k]);
+                bytes += part_copies[k].size;
+            }
+            copy_barrier_host(cb);
+        }
         g_ob_end.fetch_add(bytes, std::memory_order_relaxed);
         for (size_t i : eager) {
             OutEntry& e = g_out[i];
@@ -1718,11 +1840,12 @@ void out_log() {
     }
     NXLOG_I(kTag, "compute out (%s): copied back %.0f KB/s over %.1f s (end of submission %llu KiB, for GPU readers %llu KiB in %llu flushes, on demand: "
             "CPU touches %llu KiB in %llu copies, invalidates %llu KiB in %llu copies; guard faults %llu); held in the copy %zu results, %llu KiB "
-            "(held %llu, sent back at once %llu: CPU-read pages, %llu: not guardable)",
+            "(held %llu, sent back at once %llu: CPU-read pages, %llu: not guardable; split %llu in all)",
             out_lazy() ? "lazy" : "always", total / 1000.0 / secs, secs, (unsigned long long)page_size_kb(end - p_end), (unsigned long long)page_size_kb(gpu - p_gpu),
             (unsigned long long)(ngf - pn_gf), (unsigned long long)page_size_kb(fault - p_fault), (unsigned long long)(nf - pn_fault),
             (unsigned long long)page_size_kb(inval - p_inval), (unsigned long long)(ni - pn_inval), (unsigned long long)(gfaults - p_gfaults), held,
-            (unsigned long long)(held_bytes >> 10), (unsigned long long)(nd - pn_def), (unsigned long long)(nr - pn_read), (unsigned long long)(ng - pn_ng));
+            (unsigned long long)(held_bytes >> 10), (unsigned long long)(nd - pn_def), (unsigned long long)(nr - pn_read), (unsigned long long)(ng - pn_ng),
+            (unsigned long long)g_on_split.load(std::memory_order_relaxed));
     static uint64_t pw_b[kOutWhyCount] = {}, pw_n[kOutWhyCount] = {};
     static const char* const kWhyName[kOutWhyCount] = {"reader", "submit end", "copies off", "dispatch", "draw vertex/index/uniform", "draw storage/xfb",
                                                        "indirect", "buffer write", "buffer read", "texture upload", "event", "other",

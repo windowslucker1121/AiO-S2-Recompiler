@@ -1609,7 +1609,7 @@ int storage_slot_for(int nvn_stage, int c0_offset) {
 //    a state change or a barrier, before a dispatch reads it another way (uniform block, indirect arguments, another range on its pages,
 //    a texture upload), and at the end of the submission, before the serial the CPU waits for can signal. A run of dispatches over the
 //    same buffers thus copies each result out once instead of once per dispatch.
-//  * Shadow (otherwise: no copy for the pool, hot or banned pages, a range over two chunks): the range is copied into a buffer of its own
+//  * Shadow (otherwise: no copy for the pool, banned pages, a range over two chunks): the range is copied into a buffer of its own
 //    before the dispatch and copied back after it when the shader can write it (and into the pool copy, when there is one).
 // Game memory holds every result by the end of the submission, in queue order, as before. Ranges that overlap another range of the same
 // dispatch stay in the pool.
@@ -1632,6 +1632,12 @@ bool compute_shadows_on() {
 // [nvn] compute_shadow_hold (default on): a shadow's result stays in the shadow (out_add) instead of being copied back after its dispatch.
 bool shadow_hold_on() {
     static const bool on = nxrt::config_get_bool("nvn", "compute_shadow_hold", true);
+    return on;
+}
+// [nvn] ssbo_readonly (default on): storage buffers a shader's SPIR-V never writes (DescriptorBinding::written) are not copied back after
+// a dispatch and do not invalidate the pool copy.
+bool ssbo_readonly_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "ssbo_readonly", true);
     return on;
 }
 bool compute_direct_on() {
@@ -1669,11 +1675,31 @@ bool compute_out_may_wait(Op op) {
 
 // A buffer a draw reads: results it shares a page with go back first, unless the draw binds the pool copy for it (vertex, index and aligned
 // uniform buffers whose pages are all current there, resolve_read).
+// [nvn] draw_fill (default on): when the copy holds results in such a range but not all of it (pages the CPU rewrote, untracked pages), the
+// missing pages are copied into the copy for this submission (mirror_fill) and the draw binds the copy, instead of every held result there
+// going back to the pool: the results are most of the range, the missing pages a few.
+bool draw_fill_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "draw_fill", true);
+    return on;
+}
+uint64_t g_draw_fills = 0, g_draw_fill_bytes = 0;
 void out_draw_read(uint64_t addr, uint64_t size, bool copy_ok, int why) {
     if (!addr) return;
     if (!size) size = 65536;
     if (!out_overlaps(addr, size)) return;
     if (copy_ok && out_servable(addr, size)) return;
+    if (copy_ok && out_lazy() && draw_fill_on() && mirror_span(addr, size).buf) {
+        end_pass();
+        memory_barrier(F->cb);                     // earlier writes to the pool there before the copies read it
+        uint64_t bytes = 0;
+        const bool ok = mirror_fill(F->cb, addr, size, &bytes);
+        if (bytes) memory_barrier(F->cb);          // the copies before the draw reads them
+        if (ok && out_servable(addr, size)) {
+            ++g_draw_fills;
+            g_draw_fill_bytes += bytes;
+            return;
+        }
+    }
     compute_out_guard(addr, size, why);
 }
 
@@ -2343,6 +2369,9 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                     }
                     if (slot >= 0 && slot < 16 && S.ssbo[d.nvn_stage][slot].addr) {
                         const GState::Bind& bind = S.ssbo[d.nvn_stage][slot];
+                        // the shader may write the binding (its SPIR-V stores or atomics into it; a shader that also reaches memory through
+                        // pointers, A17, counts as writing everything it binds)
+                        const bool writes = b.written || d.shader->refl.global_fallback || !ssbo_readonly_on();
                         BufRef br = resolve_buffer(bind.addr, bind.size);
                         upd_note_read(bind.addr, bind.size ? bind.size : br.avail);
                         // The console's storage access is a raw load at the descriptor's address: nothing stops a shader at the bound size.
@@ -2354,17 +2383,19 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             if (hb.buffer != br.buffer) {
                                 bi.buffer = hb.buffer;
                                 bi.offset = hb.offset;
-                                gpu_wrote(bind.addr, bi.range, kWriteStorage);
-                                out_add(bind.addr, bi.range, hb.buffer, hb.offset, br);   // what the draw writes there is held like a dispatch's
+                                if (writes) {
+                                    gpu_wrote(bind.addr, bi.range, kWriteStorage);
+                                    out_add(bind.addr, bi.range, hb.buffer, hb.offset, br);   // what the draw writes there is held like a dispatch's
+                                }
                                 break;
                             }
                         }
                         if (g_shadowing && br.ok) {                                  // before gpu_wrote: the shadow reads the pool copy while valid
-                            const BufRef sh = shadow_of(bind.addr, bi.range, br, true);
+                            const BufRef sh = shadow_of(bind.addr, bi.range, br, writes);
                             bi.buffer = sh.buffer;
                             bi.offset = sh.offset;
                         }
-                        if (br.ok) gpu_wrote(bind.addr, bi.range, kWriteStorage);      // a storage buffer may be written by the shader
+                        if (br.ok && writes) gpu_wrote(bind.addr, bi.range, kWriteStorage);   // the shader may write it
                     }
                     break;
                 }
@@ -4030,7 +4061,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     }
     if (g_sh_copied) {
         memory_barrier(F->cb);     // the copies into the shadows before the dispatch reads them
-        gstamp("shadow in");
+        if (gpass_on()) gstamp(("shadow in " + cs->hash.substr(0, 8)).c_str());
     }
     if (checkpoints_on()) {
         char t[128];
@@ -5312,8 +5343,9 @@ void replay_begin_submit(Frame& f) {
             NXLOG_I(kTag, "uniform updates: %llu at record time, %llu on the GPU; %zu update ranges; bindings: %llu snapshots made, %llu reused, %llu from game memory",
                     (unsigned long long)g_upd_fast, (unsigned long long)g_upd_slow, g_upd.size(), (unsigned long long)g_upd_snapped,
                     (unsigned long long)g_upd_snap_hits, (unsigned long long)g_upd_direct);
-            NXLOG_I(kTag, "graphics c[0] tables: %llu made, %llu shared; unaligned uniform copies %llu (%llu KiB)", (unsigned long long)g_c0_made_n,
-                    (unsigned long long)g_c0_reused_n, (unsigned long long)g_ubo_unaligned_n, (unsigned long long)(g_ubo_unaligned_bytes >> 10));
+            NXLOG_I(kTag, "graphics c[0] tables: %llu made, %llu shared; unaligned uniform copies %llu (%llu KiB); draws over held results served by filling the copy %llu (%llu KiB)",
+                    (unsigned long long)g_c0_made_n, (unsigned long long)g_c0_reused_n, (unsigned long long)g_ubo_unaligned_n, (unsigned long long)(g_ubo_unaligned_bytes >> 10),
+                    (unsigned long long)g_draw_fills, (unsigned long long)(g_draw_fill_bytes >> 10));
             NXLOG_I(kTag, "occlusion reports: %llu in their pass, %llu with a pass break; %llu queries ended early by a pass break (split)",
                     (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
         }

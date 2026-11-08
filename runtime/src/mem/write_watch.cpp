@@ -293,7 +293,22 @@ LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
         ours |= mine;
     }
     g_busy.fetch_sub(1, std::memory_order_seq_cst);
-    if (!ours) return EXCEPTION_CONTINUE_SEARCH;
+    if (!ours) {
+        // no region took it: a page made writable meanwhile (another releaser) lets the write retry; otherwise the fault is not ours, and the
+        // state of the page in every region is logged for the crash report
+        const DWORD pr = page_protect(addr);
+        if (pr == PAGE_READWRITE) return EXCEPTION_CONTINUE_EXECUTION;
+        const int hi2 = g_hi.load(std::memory_order_seq_cst);
+        for (int i = 0; i < hi2; ++i) {
+            Region* r = g_slots[i].load(std::memory_order_seq_cst);
+            if (!r || addr < r->base || addr >= r->base + r->npages * kPage) continue;
+            const uint64_t pg = (addr - r->base) / kPage;
+            NXLOG_E(kTag, "unhandled write fault %llx: region %d base %llx pages %llu: prot %d valid %d guard %d ban %d releasing %u, protect 0x%lx",
+                    (unsigned long long)addr, i, (unsigned long long)r->base, (unsigned long long)r->npages, test(r->prot.get(), pg), test(r->valid.get(), pg),
+                    test(r->guard.get(), pg), test(r->ban.get(), pg), (unsigned)r->releasing[pg].load(), (unsigned long)pr);
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     g_faults.fetch_add(1, std::memory_order_relaxed);
     return EXCEPTION_CONTINUE_EXECUTION;
 }
@@ -531,7 +546,7 @@ bool all_armed(const Region* r, uint64_t first, uint64_t count) {
     return all_set(r->prot.get(), first, count);
 }
 
-bool all_valid_or_armed(const Region* r, uint64_t first, uint64_t count, const std::atomic<uint64_t>* extra) {
+bool all_valid_or_armed(const Region* r, uint64_t first, uint64_t count, const std::atomic<uint64_t>* extra, const std::atomic<uint64_t>* also) {
     if (!r || !count || first >= r->npages || count > r->npages - first) return false;
     uint64_t p = first;
     const uint64_t end = first + count;
@@ -542,7 +557,8 @@ bool all_valid_or_armed(const Region* r, uint64_t first, uint64_t count, const s
         const uint64_t mask = (hi - lo == 64) ? ~uint64_t{0} : (((uint64_t{1} << (hi - lo)) - 1) << lo);
         const uint64_t v = r->valid[w].load(std::memory_order_acquire);
         if ((v & mask) != mask) {
-            const uint64_t ok = v | (extra[w].load(std::memory_order_acquire) & r->prot[w].load(std::memory_order_acquire));
+            uint64_t ok = v | (extra[w].load(std::memory_order_acquire) & r->prot[w].load(std::memory_order_acquire));
+            if (also) ok |= also[w].load(std::memory_order_acquire);
             if ((ok & mask) != mask) return false;
         }
         p += hi - lo;

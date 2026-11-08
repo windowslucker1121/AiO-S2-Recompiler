@@ -98,7 +98,8 @@ void unguard(Region* r, uint64_t first, uint64_t count);
 bool all_armed(const Region* r, uint64_t first, uint64_t count);
 // Owner: true when every page of the run is valid, or armed with its bit set in `extra` (a caller's bitmap over the same page indices,
 // one bit per page, 64 per word). Word at a time: the per-binding check of the NVN replay (new_servable) over runs of thousands of pages.
-bool all_valid_or_armed(const Region* r, uint64_t first, uint64_t count, const std::atomic<uint64_t>* extra);
+// also (optional): pages with their bit set there count as well.
+bool all_valid_or_armed(const Region* r, uint64_t first, uint64_t count, const std::atomic<uint64_t>* extra, const std::atomic<uint64_t>* also = nullptr);
 uint64_t guard_faults();   // accesses that hit a guarded page (statistics)
 
 uint64_t faults();     // write faults handled so far (statistics)

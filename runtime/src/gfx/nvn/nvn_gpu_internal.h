@@ -170,7 +170,8 @@ void mirror_span_written(uint64_t gpu_address, uint64_t size);
 // The compute bindings that use the copy directly (nvn_replay.cpp): records into cb the copies, from the pool, of the pages of the range the
 // copy does not hold, and tracks them like the copies of mirror_begin_submit. The caller orders earlier writes to the pool before cb's copies
 // and the copies before their readers. True when every page of the range is valid in the copy afterwards; false (nothing or only part of it
-// copied) when a page is hot, banned or cannot be tracked, or the range has no copy. *bytes (optional) receives the bytes copied.
+// copied) when a page is banned or cannot be tracked, or the range has no copy. Hot pages (rewritten by the CPU every frame) are copied for
+// this use without being tracked. *bytes (optional) receives the bytes copied.
 bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes);
 bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use);
 void mirror_begin_submit(Frame& f, bool on);
