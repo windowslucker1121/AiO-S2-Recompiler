@@ -495,6 +495,19 @@ buffers no longer go back whole every second frame: end-of-submission copies 6.6
 holding these results. `[nvn] compute_out_lazy = 0` (everything back at submission end): 29.5 fps. The remaining copy-back cost is the
 "draw storage/xfb" flushes (~410 MB/s, ~8 per frame, `fill failed` = pages newer in the copy but not armed); fixing them needs the copies
 before the render pass opens (look ahead in the command list), not inside it.
+**Session 2026-11-08 (CPU touches of held compute results, WP3 a / WP6).** The guard handler now gets read/write and the host pc; every
+CPU fetch of a held result is attributed in the log (`compute out fetch:` lines, `CPU fetch:` 10 s sums, `[nvn] out_fetch_trace`). Found
+(first scene): (1) **the eight culling buffers** (4.4-6.6 MB) are read by the CPU in their **first page only**: main+0x341a00 reads the
+counters and writes them back to 0, main+0x342ff0 reads after an `InvalidateMappedRange` of the whole buffer (lr main+0x3433cc). They go back
+whole because the next frame's dispatch writes them again while their split part is still held ("held from before" in the
+`sent back at submission end` lines). Splitting those too cut the end-of-submission copies 850 -> 150 MiB/s but cost ~10 fps (the CPU's
+first-page reads and the readers then wait for or flush held data); copying the CPU-written first page into the copy for draws
+(`[nvn] mirror_refill_written`) cut reader flushes 800 -> 150 MiB/s but cost ~7 fps the same way. Both stay off. (2) **The periodic
+20-50 ms hitches** were job-worker reads (guest function main+0x12d0fc0, lr main+0x126d234) of small GPU results (16-192 KiB), a new page
+every second or so: the split held the other pages, so each new page was a guard fault waiting for the frame on the GPU. Results under 1 MiB
+are no longer split (`[nvn] compute_out_split_min_kb`): write-fault-handler hitches 30 -> 6 per 160 s. Invalidates no longer fetch or mark
+(`[nvn] compute_out_invalidate = guard`). A/B with flags on one exe (first scene 20-180 s, alone): 34.7 fps / 1% lows 19.1 (old) vs 34.2 /
+20.8 (new); fps runs here vary by +-4 fps between runs, so compare flags back to back.
 Measuring tips: give `[prof] trace_events` 20000000 for runs past ~110 s (the default 6M fills up); per-10-s fps from the log: hitch lines `N frames in X s`.
 `gfx_nvn_scene_state`: passed in every full test run of this session (no flake seen).
 
