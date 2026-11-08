@@ -44,6 +44,7 @@ tools\
                                 --self-contained true -o <release>\tools\spirv_harness     (~84 MB)
                             (stage the Ryujinx sources first: tools\shaders\scripts\setup_ryujinx.ps1)
   shaders\extract_corpus.py nx tools/shaders/ampere/extract_corpus.py
+  extract\nx_plain_nso.exe  nx tools/extract (only for games whose ExeFS uses ZBIC compression; tools\extract\scripts\build.ps1)
   python\python.exe         optional: Python 3 (for example the embeddable package) with the lz4 package installed.
                             Without it the first python.exe on PATH that can `import lz4.block` is used.
 ```

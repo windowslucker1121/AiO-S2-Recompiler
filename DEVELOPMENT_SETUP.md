@@ -138,8 +138,8 @@ From a Visual Studio x64 developer prompt:
 cmake -S tools\extract -B tools\extract\build\msvc -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build tools\extract\build\msvc
 ```
-Gives `nx_plain_nso.exe` (writes plain NSOs from OoT's ZBIC-compressed `main`). `tools\setup\` is not in this repository, so the
-NSP/XCI reader `nx_extract` is not built here.
+Gives `nx_plain_nso.exe` (writes plain NSOs from OoT's ZBIC-compressed `main`). The project reads only already decrypted dumps (a
+`.nup` or an extracted folder); there is no NSP/XCI reader and nothing reads keys.
 
 ## 5. Game data (supplied by the developer)
 

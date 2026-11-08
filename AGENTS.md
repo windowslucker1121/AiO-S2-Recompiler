@@ -13,7 +13,8 @@ current. How to contribute: `CONTRIBUTING.md`.
   game. Facts are fine: title IDs, build IDs, hashes, offsets, symbol names, short notes about formats.
 - Test fixtures and sample data are synthetic or come from openly licensed projects, with their licence recorded.
 - No piracy help: no links to dumps, keys or firmware, no key derivation or decryption, no instructions beyond "dump your own copy".
-  Do not add code that decrypts game containers or reads console keys.
+  Do not add code that decrypts game containers or reads console keys. Inputs are already decrypted dumps only (an extracted folder or a
+  `.nup`); the key-based NSP/XCI path (`nx_extract --keys`, the launcher's keys page) was removed on 2026-11-08 and must not come back.
 - **Names:** game and Nintendo names only to say what a module is for ("module for <game>"). Never in product, app, exe, window or
   package names, and no Nintendo or game logos, icons or art styles. New game ids are short neutral ids (`oot`, `pkp`).
 - Copied code needs a licence compatible with GPL-3.0 and an entry in the notices (`runtime/THIRD_PARTY_NOTICES.md` or the folder's
@@ -162,7 +163,7 @@ steps in about 2 minutes (224 blocks, 181 programs, 100 s of it the compile whil
 every page screenshotted (`tests/winshot.py`), driver change detected (edited `prepare.state` key), Rebuild "compile again" (0.4 s from the
 pipeline cache), Cancel in the shader scan of the full game (no process left), Play started the exe (refused by the memory guard beside
 another run: the setup now explains an exit within 4 s instead of closing). Not checked: a real Play into the game from the setup, a full
-`.nup` extraction, NSP/XCI (not supported: `tools/setup` is not in this repository).
+`.nup` extraction. NSP/XCI are not supported (encrypted; the project decrypts nothing).
 
 **Shader preparation without batches (2026-11-07, `gpl_prepare` in nvn_gpl.cpp)**: the 192-program batches with a barrier are gone. One
 work list, every thread takes the next program; each shader counts the programs of the list that still need it and the last one releases
@@ -308,7 +309,7 @@ Open points besides the milestones:
 - **auddmg** session answers only ListVirtualDeviceNames; microphone capture (the remake's voice/ocarina features) later.
 - **nn::vi queries** (QueryDisplayHdrStatus/VrrSupported/HdrPaperWhite/CurrentRefreshRate) return the SDK's 0x272 for the stand-in display.
 - **Movies** need libvpx (vcpkg `libvpx:x64-windows-static`, `NXRT_LIBVPX_ROOT`); not installed.
-- **Launcher** (`runtime/apps/launcher`, mpr's, not built for OoT) accepts NSP/XCI/folder only; the Initial Setup (`oot_setup.exe`) takes `.nup` (through `nup_extract.py`) or an extracted folder. NSP/XCI need `tools/setup` (not in this repository).
+- **Launcher** (`runtime/apps/launcher`, mpr's, not built for OoT) accepts an extracted folder; the Initial Setup (`oot_setup.exe`) takes `.nup` (through `nup_extract.py`) or an extracted folder. Encrypted NSP/XCI are not supported (removed 2026-11-08: no code reads keys or decrypts).
 - **Pokopia regression risk** (no Pokopia dump here): shared changes in funcs.py (header/MOD0, ADR starts, RETAA/RETAB, zero FDEs), a64.py
   (PAC decode), tier2 FP16, used-memory accounting, NVN minor 40, TLS +0x110, MapMemory Alias sources, WaitIfEqual64, bsd descriptors.
   Oracles, from `recomp\`: `..\tools\.venv\Scripts\python oracle/difftest/difftest.py all`, `oracle/e2e/run_e2e.py`,
@@ -780,8 +781,8 @@ modules first (~3 min).
   records, all stored raw, 25.6 GB. The update's RomFS overlays the base's.
 - **ZBIC**: OoT's `main` has NSO flags `0xff` (bit 7 = ZBIC); `sdk`, `subsdk0`, `rtld` are LZ4 (`0x3f`). The repo's decoder
   (`runtime/third_party/zstd_zbic`) decoded it and every segment matched its header hash: the first real-game check of that decoder.
-- **`tools/setup/` is not in this repository**, so `nx_extract` (NSP/XCI reader, launcher raw-dump path) cannot be built here.
-  `tools/extract/CMakeLists.txt` builds only `nx_plain_nso` in that case.
+- **No NSP/XCI path** (removed 2026-11-08): `nx_extract` (the key-based NSP/XCI reader on top of `tools/setup`, which this repository never
+  had) and the launcher's raw-dump page are gone. `tools/extract` builds `nx_plain_nso` (ZBIC -> plain NSO) and has `nup_extract.py`.
 - **Zero-length FDEs**: OoT's main has three (module offsets `0x3470b00`, `0x3470b70`, `0x3470be0`) on code that is called.
   `recomp/nxrecomp/funcs.py` now ignores an FDE whose end is not after its start (the lifter crashed with an empty function).
 - **FP16** (FEAT_FP16; the tier-2 lifter and its difftest corpus are Cortex-A57, without it): the generic vector emitters wrote

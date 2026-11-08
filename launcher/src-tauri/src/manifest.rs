@@ -12,7 +12,7 @@ pub struct Game {
     pub id: String,
     pub title: String,
     pub short_title: String,
-    /// Switch program id (16 hex digits): picks the game in NSP / XCI dumps (rawdump.rs)
+    /// Program id (16 hex digits) of the game
     #[serde(default)]
     pub title_id: String,
 }

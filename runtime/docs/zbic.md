@@ -64,9 +64,9 @@ with 2048 or more sequences, off for Huffman weights), so it is a property of th
   can sit next to a plain zstd in the same binary (`tools/extract` links both). `zbic_decompress()` decodes one segment and succeeds
   only on exactly the expected size.
 - `runtime/src/loader/nso.cpp`: segments with their compressed bit set are decoded with ZBIC when flag bit 7 is set, LZ4 otherwise.
-- `tools/extract` (`nx_extract --plain-nso <exefs> <out>`): writes a plain NSO (segments stored, compressed sizes = sizes, bits 0-2
+- `tools/extract` (`nx_plain_nso <exefs> <out>`): writes a plain NSO (segments stored, compressed sizes = sizes, bits 0-2
   and 7 cleared, hash bits and hashes kept) so the lifter (`recomp/nxrecomp/nso.py`, which refuses bit 7 with a pointer here) and
-  any LZ4-only tool read it. The launcher runs it at Set up when the dump's ExeFS has a ZBIC module.
+  any LZ4-only tool read it. The launcher runs it at Set up when the dump's ExeFS has a ZBIC module (`tools/extract/nx_plain_nso.exe` in the package).
 
 ## What was checked
 
