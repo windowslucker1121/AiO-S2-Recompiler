@@ -37,6 +37,7 @@ const StructSize g_structs[] = {
 constexpr size_t kStructCount = sizeof(g_structs) / sizeof(g_structs[0]);
 
 std::atomic<uint64_t> g_calls[kEntryCount];
+std::atomic<nxrt::GapCounter*> g_stub_gaps[kEntryCount];   // made on an entry's first stub call (per call: one atomic add)
 std::atomic<bool> g_impl[kEntryCount];
 std::atomic<uint64_t> g_stub_calls{0};
 std::atomic<uint64_t> g_unknown_calls{0};
@@ -90,8 +91,16 @@ void stub_handler(::Ctx* c) {
         std::lock_guard<std::mutex> lk(g_unknown_mu);
         n = ++g_unknown_by_name[name ? name : "?"];
     }
-    if (idx >= 0) nxrt::gap("nvn-proc", "logging stub called", g_entries[idx].name);
-    else nxrt::gap("nvn-proc", "entry point without an implementation called", name ? name : "?");
+    if (idx >= 0) {
+        nxrt::GapCounter* gc = g_stub_gaps[idx].load(std::memory_order_acquire);
+        if (!gc) {
+            auto* made = new nxrt::GapCounter("nvn-proc", "logging stub called", g_entries[idx].name);   // never freed (registered)
+            gc = g_stub_gaps[idx].compare_exchange_strong(gc, made, std::memory_order_acq_rel) ? made : gc;
+            // a lost race leaks one registered counter that never counts: harmless
+        }
+        gc->hit();
+    }
+    if (idx < 0) nxrt::gap("nvn-proc", "entry point without an implementation called", name ? name : "?");
     const uint64_t caller = lr(c) - 4;   // lr is the return address: the BLR is the instruction before it
     if (static_cast<int64_t>(n) <= log_first_calls()) {
         if (idx >= 0) {
