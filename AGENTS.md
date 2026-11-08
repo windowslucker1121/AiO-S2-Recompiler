@@ -373,6 +373,38 @@ Next steps, in the order they would pay:
 5. Real-time game step (A16) only as a separate, switchable change if 60 fps is not reached everywhere: the step is fixed per frame.
 6. x86-64-v3 build of the lifted code only if the guest threads become the limit (they use ~0.9 cores; main waits for the GPU).
 
+**Session 2026-11-08 (later): measured, mostly ruled out; no fps gain committed.** First scene at d18af54/c3e83ad: 33.9-34.1 fps in
+20-100 s, 22-23 fps later (no instrumentation; the same as 82ac2d0 within the run-to-run spread of +-2 fps). Committed: the crash
+fix (d18af54: a write fault racing `guard()` left a guarded page without its prot bit, "unhandled write fault ... prot 0 guard 1",
+seen twice in ~10 runs, not in 8 after) and diagnostics (c3e83ad): `[prof] gpu_draws` (with `gpu_passes`) stamps every draw as
+`gp:d <fs> <vs|mesh>`; the 10 s lines give why draw reads over held results flush, and which results go back at submission end.
+Where the GPU time is (gpu_passes + gpu_draws, ms per frame): 854x480 pass 12.4-16 (with stamps), end-of-submission copy-backs
+("tail") 2.3, "compute out" flushes 2.2, fea98fe7 1.9, other compute ~3.5. **~830 draws carry the pass time, and 8.3 of the top 11.6 ms
+are draws whose vertex/mesh shader is a gpt shader** (A17 pointer accesses): fern mesh fs 957527e8 / mesh fbb731e2 alone 2.4 ms,
+then 4097c13f/6ec65625, 40478981/f3054ac2, bb9b2ea9/a5bfd19f, 2972adf5/40953571, 3abc0b54/301aa659 (0.5-1 ms each, all gmem gpt).
+Ruled out, one game run each (pass time and fps unchanged):
+- vertex/index/uniform data in host memory: device-local copies for the ~300 MapPhysicalMemory pools at 0x60_xxxx_xxxx (write
+  tracking extended to the alias region; worked, 0 binds "without a copy" left): pass 12.6 -> 12.4 ms, fps 31.5 -> 32.5 (noise);
+- uniform blocks and read-only storage buffers of draws copied into the upload ring (device-local BAR) at record time, even forced
+  for every binding (`host_copy_force`), and draws' read-only SSBOs bound from the pool copy: no change in any draw's time;
+- the guest page table pointed into the pool copies for valid pages: no change (and the entries churned: pointer shaders counted
+  every binding as written, `gpu_wrote`, so their pages never stayed valid).
+So the draws are bound by their shader code, not by where their data lives. The translated gmem access (AmpereGlobal.cs) does, per
+32-bit word, a 16-slot candidate loop over c[0] and then a dependent page walk of 2-3 levels (two loads per level): that latency on
+every pointer load is the most likely cost. **Next (needs the user's go-ahead: re-translation of the 3,413 gmem blocks, ~1 min, and
+then new mesh/vertex pipelines, 40-72 s each to build on demand, or a preparation):** a per-invocation one-entry cache of the last
+page walk / last candidate slot in the translator, then measure with `gpu_draws`.
+Also tried and dropped: (1) aging the CPU-read marks of compute results (`cpu_read`, 600 presents): 34 -> 20 fps (OoT reads those
+pages every few seconds; each read then waits for the GPU in the guard handler). (2) Copying back only the result bytes of pages that
+are newer in the copy but untracked, then filling them, for draws (`draw storage/xfb` 4 GB -> 0.4 MB per 10 s): 34 -> 23 fps, because
+each of ~150 such draws per frame then broke the pass. (3) A per-thread cache in `pool_lookup` and a block filter in `out_overlaps`:
+their share of the render thread did not drop (still 3.5% / 4.5%). The render thread waits 45-50% (GPU-bound).
+Facts for the copy-backs: the end-of-submission copies (~650 MB/s) are 8 culling output buffers of 4.4-6.6 MB (0x796bfa0000,
+0x796c5f6000, 0x796cc4c000, 0x796d2a2000, 0x797045e000, 0x79708a9040, 0x7970f46000, 0x7971391040), each sent back whole about every
+second frame because some of its pages count as CPU-read; "draw storage/xfb" flushes (~400 MB/s) are reads over results whose pages
+are newer in the copy but not armed (`mirror_fill` skips them as "have", `new_servable` wants them armed). The replay with
+`[capture] reset = 0` is useless for timing mesh draws: the culling counts accumulate loop to loop (fern draw 25 ms there).
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
