@@ -170,6 +170,30 @@ The cache the merge was tested with was removed with worktree quirky-panini-7286
 `work\dumps\code` (4c1e8564 is a block from `main`, not in the corpus). Windows Defender quarantined corpus block
 `5747cdd7457ef048.bin` as a false positive (user's decision; batch translations need a `unique.tsv` without it until then).
 
+**Shader preparation after the A18 re-translation (2026-11-08, commit 33cd6b6, RTX 4080, alone):** `oot.exe --prepare-shaders --force`
+with `NXRT_MEMORY_LIMIT_GB=24` and the three `NXRT_NVN_SHADER_*` paths (log `work\run\prep_a18`): **3 h 8 min** (11,275 s), 39,363 programs,
+118,089 parts (49,671 under 2 ms from the driver's caches), 0 missing, 0 failed, footprint peak 15.6 GB; `pipeline_cache.bin` 4.33 GB (the
+2.83 GB file of 2026-11-07 was loaded and kept, so stale entries stay in it). Slow because 12,896 programs count as expensive (gmem, large
+SPIR-V; the A17 page-table code changed all of them after the last preparation): about 45 programs/min for the first 8,000, then the rest
+in minutes. **`--prepare-shaders --check` said "ready" before it**: readiness counts usable programs, not changed SPIR-V, so after a
+re-translation that keeps the number of ok rows, run `--force` (or delete `prepare.state`). A normal start afterwards (default run, no
+`setup_on_start` override) opened no preparation window and loaded the cache (4.3 GB in 3.6 s); 3,500 parts from the preparation at
+1.8 ms each, ~115 new.
+
+**FPS baseline, first scene (2026-11-08, same build and cache, alone; `load_state("first_scene")`, `memory.limit_gb = 24`):** run
+`work\run\fps_base1` (`[gfx] log_fps`, `[diag] soak_csv`): first scene frame took 8.0 s (13,300 draws, first replay), then no hitch over
+0.6 s. Over 290 s in the scene: **average 11.6 fps, min 2.6, max 24.6, median 10.5**; per 30 s window 10.3, 9.9, 10.0, 10.4, 15.3, 14.0,
+15.5, 15.2, 10.1, 5.9, 7.6 (the cutscene's later village shots are the heaviest: 5.9-7.6 fps). Frame times (soak, 5 s windows): median
+p50 95.6 ms, median p99 114 ms, worst 471 ms. Working set 23-25 GB, private 21-22.7 GB. **CPU** (run `work\run\prof_base1`,
+`[prof] sample_hz = 100` + `[prof] trace`; 120 s window: 13.6 fps, p50 80.6 ms): the render thread is the bottleneck, `replay` busy 99.7%
+of the time (73 ms per frame); 60% of it in `begin_draw`, of which `bind_sets` -> `build_set` -> `new_servable`/`out_servable` (45%) with
+`mem::ww::all_armed` 30% and `ww::page_valid` 11% self time (write-watch checks per descriptor), `held_or_pool` 20%, `prepare_textures` 7%,
+`YmmLoop` (memcpy) 10%. Guest threads together ~0.9 cores, the game's main thread 0.08 cores (it waits on the GPU fences the render
+thread feeds). **GPU** (run `work\run\gpu_base1`, `[prof] gpu_passes`, drains inflate the total: 64 ms per frame): 675 render passes per
+frame at 854x480 (24.5 ms, the scene is split into passes every few draws), storage shadows in/out 15.7 ms (61 dispatches), "write memory"
+7.9 ms (844 per frame), gaps between passes 7.1 ms (788), compute 5.4 ms (largest: the network pass fea98fe7 1.9 ms, 20593fd9 0.8,
+beb1205f 0.6, culling root 0.5). First targets for FPS: the write-watch checks in `build_set` and the pass splitting.
+
 ## Boot progress (`oot.exe --game game\oot\updates\131072 --log work\run\bootN\oot.log --max-seconds 60`)
 
 Each fix below moved the boot further; all are in the branch. Crash reports land next to the exe (`game-build\build\release\oot_crash.txt`,
