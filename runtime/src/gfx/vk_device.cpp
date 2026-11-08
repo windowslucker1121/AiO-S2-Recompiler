@@ -59,6 +59,159 @@ namespace {
 constexpr const char* kTag = "gfx";
 constexpr const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
 
+// [gfx] exp_bda_probe (architecture experiment for bet 2, measurement only): can a buffer get a device address of our choosing, the guest
+// address of a pool, through bufferDeviceAddressCaptureReplay's opaque capture addresses? Tries device-local and imported host memory at
+// a few addresses and logs what the driver gave.
+void probe_bda_placement(VkPhysicalDevice pd, VkDevice dev, VkBool32 capture_replay) {
+    if (!capture_replay) { NXLOG_I(kTag, "caps: BDA placement probe: bufferDeviceAddressCaptureReplay not available"); return; }
+    VkPhysicalDeviceMemoryProperties mp{};
+    vkGetPhysicalDeviceMemoryProperties(pd, &mp);
+    constexpr VkDeviceSize kSize = 1ull << 20;
+    auto attempt = [&](uint64_t want, void* host, const char* what) {
+        VkBufferOpaqueCaptureAddressCreateInfo boc = {VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO};
+        boc.opaqueCaptureAddress = want;
+        VkExternalMemoryBufferCreateInfo ebi = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+        ebi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+        if (host) boc.pNext = &ebi;
+        VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, &boc};
+        bi.flags = VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT;
+        bi.size = kSize;
+        bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        VkBuffer buf = VK_NULL_HANDLE;
+        VkResult r = vkCreateBuffer(dev, &bi, nullptr, &buf);
+        if (r != VK_SUCCESS) { NXLOG_I(kTag, "caps: BDA placement %s at 0x%llx: vkCreateBuffer %d", what, (unsigned long long)want, (int)r); return; }
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(dev, buf, &req);
+        uint32_t bits = req.memoryTypeBits;
+        VkImportMemoryHostPointerInfoEXT imp = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+        if (host) {
+            VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+            if (!vkGetMemoryHostPointerPropertiesEXT ||
+                vkGetMemoryHostPointerPropertiesEXT(dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host, &hp) != VK_SUCCESS) {
+                NXLOG_I(kTag, "caps: BDA placement %s: no host pointer properties", what);
+                vkDestroyBuffer(dev, buf, nullptr);
+                return;
+            }
+            bits &= hp.memoryTypeBits;
+            imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+            imp.pHostPointer = host;
+        }
+        uint32_t type = UINT32_MAX;
+        for (uint32_t t = 0; t < mp.memoryTypeCount && type == UINT32_MAX; ++t)
+            if ((bits & (1u << t)) && (host || (mp.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))) type = t;
+        if (type == UINT32_MAX) { vkDestroyBuffer(dev, buf, nullptr); NXLOG_I(kTag, "caps: BDA placement %s: no memory type", what); return; }
+        VkMemoryOpaqueCaptureAddressAllocateInfo moc = {VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO};
+        moc.opaqueCaptureAddress = want;
+        if (host) moc.pNext = &imp;
+        VkMemoryAllocateFlagsInfo fi = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, &moc};
+        fi.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT | VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT;
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &fi};
+        ai.allocationSize = std::max<VkDeviceSize>(req.size, kSize);
+        ai.memoryTypeIndex = type;
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        r = vkAllocateMemory(dev, &ai, nullptr, &mem);
+        uint64_t got = 0;
+        if (r == VK_SUCCESS && vkBindBufferMemory(dev, buf, mem, 0) == VK_SUCCESS) {
+            VkBufferDeviceAddressInfo dai = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+            dai.buffer = buf;
+            got = vkGetBufferDeviceAddress(dev, &dai);
+        }
+        NXLOG_I(kTag, "caps: BDA placement %s: asked 0x%llx, vkAllocateMemory %d, device address 0x%llx (%s)", what, (unsigned long long)want, (int)r,
+                (unsigned long long)got, got == want ? "as asked" : "different");
+        vkDestroyBuffer(dev, buf, nullptr);
+        if (mem) vkFreeMemory(dev, mem, nullptr);
+    };
+    // what the driver hands out without a request (the address range it uses)
+    attempt(0, nullptr, "device-local, no request");
+    for (uint64_t a : {0x7800000000ull, 0x6000000000ull, 0x10000000000ull, 0x200000000000ull}) attempt(a, nullptr, "device-local");
+    void* host = VirtualAlloc(nullptr, kSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (host) {
+        attempt(reinterpret_cast<uint64_t>(host), host, "host import at its own address");
+        VirtualFree(host, 0, MEM_RELEASE);
+    }
+}
+
+// Memory heaps, resizable BAR and the extensions a different binding/memory model would need (architecture experiment E2b),
+// logged once at device creation at info level. Read only: nothing here is enabled.
+template <class HasExt>
+void log_platform_caps(VkPhysicalDevice pd, HasExt&& has_dext, VkBool32 bda, VkBool32 bda_capture_replay) {
+    VkPhysicalDeviceMemoryProperties mp{};
+    vkGetPhysicalDeviceMemoryProperties(pd, &mp);
+    uint64_t best_local = 0; uint32_t best_heap = 0;
+    for (uint32_t h = 0; h < mp.memoryHeapCount; ++h) {
+        const auto& hp = mp.memoryHeaps[h];
+        NXLOG_I(kTag, "caps: heap %u: %.2f GiB%s%s", h, hp.size / 1073741824.0,
+                (hp.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? " device-local" : "",
+                (hp.flags & VK_MEMORY_HEAP_MULTI_INSTANCE_BIT) ? " multi-instance" : "");
+        if ((hp.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && hp.size > best_local) { best_local = hp.size; best_heap = h; }
+    }
+    uint64_t bar_bytes = 0;
+    for (uint32_t t = 0; t < mp.memoryTypeCount; ++t) {
+        const auto f = mp.memoryTypes[t].propertyFlags;
+        NXLOG_I(kTag, "caps: memory type %u heap %u:%s%s%s%s", t, mp.memoryTypes[t].heapIndex,
+                (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? " device-local" : "", (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? " host-visible" : "",
+                (f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? " coherent" : "", (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? " cached" : "");
+        if ((f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+            bar_bytes = std::max<uint64_t>(bar_bytes, mp.memoryHeaps[mp.memoryTypes[t].heapIndex].size);
+    }
+    const bool rebar = bar_bytes > (512ull << 20) && bar_bytes + (256ull << 20) >= best_local;
+    NXLOG_I(kTag, "caps: resizable BAR %s (host-visible device-local heap %.2f GiB of %.2f GiB, heap %u)",
+            rebar ? "on" : (bar_bytes ? "off (small BAR window)" : "off (no host-visible device-local type)"),
+            bar_bytes / 1073741824.0, best_local / 1073741824.0, best_heap);
+    auto yn = [&](const char* e) { return has_dext(e) ? "yes" : "no"; };
+    NXLOG_I(kTag, "caps: VK_EXT_map_memory_placed %s, VK_EXT_descriptor_buffer %s, VK_KHR_push_descriptor %s, VK_KHR_unified_image_layouts %s, "
+                  "VK_EXT_external_memory_host %s, VK_KHR_pipeline_executable_properties %s, VK_EXT_device_generated_commands %s, "
+                  "VK_NV_device_generated_commands %s",
+            yn("VK_EXT_map_memory_placed"), yn("VK_EXT_descriptor_buffer"), yn("VK_KHR_push_descriptor"), yn("VK_KHR_unified_image_layouts"),
+            yn("VK_EXT_external_memory_host"), yn("VK_KHR_pipeline_executable_properties"), yn("VK_EXT_device_generated_commands"),
+            yn("VK_NV_device_generated_commands"));
+    NXLOG_I(kTag, "caps: bufferDeviceAddress %s, bufferDeviceAddressCaptureReplay %s", bda ? "yes" : "no", bda_capture_replay ? "yes" : "no");
+    // feature and property details of the optional extensions
+    VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    VkPhysicalDeviceExternalMemoryHostPropertiesEXT emh = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+    VkPhysicalDeviceDescriptorIndexingProperties dip = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES};
+    dip.pNext = &emh;
+    p2.pNext = &dip;
+#ifdef VK_EXT_descriptor_buffer
+    VkPhysicalDeviceDescriptorBufferFeaturesEXT dbf = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT};
+    VkPhysicalDeviceDescriptorBufferPropertiesEXT dbp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT};
+    if (has_dext("VK_EXT_descriptor_buffer")) { dbf.pNext = f2.pNext; f2.pNext = &dbf; dbp.pNext = p2.pNext; p2.pNext = &dbp; }
+#endif
+#ifdef VK_EXT_map_memory_placed
+    VkPhysicalDeviceMapMemoryPlacedFeaturesEXT mpf = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT};
+    VkPhysicalDeviceMapMemoryPlacedPropertiesEXT mpp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_PROPERTIES_EXT};
+    if (has_dext("VK_EXT_map_memory_placed")) { mpf.pNext = f2.pNext; f2.pNext = &mpf; mpp.pNext = p2.pNext; p2.pNext = &mpp; }
+#endif
+#ifdef VK_KHR_unified_image_layouts
+    VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR uil = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR};
+    if (has_dext("VK_KHR_unified_image_layouts")) { uil.pNext = f2.pNext; f2.pNext = &uil; }
+#endif
+    vkGetPhysicalDeviceFeatures2(pd, &f2);
+    vkGetPhysicalDeviceProperties2(pd, &p2);
+    NXLOG_I(kTag, "caps: host import alignment %llu, update-after-bind sampled images %u, storage buffers %u, maxPerStageDescriptorUpdateAfterBindSampledImages %u",
+            (unsigned long long)emh.minImportedHostPointerAlignment, dip.maxDescriptorSetUpdateAfterBindSampledImages,
+            dip.maxDescriptorSetUpdateAfterBindStorageBuffers, dip.maxPerStageDescriptorUpdateAfterBindSampledImages);
+#ifdef VK_EXT_descriptor_buffer
+    if (has_dext("VK_EXT_descriptor_buffer"))
+        NXLOG_I(kTag, "caps: descriptor buffer %u (capture/replay %u, push %u), sampled image %zu B, sampler %zu B, combined %zu B, storage buffer %zu B, "
+                      "uniform buffer %zu B, max resource range %llu B, sampler range %llu B",
+                dbf.descriptorBuffer, dbf.descriptorBufferCaptureReplay, dbf.descriptorBufferPushDescriptors, dbp.sampledImageDescriptorSize,
+                dbp.samplerDescriptorSize, dbp.combinedImageSamplerDescriptorSize, dbp.robustStorageBufferDescriptorSize,
+                dbp.robustUniformBufferDescriptorSize, (unsigned long long)dbp.maxResourceDescriptorBufferRange,
+                (unsigned long long)dbp.maxSamplerDescriptorBufferRange);
+#endif
+#ifdef VK_EXT_map_memory_placed
+    if (has_dext("VK_EXT_map_memory_placed"))
+        NXLOG_I(kTag, "caps: map memory placed %u (map range %u, unmap reserve %u), alignment %llu", mpf.memoryMapPlaced, mpf.memoryMapRangePlaced,
+                mpf.memoryUnmapReserve, (unsigned long long)mpp.minPlacedMemoryMapAlignment);
+#endif
+#ifdef VK_KHR_unified_image_layouts
+    if (has_dext("VK_KHR_unified_image_layouts"))
+        NXLOG_I(kTag, "caps: unified image layouts %u (video %u)", uil.unifiedImageLayouts, uil.unifiedImageLayoutsVideo);
+#endif
+}
+
 std::string lower(std::string s) {
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
@@ -600,6 +753,10 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     if (x_cp) dev_exts.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
     // tensor-core HMMA of translated compute shaders (the cooperative-matrix variant of a block, vk_coopmat_probe.cpp)
     const bool x_cm = config_get_bool("gfx", "cooperative_matrix", true) && add_ext(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME, &acm);
+    // [nvn] exp_pipeline_stats (architecture experiment E5, measurement only): the driver's statistics of each pipeline (nvn_pipeline.cpp)
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR apep = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
+    const bool x_pep = config_get_bool("nvn", "exp_pipeline_stats", false) && add_ext(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME, &apep);
+    if (x_pep) NXLOG_I(kTag, "pipeline executable statistics on ([nvn] exp_pipeline_stats)");
     features_.external_memory_host = has_dext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     if (features_.external_memory_host) dev_exts.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     if (has_dext(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) { dev_exts.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME); features_.push_descriptor = true; }
@@ -607,6 +764,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     a11.pNext = &a12; a12.pNext = &a13; a13.pNext = chain;
     VkPhysicalDeviceFeatures2 avail = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &a11};
     vkGetPhysicalDeviceFeatures2(physical_, &avail);
+    log_platform_caps(physical_, has_dext, a12.bufferDeviceAddress, a12.bufferDeviceAddressCaptureReplay);
     // the same chain, as it was filled in, enables everything that is available (minus robustness, which costs speed)
     a13.dynamicRendering = VK_TRUE;
     a13.synchronization2 = VK_TRUE;
@@ -760,6 +918,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     r = vkCreateDevice(physical_, &dci, nullptr, &device_);
     if (r != VK_SUCCESS) return fail("vkCreateDevice failed (" + std::to_string(r) + ")");
     volkLoadDevice(device_);
+    if (config_get_bool("gfx", "exp_bda_probe", false)) probe_bda_placement(physical_, device_, a12.bufferDeviceAddressCaptureReplay);
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
 
     uint32_t nq = 0;

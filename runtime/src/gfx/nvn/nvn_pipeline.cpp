@@ -734,6 +734,46 @@ const VkPipelineDynamicStateCreateInfo* mesh_dynamic_state() {
     return &dyn.ci;
 }
 
+namespace {
+// [nvn] exp_pipeline_stats (architecture experiment E5, measurement only): pipelines are created with CAPTURE_STATISTICS and the driver's
+// statistics of each executable (registers, binary size ...) are logged with the shader hashes. The flag changes the pipeline cache key.
+bool exp_pipeline_stats() {
+    static const bool on = config_get_bool("nvn", "exp_pipeline_stats", false);
+    return on;
+}
+void log_pipeline_stats(VkPipeline pipe, const std::string& what) {
+    if (!pipe || !vkGetPipelineExecutablePropertiesKHR || !vkGetPipelineExecutableStatisticsKHR) return;
+    VkPipelineInfoKHR pi = {VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR};
+    pi.pipeline = pipe;
+    uint32_t n = 0;
+    if (vkGetPipelineExecutablePropertiesKHR(vkdev(), &pi, &n, nullptr) != VK_SUCCESS || !n) return;
+    std::vector<VkPipelineExecutablePropertiesKHR> props(n, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR});
+    vkGetPipelineExecutablePropertiesKHR(vkdev(), &pi, &n, props.data());
+    for (uint32_t i = 0; i < n; ++i) {
+        VkPipelineExecutableInfoKHR ei = {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR};
+        ei.pipeline = pipe;
+        ei.executableIndex = i;
+        uint32_t ns = 0;
+        vkGetPipelineExecutableStatisticsKHR(vkdev(), &ei, &ns, nullptr);
+        std::vector<VkPipelineExecutableStatisticKHR> st(ns, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR});
+        if (ns) vkGetPipelineExecutableStatisticsKHR(vkdev(), &ei, &ns, st.data());
+        std::string line;
+        for (const auto& s : st) {
+            char b[160];
+            switch (s.format) {
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR: std::snprintf(b, sizeof b, "%s=%u; ", s.name, s.value.b32); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR: std::snprintf(b, sizeof b, "%s=%lld; ", s.name, (long long)s.value.i64); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR: std::snprintf(b, sizeof b, "%s=%llu; ", s.name, (unsigned long long)s.value.u64); break;
+            default: std::snprintf(b, sizeof b, "%s=%g; ", s.name, s.value.f64); break;
+            }
+            line += b;
+        }
+        NXLOG_I("nvn.exp", "E5 pipeline %s exec %u (%s, stages 0x%x, subgroup %u): %s", what.c_str(), i, props[i].name,
+                static_cast<unsigned>(props[i].stages), props[i].subgroupSize, line.c_str());
+    }
+}
+}  // namespace
+
 VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     ensure_cache();
     const auto t0 = std::chrono::steady_clock::now();
@@ -846,8 +886,11 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
     gi.pColorBlendState = &cb;
     gi.pDynamicState = mesh ? mesh_dynamic_state() : pipeline_dynamic_state();
     gi.layout = layout.layout;
+    if (exp_pipeline_stats()) gi.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
     VkPipeline pipe = VK_NULL_HANDLE;
     const VkResult r = create_graphics_pipeline_tracked(vkdev(), g_cache, &gi, &pipe);
+    if (r == VK_SUCCESS && exp_pipeline_stats())
+        log_pipeline_stats(pipe, std::string(mesh ? "ms " : "vs ") + (mesh ? key.mesh[1]->hash : key.stage[0] ? key.stage[0]->hash : std::string("-")) + " fs " + (key.stage[1] ? key.stage[1]->hash : std::string("-")));
     const double ms_taken = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (r != VK_SUCCESS) {
         NXLOG_E(kTag, "graphics pipeline failed (%d): %s %s fs %s, %u colour targets", static_cast<int>(r), mesh ? "ms" : "vs",
@@ -950,6 +993,7 @@ VkPipeline create_compute(const ShaderInfo* cs, VkShaderModule m, VkPipelineLayo
     ci.stage.module = m;
     ci.stage.pName = "main";
     ci.layout = layout;
+    if (exp_pipeline_stats()) ci.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
     VkPipeline pipe = VK_NULL_HANDLE;
     const uint64_t tp0 = nxrt::hitch_ticks();
     const auto t0 = std::chrono::steady_clock::now();
@@ -962,6 +1006,7 @@ VkPipeline create_compute(const ShaderInfo* cs, VkShaderModule m, VkPipelineLayo
         NXLOG_E(kTag, "compute pipeline failed for %s", cs->hash.c_str());
         return VK_NULL_HANDLE;
     }
+    if (exp_pipeline_stats()) log_pipeline_stats(pipe, "cs " + cs->hash);
     counters().pipelines_created.fetch_add(1);
     ++g_pipeline_count;
     g_pipes_created.add(1);

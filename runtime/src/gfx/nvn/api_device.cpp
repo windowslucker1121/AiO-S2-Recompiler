@@ -29,6 +29,7 @@
 
 #include "nxrt/extras.h"
 #include "nxrt/game.h"
+#include "nvn_arch_exp.h"
 #include "nvn_cmd.h"
 #include "nvn_gpu.h"
 #include "nvn_impl.h"
@@ -279,6 +280,7 @@ void nvnQueueSubmitCommands(NVNqueue* queue, int count, const NVNcommandHandle* 
             else note_unknown_handle(handles[i], count);
         }
     }
+    if (be::archexp::coherence_on()) be::archexp::submit_sample(lists);
     be::gpu::submit(lists);
 }
 
@@ -317,6 +319,7 @@ void nvnQueuePresentTexture(NVNqueue* queue, NVNwindow* window, int index) {
         NXLOG_W(kTag, "nvnQueuePresentTexture: index %d is not one of the %zu window textures; not presented", index, w->textures.size());
         return;
     }
+    be::archexp::game_present();
     be::gpu::present(w, index);
 }
 

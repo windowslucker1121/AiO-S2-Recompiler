@@ -40,6 +40,7 @@
 #include "vk_gauges.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_mirror_cap.h"
+#include "nvn_arch_exp.h"
 
 namespace nxrt::nvn::be {
 
@@ -1269,6 +1270,7 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
 }
 
 bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
+    if (archexp::coherence_on()) archexp::note_gpu_write(gpu_address, size);   // E2a (measurement only)
     if (g_mirrors.empty() || !size) return false;
     const PoolHit hit = pool_lookup(gpu_address);
     if (!hit.pool || !hit.pool->gpu || !hit.pool->gpu->mirror) return false;
@@ -1946,6 +1948,10 @@ bool out_invalidate_by_guard() {
 
 void out_fetch(uint64_t addr, uint64_t size, bool by_fault, int access, uint64_t host_pc) {
     if (!size || (!by_fault && !out_lazy())) return;
+    if (by_fault && archexp::coherence_on()) {   // E2a (measurement only)
+        const PoolHit ph = pool_lookup(addr);
+        archexp::note_guard_fault(addr, access, ph.pool ? ph.pool->flags : 0);
+    }
     const uint64_t lo = addr & ~(kPageBytes - 1), hi = (addr + size + kPageBytes - 1) & ~(kPageBytes - 1);
     const int src = access >= 0 && access < 4 ? access : (on_render_thread() ? kFsRender : kFsInvalidate);
     if (src == kFsInvalidate && out_invalidate_by_guard()) {

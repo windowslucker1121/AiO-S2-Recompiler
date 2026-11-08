@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 
+#include "nvn_arch_exp.h"
 #include "nvn_cmd.h"
 #include "nvn_impl.h"
 #include "nxrt/config.h"
@@ -413,6 +414,7 @@ NVNcommandHandle nvnCommandBufferEndRecording(NVNcommandBuffer* c) {
             cb->overflow_pos += size;
         }
     }
+    if (archexp::lists_on()) archexp::list_recorded(*list);
     const uint64_t h = handle_register(list);
     std::lock_guard<std::mutex> lk(cb->lock);
     cb->handles.push_back(h);
