@@ -7,6 +7,8 @@
 #include "eh_internal.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/eh.h"
+#include "nxrt/log.h"
+#include "nxrt/nxmodule.h"
 
 extern "C" void nx_catch_call(Ctx* c, void (*body)(Ctx*, uint64_t)) {
     using namespace nxrt::eh::detail;
@@ -34,3 +36,39 @@ extern "C" void nx_catch_call(Ctx* c, void (*body)(Ctx*, uint64_t)) {
     for (size_t i = st.size(); i-- > 0;)
         if (st[i] == &rec) { st.resize(i); break; }
 }
+
+namespace nxrt::eh {
+
+// Guest longjmp (setjmp/longjmp of the guest libc): it restores the registers setjmp saved and branches to setjmp's return address,
+// which is in the middle of a lifted function, so dispatch_call finds no function there. The lifter makes every such return address
+// a landing pad of its function and enters that function through nx_catch_call (nxrecomp Env.add_setjmp_pads), so the lifted function
+// is still live on the host stack below us: find its catch frame (the innermost one whose CFA lies above the restored SP: frames
+// entered after setjmp have their CFA at or below it) and resume it at the pad with a host longjmp, dropping every host frame between.
+bool longjmp_landing(::Ctx* c, uint64_t addr) {
+    using namespace detail;
+    const NxModule* m = nxmodule_at(addr);
+    if (!m) return false;
+    bool is_pad = false;
+    for (int lo = 0, hi = m->nresume - 1; lo <= hi;) {
+        const int mid = (lo + hi) / 2;
+        if (m->resume[mid].pad == addr) { is_pad = true; break; }
+        if (m->resume[mid].pad < addr) lo = mid + 1; else hi = mid - 1;
+    }
+    if (!is_pad) return false;
+    auto& st = catch_stack();
+    const uint64_t sp = c->x[31];
+    for (size_t i = st.size(); i-- > 0;) {
+        if (st[i]->cfa > sp) {
+            CatchRec* rec = st[i];
+            rec->pad = addr;
+            rec->landed = true;
+            st.resize(i + 1);
+            NXLOG_D("eh", "guest longjmp: resuming the catch frame (cfa 0x%llx) at 0x%llx, x0 = %llu", static_cast<unsigned long long>(rec->cfa),
+                    static_cast<unsigned long long>(addr), static_cast<unsigned long long>(c->x[0]));
+            longjmp(rec->jb, 1);
+        }
+    }
+    return false;
+}
+
+}  // namespace nxrt::eh

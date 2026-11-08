@@ -25,6 +25,7 @@ namespace {
 
 constexpr uint64_t B = 0x7230000000ull;
 constexpr uint64_t kPadMain = B + 0x1a0, kPadMid = B + 0x380;
+constexpr uint64_t kPadJmp = B + 0x154;   // Fmain: the return address of a `bl setjmp` (the lifter makes it a landing pad)
 
 // typeinfos: kind Unknown (no vtables configured), identity by name
 struct Ti { const void* vptr; const char* name; };
@@ -62,9 +63,10 @@ NxEh g_eh = {kFdes, 3, kRows, kSaved, kSites, kActions, kTypes};
 
 void fn_noop(::Ctx*) {}
 void cleanup_resume(::Ctx* c, uint64_t pad);
-const NxResume kResume[] = {{kPadMid, cleanup_resume}};
+void setjmp_resume(::Ctx*, uint64_t) {}
+const NxResume kResume[] = {{kPadJmp, setjmp_resume}, {kPadMid, cleanup_resume}};   // sorted by pad
 const FnEntry kFns[] = {{B + 0x100, fn_noop}, {B + 0x200, fn_noop}, {B + 0x300, fn_noop}};
-NxModule g_mod = {"ehtest", 20u, B, B + 0x1000, kFns, 3, nullptr, 0, kResume, 1, &g_eh};
+NxModule g_mod = {"ehtest", 20u, B, B + 0x1000, kFns, 3, nullptr, 0, kResume, 2, &g_eh};
 
 // a guest stack in host memory
 alignas(16) uint64_t g_stack[512];
@@ -597,4 +599,51 @@ NXTEST(uncaught_report_calls_what_of_std_exception_types) {
     CHECK_EQ(what_calls, 1);                              // the report asked the exception what it was
     fn_clear();
     nxrt::eh::set_typeinfo_vtables({});
+}
+
+// Guest setjmp/longjmp: Fmain called setjmp (return address kPadJmp), then an inner function with a catch frame of its own runs the
+// guest longjmp, which restores Fmain's SP and x0 = 1 and branches to kPadJmp. dispatch_call finds no function there and resumes
+// Fmain's catch frame at the pad, skipping the inner frame (its CFA is below the restored SP).
+NXTEST(guest_longjmp_resumes_the_setjmp_caller_at_its_pad) {
+    reset_world();
+    REQUIRE(register_module());
+    struct Inner {
+        static void run(::Ctx* c, uint64_t pad) {
+            if (pad) { g_seen.x0 = 0xbad; return; }   // must not be landed in
+            c->x[31] = g_seen.sp_expected;              // the guest longjmp: registers as setjmp saved them, x0 = the value
+            c->x[0] = 1;
+            nxrt::dispatch_call(c, kPadJmp);
+            g_seen.x1 = 0xbad;                          // dispatch_call returned: not landed
+        }
+    };
+    struct Body {
+        static void run(::Ctx* c, uint64_t pad) {
+            g_seen.body_calls++;
+            if (pad) {
+                g_seen.pad = pad;
+                g_seen.x0 = c->x[0];
+                g_seen.sp = c->x[31];
+                return;
+            }
+            const uint64_t entry_sp = c->x[31];
+            c->x[31] = entry_sp - 32;                   // Fmain's frame: setjmp saved this SP
+            g_seen.sp_expected = c->x[31];
+            c->x[31] = entry_sp - 96;                   // a deeper function entered through its own catch frame
+            nx_catch_call(c, Inner::run);
+            g_seen.x1 = 0xbad;
+        }
+    };
+    ::Ctx c{};
+    c.x[31] = stack_top();
+    nx_catch_call(&c, Body::run);
+    CHECK_EQ(g_seen.body_calls, 2);
+    CHECK_EQ(g_seen.pad, kPadJmp);
+    CHECK_EQ(g_seen.x0, 1u);
+    CHECK_EQ(g_seen.x1, 0u);
+    CHECK_EQ(g_seen.sp, g_seen.sp_expected);
+    CHECK_EQ(nxrt::eh::catch_frame_depth(), 0u);
+    // an address that is no landing pad is not taken for a longjmp target
+    ::Ctx c2{};
+    c2.x[31] = stack_top();
+    CHECK(!nxrt::eh::longjmp_landing(&c2, B + 0x158));
 }

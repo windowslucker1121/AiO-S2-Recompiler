@@ -247,6 +247,44 @@ class Env:
         self.eh_starts = starts
         return fdes
 
+    SETJMP_NAMES = frozenset(('setjmp', '_setjmp', 'sigsetjmp', '__sigsetjmp'))
+
+    def add_setjmp_pads(self):
+        """setjmp returns twice. The return address of every `bl setjmp` becomes a landing pad and its function a catcher
+        (entered through nx_catch_call), so a guest longjmp, which branches to that address with the setjmp caller's SP,
+        can resume the still-live lifted function there (the runtime's dispatch_call finds the catch frame, eh/catch_call.cpp).
+        Without it the longjmp ends in "indirect call to an address that is not a known function". Returns the call count."""
+        targets = set()
+        for name, typ, bind, shndx, value, size in self.img.symbols():
+            if name in self.SETJMP_NAMES and shndx != 0 and value:
+                targets.add(value if value >= self.base else self.base + value)
+        bl_targets = {}
+        lo = self.text_lo
+        for i, w in enumerate(self.img.words()):
+            if (w & 0xfc000000) == 0x94000000:
+                pc = lo + 4 * i
+                if self.patches and pc in self.patches:
+                    w = self.patches[pc]
+                    if (w & 0xfc000000) != 0x94000000:
+                        continue
+                bl_targets.setdefault(pc + sext(w & 0x3ffffff, 26) * 4, []).append(pc)
+        sites = []
+        for t, pcs in bl_targets.items():
+            if t in targets or (self.text_lo <= t < self.text_hi and self.plt_symbol(t) in self.SETJMP_NAMES):
+                sites.extend(pcs)
+        pads = set(self.pads)
+        for pc in sorted(sites):
+            i = bisect.bisect_right(self.starts, pc)
+            if not i:
+                continue
+            entry = self.starts[i - 1]
+            if pc + 4 >= self.extent(entry):
+                continue                                   # a tail position: nothing of this function runs after it
+            pads.add(pc + 4)
+            self.catchers.add(entry)
+        self.pads = sorted(pads)
+        return len(sites)
+
     def _terminate_pad(self, pad):
         """A catch(...) pad that only calls __clang_call_terminate (a noexcept boundary): bl __cxa_begin_catch; bl terminate."""
         def bl_target(a):
@@ -465,6 +503,9 @@ def lift_module(spec, outdir, jobs=8, shards=0, bucket=0xC000, log=print):
             env.ends[a] = env.extent(a)
     env.starts = sorted(env.ends)
     env.load_eh()
+    n_setjmp = env.add_setjmp_pads()
+    if n_setjmp:
+        log('%s: %d setjmp calls (their return addresses are landing pads)' % (img.name, n_setjmp))
     from . import jumptables
     jumptables.resolve(env)
     starts = env.starts

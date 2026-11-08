@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "nxrt/eh.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/config.h"
 #include "nxrt/log.h"
@@ -364,6 +365,7 @@ void dispatch_call(::Ctx* c, uint64_t addr) {
         t_hle_name = saved;
         return;
     }
+    if (eh::longjmp_landing(c, addr)) return;   // does not return when it lands
     trap("indirect call to an address that is not a known function", addr);
 }
 

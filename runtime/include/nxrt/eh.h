@@ -132,6 +132,9 @@ void legacy_resume(::Ctx* c);
 // ---- catch frames ------------------------------------------------------------------------------------------------------------
 // nx_catch_call (ctx.h) is defined in src/eh/catch_call.cpp on top of these; they are exposed for tests and diagnostics.
 size_t catch_frame_depth();                       // catch frames live on the calling thread
+// A guest longjmp branching to `addr` (a setjmp return address, made a landing pad by the lifter): resumes the setjmp caller's
+// catch frame there and does not return. False when addr is no landing pad or no live catch frame lies above the guest SP.
+bool longjmp_landing(::Ctx* c, uint64_t addr);
 
 // ---- terminate and diagnostics -----------------------------------------------------------------------------------------------
 // Guest backtrace from the registers in `c` (pc = c->x[30], then the CFI chain): "#0 0x... module+off (symbol+off)" lines.
