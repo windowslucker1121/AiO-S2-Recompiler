@@ -4,6 +4,16 @@
 // (buffer, offset) with no copy, and anything the GPU writes (compute, copies, queries, events) is visible to the CPU through
 // the same pages. Measured on the RTX 3080 and the UHD 770 with MapViewOfFile views: imports work with 4096-byte alignment,
 // and GPU writes are visible through every view of the section.
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <cstring>
 #include <map>
@@ -14,11 +24,14 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 #include <new>
 #include <unordered_set>
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
+#include "nxrt/dispatch.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/log.h"
 #include "nxrt/gauge.h"
@@ -819,6 +832,8 @@ int64_t g_use_dev[3] = {}, g_use_host[3] = {}, g_use_skip[3] = {};
 int64_t g_skip_why[5] = {};          // binds not eligible: outside a pool (or past its end), over 64 MiB, pool without a copy, two chunks, no chunk
 int64_t g_wr_pages[6] = {}, g_wr_calls[6] = {};
 int64_t g_fill_fail[3] = {};         // mirror_fill refused: banned pages, arming over budget or refused, not servable after the fill
+std::atomic<uint64_t> g_st_refill_written{0};
+std::atomic<uint64_t> g_st_pending_written{0};   // the same, covered by a result of the current submission: current in the copy (fresh)   // pages newer in the copy but written by the CPU, copied in by mirror_fill
 
 MirrorMode mirror_mode() {
     static const MirrorMode m = [] {
@@ -979,9 +994,11 @@ void log_summary(uint32_t now) {
             (long long)g_wr_pages[1], (long long)g_wr_calls[2], (long long)g_wr_pages[2], (long long)g_wr_calls[3], (long long)g_wr_pages[3], (long long)g_wr_calls[4],
             (long long)g_wr_pages[4], (long long)g_wr_calls[5], (long long)g_wr_pages[5]);
     NXLOG_I(kTag, "pool mirror binds not eligible: outside a pool %lld, over 64 MiB %lld, pool without a copy %lld, across two chunks %lld, no chunk %lld; "
-            "fills refused: banned %lld, arming %lld (deferred arms %llu), not servable after %lld",
+            "fills refused: banned %lld, arming %lld (deferred arms %llu), not servable after %lld; "
+            "pages newer in the copy but written by the CPU copied in %llu, current in the copy (this submission's results) %llu",
             (long long)g_skip_why[0], (long long)g_skip_why[1], (long long)g_skip_why[2], (long long)g_skip_why[3], (long long)g_skip_why[4],
-            (long long)g_fill_fail[0], (long long)g_fill_fail[1], (unsigned long long)g_st_arm_deferred.load(), (long long)g_fill_fail[2]);
+            (long long)g_fill_fail[0], (long long)g_fill_fail[1], (unsigned long long)g_st_arm_deferred.load(), (long long)g_fill_fail[2],
+            (unsigned long long)g_st_refill_written.load(), (unsigned long long)g_st_pending_written.load());
     std::vector<const Mirror*> top(g_mirrors.begin(), g_mirrors.end());
     std::sort(top.begin(), top.end(), [](const Mirror* a, const Mirror* b) { return a->st_copied > b->st_copied; });
     for (size_t i = 0; i < top.size() && i < 6; ++i) {
@@ -1139,6 +1156,16 @@ void mirror_span_written(uint64_t gpu_address, uint64_t size) {
     }
 }
 
+bool out_pending_on_page(const Mirror* m, uint64_t page);   // below
+
+// [nvn] mirror_refill_written (default off): see stale_new in mirror_fill. Measured 2026-11-08 (first scene): the draws' flushes for GPU
+// readers fell from ~800 to ~150 MiB/s, but the results then stayed held longer, the CPU's reads of their first page waited for the GPU
+// (write-fault stalls 6 -> 20 per 160 s) and fps fell from ~34 to ~27.
+bool refill_written_on() {
+    static const bool on = config_get_bool("nvn", "mirror_refill_written", false);
+    return on;
+}
+
 bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes) {
     if (bytes) *bytes = 0;
     if (!g_mirror_on || !size) return false;
@@ -1164,13 +1191,31 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
     const uint64_t base = (first / chunk_pages) * kChunkBytes;
     bool ok = true;
     auto hot = [&](uint64_t p) { return m.hot_until[static_cast<size_t>(p)] > now; };
+    // A page newer in the copy whose tracking the CPU dropped (it wrote the page) and that no result of this submission covers: the result's
+    // copy-back is recorded already (it runs before this submission), and the CPU wrote the pool page after that result, so the pool is the
+    // current one. It is copied in for this submission like a hot page (fresh). Before, the whole range went back to the pool instead: OoT
+    // clears the counters in the first page of its GPU culling buffers (2-15 MB each), and every draw reading one flushed all of it.
+    auto stale_new = [&](uint64_t x) {
+        return new_get(m, x) && !(m.any_fresh && fresh_get(m, x)) && !mem::ww::all_armed(m.ww, x, 1) && refill_written_on() && !out_pending_on_page(&m, x);
+    };
     for (uint64_t p = first; p <= last;) {
-        auto have = [&](uint64_t x) { return page_valid(m, x) || new_get(m, x) || (m.any_fresh && fresh_get(m, x)); };
-        if (have(p)) { ++p; continue; }
-        // a run of pages to copy in, all hot or all not
-        const bool h = hot(p);
+        auto have = [&](uint64_t x) { return page_valid(m, x) || (new_get(m, x) && !stale_new(x)) || (m.any_fresh && fresh_get(m, x)); };
+        if (have(p)) {
+            // The same kind of page, but a result of this submission covers it: the GPU writes it after the CPU did, so the copy is the
+            // current one already. It counts as current for this submission (fresh) without a copy.
+            if (refill_written_on() && new_get(m, p) && !(m.any_fresh && fresh_get(m, p)) && !page_valid(m, p) && !mem::ww::all_armed(m.ww, p, 1)) {
+                m.fresh[static_cast<size_t>(p >> 6)].fetch_or(uint64_t{1} << (p & 63), std::memory_order_acq_rel);
+                if (!m.any_fresh) { m.any_fresh = true; g_fresh_mirrors.push_back(&m); }
+                g_st_pending_written.fetch_add(1, std::memory_order_relaxed);
+            }
+            ++p;
+            continue;
+        }
+        // a run of pages to copy in, all hot or all not (pages newer in the copy but written by the CPU count as hot: they are not armed)
+        const bool h = hot(p) || stale_new(p);
         uint64_t q = p + 1;
-        while (q <= last && !have(q) && hot(q) == h) ++q;
+        while (q <= last && !have(q) && (hot(q) || stale_new(q)) == h) ++q;
+        if (h && stale_new(p)) g_st_refill_written.fetch_add(q - p, std::memory_order_relaxed);
         bool copy = h;
         if (h) {
             // per-frame CPU data: copied without tracking (arming pages the CPU rewrites every frame costs a fault each), current in the copy
@@ -1201,6 +1246,25 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
     if (!ok) return false;
     if (range_valid(m, first, last - first + 1) || new_servable(m, first, last)) return true;
     g_fill_fail[2]++;
+    {   // why (the first few): pages newer in the copy whose tracking the CPU dropped (written since) and that are not fresh
+        static int logged = 0;
+        if (logged < 40) {
+            ++logged;
+            uint64_t n_new_unarmed = 0, n_other = 0, first_bad = UINT64_MAX;
+            for (uint64_t p = first; p <= last; ++p) {
+                if (page_valid(m, p) || (m.any_fresh && fresh_get(m, p))) continue;
+                const bool armed = mem::ww::all_armed(m.ww, p, 1);
+                if (new_get(m, p) && armed) continue;
+                if (new_get(m, p)) ++n_new_unarmed; else ++n_other;
+                first_bad = std::min(first_bad, p);
+            }
+            NXLOG_I(kTag, "pool copy fill: %llx +%llx not servable after the fill: %llu pages newer in the copy but written by the CPU, %llu other, first at page +%llx "
+                    "(hot %d, cpu_read %d)", (unsigned long long)gpu_address, (unsigned long long)size, (unsigned long long)n_new_unarmed,
+                    (unsigned long long)n_other, (unsigned long long)(first_bad == UINT64_MAX ? 0 : (first_bad - first) * kPageBytes),
+                    first_bad != UINT64_MAX && m.hot_until[static_cast<size_t>(first_bad)] > now ? 1 : 0,
+                    first_bad != UINT64_MAX ? static_cast<int>((m.cpu_read[static_cast<size_t>(first_bad >> 6)].load() >> (first_bad & 63)) & 1) : 0);
+        }
+    }
     return false;
 }
 
@@ -1365,8 +1429,11 @@ std::atomic<uint64_t> g_out_lo{UINT64_MAX}, g_out_hi{0};   // address bounds of 
 std::atomic<uint64_t> g_ob_end{0}, g_ob_gpu{0}, g_ob_fault{0}, g_ob_inval{0};
 std::atomic<uint64_t> g_why_bytes[kOutWhyCount], g_why_n[kOutWhyCount];   // GPU-reader copy-backs by reason
 std::atomic<uint64_t> g_on_split{0};   // entries split at the end of their submission (out_split)
-struct EagerDiag { uint64_t addr = 0, size = 0, bytes = 0, n = 0; bool cpu_read = false; };
+struct EagerDiag { uint64_t addr = 0, size = 0, bytes = 0, n = 0; bool cpu_read = false; uint64_t pages = 0, read_pages = 0, unarmed_pages = 0, was_guarded = 0; };
 std::unordered_map<uint64_t, EagerDiag> g_eager_diag;   // g_out_mu held
+struct FlushDiag { uint64_t addr = 0, size = 0, bytes = 0, n[kOutWhyCount] = {}; };
+std::unordered_map<uint64_t, FlushDiag> g_flush_diag;   // GPU-reader copy-backs by result (g_out_mu held)
+std::atomic<uint64_t> g_on_inval_skipped{0};   // invalidates left to the guards (out_invalidate_by_guard)
 std::atomic<uint64_t> g_on_fault{0}, g_on_inval{0}, g_on_deferred{0}, g_on_eager_read{0}, g_on_eager_noguard{0}, g_on_gpu_flush{0};
 
 void bits_set(std::atomic<uint64_t>* bm, uint64_t first, uint64_t last, bool on) {
@@ -1382,11 +1449,69 @@ bool bits_any(const std::atomic<uint64_t>* bm, uint64_t first, uint64_t last) {
     return false;
 }
 
+// ---- CPU fetches of held results: who, how, how long (the 10 s line; [nvn] out_fetch_trace = N logs the first N fetches one by one) ----
+// Source of a fetch: a guard fault (read or write: the game's own code, host_pc in lifted code), an OS call on guarded pages, an invalidate
+// of the game (nvnMemoryPool/BufferInvalidateMappedRange: lr of the guest thread is the call site), or the render thread (cpu_view).
+enum FetchSrc { kFsRead = 0, kFsWrite, kFsOsRead, kFsOsWrite, kFsInvalidate, kFsRender, kFsCount };
+const char* const kFetchSrcName[kFsCount] = {"read fault", "write fault", "OS read", "OS write", "invalidate", "render thread"};
+struct FetchKey {
+    int src = 0;
+    uint64_t pc = 0, lr = 0, entry = 0;     // host pc of the access, guest lr, the largest held result it touched
+    bool operator<(const FetchKey& o) const { return std::tie(src, pc, lr, entry) < std::tie(o.src, o.pc, o.lr, o.entry); }
+};
+struct FetchStat { uint64_t n = 0, new_pages = 0, waits = 0, wait_ns = 0, max_wait_ns = 0, bytes = 0, entry_size = 0; };
+std::mutex g_fd_mu;
+std::map<FetchKey, FetchStat> g_fd;
+std::atomic<int64_t> g_fd_lines{-1};
+
+int64_t fetch_trace_lines() {
+    int64_t v = g_fd_lines.load(std::memory_order_relaxed);
+    if (v < 0) {
+        v = std::max<int64_t>(0, config_get_int("nvn", "out_fetch_trace", 0));
+        g_fd_lines.store(v, std::memory_order_relaxed);
+    }
+    return v;
+}
+
+void fetch_note(int src, uint64_t addr, uint64_t size, uint64_t host_pc, uint64_t entry, uint64_t entry_size, uint64_t new_pages, uint64_t bytes,
+                uint64_t wait_ns, bool waited, uint64_t need, uint64_t done_before) {
+    FetchKey k;
+    k.src = src;
+    k.pc = host_pc;
+    if (::Ctx* c = diag_thread_ctx()) k.lr = c->x[30];
+    k.entry = entry;
+    {
+        std::lock_guard<std::mutex> lk(g_fd_mu);
+        FetchStat& s = g_fd[k];
+        s.n++;
+        s.new_pages += new_pages;
+        s.bytes += bytes;
+        s.entry_size = entry_size;
+        if (waited) { s.waits++; s.wait_ns += wait_ns; s.max_wait_ns = std::max(s.max_wait_ns, wait_ns); }
+    }
+    // the first N fetches, every fetch that marked pages CPU-read for the first time (rare: the mark is sticky), and slow ones
+    static std::atomic<int64_t> traced{0}, marked{0}, slow{0};
+    const bool tr = traced.load(std::memory_order_relaxed) < fetch_trace_lines() && traced.fetch_add(1) < fetch_trace_lines();
+    const bool mk = new_pages && marked.load(std::memory_order_relaxed) < 200 && marked.fetch_add(1) < 200;
+    const bool sl = wait_ns > 2000000 && slow.load(std::memory_order_relaxed) < 100 && slow.fetch_add(1) < 100;
+    if (!tr && !mk && !sl)
+        return;
+    NXLOG_I(kTag, "compute out fetch: %s %llx +%llx tid %lu pc %llx (guest f_%llx) lr %llx: result %llx +%llx (page +%llx), %llu pages newly CPU-read, %llu KiB copied, "
+            "waited %.2f ms for submission %llu (done %llu)%s",
+            kFetchSrcName[src], (unsigned long long)addr, (unsigned long long)size, (unsigned long)GetCurrentThreadId(), (unsigned long long)host_pc,
+            (unsigned long long)(host_pc ? guest_function_of(host_pc) : 0),
+            (unsigned long long)k.lr, (unsigned long long)entry, (unsigned long long)entry_size,
+            (unsigned long long)(entry && addr >= entry ? (addr - entry) & ~(kPageBytes - 1) : 0), (unsigned long long)new_pages,
+            (unsigned long long)(bytes >> 10), wait_ns / 1e6, (unsigned long long)need, (unsigned long long)done_before, sl ? " (slow)" : "");
+}
+
 void out_register(Mirror* m) {
     std::lock_guard<std::mutex> lk(g_out_mu);
     g_out_mirrors.push_back(m);
     static std::once_flag once;
-    std::call_once(once, [] { mem::ww::set_guard_handler([](uint64_t addr) { out_fetch(addr, kPageBytes, true); }); });
+    std::call_once(once, [] {
+        mem::ww::set_guard_handler([](uint64_t addr, int access, uint64_t host_pc) { out_fetch(addr, kPageBytes, true, access, host_pc); });
+    });
 }
 
 bool new_servable(const Mirror& m, uint64_t first, uint64_t last) {   // every page valid, newer in the copy and armed (the CPU has not written it
@@ -1598,6 +1723,14 @@ bool out_servable(uint64_t addr, uint64_t size) {
     return range_valid(m, first, last - first + 1) || new_servable(m, first, last);
 }
 
+// A result written by the submission being recorded (pending) covers page `page` of m.
+bool out_pending_on_page(const Mirror* m, uint64_t page) {
+    std::lock_guard<std::mutex> lk(g_out_mu);
+    for (const OutEntry& e : g_out)
+        if (e.m == m && e.pending && page >= e.first && page <= e.last) return true;
+    return false;
+}
+
 uint64_t out_flush(VkCommandBuffer cb, uint64_t addr, uint64_t size, int why) {
     if (!out_any()) return 0;
     const uint64_t lo = size == UINT64_MAX ? 0 : addr & ~(kPageBytes - 1);
@@ -1615,6 +1748,13 @@ uint64_t out_flush(VkCommandBuffer cb, uint64_t addr, uint64_t size, int why) {
         }
         if (idx.empty()) return 0;
         bytes = record_copies(cb, idx);
+        if (why != kOutSubmitEnd)
+            for (size_t i : idx) {
+                const OutEntry& e = g_out[i];
+                FlushDiag& d = g_flush_diag[e.addr ^ (e.size << 40)];
+                d.addr = e.addr; d.size = e.size; d.bytes += e.size;
+                d.n[why >= 0 && why < kOutWhyCount ? why : kOutGpuReader]++;
+            }
         for (size_t i : idx) {
             OutEntry& e = g_out[i];
             if (e.guarded) {                                // the CPU may still read old bytes until the copy has run: guarded until then;
@@ -1642,6 +1782,15 @@ uint64_t out_flush(VkCommandBuffer cb, uint64_t addr, uint64_t size, int why) {
 bool out_split_on() {
     static const bool on = config_get_bool("nvn", "compute_out_split", true);
     return on;
+}
+
+// [nvn] compute_out_split_min_kb (default 1024): smaller results are not split; one with a CPU-read page goes back whole at the end of its
+// submission. OoT's job workers read small GPU results (16-192 KiB) a page at a time, a new page every second or so: split, each new page was
+// a guard fault that waited for the submission still on the GPU (20-50 ms, the periodic hitches of the first scene). Whole, the copy-back
+// costs microseconds and the CPU finds the pool current.
+uint64_t out_split_min() {
+    static const uint64_t b = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "compute_out_split_min_kb", 1024))) << 10;
+    return b;
 }
 
 // Lock held. Pending entry i (lazy, not guarded yet) whose pages are of both kinds: the pages that must go back now (the CPU read them, or they
@@ -1695,7 +1844,10 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
             OutEntry& e = g_out[i];
             if (!e.pending) continue;
             bool hold = out_lazy() && e.m && e.m->ww;
-            if (hold && !e.guarded && e.last > e.first && out_split_on()) {
+            // A result still held from an earlier submission is not split again (it goes back whole when the CPU has read some of it). Splitting
+            // it too (2026-11-08: OoT's eight GPU culling buffers, the CPU reads and clears only their first page) cut the end-of-submission
+            // copies from ~850 to ~150 MiB/s but took the first scene from ~31 to ~22 fps.
+            if (hold && !e.guarded && e.last > e.first && out_split_on() && e.size >= out_split_min()) {
                 const int sp = out_split(i, serial, part_copies, part_bufs, rearm);
                 if (sp == 1) { g_on_deferred.fetch_add(1, std::memory_order_relaxed); continue; }   // held for its guarded pages
                 if (sp == 2) { gone.push_back(i); continue; }                                       // every page went back (part_copies)
@@ -1717,6 +1869,17 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
             auto& d = g_eager_diag[e.addr ^ (e.size << 40)];
             d.addr = e.addr; d.size = e.size; d.bytes += e.size; d.n++;
             d.cpu_read = e.m && bits_any(e.m->cpu_read.get(), e.first, e.last);
+            if (e.m) {   // why it went back whole: pages the CPU read, pages not armed (cannot be guarded), held from before
+                d.pages = e.last - e.first + 1;
+                uint64_t rd = 0, ua = 0;
+                for (uint64_t p = e.first; p <= e.last; ++p) {
+                    rd += (e.m->cpu_read[static_cast<size_t>(p >> 6)].load(std::memory_order_relaxed) >> (p & 63)) & 1;
+                    ua += mem::ww::all_armed(e.m->ww, p, 1) ? 0 : 1;
+                }
+                d.read_pages = rd;
+                d.unarmed_pages = ua;
+                d.was_guarded += e.guarded ? 1 : 0;
+            }
         }
         uint64_t bytes = record_copies(cb, eager);
         if (!part_copies.empty()) {
@@ -1740,6 +1903,20 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
 }
 
 void out_retire() {
+    // [nvn] out_cpu_read_reset_s = N (diagnostic, default 0: off): every N s the CPU-read marks are cleared, so the next CPU touch of each held
+    // result faults again and shows up in the fetch lines (who reads, read or write, how long it waits). Costs fps while on.
+    static const int64_t reset_s = config_get_int("nvn", "out_cpu_read_reset_s", 0);
+    if (reset_s > 0) {
+        static auto last = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last >= std::chrono::seconds(reset_s)) {
+            last = now;
+            std::lock_guard<std::mutex> lk(g_out_mu);
+            for (Mirror* m : g_out_mirrors)
+                for (size_t i = 0; i < static_cast<size_t>((m->npages + 63) / 64); ++i) m->cpu_read[i].store(0, std::memory_order_relaxed);
+            NXLOG_I(kTag, "compute out: CPU-read marks cleared (out_cpu_read_reset_s)");
+        }
+    }
     if (!out_any()) return;
     const uint64_t done = poll_completed();
     std::vector<std::pair<uint64_t, uint64_t>> rearm;
@@ -1758,16 +1935,46 @@ void out_retire() {
     for (const auto& r : rearm) mirror_span_written(r.first, r.second);
 }
 
-void out_fetch(uint64_t addr, uint64_t size, bool by_fault) {
+// [nvn] compute_out_invalidate (default "guard"): what nvnMemoryPool/BufferInvalidateMappedRange does with held results. "fetch" (before
+// 2026-11-08): copies them back at once and marks the whole range CPU-read, so later results there go back at the end of every submission.
+// OoT invalidates four 4.4 MB GPU culling buffers whole every other frame (generic buffer code, lr main+0x3433cc) and reads little of them:
+// that alone sent ~350 MB/s back over PCIe. "guard": nothing; the guard faults of the pages the CPU touches do the work.
+bool out_invalidate_by_guard() {
+    static const bool on = config_get_str("nvn", "compute_out_invalidate", "guard") != "fetch";
+    return on;
+}
+
+void out_fetch(uint64_t addr, uint64_t size, bool by_fault, int access, uint64_t host_pc) {
     if (!size || (!by_fault && !out_lazy())) return;
     const uint64_t lo = addr & ~(kPageBytes - 1), hi = (addr + size + kPageBytes - 1) & ~(kPageBytes - 1);
+    const int src = access >= 0 && access < 4 ? access : (on_render_thread() ? kFsRender : kFsInvalidate);
+    if (src == kFsInvalidate && out_invalidate_by_guard()) {
+        // The guards already make every CPU access of a held result current (and a result whose copy-back is recorded stays guarded until
+        // it has run), so an invalidate needs no fetch: the pages the CPU really touches fault and are marked, the rest stays held.
+        g_on_inval_skipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     std::unique_lock<std::mutex> lk(g_out_mu);
     // later results in these pages go back at the end of their submission
+    uint64_t new_pages = 0;
     for (Mirror* m : g_out_mirrors) {
         const uint64_t base = reinterpret_cast<uint64_t>(m->pg->base), end = base + m->npages * kPageBytes;
         if (hi <= base || lo >= end) continue;
-        bits_set(m->cpu_read.get(), (std::max(lo, base) - base) / kPageBytes, (std::min(hi, end) - 1 - base) / kPageBytes, true);
+        const uint64_t f = (std::max(lo, base) - base) / kPageBytes, l = (std::min(hi, end) - 1 - base) / kPageBytes;
+        for (uint64_t p = f; p <= l; ++p) {
+            const uint64_t b = uint64_t{1} << (p & 63);
+            if (!(m->cpu_read[p >> 6].fetch_or(b, std::memory_order_acq_rel) & b)) ++new_pages;
+        }
     }
+    // diagnostics: the largest held result the fetch touches, the time spent waiting for the GPU
+    uint64_t d_entry = 0, d_entry_size = 0, d_wait_ns = 0, d_need = 0, d_done = 0;
+    bool d_waited = false;
+    for (const OutEntry& e : g_out)
+        if (overlaps(e, lo, hi) && e.size > d_entry_size) { d_entry = e.addr; d_entry_size = e.size; }
+    uint64_t d_bytes = 0;
+    auto finish = [&] {          // lock released
+        if (d_entry || new_pages) fetch_note(src, addr, size, host_pc, d_entry, d_entry_size, new_pages, d_bytes, d_wait_ns, d_waited, d_need, d_done);
+    };
     for (int waits = 0;; ) {
         // rebuilt after every wait: entries may have changed or gone while the lock was free
         std::vector<size_t> idx, copy;
@@ -1784,10 +1991,18 @@ void out_fetch(uint64_t addr, uint64_t size, bool by_fault) {
             if (e.flushed && !e.pending && !(rt && e.flushed >= cur)) need = std::max(need, e.flushed);
             else { copy.push_back(i); need = std::max(need, e.serial); }
         }
-        if (idx.empty()) return;
+        if (idx.empty()) {
+            lk.unlock();
+            finish();
+            return;
+        }
         if (need && !serial_done(need) && !(rt && need >= cur) && waits < 8) {
             lk.unlock();
+            const auto t0 = std::chrono::steady_clock::now();
+            if (!d_waited) { d_need = need; d_done = completed_serial(); }
+            d_waited = true;
             if (!wait_serial(need, 5ull * 1000 * 1000 * 1000)) NXLOG_W(kTag, "compute out: waited 5 s for submission %llu to read its result", static_cast<unsigned long long>(need));
+            d_wait_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
             lk.lock();
             ++waits;
             continue;
@@ -1813,6 +2028,9 @@ void out_fetch(uint64_t addr, uint64_t size, bool by_fault) {
         for (const Span& s : spans)
         if (s.m) settle(s.m, s.first, s.last);
         remove_entries(gone);
+        d_bytes = bytes;
+        lk.unlock();
+        finish();
         return;
     }
 }
@@ -1868,8 +2086,45 @@ void out_log() {
         }
         std::sort(v.begin(), v.end(), [](const EagerDiag& a, const EagerDiag& b) { return a.bytes > b.bytes; });
         for (size_t i = 0; i < v.size() && i < 8; ++i)
-            NXLOG_I(kTag, "  sent back at submission end: 0x%llx +0x%llx, %llu times, %llu KiB%s", (unsigned long long)v[i].addr, (unsigned long long)v[i].size,
-                    (unsigned long long)v[i].n, (unsigned long long)(v[i].bytes >> 10), v[i].cpu_read ? " (CPU-read pages)" : "");
+            NXLOG_I(kTag, "  sent back at submission end: 0x%llx +0x%llx, %llu times, %llu KiB%s; last time %llu pages: %llu CPU-read, %llu not armed; %llu times held from before",
+                    (unsigned long long)v[i].addr, (unsigned long long)v[i].size, (unsigned long long)v[i].n, (unsigned long long)(v[i].bytes >> 10),
+                    v[i].cpu_read ? " (CPU-read pages)" : "", (unsigned long long)v[i].pages, (unsigned long long)v[i].read_pages,
+                    (unsigned long long)v[i].unarmed_pages, (unsigned long long)v[i].was_guarded);
+    }
+    static const char* const kWhyShort[kOutWhyCount] = {"reader", "end", "off", "dispatch", "draw buf", "draw ssbo/xfb", "indirect", "buf write", "buf read",
+                                                        "texture", "event", "other", "gmem"};
+    {   // GPU-reader copy-backs by result
+        std::vector<FlushDiag> v;
+        {
+            std::lock_guard<std::mutex> lk(g_out_mu);
+            for (const auto& kv : g_flush_diag) v.push_back(kv.second);
+            g_flush_diag.clear();
+        }
+        std::sort(v.begin(), v.end(), [](const FlushDiag& a, const FlushDiag& b) { return a.bytes > b.bytes; });
+        for (size_t i = 0; i < v.size() && i < 8; ++i) {
+            std::string w;
+            for (int k = 0; k < kOutWhyCount; ++k)
+                if (v[i].n[k]) { char t[48]; snprintf(t, sizeof t, " %s %llu", kWhyShort[k], (unsigned long long)v[i].n[k]); w += t; }
+            NXLOG_I(kTag, "  flushed for GPU readers: 0x%llx +0x%llx, %llu KiB (entry sizes):%s", (unsigned long long)v[i].addr, (unsigned long long)v[i].size,
+                    (unsigned long long)(v[i].bytes >> 10), w.c_str());
+        }
+    }
+    {   // CPU fetches of held results by source (who touched them, how long they waited for the GPU)
+        std::vector<std::pair<FetchKey, FetchStat>> v;
+        {
+            std::lock_guard<std::mutex> lk(g_fd_mu);
+            v.assign(g_fd.begin(), g_fd.end());
+            g_fd.clear();
+        }
+        std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second.wait_ns + a.second.n > b.second.wait_ns + b.second.n; });
+        for (size_t i = 0; i < v.size() && i < 8; ++i) {
+            const FetchKey& k = v[i].first;
+            const FetchStat& st = v[i].second;
+            NXLOG_I(kTag, "  CPU fetch: %s pc %llx (guest f_%llx) lr %llx on result %llx +%llx: %llu times, %llu pages newly CPU-read, %llu KiB, waited %llu times "
+                    "%.1f ms (max %.1f)", kFetchSrcName[k.src], (unsigned long long)k.pc, (unsigned long long)(k.pc ? guest_function_of(k.pc) : 0),
+                    (unsigned long long)k.lr, (unsigned long long)k.entry, (unsigned long long)st.entry_size, (unsigned long long)st.n,
+                    (unsigned long long)st.new_pages, (unsigned long long)(st.bytes >> 10), (unsigned long long)st.waits, st.wait_ns / 1e6, st.max_wait_ns / 1e6);
+        }
     }
     static uint64_t pw_b[kOutWhyCount] = {}, pw_n[kOutWhyCount] = {};
     static const char* const kWhyName[kOutWhyCount] = {"reader", "submit end", "copies off", "dispatch", "draw vertex/index/uniform", "draw storage/xfb",
@@ -1886,6 +2141,10 @@ void out_log() {
         pw_b[w] = b; pw_n[w] = n;
     }
     if (!why.empty()) NXLOG_I(kTag, "compute out: copy-backs by reason (KiB/flushes over %.1f s): %s", secs, why.c_str());
+    static uint64_t p_skip = 0;
+    const uint64_t skip = g_on_inval_skipped.load(std::memory_order_relaxed);
+    if (skip != p_skip) NXLOG_I(kTag, "compute out: %llu invalidates left to the guards over %.1f s", (unsigned long long)(skip - p_skip), secs);
+    p_skip = skip;
     p_end = end; p_gpu = gpu; p_fault = fault; p_inval = inval; pn_fault = nf; pn_inval = ni; pn_def = nd; pn_read = nr; pn_ng = ng; pn_gf = ngf; p_gfaults = gfaults;
 }
 

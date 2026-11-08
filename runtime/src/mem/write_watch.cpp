@@ -273,7 +273,8 @@ LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
     // again on the read-only page and is tracked as usual.
     if (guarded_at(addr)) {
         g_guard_faults.fetch_add(1, std::memory_order_relaxed);
-        if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(addr & ~(kPage - 1));
+        const uint64_t pc = ep->ContextRecord ? static_cast<uint64_t>(ep->ContextRecord->Rip) : 0;
+        if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(addr & ~(kPage - 1), kind == 1 ? kAccessWrite : kAccessRead, pc);
         drop_guard(addr & ~(kPage - 1), kPage);   // still guarded (no handler, or it found nothing): read-only again, as it is
         return EXCEPTION_CONTINUE_EXECUTION;
     }
@@ -650,7 +651,7 @@ void before_os_read(const void* p, uint64_t n) {
     const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kPage - 1), hi = reinterpret_cast<uint64_t>(p) + n;
     for (uint64_t a = lo; a < hi; a += kPage)
         if (guarded_at(a)) {
-            if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(a);
+            if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(a, kAccessOsRead, 0);
             drop_guard(a, kPage);
         }
 }
@@ -661,7 +662,7 @@ void before_os_write(const void* p, uint64_t n) {
         const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kPage - 1), hi = reinterpret_cast<uint64_t>(p) + n;
         for (uint64_t a = lo; a < hi; a += kPage)
             if (guarded_at(a)) {
-                if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(a);
+                if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(a, kAccessOsWrite, 0);
                 drop_guard(a, kPage);
             }
     }
