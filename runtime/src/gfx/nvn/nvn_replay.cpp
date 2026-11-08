@@ -1045,6 +1045,187 @@ void vol3d_prepare(const ProgLayout& pl) {
 
 // Makes the textures a draw samples current (uploaded, in their sampled layout) and the storage images it binds writable (GENERAL).
 // Ends the pass when it has to touch images. The depth attachment itself is left to the pass.
+// ---- pool arrays (A7) ---------------------------------------------------------------------------------------------------------------
+// A shader whose texture handle is computed per pixel indexes a texture array and a sampler array as large as the NVN pools (texture id =
+// handle & 0xfffff, sampler id = handle >> 20; nvn_pool_sets.cpp). Each (pool, array kind) gets one persistent descriptor set, partially
+// bound and updated after bind: every entry starts as the stand-in of its kind (a depth comparison against it answers "lit", as the
+// shaders did before the arrays existed), and the entries of textures the shader may read are written once per present (and again when
+// the device created images since). Entered are the pool's textures whose image exists on the GPU and fit the array's kind; a depth
+// comparison array takes depth formats only (shadow maps). Texture views and samplers of an entry rarely change, so a write seldom
+// touches a descriptor that GPU work in flight reads (the layout allows updates of entries that pending work does not use).
+// [nvn] pool_arrays = 0: the texture sets stay stand-ins (a depth comparison answers "lit"); the sampler sets are filled either way.
+struct PoolSet {
+    VkDescriptorPool dpool = VK_NULL_HANDLE;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    std::vector<uint64_t> written;      // per entry: the view or sampler handle written (0 = the stand-in)
+    std::vector<Ref<Texture>> tex;      // texture sets: the texture of each live entry (held: the game may free it before the next sync,
+                                        // and the descriptor names its view until then)
+    std::vector<uint32_t> live;         // texture sets: entries with a real view
+    uint64_t synced = ~0ull;
+    bool failed = false;
+};
+struct PoolSetKey {
+    const void* owner;
+    int view;
+    bool depth, sampler;
+    bool operator<(const PoolSetKey& o) const { return std::tie(owner, view, depth, sampler) < std::tie(o.owner, o.view, o.depth, o.sampler); }
+};
+std::map<PoolSetKey, PoolSet> g_pool_sets;
+
+bool pool_arrays_on() {
+    static const bool on = config_get_bool("nvn", "pool_arrays", true);
+    return on;
+}
+
+PoolSet* pool_set_create(const PoolBinding& pb, PoolSet& st) {
+    const VkDescriptorSetLayout layout = pool_set_layout(pb.sampler);
+    if (!layout) { st.failed = true; return nullptr; }
+    const uint32_t n = pb.sampler ? kPoolSamplers : kPoolTextures;
+    VkDescriptorPoolSize ps = {pb.sampler ? VK_DESCRIPTOR_TYPE_SAMPLER : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, n};
+    VkDescriptorPoolCreateInfo pci = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pci.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+    pci.maxSets = 1;
+    pci.poolSizeCount = 1;
+    pci.pPoolSizes = &ps;
+    if (vkCreateDescriptorPool(vkdev(), &pci, nullptr, &st.dpool) != VK_SUCCESS) { st.failed = true; return nullptr; }
+    VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = st.dpool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &layout;
+    if (vkAllocateDescriptorSets(vkdev(), &ai, &st.set) != VK_SUCCESS) { st.failed = true; return nullptr; }
+    // every entry the stand-in of its kind
+    std::vector<VkDescriptorImageInfo> ii(n);
+    for (VkDescriptorImageInfo& x : ii)
+        x = pb.sampler ? VkDescriptorImageInfo{dummy_sampler(), VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED}
+                       : VkDescriptorImageInfo{VK_NULL_HANDLE, dummy_view(pb.view, pb.depth), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = st.set;
+    w.dstBinding = 0;
+    w.descriptorCount = n;
+    w.descriptorType = ps.type;
+    w.pImageInfo = ii.data();
+    vkUpdateDescriptorSets(vkdev(), 1, &w, 0, nullptr);
+    st.written.assign(n, 0);
+    st.tex.assign(pb.sampler ? 0 : n, Ref<Texture>());
+    if (pb.sampler) NXLOG_I(kTag, "pool array set: samplers (%u entries)", n);
+    else NXLOG_I(kTag, "pool array set: textures, view type %d%s (%u entries)", static_cast<int>(pb.view), pb.depth ? ", depth compare" : "", n);
+    return &st;
+}
+
+// The set of this pool array, its entries brought up to date with the bound pool (once per present, or when images were created since).
+PoolSet* pool_set_sync(const PoolBinding& pb) {
+    const void* owner = pb.sampler ? static_cast<const void*>(S.spool.get()) : static_cast<const void*>(S.tpool.get());
+    PoolSet& st = g_pool_sets[PoolSetKey{owner, static_cast<int>(pb.view), pb.depth && !pb.sampler, pb.sampler}];
+    if (st.failed) return nullptr;
+    if (!st.set && !pool_set_create(pb, st)) return nullptr;
+    const uint64_t key = counters().presents.load(std::memory_order_relaxed) * 0x9e3779b97f4a7c15ull ^ counters().textures_created.load(std::memory_order_relaxed);
+    // [nvn] pool_arrays = 0 keeps the textures stand-ins; the samplers are real either way, so a depth comparison against a stand-in (depth
+    // 1.0) answers "lit" with the game's comparison function, as the shaders did before the arrays existed
+    if (st.synced == key || !owner || (!pb.sampler && !pool_arrays_on())) return &st;
+    st.synced = key;
+    std::vector<VkDescriptorImageInfo> ii;
+    std::vector<uint32_t> at;
+    auto put = [&](uint32_t i, const VkDescriptorImageInfo& x, uint64_t h) {
+        ii.push_back(x);
+        at.push_back(i);
+        st.written[i] = h;
+    };
+    if (pb.sampler) {
+        std::shared_lock<std::shared_mutex> lk(S.spool->lock);
+        const uint32_t n = std::min<uint32_t>(kPoolSamplers, static_cast<uint32_t>(std::max(0, S.spool->count)));
+        for (uint32_t i = 0; i < n; ++i) {
+            const VkSampler smp = (i < S.spool->used.size() && S.spool->used[i]) ? sampler_for(S.spool->entries[i]) : VK_NULL_HANDLE;
+            const uint64_t h = reinterpret_cast<uint64_t>(smp);
+            if (h == st.written[i]) continue;
+            put(i, {smp ? smp : dummy_sampler(), VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED}, h);
+        }
+    } else {
+        const DescriptorBinding& b = pb.shader->refl.bindings[pb.index];
+        std::shared_lock<std::shared_mutex> lk(S.tpool->lock);
+        const uint32_t count = static_cast<uint32_t>(std::max(0, S.tpool->count));
+        if (count > kPoolTextures) log_once("pool-array-short", "a texture pool has more entries than the pool arrays (65536): later ids read the last entry");
+        const uint32_t n = std::min<uint32_t>(kPoolTextures, count);
+        st.live.clear();
+        for (uint32_t i = 0; i < n; ++i) {
+            const TexturePool::Entry& e = S.tpool->entries[i];
+            Texture* t = (e.used && e.tex) ? e.tex.get() : nullptr;
+            if (t && pb.depth && (!t->fmt || t->fmt->aspect == kAspectColor)) t = nullptr;   // a depth comparison reads depth textures only
+            if (t && !t->gpu) {   // no image of its own yet: one only when another object over the same storage has one (tex_gpu shares it)
+                const Ref<Texture> alias = texture_registry_find_alias(t);
+                if (!alias || !alias->gpu) t = nullptr;
+            }
+            VkImageView v = VK_NULL_HANDLE;
+            if (t) {
+                TexResolved r;
+                r.tex = t;
+                r.view = e.view;
+                r.has_view = e.has_view;
+                v = tex_sampled_view(t, make_request(b, r));
+            }
+            st.tex[i] = v ? e.tex : Ref<Texture>();
+            if (v) st.live.push_back(i);
+            const uint64_t h = reinterpret_cast<uint64_t>(v);
+            if (h == st.written[i]) continue;
+            put(i, v ? VkDescriptorImageInfo{VK_NULL_HANDLE, v, tex_sampled_layout(t)}
+                     : VkDescriptorImageInfo{VK_NULL_HANDLE, dummy_view(pb.view, pb.depth), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, h);
+        }
+        for (uint32_t i = n; i < st.tex.size(); ++i) {                                     // a pool that shrank: stand-ins
+            st.tex[i] = Ref<Texture>();
+            if (st.written[i]) put(i, {VK_NULL_HANDLE, dummy_view(pb.view, pb.depth), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, 0);
+        }
+    }
+    if (!ii.empty()) {
+        std::vector<VkWriteDescriptorSet> ws(ii.size(), VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET});
+        for (size_t k = 0; k < ii.size(); ++k) {
+            ws[k].dstSet = st.set;
+            ws[k].dstBinding = 0;
+            ws[k].dstArrayElement = at[k];
+            ws[k].descriptorCount = 1;
+            ws[k].descriptorType = pb.sampler ? VK_DESCRIPTOR_TYPE_SAMPLER : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            ws[k].pImageInfo = &ii[k];
+        }
+        vkUpdateDescriptorSets(vkdev(), static_cast<uint32_t>(ws.size()), ws.data(), 0, nullptr);
+    }
+    if (g_trace) {
+        std::string ids;
+        for (size_t k = 0; k < st.live.size() && k < 48; ++k) {
+            char t[64];
+            Texture* x = st.tex[st.live[k]].get();
+            std::snprintf(t, sizeof t, " %u:t%u:%s:%ux%ux%u", st.live[k], x ? x->id : 0, x && x->fmt ? x->fmt->name : "?", x ? x->b.width : 0, x ? x->b.height : 0, x ? x->b.depth : 0);
+            ids += t;
+        }
+        TRACE("    pool array %s: %zu entries written, %zu live%s", pb.sampler ? "samplers" : "textures", ii.size(), st.live.size(), ids.c_str());
+        // [nvn] trace_pool_handles = "1a60298d,..." (handles as the shaders read them): what each resolves to in the pool arrays
+        static const std::string want = config_get_str("nvn", "trace_pool_handles", "");
+        for (size_t at0 = 0; at0 < want.size();) {
+            size_t e = want.find(',', at0);
+            if (e == std::string::npos) e = want.size();
+            const uint32_t h = static_cast<uint32_t>(std::strtoul(want.substr(at0, e - at0).c_str(), nullptr, 16));
+            at0 = e + 1;
+            const uint32_t tid = handle_texture_id(h), sid = handle_sampler_id(h);
+            if (pb.sampler) {
+                if (S.spool && sid < S.spool->used.size() && S.spool->used[sid]) {
+                    const SamplerInfo& si = S.spool->entries[sid];
+                    TRACE("    pool handle %08x: sampler %u compare mode %d func %d filter %d/%d wrap %d,%d", h, sid, si.compare_mode, si.compare_func, si.min_filter, si.mag_filter, si.wrap_s, si.wrap_t);
+                } else {
+                    TRACE("    pool handle %08x: sampler %u not in the pool", h, sid);
+                }
+            } else {
+                Texture* x = tid < st.tex.size() ? st.tex[tid].get() : nullptr;
+                char d[128];
+                TRACE("    pool handle %08x: texture id %u %s", h, tid, x ? tex_desc(x, d, sizeof d) : "(stand-in)");
+            }
+        }
+    }
+    return &st;
+}
+
+void pool_sets_reset() {
+    for (auto& [k, st] : g_pool_sets)
+        if (st.dpool) vkDestroyDescriptorPool(vkdev(), st.dpool, nullptr);   // frees the set
+    g_pool_sets.clear();
+}
+
 void prepare_textures(const ProgLayout& pl) {
     vol3d_prepare(pl);
     std::vector<Texture*> need, need_storage;
@@ -1066,6 +1247,23 @@ void prepare_textures(const ProgLayout& pl) {
         if (r.tex->cpu_dirty.load() || tex_layout(r.tex) != tex_sampled_layout(r.tex)) {
             need.push_back(r.tex);
             if (r.tex->cpu_dirty.load() && ft::on()) ft::mark(b.nvn.source == NvnSource::SamplerBinding ? "tx.dirty_bind" : "tx.dirty_uniform", r.tex->id);
+        }
+    }
+    for (const PoolBinding& pb : pl.pool) {   // A7: what a pool array may read is in the sampled layout too (the pass's own targets excepted)
+        if (pb.sampler || !pool_arrays_on()) continue;
+        PoolSet* st = pool_set_sync(pb);
+        if (!st) continue;
+        const bool cs = pb.shader && pb.shader->stage == ShaderStage::Compute;
+        for (uint32_t i : st->live) {
+            Texture* t = st->tex[i].get();
+            if (!t || !tex_gpu(t)) continue;
+            if (shares_image(t, S.depth_tex.get()) || (!cs && is_color_feedback(t))) continue;
+            if (t->cpu_dirty.load() || tex_layout(t) != tex_sampled_layout(t))
+                if (std::find(need.begin(), need.end(), t) == need.end()) {
+                    need.push_back(t);
+                    char d[96];
+                    TRACE("    pool array: entry %u %s to the sampled layout", i, tex_desc(t, d, sizeof d));
+                }
         }
     }
     if (need.empty() && need_storage.empty()) return;
@@ -2127,6 +2325,10 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
         if (!pl.has_set[set]) continue;
         VkDescriptorSet ds = build_set(pl, set);
         if (ds) vkCmdBindDescriptorSets(F->cb, bp, pl.layout, set, 1, &ds, 0, nullptr);
+    }
+    for (const PoolBinding& pb : pl.pool) {   // A7: the pool arrays' persistent sets
+        PoolSet* st = pool_set_sync(pb);
+        if (st && st->set) vkCmdBindDescriptorSets(F->cb, bp, pl.layout, pb.set, 1, &st->set, 0, nullptr);
     }
 }
 
@@ -4872,6 +5074,7 @@ void replay_shutdown() {
     g_prims_generated = g_prims_xfb = 0;
     g_mask.shutdown();
     g_mask_ready = false;
+    pool_sets_reset();
     pipeline_shutdown();
     S = GState();
     P = Pass();

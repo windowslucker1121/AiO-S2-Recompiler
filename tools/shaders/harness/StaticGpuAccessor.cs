@@ -165,9 +165,25 @@ namespace SpirvHarness
         /// The handle expressions of textures bound with constant buffer slot HandleExprSlot (0x20000), by handle number.
         public readonly Dictionary<int, string> HandleExprs = new();
 
-        // No pool-sized texture and sampler arrays: the runtime binds one texture per binding, so a handle the draw does not determine
-        // (Ryujinx's GenerateBindlessAccess) is left out instead (the sample reads 0, a depth comparison 1).
-        public bool QueryHostSupportsSeparateSampler() => false;
+        // Pool-sized texture and sampler arrays (A7): a handle the draw does not determine (per-pixel handles, e.g. the clustered-light
+        // shadow maps: TEX.SCR.B.DC with the light index from a storage loop) becomes Ryujinx's GenerateBindlessAccess: texture id =
+        // handle & 0xfffff into a sampled-image array, sampler id = handle >> 20 into a sampler array. It runs only when
+        // TryConvertBindless (and the handle expressions of ampere-bindless-handle-expr.patch) found no per-draw binding, so every block
+        // whose handle resolves per draw keeps its plain binding. Each array gets an extra descriptor set (CreateExtraSet) that the runtime
+        // binds to its persistent pool set for that array kind (nvn_pool_sets.cpp). Off (NXRT_HARNESS_POOL_BINDLESS=0 / --no-pool-bindless):
+        // the sample is left out as before (it reads 0, a depth comparison 1).
+        public static bool PoolBindless = Environment.GetEnvironmentVariable("NXRT_HARNESS_POOL_BINDLESS") != "0";
+        public bool QueryHostSupportsSeparateSampler() => PoolBindless;
+
+        // Extra sets for the pool arrays: 4 + 3 * stage slot + n (at most three arrays per stage: the sampler array and two texture
+        // kinds), so the stages of one program never share a set number. A fourth array goes into the texture set as before.
+        public const int PoolSetBase = 4, PoolSetsPerStage = 3;
+        int _extraSets;
+        public int CreateExtraSet()
+        {
+            if (!PoolBindless || _extraSets >= PoolSetsPerStage) return -1;
+            return PoolSetBase + PoolSetsPerStage * _stageSlot + _extraSets++;
+        }
 
         // "GPU addresses" are offsets in the code block: the harness passes the program start (0x30 or 0x100).
         public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize)
@@ -255,8 +271,11 @@ namespace SpirvHarness
         public int QueryComputeSharedMemorySize() => _sharedSize;  // 0: the translator uses 4 KB (never happens here)
 
         // Sizes of bindless arrays: pool sizes are draw-time state; a fixed bound makes the SPIR-V valid.
+        // With pool arrays: the sampler id has 12 bits (4096), the texture array covers 65536 ids (OoT's pool: see nvn_pool_sets.cpp; ids past
+        // the end are clamped by the translator, the runtime warns when a pool is larger).
+        public const int PoolTextureArrayLength = 65536, PoolSamplerArrayLength = 4096;
         public int QuerySamplerArrayLengthFromPool() { DrawTimeQueries.Add("poolSize"); return 4096; }
-        public int QueryTextureArrayLengthFromPool() { DrawTimeQueries.Add("poolSize"); return 4096; }
+        public int QueryTextureArrayLengthFromPool() { DrawTimeQueries.Add("poolSize"); return PoolBindless ? PoolTextureArrayLength : 4096; }
         public int QueryTextureArrayLengthFromBuffer(int slot) { DrawTimeQueries.Add("cbufSize"); return 32; }
 
         // Default graphics state: triangles, no alpha test (emulated in the shader on Vulkan), every vertex attribute

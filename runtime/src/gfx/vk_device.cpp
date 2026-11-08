@@ -649,7 +649,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     features_.sparse_residency_aliased = af.sparseResidencyAliased;
     features_.shader_draw_parameters = a11.shaderDrawParameters;
     features_.sampler_mirror_clamp_to_edge = a12.samplerMirrorClampToEdge;
-    features_.descriptor_indexing = a12.descriptorIndexing && a12.shaderSampledImageArrayNonUniformIndexing;
+    // also what the pool arrays (A7, nvn_pool_sets.cpp) need: partially bound sets updated after bind, while unused entries are pending
+    features_.descriptor_indexing = a12.descriptorIndexing && a12.shaderSampledImageArrayNonUniformIndexing && a12.descriptorBindingSampledImageUpdateAfterBind &&
+                                    a12.descriptorBindingPartiallyBound && a12.descriptorBindingUpdateUnusedWhilePending;
     features_.host_query_reset = a12.hostQueryReset;
     features_.fragment_shader_interlock = x_fsi && afsi.fragmentShaderPixelInterlock;
     features_.depth_clip_control = x_dcc && adcc.depthClipControl;

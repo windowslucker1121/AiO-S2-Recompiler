@@ -59,6 +59,7 @@ namespace SpirvHarness
         {
             NoRetry = args.Contains("--no-retry");
             NoGlobalFallback |= args.Contains("--no-global-fallback");
+            if (args.Contains("--no-pool-bindless")) StaticGpuAccessor.PoolBindless = false;   // A7: no pool arrays (StaticGpuAccessor)
             StaticGpuAccessor.DesktopHost = Opt(args, "--host", "desktop") != "moltenvk";
             Debug = args.Contains("--debug-mode");
             try

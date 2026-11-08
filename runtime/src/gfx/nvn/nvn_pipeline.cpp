@@ -498,6 +498,18 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[kProgStages]) {
         if (!s) continue;
         for (size_t i = 0; i < s->refl.bindings.size(); ++i) {
             const DescriptorBinding& b = s->refl.bindings[i];
+            if (b.used && b.set >= 4 && b.set < kMaxSets && b.binding == 0 &&
+                (b.type == DescriptorType::Sampler || b.type == DescriptorType::SampledImage)) {
+                PoolBinding pb;
+                pb.set = b.set;
+                pb.sampler = b.type == DescriptorType::Sampler;
+                pb.view = pool_view_type(b.image);
+                pb.depth = b.image.depth;
+                pb.shader = s;
+                pb.index = static_cast<int>(i);
+                pl.pool.push_back(pb);
+                continue;
+            }
             if (!b.used || b.set > 3) continue;
             const auto k = std::make_pair(b.set, b.binding);
             auto f = index.find(k);
@@ -534,6 +546,13 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[kProgStages]) {
         }
         sig.append("|", 1);
     }
+    uint32_t set_count = 4;
+    for (const PoolBinding& pb : pl.pool) {           // the pool arrays: one shared layout per descriptor type (nvn_pool_sets.cpp)
+        const uint32_t w[2] = {pb.set, pb.sampler ? 1u : 0u};
+        sig.append("Q", 1);
+        sig.append(reinterpret_cast<const char*>(w), sizeof w);
+        set_count = std::max(set_count, pb.set + 1);
+    }
     // push constants of generated stages (the pass-through tessellation control shader): one range from offset 0 over those stages
     VkPushConstantRange pcr = {0, 0, 0};
     for (int st = 0; st < kProgStages; ++st)
@@ -558,9 +577,18 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[kProgStages]) {
                 return nullptr;
             }
         }
+        VkDescriptorSetLayout all[kMaxSets] = {};
+        for (int set = 0; set < 4; ++set) all[set] = nl.sets[set];
+        for (uint32_t set = 4; set < set_count; ++set) all[set] = pool_empty_set_layout();   // a gap between pool sets
+        for (const PoolBinding& pb : pl.pool) all[pb.set] = pool_set_layout(pb.sampler);
+        for (uint32_t set = 4; set < set_count; ++set)
+            if (!all[set]) {
+                NXLOG_E(kTag, "pool array set layout %u failed", set);
+                return nullptr;
+            }
         VkPipelineLayoutCreateInfo pci = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        pci.setLayoutCount = 4;
-        pci.pSetLayouts = nl.sets;
+        pci.setLayoutCount = set_count;
+        pci.pSetLayouts = all;
         pci.pushConstantRangeCount = pcr.size ? 1 : 0;
         pci.pPushConstantRanges = pcr.size ? &pcr : nullptr;
         if (vkCreatePipelineLayout(vkdev(), &pci, nullptr, &nl.layout) != VK_SUCCESS) {
@@ -1109,6 +1137,7 @@ void pipeline_shutdown() {
             if (s) vkDestroyDescriptorSetLayout(d, s, nullptr);
     }
     g_shared_layouts.clear();
+    pool_layouts_shutdown();                     // the pool arrays' set layouts (A7), shared by those pipeline layouts
     for (auto& [k, m] : g_modules)
         if (m) vkDestroyShaderModule(d, m, nullptr);
     g_modules.clear();

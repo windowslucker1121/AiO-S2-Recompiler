@@ -32,10 +32,32 @@ struct BindingDesc {
     int nvn_stage = 0;                          // NVNshaderStage of that module (0 vertex, 1 fragment, 2 geometry, 5 compute)
 };
 
+// A pool array (A7): a texture or sampler array the size of the NVN pool, indexed in the shader by a handle the draw does not determine
+// (the harness's extra sets, StaticGpuAccessor.CreateExtraSet: set 4 + 3 * stage slot + n, binding 0). Bound to a persistent descriptor
+// set that mirrors the bound texture or sampler pool (nvn_pool_sets.cpp, bind_pool_sets in nvn_replay.cpp).
+struct PoolBinding {
+    uint32_t set = 0;
+    bool sampler = false;                       // the sampler array; otherwise sampled images of `view` type
+    VkImageViewType view = VK_IMAGE_VIEW_TYPE_2D;
+    bool depth = false;                         // the shader samples with a depth comparison (only depth textures are entered)
+    const ShaderInfo* shader = nullptr;
+    int index = -1;                             // into shader->refl.bindings
+};
+constexpr uint32_t kMaxSets = 20;               // sets 0..3 (uniform, storage, texture, image) and the pool arrays' extra sets 4..19
+constexpr uint32_t kPoolTextures = 65536;       // the texture array's length (the harness: StaticGpuAccessor.PoolTextureArrayLength)
+constexpr uint32_t kPoolSamplers = 4096;        // the sampler array's length (12-bit sampler ids)
+// nvn_pool_sets.cpp: the shared set layouts of the pool arrays (sampler array / sampled-image array; partially bound, updated after bind)
+// and the empty layout for set numbers between them. Null when the device lacks descriptor indexing.
+VkDescriptorSetLayout pool_set_layout(bool sampler);
+VkDescriptorSetLayout pool_empty_set_layout();
+VkImageViewType pool_view_type(const ImageShape& s);
+void pool_layouts_shutdown();
+
 struct ProgLayout {
     VkDescriptorSetLayout sets[4] = {};
     VkPipelineLayout layout = VK_NULL_HANDLE;
     std::vector<BindingDesc> bindings;          // every used descriptor of every stage, sorted by (set, binding)
+    std::vector<PoolBinding> pool;              // pool arrays (A7), not in `bindings`
     bool has_set[4] = {};
     VkShaderStageFlags push_stages = 0;         // push constant range [0, push_bytes) of generated stages (ShaderInfo::push_bytes); 0 = none
     uint32_t push_bytes = 0;
