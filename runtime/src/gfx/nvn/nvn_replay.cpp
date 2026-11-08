@@ -159,14 +159,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024 };
+enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048 };
 uint32_t ab_mask() {
     static const uint32_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}};
         uint32_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -863,6 +863,7 @@ bool memo_pass_keep() {
 }
 
 // Starts a pass on the current render targets if none is open for them. False when there is nothing to render to.
+void bind_skip_reset();   // below (bind_sets)
 void pass_lookahead();   // below: settles the reads of the coming draws before the pass begins
 bool ensure_pass(bool depth_ro = false) {
     if (P.open && targets_match() && P.depth_ro == depth_ro) return true;
@@ -965,6 +966,7 @@ bool ensure_pass(bool depth_ro = false) {
     gstamp("pass setup");
     if (g_occ_want) occ_reset_ahead();          // outside the pass still: a slot for the counter's part in it
     vkCmdBeginRendering(F->cb, &ri);
+    bind_skip_reset();
     P.open = true;
     // attachments, layouts and feedback changed: sets resolve anew. [nvn] memo_pass_keep (default on): not needed for the set memo, whose
     // signature holds the render targets (feedback dummies) and whose epoch holds g_tex_image_gen (views), while sampled layouts are fixed per format
@@ -3070,6 +3072,28 @@ uint64_t g_set_memo_epoch = 0;
 uint64_t g_sets_reused = 0, g_sets_verify_bad = 0;          // statistics
 uint64_t g_memo_clr[3] = {}, g_memo_last[3] = {};            // statistics: memo clears by the resolve epoch, texture state, results sent back
 
+// [nvn] bind_skip (default on): a graphics descriptor set already bound at its index with the same pipeline layout, in the same command buffer and
+// pass, is not bound again (the persistent pool-array sets were bound for every draw). Cleared when a pass begins.
+VkCommandBuffer g_bs_cb = VK_NULL_HANDLE;
+VkPipelineLayout g_bs_layout = VK_NULL_HANDLE;
+VkDescriptorSet g_bs_ds[16] = {};
+uint64_t g_bs_skipped = 0, g_bs_bound = 0;   // statistics
+void bind_skip_reset() { g_bs_cb = VK_NULL_HANDLE; }
+void bind_graphics_set(const ProgLayout& pl, VkPipelineBindPoint bp, uint32_t set, VkDescriptorSet ds) {
+    static const bool on = nxrt::config_get_bool("nvn", "bind_skip", true);
+    if (bp == VK_PIPELINE_BIND_POINT_GRAPHICS && on && ab_on(kAbBindSkip) && set < 16) {
+        if (g_bs_cb != F->cb || g_bs_layout != pl.layout) {
+            g_bs_cb = F->cb;
+            g_bs_layout = pl.layout;
+            std::memset(g_bs_ds, 0, sizeof g_bs_ds);
+        }
+        if (g_bs_ds[set] == ds) { ++g_bs_skipped; return; }
+        g_bs_ds[set] = ds;
+    }
+    ++g_bs_bound;
+    vkCmdBindDescriptorSets(F->cb, bp, pl.layout, set, 1, &ds, 0, nullptr);
+}
+
 void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
     const SetReuse mode = bp == VK_PIPELINE_BIND_POINT_GRAPHICS && ab_on(kAbSetReuse) ? set_reuse_mode() : SetReuse::Off;
     uint8_t reusable = 0;
@@ -3116,11 +3140,11 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
             ds = build_set(pl, set);
             if (ds && (reusable & (1u << set))) g_set_memo[sig] = ds;
         }
-        if (ds) vkCmdBindDescriptorSets(F->cb, bp, pl.layout, set, 1, &ds, 0, nullptr);
+        if (ds) bind_graphics_set(pl, bp, set, ds);
     }
     for (const PoolBinding& pb : pl.pool) {   // A7: the pool arrays' persistent sets
         PoolSet* st = pool_set_sync(pb);
-        if (st && st->set) vkCmdBindDescriptorSets(F->cb, bp, pl.layout, pb.set, 1, &st->set, 0, nullptr);
+        if (st && st->set) bind_graphics_set(pl, bp, pb.set, st->set);
     }
 }
 
@@ -5988,6 +6012,7 @@ void replay_begin_submit(Frame& f) {
                     (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
             NXLOG_I(kTag, "game barriers: %llu, %llu in an open pass: %llu kept the pass (barrier_keep_pass, bits seen %x), %llu ended it after storage or stream-out writes (bits of all %x)",
                     (unsigned long long)g_bar_n, (unsigned long long)g_bar_in_pass, (unsigned long long)g_bar_kept, g_bar_bits_kept, (unsigned long long)g_bar_unsafe, g_bar_bits_all);
+            NXLOG_I(kTag, "graphics descriptor set binds: %llu made, %llu skipped as already bound (bind_skip)", (unsigned long long)g_bs_bound, (unsigned long long)g_bs_skipped);
             NXLOG_I(kTag, "submissions: %llu, parts sent ahead while recording (submit_chunk_draws): %llu; draw buffer checks skipped %llu; pass look-aheads %llu settled %llu ranges; descriptor sets resolved %llu, %llu of them already in the submission's cache; %llu bound again without resolving (set_reuse), %llu differed (verify); resolve epoch moves: commands %llu, GPU writes %llu, passes %llu; set memo cleared by the epoch %llu, texture state %llu, results sent back %llu",
                     (unsigned long long)counters().submits.load(), (unsigned long long)counters().submit_chunks.load(), (unsigned long long)g_odb_skipped, (unsigned long long)g_la_scans, (unsigned long long)g_la_settled, (unsigned long long)g_sets_built, (unsigned long long)g_sets_cached,
                     (unsigned long long)g_sets_reused, (unsigned long long)g_sets_verify_bad, (unsigned long long)g_bump_n[kBumpOp],
