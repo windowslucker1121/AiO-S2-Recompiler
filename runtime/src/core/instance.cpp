@@ -5,6 +5,7 @@
 
 #include <windows.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -28,6 +29,20 @@ std::string str(const fs::path& p) {
 bool is_absolute(const std::string& p) {
     if (p.size() >= 2 && (p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/')) return true;   // UNC
     return u8(p).is_absolute();
+}
+
+// Two names of one file (a hard link): same volume and file index.
+bool same_file(const std::string& a, const std::string& b) {
+    auto id = [](const std::string& p, BY_HANDLE_FILE_INFORMATION* i) {
+        HANDLE h = CreateFileW(u8(p).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        const bool ok = GetFileInformationByHandle(h, i) != 0;
+        CloseHandle(h);
+        return ok;
+    };
+    BY_HANDLE_FILE_INFORMATION x = {}, y = {};
+    return id(a, &x) && id(b, &y) && x.dwVolumeSerialNumber == y.dwVolumeSerialNumber && x.nFileIndexHigh == y.nFileIndexHigh &&
+           x.nFileIndexLow == y.nFileIndexLow;
 }
 
 std::string exe_path() {
@@ -133,6 +148,18 @@ void instance_apply_config() {
     // The "Preparing shaders" window translates into the shared shader cache and rewrites the shared pipeline cache and prepare.state:
     // the default run (or --prepare-shaders) does that.
     if (!config_has("nvn", "setup_on_start")) config_set("nvn", "setup_on_start", "0");
+    // The marker of an instance that writes its pipeline cache back (instance_keep_pipeline_cache): the start-up sweep of other runs skips it.
+    std::error_code ec;
+    const fs::path marker = u8(g_dir) / "keep_pipeline_cache";
+    if (instance_keep_pipeline_cache()) {
+        if (FILE* f = _wfopen(marker.c_str(), L"wb")) { std::fputs("[instance] keep_pipeline_cache = 1: this folder's pipeline_cache.bin is kept\n", f); std::fclose(f); }
+    } else {
+        fs::remove(marker, ec);
+    }
+}
+
+bool instance_keep_pipeline_cache() {
+    return instance_active() && config_get_bool("instance", "keep_pipeline_cache", false);
 }
 
 void instance_link_pipeline_cache() {
@@ -163,7 +190,10 @@ void instance_link_pipeline_cache() {
         std::error_code e2;
         const bool have = fs::exists(u8(own), e2);
         const bool older = have && fs::last_write_time(u8(own), e2) < t_shared;
-        if (!have || older) {
+        // an instance that does not keep its cache (the default) always starts from the shared one: a private file left by an older build
+        // or a kept run goes
+        const bool stale = have && !instance_keep_pipeline_cache() && !same_file(own, shared);
+        if (!have || older || stale) {
             // A hard link costs nothing (gigabytes after a shader preparation); the instance's first save writes a file of its own under
             // the same name and leaves the shared one alone. Another volume: a copy.
             fs::remove(u8(own), e2);

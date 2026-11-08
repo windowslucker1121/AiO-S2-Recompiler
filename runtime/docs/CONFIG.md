@@ -455,11 +455,17 @@ the instance folder. The keys below without a default stay off.
 | `[fs] save_dir` (saves, temporary storage) | `%APPDATA%\<save folder>\save` | `<instance folder>\save` (empty at first; copy a save in to start from it) |
 | `[play] controls` | `controls.ini` (game folder) | its own copy, made from the game folder's the first time |
 | `[nvn] pipeline_keys`, `[nvn] shader_order` | game folder | own copies, made from the game folder's the first time |
-| `[nvn] pipeline_cache` | `pipeline_cache.bin` beside the shader cache folder | `<instance folder>\pipeline_cache.bin`: a hard link to the shared file (a copy across volumes), renewed when the shared one is newer. The instance's first save writes its own file of the shared size (a full preparation: 2-4 GB) |
+| `[nvn] pipeline_cache` | `pipeline_cache.bin` beside the shader cache folder | `<instance folder>\pipeline_cache.bin`: a hard link to the shared file (a copy across volumes), renewed when the shared one is newer; a private file left from an older run is replaced by the link. The instance only reads it: it never writes the cache back, unless `[instance] keep_pipeline_cache = 1` (then its saves write a private file of the shared size, 2-6 GB, and the folder gets the marker file `keep_pipeline_cache`) |
 | `[nvn] setup_on_start` | `true` | `false`: the "Preparing shaders" window writes the shared shader data. `--prepare-shaders` refuses `--instance` |
 | `[album] dir`, `[nvn] shot_dir`, `[test] out`, `[prof] sample_out` | relative to the game folder or exe | inside the instance folder |
 | `[test] shot_dir`, `[test] record`, `[diag] soak_csv`, `[prof] trace`, `[time] csv`, `[audio] wav_dump`, `[nvn] dump_missing`, `[nvn] dump_astc` | off unless set | inside the instance folder when set to a relative path |
 | Screenshots and texture dumps with relative paths (`[boot] screenshot_at`, `[nvn] trace_frame` PNGs, `gpu_fault_vendor.bin`) | working folder (game folder) | instance folder |
+
+`[instance] keep_pipeline_cache` (default `false`): see `[nvn] pipeline_cache` above. Pipelines an instance builds that the shared cache lacks
+come from the driver's own disk cache on its next start. Every instance start also removes the `pipeline_cache.bin` of the other folders beside
+its own (the instance root, e.g. `worki_run\oot`) that no running instance holds (their run crashed, was killed, or came from a build that
+still wrote private caches), except in folders with the `keep_pipeline_cache` marker; the log line `removed the pipeline caches of N instance
+folders` says how much went. Before this, every named instance kept a private copy of the whole cache (150 GB in 50 folders, 2026-11-08).
 
 Shared by every run: the game files (exefs, romfs), the shader cache (`[nvn] shader_cache`; the on-demand translator writes each `.spv` under a
 temporary name and moves it into place, and appends `results.tsv` rows under an exclusive-write open), the BC7 cache (`[nvn] bc7_cache`; temporary

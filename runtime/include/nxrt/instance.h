@@ -38,4 +38,10 @@ void instance_apply_config();
 // it. A no-op for the default run and when [nvn] pipeline_cache is set to an absolute path or to nothing.
 void instance_link_pipeline_cache();
 
+// Whether this instance writes its pipeline cache back ([instance] keep_pipeline_cache, default off). Off, an instance only reads the
+// shared cache through its hard link and never saves: a save would write a private file of the whole cache (2-6 GB) into its folder, and
+// named instances (one per test run) left ~150 GB of them behind. The default run always saves (the shared cache). A kept instance has
+// the marker file keep_pipeline_cache in its folder, so the start-up sweep (the game exe) leaves its cache alone.
+bool instance_keep_pipeline_cache();
+
 }  // namespace nxrt

@@ -21,6 +21,7 @@
 #include "nxrt/config.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
+#include "nxrt/instance.h"
 #include "nxrt/log.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_spirv_patch.h"
@@ -191,6 +192,11 @@ void ensure_cache() {
 // Returns the size of the file written (0: nothing written).
 uint64_t save_cache() {
     if (!g_cache || g_cache_path.empty()) return 0;
+    if (nxrt::instance_active() && !nxrt::instance_keep_pipeline_cache()) {   // instances read the shared cache only (nxrt/instance.h)
+        static std::atomic<bool> told{false};
+        if (!told.exchange(true)) NXLOG_I(kTag, "pipeline cache: a named instance does not write it back ([instance] keep_pipeline_cache = 1 does)");
+        return 0;
+    }
     std::lock_guard<std::mutex> lk(g_save_mu);
     NXFT("pipe.cache.save");
     g_cache_dirty.store(false);

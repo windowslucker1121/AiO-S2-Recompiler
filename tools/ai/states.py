@@ -613,23 +613,50 @@ class StateTools:
                     if m := done.search(ln):
                         for r in reqs:
                             r.unlink(missing_ok=True)
-                        return {'ok': m.group(1) == 'written', 'capture': m.group(2), 'id': Path(m.group(2)).name, 'summary': m.group(3)}
+                        out = {'ok': m.group(1) == 'written', 'capture': m.group(2), 'id': Path(m.group(2)).name, 'summary': m.group(3)}
+                        if out['ok']:
+                            out['removed'] = self._prune_captures(keep_id=out['id'])
+                        return out
         for r in reqs:
             r.unlink(missing_ok=True)
         return {'ok': False, 'why': f'no capture within {timeout_s:g} s (a build without frame capture, no frame presented, or stuck)'}
 
-    def captures(self, id: str = None, show: bool = True):
-        """Frame captures (work/captures), newest first: id, size in GB, whether the game's reference picture is there. With id (a folder name,
-        part of one, or "latest"): the files and (show) the reference picture."""
+    def _capture_list(self):
         d = self._captures_dir()
-        caps = sorted((p for p in d.iterdir() if p.is_dir() and (p / 'capture.bin').exists()), key=lambda p: p.name, reverse=True) if d.exists() else []
+        return d, sorted((p for p in d.iterdir() if p.is_dir() and (p / 'capture.bin').exists()), key=lambda p: p.name, reverse=True) if d.exists() else []
+
+    def _prune_captures(self, keep_id: str = None):
+        """After a new capture: only the newest NXRT_AI_CAPTURES_KEEP captures (default 5) stay, plus every capture marked keep (a file
+        named `keep` in its folder: captures(id, keep=True)). Captures are 3-4 GB each. Returns the ids removed."""
+        try:
+            n = int(os.environ.get('NXRT_AI_CAPTURES_KEEP', '5'))
+        except ValueError:
+            n = 5
+        _, caps = self._capture_list()
+        removed = []
+        for c in [c for c in caps if not (c / 'keep').exists()][max(n, 1):]:
+            if c.name == keep_id:
+                continue
+            shutil.rmtree(c, ignore_errors=True)
+            removed.append(c.name)
+        return removed
+
+    def captures(self, id: str = None, show: bool = True, keep: bool = None):
+        """Frame captures (work/captures), newest first: id, size in GB, whether the game's reference picture is there, whether it is marked
+        keep. With id (a folder name, part of one, or "latest"): the files and (show) the reference picture; keep=true marks it so that
+        capture_frame never removes it (it keeps only the newest NXRT_AI_CAPTURES_KEEP unmarked captures, default 5), keep=false unmarks it."""
+        d, caps = self._capture_list()
         if id is None:
             return {'captures_dir': str(d), 'captures': [{'id': c.name, 'gb': round(sum(f.stat().st_size for f in c.iterdir() if f.is_file()) / 2**30, 2),
-                                                          'reference': (c / 'reference.png').exists()} for c in caps]}
+                                                          'reference': (c / 'reference.png').exists(), 'keep': (c / 'keep').exists()} for c in caps]}
         c = caps[0] if id == 'latest' and caps else next((x for x in caps if x.name == id), None) or next((x for x in caps if id in x.name), None)
         if c is None:
             raise ValueError(f'no capture {id!r} in {d}')
-        info = {'id': c.name, 'path': str(c), 'files': {f.name: f.stat().st_size for f in c.iterdir() if f.is_file()}}
+        if keep is True:
+            (c / 'keep').write_text('kept: capture_frame does not remove this capture\n', encoding='utf-8')
+        elif keep is False:
+            (c / 'keep').unlink(missing_ok=True)
+        info = {'id': c.name, 'path': str(c), 'keep': (c / 'keep').exists(), 'files': {f.name: f.stat().st_size for f in c.iterdir() if f.is_file()}}
         if show and (c / 'reference.png').exists():
             return jpeg(c / 'reference.png'), info
         return info

@@ -95,6 +95,11 @@ preparation made (x ms each), M new (y ms each); the overlay shows K left` track
 took 25 min for 117,981 parts (both raster sets); a forced second one loads the file, rebuilds everything in 58 s and saves the same
 2,305,488,425 bytes. Test folder: `work\shaders\pcfix` (deleted after the merge; runs `work\run\pcfix_*`).
 
+**Game library (`recomp_library.exe`, 2026-11-08, replaces `oot_setup.exe`; same sources and target `game_setup`)**: the one front end the
+user chose (native Win32, not the Tauri `launcher/`): game cards, a preparation queue per game, Play; manifests read at run time, so one
+exe serves every game; `library.ini` next to the exe. State, test route (`work\build\library\build.cmd`, `--add <dump>`, `tests\winshot.py`)
+and next steps (settings pages, building games from the library): `MULTIGAME_PLAN.md`. The text below describes the steps and checks,
+which it keeps; game names now come from the manifest at run time instead of `game_manifest.h`.
 **Initial Setup (`oot_setup.exe`, since 2026-11-07; `runtime/apps/setup`, target `game_setup`, name from `game.toml` `files.setup_exe`)**:
 the player's first program, native Win32 (menu bar, four pages: Requirements, Game files, Prepare, Play; task dialog for Rebuild).
 Game independent: names from `game_manifest.h` (`GAME_DUMP_VERSION`, `GAME_MAIN_BUILD_ID` were added to `GameManifest.cmake`); it links
@@ -462,8 +467,9 @@ GPU state, the guest memory the GPU reads, the images the GPU rendered before it
 `[nvn] skip_fs_file`, `trace_frame`/`trace_snap*`, `[prof] gpu_passes`, screenshots and SSIM against `reference.png` all work on it.
 Shaders come from the shader cache at load, so a re-translated block shows on the next replay start without a new capture.
 
-MCP tools: `capture_frame(name, instance=...)` (the game writes `work\captures\<time>-<instance>-<name>`, 3-10 s, ~4 GB),
-`captures(id)`, `replay_capture(id, instance="replay", seconds=...)`. A request file `capture_frame[.<pid>]` in the request folder or
+MCP tools: `capture_frame(name, instance=...)` (the game writes `work\captures\<time>-<instance>-<name>`, 3-10 s, ~4 GB; afterwards
+only the newest `NXRT_AI_CAPTURES_KEEP` captures stay, default 5, plus those marked with `captures(id, keep=true)`: a file `keep` in the
+capture folder), `captures(id)`, `replay_capture(id, instance="replay", seconds=...)`. A request file `capture_frame[.<pid>]` in the request folder or
 `[capture] at_present = N` do the same without the tools. The way in: `load_state("first_scene")` (30-55 s on the 5800X3D/RTX 4080),
 then `capture_frame`.
 
@@ -549,8 +555,10 @@ Parallel sessions no longer queue for one game window: `oot.exe --instance NAME 
 own beside others. It writes everything of its own into its folder (default `<game folder>\instances\NAME`; the MCP server uses
 `work\ai_run\oot\NAME`): log, crash / freeze / fatal reports, `dump_threads`, saves and temporary storage (empty at first), `controls.ini`,
 `pipeline_keys.bin`, `shader_order.txt` (copied from the game folder the first time), `pipeline_cache.bin` (a hard link to the shared prepared
-cache, renewed when that one is newer; the instance's first save writes its own file of the shared one's size, which happened at the
-title already: ~3,000 shader parts built ahead), screenshots, test output and the outputs of
+cache, renewed when that one is newer; **an instance never writes it back** unless `[instance] keep_pipeline_cache = 1`, since 2026-11-08:
+every instance used to save a private copy of the whole cache, 2-6 GB, and ~50 instance folders held 150 GB; each instance start also
+deletes the `pipeline_cache.bin` of other instance folders beside it that no running instance holds, except folders with the
+`keep_pipeline_cache` marker file), screenshots, test output and the outputs of
 diagnostic keys given as relative paths. Shared: the game files, the shader cache (the translator's writes are atomic) and the BC7 cache
 (temporary name + rename). The full list: `runtime/docs/CONFIG.md`, "Named instances"; code: `runtime/src/core/instance.cpp`.
 The window title ends in ` [NAME]`. One run per game folder without a name (as before), one per instance folder with one.

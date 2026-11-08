@@ -145,15 +145,26 @@ NXTEST(instance_pipeline_cache_links_to_the_shared_one) {
     write(own.string() + ".tmp", "PREPARED+MINE");
     fs::rename(own.string() + ".tmp", own);
     CHECK(read(shared) == "PREPARED");
-    // The next start keeps the instance's newer file ...
+    // An instance does not keep a private cache (it never saves one now; a file left by an older build): the next start links again ...
     config_clear();
     config_set("nvn", "shader_cache", cache.c_str());
+    instance_link_pipeline_cache();
+    CHECK(read(own) == "PREPARED");
+    CHECK(fs::hard_link_count(own) == 2);
+    // ... unless [instance] keep_pipeline_cache: then the next start keeps the instance's newer file ...
+    write(own.string() + ".tmp", "PREPARED+MINE");
+    fs::rename(own.string() + ".tmp", own);
+    config_clear();
+    config_set("nvn", "shader_cache", cache.c_str());
+    config_set("instance", "keep_pipeline_cache", "1");
+    CHECK(instance_keep_pipeline_cache());
     instance_link_pipeline_cache();
     CHECK(read(own) == "PREPARED+MINE");
     // ... until the shared one is newer (a new shader preparation): then it links again.
     fs::last_write_time(shared, fs::file_time_type::clock::now() + std::chrono::hours(1));
     config_clear();
     config_set("nvn", "shader_cache", cache.c_str());
+    config_set("instance", "keep_pipeline_cache", "1");
     instance_link_pipeline_cache();
     CHECK(read(own) == "PREPARED");
     // An absolute [nvn] pipeline_cache is the caller's choice: left alone.

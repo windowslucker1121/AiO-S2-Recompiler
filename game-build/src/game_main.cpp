@@ -39,6 +39,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <cwchar>
 #include <cwctype>
 #include <memory>
@@ -172,6 +173,46 @@ bool take_folder_mutex(const wchar_t* kind, const std::wstring& folder) {
     for (wchar_t ch : full_path(folder)) h = (h ^ static_cast<unsigned long long>(std::towlower(ch))) * 1099511628211ull;
     const std::wstring name = L"Local\\" + widen_utf8(GAME_SAVE_FOLDER) + kind + std::to_wstring(h);
     return !(CreateMutexW(nullptr, FALSE, name.c_str()) && GetLastError() == ERROR_ALREADY_EXISTS);
+}
+// Whether a run holds the mutex take_folder_mutex(kind, folder) took (without creating it, so a run starting meanwhile is not refused).
+bool folder_mutex_held(const wchar_t* kind, const std::wstring& folder) {
+    unsigned long long h = 1469598103934665603ull;
+    for (wchar_t ch : full_path(folder)) h = (h ^ static_cast<unsigned long long>(std::towlower(ch))) * 1099511628211ull;
+    const std::wstring name = L"Local\\" + widen_utf8(GAME_SAVE_FOLDER) + kind + std::to_wstring(h);
+    HANDLE m = OpenMutexW(SYNCHRONIZE, FALSE, name.c_str());
+    if (!m) return false;
+    CloseHandle(m);
+    return true;
+}
+// A named instance's start: the pipeline caches other instance folders beside this one still hold although no run uses them (a crashed or
+// killed run, or a build from before instances stopped writing the cache back): deleted, except in folders marked keep_pipeline_cache
+// (nxrt/instance.h). Instance folders are named after their runs, so the mutex of a folder tells whether a run uses it.
+void sweep_instance_pipeline_caches(const std::string& own_dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path own = fs::u8path(own_dir);
+    const fs::path parent = own.parent_path();
+    if (parent.empty() || !fs::is_directory(parent, ec)) return;
+    int n = 0;
+    uint64_t bytes = 0;
+    for (const fs::directory_entry& e : fs::directory_iterator(parent, ec)) {
+        if (!e.is_directory(ec) || fs::equivalent(e.path(), own, ec)) continue;
+        const fs::path cache = e.path() / "pipeline_cache.bin";
+        if (!fs::exists(cache, ec) || fs::exists(e.path() / "keep_pipeline_cache", ec)) continue;
+        if (folder_mutex_held(L"_instance_", e.path().wstring())) continue;
+        const uint64_t size = fs::file_size(cache, ec);
+        const uint64_t links = fs::hard_link_count(cache, ec);
+        if (fs::remove(cache, ec)) {
+            ++n;
+            if (links == 1) bytes += size;   // a hard link to the shared cache frees nothing (unless it was the last name of an old one)
+            fs::remove(e.path() / "pipeline_cache.bin.tmp", ec);
+        }
+    }
+    if (n) {
+        const std::u8string where = parent.u8string();
+        NXLOG_I("instance", "removed the pipeline caches of %d instance folders no run uses (%.1f GB of private copies) in %s", n, bytes / 1e9,
+                reinterpret_cast<const char*>(where.c_str()));
+    }
 }
 // An instance name: 1-40 letters, digits, '-', '_' or '.', not starting with '.', and not "default" (what tools call the run without one).
 bool valid_instance_name(const std::string& n) {
@@ -624,6 +665,7 @@ int main(int argc, char** argv) {
     NXLOG_I("boot", "%s %s: exefs '%s'", GAME_TITLE, nxrt::game::info().version, exefs.c_str());
     if (!prepare && !translate) check_memory();             // beside other runs of the game: refuse when the memory would not hold one more
     nxrt::instance_link_pipeline_cache();     // a named instance: its own pipeline cache file, linked to the shared one (needs [nvn] shader_cache)
+    if (nxrt::instance_active()) sweep_instance_pipeline_caches(nxrt::instance_dir());
 
     if (prepare) return prepare_shaders_main(prepare_if_needed, prepare_check, prepare_force, prepare_threads, prepare_programs);
     if (translate) return translate_shaders_main();
