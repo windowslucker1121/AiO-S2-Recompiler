@@ -1,28 +1,35 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Initial Setup: the first program the player starts (<id>_setup.exe, named in the game manifest). Plain Win32 with common controls v6:
-// a menu bar, four pages (Requirements, Game files, Prepare, Play) and native dialogs. It checks what the PC needs and says how to get what
-// is missing (it installs nothing and changes no system setting), extracts the player's dump, prepares the shaders with progress, cancel and
-// resume, and starts the game. The preparation steps are the existing tools, run as child processes:
+// The game library: the one program a player starts. One window for every game this release (or checkout) has a port of: a library of
+// game cards, each game's preparation queue (extraction, shader scan, translation, program list, shader compile) with its status, the
+// PC's requirements, and Play. Plain Win32 + GDI+ (anti-aliased cards, dark theme), common controls v6 for lists and edits. It checks
+// what the PC needs and says how to get what is missing (it installs nothing and changes no system setting).
+//
+// Games come from their manifests at run time (setup_games.h: <exe dir>\games\<id>\game.toml, or recomp\games in a development build); the
+// player's games and their folders are in <exe dir>\library.ini. A game's preparation steps are the existing tools, run as child processes:
 //   extract    python nup_extract.py <nup> <data>\dump                                    (tools/extract)
 //   corpus     python extract_generic.py --romfs --exefs --out <data>\shader_cache\corpus  (tools/shaders/scripts)
-//   translate  <id>.exe --translate-shaders                                                 (the "Preparing shaders" window's step 1, headless)
+//   translate  <game>.exe --translate-shaders                                              (the "Preparing shaders" window's step 1, headless)
 //   programs   python bnsh_programs.py --romfs --out <data>\shader_cache\programs.bin
-//   prepare    <id>.exe --prepare-shaders --if-needed                                       (pipeline parts for this GPU and driver)
+//   prepare    <game>.exe --prepare-shaders --if-needed                                    (pipeline parts for this GPU and driver)
 // <data>\setup_state.ini records which game and translator each step ran for; the prepare step is judged by the game exe itself
-// (--prepare-shaders --check: GPU, driver, pipeline cache UUID, new translations). A change means that step (and the ones after it) runs again.
+// (--prepare-shaders --check). One game's steps run at a time (they use every core); the other games wait in the queue.
 //
-//   <id>_setup.exe [--data DIR] [--source PATH] [--page N] [--start] [--game-args "<text>"]
-// --data / --source set the data folder and the dump (saved like a choice in the window); --page opens a page (0-3); --start runs the
-// preparation at once; --game-args adds text to the game's command line when Play starts it (test runs: --instance NAME --max-seconds N).
+//   recomp_library.exe [--add DUMP]... [--game ID] [--data DIR] [--source PATH] [--page N] [--start] [--game-args "<text>"]
+// --add identifies a dump (.nup or folder) and adds it to the library without questions (tests);
+// --game selects a game of the library (or a known manifest); --data / --source set its data folder and dump; --page opens a page
+// (0 library, 1 game, 2 settings, 3 this PC); --start queues its preparation; --game-args adds text to the game's command line at Play.
 #include <windows.h>
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <uxtheme.h>
+#include <windowsx.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <deque>
 #include <filesystem>
@@ -31,39 +38,97 @@
 #include <thread>
 #include <vector>
 
-#include "game_manifest.h"
+
 #include "setup_core.h"
+#include "setup_games.h"
+#include "setup_settings.h"
+#include "setup_theme.h"
 
 namespace fs = std::filesystem;
 using namespace setup;
+using namespace setup::theme;
+namespace gp = Gdiplus;
 
 namespace {
 
-constexpr wchar_t kClass[] = L"NxrtInitialSetup";
-constexpr UINT kMsgLine = WM_APP + 1;     // lParam: std::string* (one output line of the running step)
-constexpr UINT kMsgExit = WM_APP + 2;     // wParam: exit code of the running step
-constexpr UINT kMsgCheck = WM_APP + 3;    // lParam: std::string* (the prepare check's answer line)
-constexpr UINT kMsgReqs = WM_APP + 4;     // lParam: std::vector<Check>* (requirements checked on a thread)
+constexpr wchar_t kClass[] = L"NxrtGameLibrary";
+constexpr wchar_t kCardsClass[] = L"NxrtGameCards";
+constexpr wchar_t kAppName[] = L"Recomp Library";
+constexpr UINT kMsgLine = WM_APP + 1;     // wParam: GameItem*, lParam: std::string* (one output line of its running step)
+constexpr UINT kMsgExit = WM_APP + 2;     // wParam: GameItem*, lParam: exit code
+constexpr UINT kMsgCheck = WM_APP + 3;    // wParam: GameItem*, lParam: std::string* (the prepare check's answer)
+constexpr UINT kMsgReqs = WM_APP + 4;     // lParam: std::vector<Check>* (the PC's checks, made on a thread)
 constexpr UINT_PTR kTimer = 1;
 
-enum Page { P_REQ, P_GAME, P_PREP, P_PLAY, P_COUNT };
+// Two colours per game for its card's banner, from its id (stable, distinct, never too dark or too bright).
+void banner_colors(const std::string& id, COLORREF* a, COLORREF* b) {
+    uint32_t h = 2166136261u;
+    for (char ch : id) h = (h ^ static_cast<unsigned char>(ch)) * 16777619u;
+    auto hsv = [](float hue, float s, float v) {
+        const float c = v * s, x = c * (1 - std::fabs(std::fmod(hue / 60.f, 2.f) - 1)), m = v - c;
+        float r = 0, g = 0, bl = 0;
+        if (hue < 60) { r = c; g = x; } else if (hue < 120) { r = x; g = c; } else if (hue < 180) { g = c; bl = x; }
+        else if (hue < 240) { g = x; bl = c; } else if (hue < 300) { r = x; bl = c; } else { r = c; bl = x; }
+        return RGB(static_cast<int>((r + m) * 255), static_cast<int>((g + m) * 255), static_cast<int>((bl + m) * 255));
+    };
+    const float hue = static_cast<float>(h % 360);
+    *a = hsv(hue, 0.62f, 0.62f);
+    *b = hsv(std::fmod(hue + 40.f, 360.f), 0.70f, 0.30f);
+}
+
+// ---- steps and games --------------------------------------------------------------------------------------------------------------
+enum Page { P_LIB, P_GAME, P_SET, P_PC, P_COUNT };
 enum StepId { S_EXTRACT, S_CORPUS, S_TRANSLATE, S_PROGRAMS, S_PREPARE, S_COUNT };
 const wchar_t* kStepName[S_COUNT] = {L"Extract the game files", L"Find the game's shaders", L"Translate the shaders",
                                      L"List the shader programs", L"Compile the shaders for your graphics card"};
 
-enum Id : int {
-    ID_NAV = 100, ID_REQ_LIST, ID_REQ_FIX, ID_REQ_RECHECK, ID_REQ_COPY,
-    ID_GAME_SRC, ID_GAME_NUP, ID_GAME_FOLDER, ID_GAME_INFO, ID_GAME_DATA, ID_GAME_DATA_CHANGE, ID_GAME_DATA_INFO,
-    ID_PREP_LIST, ID_PREP_BAR, ID_PREP_TEXT, ID_PREP_START, ID_PREP_CANCEL, ID_PREP_REBUILD, ID_PREP_LOG,
-    ID_PLAY_STATE, ID_PLAY_GO, ID_PLAY_NOTE, ID_PLAY_CLOSE, ID_PLAY_SHORTCUT,
-    // menu
-    IDM_CHOOSE_NUP = 1000, IDM_CHOOSE_FOLDER, IDM_DATA, IDM_OPEN_DATA, IDM_EXIT, IDM_RECHECK, IDM_START, IDM_REBUILD, IDM_SHORTCUT, IDM_PLAY,
-    IDM_ABOUT, IDM_PAGE0,
+struct GameItem {
+    std::string id;
+    const GameDef* def = nullptr;        // null: a dump no manifest knows (no port yet)
+    std::string title_id;
+    std::wstring title, short_title;
+    Config cfg;
+    Layout lay;
+    State st;
+    GameId gid;
+    std::wstring exe;                    // the game exe (may not exist: not built)
+    bool need[S_COUNT] = {};
+    std::wstring why[S_COUNT];
+    bool retranslate_all = false;
+    std::wstring prep_check;             // the last --check answer ("ready", "needed ...", "error ..."); empty: not known
+    bool checking_prep = false;
+    Child check_child;
+    // its job
+    bool queued = false, running = false, cancel_requested = false, force_prepare = false, result_ok = false;
+    bool play_after = false;             // Play pressed before the setup was done: start the game when it is
+    int cur = -1;
+    uint64_t done = 0, total = 0;
+    std::chrono::steady_clock::time_point t0;
+    std::string error;
+    Child child;
+    std::deque<std::wstring> log;
+    std::vector<Check> checks;           // its own checks (disk, program, dump)
+    bool in_library() const { return !cfg.source.empty(); }
+    bool ready() const { for (bool n : need) if (n) return false; return true; }
+    bool exe_ok() const { return file_exists(exe); }
+    bool playable() const { return def && gid.ok && !need[S_EXTRACT] && exe_ok() && !running; }
+    int todo() const { int n = 0; for (bool x : need) n += x; return n; }
 };
 
-struct Ctl {
-    HWND h;
-    Page page;
+struct Status {
+    std::wstring text;
+    COLORREF color = kMuted;
+    double progress = -1;   // 0..1 while a step runs
+};
+
+// Owner-drawn buttons: kind of each (primary = accent fill).
+enum class Btn { primary, normal, danger };
+
+enum Id : int {
+    ID_CARDS = 100, ID_STEPS, ID_LOG, ID_REQ_LIST, ID_REQ_FIX,
+    ID_PLAY, ID_PREP, ID_CANCEL, ID_REBUILD, ID_SRC_NUP, ID_SRC_FOLDER, ID_DATA, ID_OPEN_DATA, ID_SHORTCUT, ID_REMOVE,
+    ID_RECHECK, ID_COPY, ID_OPEN_INI, ID_ADD, ID_SETTINGS, ID_MORE, ID_DETAILS,
+    IDM_ADD = 1000, IDM_EXIT, IDM_RECHECK, IDM_ABOUT, IDM_PAGE0,
 };
 
 class App {
@@ -72,80 +137,97 @@ public:
 
 private:
     static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l);
+    static LRESULT CALLBACK cards_proc(HWND h, UINT m, WPARAM w, LPARAM l);
     LRESULT on(UINT m, WPARAM w, LPARAM l);
-    void create_controls();
-    void make_fonts();
-    void layout();
+    LRESULT on_cards(HWND h, UINT m, WPARAM w, LPARAM l);
     int S(int v) const { return MulDiv(v, dpi_, 96); }
-    HWND add(Page p, const wchar_t* cls, const wchar_t* text, DWORD style, int id, HFONT font = nullptr, DWORD ex = 0);
+    float Sf(float v) const { return v * static_cast<float>(dpi_) / 96.f; }
+    void make_fonts();
+    void create_controls();
+    HWND button(const wchar_t* t, int id, Btn kind);
+    void layout();
     void show_page(int p);
+    void paint(HDC dc);
+    void paint_side(gp::Graphics& g, const RECT& rc);
+    void paint_game_header(gp::Graphics& g, const RECT& rc);
+    void paint_cards(HWND h, HDC dc);
+    void draw_button(const DRAWITEMSTRUCT* d);
     void command(int id, int code);
     LRESULT notify(NMHDR* n);
-    void draw_nav(const DRAWITEMSTRUCT* d);
+    void apply_theme(HWND h);
 
-    // state
-    void evaluate();                 // what each step needs, from the files and setup_state.ini (cheap)
-    void refresh();                  // every page's texts from the evaluation
-    void start_requirements();       // the checks on a thread (Vulkan, Python take a moment)
-    void start_prepare_check();      // <exe> --prepare-shaders --check, when nothing else runs
-    void choose_nup();
-    void choose_folder(bool data);
-    void set_source(const std::wstring& s);
-    void rebuild_dialog();
-    void play();
-    void make_shortcut();
-    void about();
+    // games
+    void load_games();
+    GameItem* sel();
+    GameItem* item(const std::string& id);
+    void select(const std::string& id);
+    void save_lib();
+    void evaluate(GameItem& g);
+    Status status_of(const GameItem& g) const;
+    void add_game();
+    void add_dump(const std::wstring& path, bool quiet);
+    void set_source(GameItem& g, const std::wstring& s);
+    void choose_source(GameItem& g, bool folder);
+    void choose_data(GameItem& g);
+    void remove_game(GameItem& g);
 
-    // steps
-    void start_steps(bool force_prepare);
-    void next_step();
-    void step_line(const std::string& l);
-    void step_exit(DWORD code);
-    void cancel_steps();
-    void log(const std::wstring& s);
-    bool write_game_ini();
-    std::wstring game_cmd(const std::wstring& extra) const;   // --game <folder> --ini <ini> --log ...
+    // preparation
+    void start_requirements();
+    void start_prepare_check(GameItem& g);
+    void enqueue(GameItem& g, bool force_prepare);
+    void run_queue();
+    void next_step(GameItem& g);
+    void step_line(GameItem& g, const std::string& l);
+    void step_exit(GameItem& g, DWORD code);
+    void cancel(GameItem& g);
+    void log(GameItem& g, const std::wstring& s);
+    bool write_game_ini(GameItem& g);
+    std::wstring game_cmd(const GameItem& g, const std::wstring& extra) const;
     std::wstring py_args(const std::wstring& script, const std::wstring& rest) const;
+    void rebuild_dialog(GameItem& g);
+    void play(GameItem& g);
+    void make_shortcut(GameItem& g);
+    void about();
+    void more_menu();
+    void primary(GameItem& g);           // the one button: add the dump, set up, or play
+    std::wstring primary_label(const GameItem& g, bool* enabled) const;
+    void refresh();                       // texts and enabled states of the controls of the current page
+    void update_settings();               // the settings panel shows the selected game
 
     HINSTANCE inst_ = nullptr;
-    HWND wnd_ = nullptr, nav_ = nullptr, status_ = nullptr;
+    HWND wnd_ = nullptr, cards_ = nullptr, settings_ = nullptr;
     int dpi_ = 96;
-    HFONT font_ = nullptr, bold_ = nullptr, title_ = nullptr;
-    std::vector<Ctl> ctls_;
-    int page_ = P_REQ;
-    HWND h1_[P_COUNT] = {}, hint_[P_COUNT] = {};
-    HWND req_list_ = nullptr, req_fix_ = nullptr, req_fix_label_ = nullptr, req_recheck_ = nullptr, req_copy_ = nullptr;
-    HWND game_src_label_ = nullptr, game_src_ = nullptr, game_nup_ = nullptr, game_folder_ = nullptr, game_info_ = nullptr;
-    HWND game_data_label_ = nullptr, game_data_ = nullptr, game_data_change_ = nullptr, game_data_info_ = nullptr, game_nsp_ = nullptr;
-    HWND prep_list_ = nullptr, prep_bar_ = nullptr, prep_text_ = nullptr, prep_start_ = nullptr, prep_cancel_ = nullptr, prep_rebuild_ = nullptr;
-    HWND prep_log_label_ = nullptr, prep_log_ = nullptr;
-    HWND play_state_ = nullptr, play_go_ = nullptr, play_note_ = nullptr, play_close_ = nullptr, play_shortcut_ = nullptr;
+    HFONT font_ = nullptr, bold_ = nullptr, small_ = nullptr, title_ = nullptr, big_ = nullptr;
+    HBRUSH bg_brush_ = nullptr, field_brush_ = nullptr;
+    ULONG_PTR gdiplus_ = 0;
+    int page_ = P_LIB;
+    std::vector<std::pair<HWND, int>> ctls_;   // control, page (-1: never shown by show_page)
+    std::vector<std::pair<HWND, Btn>> btns_;
+    HWND steps_ = nullptr, log_ = nullptr, req_list_ = nullptr, req_fix_ = nullptr;
+    HWND b_more_ = nullptr;
+    HWND b_play_ = nullptr, b_cancel_ = nullptr, b_recheck_ = nullptr, b_copy_ = nullptr, b_open_ini_ = nullptr;
+    RECT nav_rect_[P_COUNT] = {}, add_rect_{};
+    RECT prog_rect_{};
+    int hover_nav_ = -1;
+    bool details_ = false;               // the game page shows the steps and the output
+
+    // cards
+    struct Hit { RECT r; GameItem* g; int action; };   // action: 0 select, 1 play, 2 prepare, 3 cancel, 4 add
+    std::vector<Hit> hits_;
+    int hover_hit_ = -1;
+    GameItem* hover_game_ = nullptr;
+    int scroll_ = 0, content_h_ = 0;
 
     Tools tools_;
-    Config cfg_;
-    Layout lay_;
-    State st_;
-    GameId gid_;
-    std::vector<Check> checks_;
+    std::vector<GameDef> defs_;
+    Library lib_;
+    std::vector<std::unique_ptr<GameItem>> games_;
+    std::deque<GameItem*> queue_;
+    GameItem* active_ = nullptr;
+    std::vector<Check> sys_checks_;
     bool checks_running_ = false;
-    bool need_[S_COUNT] = {};
-    std::wstring why_[S_COUNT];
-    bool retranslate_all_ = false;       // a new translator: the old translations go
-    std::wstring prep_check_;            // the last --check answer ("ready", "needed ...", "error ..."); empty: not known
-    bool checking_prep_ = false;
-    Child check_child_;
-
-    Child child_;
-    bool running_ = false;
-    bool cancel_requested_ = false;
-    bool force_prepare_ = false;
-    int cur_ = -1;                        // the step running
-    uint64_t done_ = 0, total_ = 0;
-    std::chrono::steady_clock::time_point step_t0_;
-    std::string step_error_;
-    bool step_result_ok_ = false;
-    std::deque<std::wstring> log_lines_;
     std::wstring game_args_;
+    std::vector<std::wstring> add_paths_;   // --add
     bool auto_start_ = false;
 };
 
@@ -153,645 +235,305 @@ App* g_app = nullptr;
 
 std::wstring step_state_text(bool need, const std::wstring& why) { return need ? (why.empty() ? L"To do" : L"To do: " + why) : (why.empty() ? L"Done" : why); }
 
-// ---- creation and layout ------------------------------------------------------------------------------------------------------------
-void App::make_fonts() {
-    for (HFONT* f : {&font_, &bold_, &title_})
-        if (*f) { DeleteObject(*f); *f = nullptr; }
-    NONCLIENTMETRICSW ncm{sizeof ncm};
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0, static_cast<UINT>(dpi_));
-    LOGFONTW lf = ncm.lfMessageFont;
-    font_ = CreateFontIndirectW(&lf);
-    lf.lfWeight = FW_SEMIBOLD;
-    bold_ = CreateFontIndirectW(&lf);
-    lf.lfHeight = -S(22);
-    title_ = CreateFontIndirectW(&lf);
-}
-
-HWND App::add(Page p, const wchar_t* cls, const wchar_t* text, DWORD style, int id, HFONT font, DWORD ex) {
-    HWND h = CreateWindowExW(ex, cls, text, WS_CHILD | style, 0, 0, 10, 10, wnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), inst_, nullptr);
-    SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font ? font : font_), TRUE);
-    ctls_.push_back({h, p});
-    return h;
-}
-
-void App::create_controls() {
-    nav_ = CreateWindowExW(0, WC_LISTBOXW, L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_NOINTEGRALHEIGHT, 0, 0, 10, 10, wnd_,
-                           reinterpret_cast<HMENU>(ID_NAV), inst_, nullptr);
-    for (int i = 0; i < P_COUNT; ++i) SendMessageW(nav_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L""));
-    status_ = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0, 0, wnd_, nullptr, inst_, nullptr);
-
-    const wchar_t* titles[P_COUNT] = {L"Requirements", L"Game files", L"Prepare the game", L"Play"};
-    const wchar_t* hints[P_COUNT] = {
-        L"What " GAME_SHORT_TITLE L" needs on this PC. The setup only checks: it installs nothing and changes no system setting. "
-        L"Select an item to see what to do.",
-        L"Use your own dump of " GAME_TITLE L", version " GAME_DUMP_VERSION L". This setup never downloads game files and never changes your dump.",
-        L"These steps run once, about one to two hours in all; most of it is compiling the shaders for your graphics card, so the game later "
-        L"runs without stutter. Cancel stops at any time and Start continues where it stopped.",
-        L"Start the game from here."};
-    for (int p = 0; p < P_COUNT; ++p) {
-        h1_[p] = add(static_cast<Page>(p), WC_STATICW, titles[p], SS_LEFT | SS_NOPREFIX, 0, title_);
-        hint_[p] = add(static_cast<Page>(p), WC_STATICW, hints[p], SS_LEFT | SS_NOPREFIX, 0);
-    }
-    // Requirements
-    req_list_ = add(P_REQ, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, ID_REQ_LIST);
-    ListView_SetExtendedListViewStyle(req_list_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-    SetWindowTheme(req_list_, L"Explorer", nullptr);
-    req_fix_label_ = add(P_REQ, WC_STATICW, L"What to do", SS_LEFT, 0, bold_);
-    req_fix_ = add(P_REQ, WC_EDITW, L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER | WS_TABSTOP, ID_REQ_FIX);
-    req_recheck_ = add(P_REQ, WC_BUTTONW, L"Check again", BS_PUSHBUTTON | WS_TABSTOP, ID_REQ_RECHECK);
-    req_copy_ = add(P_REQ, WC_BUTTONW, L"Copy steps", BS_PUSHBUTTON | WS_TABSTOP, ID_REQ_COPY);
-    // Game files
-    game_src_label_ = add(P_GAME, WC_STATICW, L"Your dump", SS_LEFT, 0, bold_);
-    game_src_ = add(P_GAME, WC_EDITW, L"", ES_READONLY | ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, ID_GAME_SRC);
-    game_nup_ = add(P_GAME, WC_BUTTONW, L"Choose a .nup file...", BS_PUSHBUTTON | WS_TABSTOP, ID_GAME_NUP);
-    game_folder_ = add(P_GAME, WC_BUTTONW, L"Choose a folder...", BS_PUSHBUTTON | WS_TABSTOP, ID_GAME_FOLDER);
-    game_info_ = add(P_GAME, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, ID_GAME_INFO);
-    game_nsp_ = add(P_GAME, WC_STATICW,
-                    L"Accepted: a .nup package, or a folder with exefs\\ and romfs\\ (also with updates\\<version>\\ or base\\ inside). "
-                    L"NSP and XCI files are not supported by this build yet.",
-                    SS_LEFT | SS_NOPREFIX, 0);
-    game_data_label_ = add(P_GAME, WC_STATICW, L"Data folder (the setup writes here)", SS_LEFT, 0, bold_);
-    game_data_ = add(P_GAME, WC_EDITW, L"", ES_READONLY | ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, ID_GAME_DATA);
-    game_data_change_ = add(P_GAME, WC_BUTTONW, L"Change...", BS_PUSHBUTTON | WS_TABSTOP, ID_GAME_DATA_CHANGE);
-    game_data_info_ = add(P_GAME, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, ID_GAME_DATA_INFO);
-    // Prepare
-    prep_list_ = add(P_PREP, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER | WS_BORDER, ID_PREP_LIST);
-    ListView_SetExtendedListViewStyle(prep_list_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-    SetWindowTheme(prep_list_, L"Explorer", nullptr);
-    prep_bar_ = add(P_PREP, PROGRESS_CLASSW, L"", PBS_SMOOTH, ID_PREP_BAR);
-    SendMessageW(prep_bar_, PBM_SETRANGE32, 0, 1000);
-    prep_text_ = add(P_PREP, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, ID_PREP_TEXT);
-    prep_start_ = add(P_PREP, WC_BUTTONW, L"Start", BS_DEFPUSHBUTTON | WS_TABSTOP, ID_PREP_START);
-    prep_cancel_ = add(P_PREP, WC_BUTTONW, L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, ID_PREP_CANCEL);
-    prep_rebuild_ = add(P_PREP, WC_BUTTONW, L"Rebuild shaders...", BS_PUSHBUTTON | WS_TABSTOP, ID_PREP_REBUILD);
-    prep_log_label_ = add(P_PREP, WC_STATICW, L"Output", SS_LEFT, 0, bold_);
-    prep_log_ = add(P_PREP, WC_EDITW, L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, ID_PREP_LOG);
-    // Play
-    play_state_ = add(P_PLAY, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, ID_PLAY_STATE, bold_);
-    play_go_ = add(P_PLAY, WC_BUTTONW, L"Play " GAME_SHORT_TITLE, BS_COMMANDLINK | WS_TABSTOP, ID_PLAY_GO);
-    SendMessageW(play_go_, BCM_SETNOTE, 0, reinterpret_cast<LPARAM>(L"Starts " GAME_EXE L" with your game files and the prepared shaders."));
-    play_note_ = add(P_PLAY, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, ID_PLAY_NOTE);
-    play_close_ = add(P_PLAY, WC_BUTTONW, L"Close the setup when the game starts", BS_AUTOCHECKBOX | WS_TABSTOP, ID_PLAY_CLOSE);
-    SendMessageW(play_close_, BM_SETCHECK, BST_CHECKED, 0);
-    play_shortcut_ = add(P_PLAY, WC_BUTTONW, L"Create a desktop shortcut", BS_PUSHBUTTON | WS_TABSTOP, ID_PLAY_SHORTCUT);
-
-    auto col = [](HWND lv, int i, const wchar_t* t, int w) {
-        LVCOLUMNW c{LVCF_TEXT | LVCF_WIDTH};
-        c.pszText = const_cast<wchar_t*>(t);
-        c.cx = w;
-        ListView_InsertColumn(lv, i, &c);
+// ---- games ---------------------------------------------------------------------------------------------------------------------------
+void App::load_games() {
+    defs_ = find_game_defs(tools_.exe_dir, tools_.dev_root);
+    lib_ = load_library(defs_);
+    auto make = [&](const std::string& id) -> GameItem& {
+        if (GameItem* g = item(id)) return *g;
+        games_.push_back(std::make_unique<GameItem>());
+        games_.back()->id = id;
+        return *games_.back();
     };
-    col(req_list_, 0, L"Item", S(200));
-    col(req_list_, 1, L"State", S(120));
-    col(req_list_, 2, L"Details", S(400));
-    col(prep_list_, 0, L"Step", S(300));
-    col(prep_list_, 1, L"State", S(380));
-    for (int i = 0; i < S_COUNT; ++i) {
-        LVITEMW it{LVIF_TEXT};
-        it.iItem = i;
-        it.pszText = const_cast<wchar_t*>(kStepName[i]);
-        ListView_InsertItem(prep_list_, &it);
-    }
-}
-
-void App::layout() {
-    RECT rc;
-    GetClientRect(wnd_, &rc);
-    SendMessageW(status_, WM_SIZE, 0, 0);
-    RECT sr;
-    GetWindowRect(status_, &sr);
-    const int sh = sr.bottom - sr.top;
-    const int nav_w = S(200);
-    const int bottom = rc.bottom - sh;
-    MoveWindow(nav_, 0, 0, nav_w, bottom, TRUE);
-    SendMessageW(nav_, LB_SETITEMHEIGHT, 0, S(54));
-    const int x = nav_w + S(24), w = rc.right - x - S(24), btn_h = S(28), btn_w = S(130);
-    auto put = [](HWND h, int x0, int y0, int w0, int h0) { MoveWindow(h, x0, y0, std::max(w0, 1), std::max(h0, 1), TRUE); };
-    for (int p = 0; p < P_COUNT; ++p) {
-        put(h1_[p], x, S(16), w, S(34));
-        put(hint_[p], x, S(54), w, S(48));
-    }
-    int y = S(108);
-    // Requirements
-    const int list_h = std::max(S(120), (bottom - y - S(220)));
-    put(req_list_, x, y, w, list_h);
-    ListView_SetColumnWidth(req_list_, 2, std::max(S(120), w - S(200) - S(120) - S(24)));
-    int y2 = y + list_h + S(12);
-    put(req_fix_label_, x, y2, w, S(20));
-    put(req_fix_, x, y2 + S(22), w, bottom - (y2 + S(22)) - btn_h - S(24));
-    put(req_recheck_, x, bottom - btn_h - S(12), btn_w, btn_h);
-    put(req_copy_, x + btn_w + S(8), bottom - btn_h - S(12), btn_w, btn_h);
-    // Game files
-    y2 = y;
-    put(game_src_label_, x, y2, w, S(20));
-    y2 += S(24);
-    put(game_src_, x, y2, w, S(24));
-    y2 += S(32);
-    put(game_nup_, x, y2, S(170), btn_h);
-    put(game_folder_, x + S(178), y2, S(170), btn_h);
-    y2 += btn_h + S(10);
-    put(game_info_, x, y2, w, S(64));
-    y2 += S(70);
-    put(game_nsp_, x, y2, w, S(36));
-    y2 += S(56);
-    put(game_data_label_, x, y2, w, S(20));
-    y2 += S(24);
-    put(game_data_, x, y2, w - S(108), S(24));
-    put(game_data_change_, x + w - S(100), y2 - S(2), S(100), btn_h);
-    y2 += S(32);
-    put(game_data_info_, x, y2, w, S(48));
-    // Prepare
-    y2 = y;
-    const int steps_h = S(30) + S_COUNT * S(22);
-    put(prep_list_, x, y2, w, steps_h);
-    ListView_SetColumnWidth(prep_list_, 1, std::max(S(120), w - S(300) - S(8)));
-    y2 += steps_h + S(12);
-    put(prep_bar_, x, y2, w, S(18));
-    y2 += S(24);
-    put(prep_text_, x, y2, w, S(20));
-    y2 += S(28);
-    put(prep_start_, x, y2, btn_w, btn_h);
-    put(prep_cancel_, x + btn_w + S(8), y2, btn_w, btn_h);
-    put(prep_rebuild_, x + w - S(160), y2, S(160), btn_h);
-    y2 += btn_h + S(14);
-    put(prep_log_label_, x, y2, w, S(20));
-    put(prep_log_, x, y2 + S(22), w, bottom - (y2 + S(22)) - S(12));
-    // Play
-    y2 = y;
-    put(play_state_, x, y2, w, S(40));
-    y2 += S(48);
-    put(play_go_, x, y2, std::min(w, S(420)), S(64));
-    y2 += S(76);
-    put(play_note_, x, y2, w, S(96));
-    y2 += S(104);
-    put(play_close_, x, y2, w, S(22));
-    y2 += S(34);
-    put(play_shortcut_, x, y2, S(200), btn_h);
-    InvalidateRect(wnd_, nullptr, TRUE);
-}
-
-void App::show_page(int p) {
-    page_ = std::clamp(p, 0, P_COUNT - 1);
-    SendMessageW(nav_, LB_SETCURSEL, static_cast<WPARAM>(page_), 0);
-    for (const Ctl& c : ctls_) ShowWindow(c.h, c.page == page_ ? SW_SHOW : SW_HIDE);
-    InvalidateRect(nav_, nullptr, TRUE);
-}
-
-// ---- evaluation ------------------------------------------------------------------------------------------------------------------
-void App::evaluate() {
-    lay_ = layout_of(cfg_);
-    st_ = load_state(lay_.state_file);
-    gid_ = game_id_of(lay_.game);
-    for (int i = 0; i < S_COUNT; ++i) { need_[i] = false; why_[i].clear(); }
-    const SourceKind sk = source_kind(cfg_.source);
-    const std::string gid = gid_.ok ? gid_.text() : std::string();
-    // extract
-    if (sk == SourceKind::nup) {
-        if (lay_.game.empty()) need_[S_EXTRACT] = true;
-        else if (st_.extracted_from != nup_stamp(cfg_.source)) { need_[S_EXTRACT] = true; why_[S_EXTRACT] = L"another .nup file was chosen"; }
-    } else if (sk == SourceKind::folder) {
-        why_[S_EXTRACT] = lay_.game.empty() ? L"the folder has no exefs\\main and romfs\\" : L"Not needed: an extracted folder";
-    } else {
-        need_[S_EXTRACT] = true;
-        why_[S_EXTRACT] = L"choose your dump first (Game files)";
-    }
-    const bool game_known = gid_.ok && !need_[S_EXTRACT];
-    // corpus, translate, programs: done for this game (and translator)
-    auto later = [&](int s, const std::wstring& w) { need_[s] = true; if (why_[s].empty()) why_[s] = w; };
-    if (!game_known) {
-        for (int s : {S_CORPUS, S_TRANSLATE, S_PROGRAMS, S_PREPARE}) later(s, L"after the game files");
-    } else {
-        if (st_.corpus_game != gid || !file_exists(join(lay_.corpus, L"unique.tsv")))
-            later(S_CORPUS, st_.corpus_game.empty() ? L"" : L"the game changed (an update)");
-        const std::string ts = translator_stamp(tools_.translator);
-        retranslate_all_ = !st_.translated_with.empty() && st_.translated_with != ts && file_exists(join(lay_.spirv, L"results.tsv"));
-        if (retranslate_all_) later(S_TRANSLATE, L"a new translator: every shader again");
-        else if (need_[S_CORPUS] || st_.translated_game != gid || st_.translated_with != ts)
-            later(S_TRANSLATE, st_.translated_game.empty() || need_[S_CORPUS] ? L"" : L"new shaders of the game update");
-        if (st_.programs_game != gid || !file_exists(lay_.programs)) later(S_PROGRAMS, st_.programs_game.empty() ? L"" : L"the game changed");
-        if (need_[S_CORPUS] || need_[S_TRANSLATE] || need_[S_PROGRAMS]) later(S_PREPARE, L"after the steps above");
-        else if (prep_check_ == L"ready") { why_[S_PREPARE] = L"Done for this graphics card and driver"; }
-        else if (prep_check_.rfind(L"needed", 0) == 0) {
-            std::wstring w = prep_check_.size() > 7 ? prep_check_.substr(7) : L"";
-            if (w.find(L"another GPU") != std::wstring::npos) w = L"your graphics card or driver changed";
-            later(S_PREPARE, w);
-        } else if (prep_check_.rfind(L"error", 0) == 0) later(S_PREPARE, L"cannot check: " + prep_check_.substr(std::min<size_t>(6, prep_check_.size())));
-        else later(S_PREPARE, checking_prep_ ? L"checking..." : L"");
-    }
-}
-
-bool ready_to_play(const bool need[S_COUNT]) {
-    for (int i = 0; i < S_COUNT; ++i) if (need[i]) return false;
-    return true;
-}
-
-void App::refresh() {
-    // nav marks are drawn from the same data (draw_nav)
-    InvalidateRect(nav_, nullptr, TRUE);
-    // requirements
-    ListView_DeleteAllItems(req_list_);
-    std::wstring all_fix;
-    for (size_t i = 0; i < checks_.size(); ++i) {
-        const Check& c = checks_[i];
-        LVITEMW it{LVIF_TEXT | LVIF_PARAM};
-        it.iItem = static_cast<int>(i);
-        it.pszText = const_cast<wchar_t*>(c.item.c_str());
-        it.lParam = static_cast<LPARAM>(c.level);
-        ListView_InsertItem(req_list_, &it);
-        ListView_SetItemText(req_list_, static_cast<int>(i), 1, const_cast<wchar_t*>(c.state.c_str()));
-        ListView_SetItemText(req_list_, static_cast<int>(i), 2, const_cast<wchar_t*>(c.detail.c_str()));
-        if (!c.fix.empty()) all_fix += c.item + L":\r\n" + c.fix + L"\r\n\r\n";
-    }
-    if (checks_running_ && checks_.empty()) {
-        LVITEMW it{LVIF_TEXT};
-        it.pszText = const_cast<wchar_t*>(L"Checking...");
-        ListView_InsertItem(req_list_, &it);
-    }
-    if (!checks_.empty()) SetWindowTextW(req_fix_, all_fix.empty() ? L"Nothing to do: this PC has everything the game needs." : all_fix.c_str());
-    // game files
-    SetWindowTextW(game_src_, cfg_.source.c_str());
-    SetWindowTextW(game_data_, cfg_.data_dir.c_str());
-    std::wstring info;
-    switch (source_kind(cfg_.source)) {
-        case SourceKind::none: info = L"No dump chosen yet."; break;
-        case SourceKind::missing: info = L"Not found: " + cfg_.source; break;
-        case SourceKind::unsupported: info = L"This file type is not supported by this build (NSP, XCI). Use a .nup package or an extracted folder."; break;
-        case SourceKind::nup: info = L"A .nup package. "; [[fallthrough]];
-        case SourceKind::folder:
-            if (gid_.ok) {
-                info += L"Game folder: " + lay_.game + L"\r\nmain build id " + widen(gid_.build_id) +
-                        (*GAME_MAIN_BUILD_ID && _stricmp(gid_.build_id.c_str(), GAME_MAIN_BUILD_ID) == 0 ? L": version " GAME_DUMP_VERSION L", the one this release is made for"
-                                                                                                         : L" (not " GAME_DUMP_VERSION L": the game may not start)");
-            } else if (source_kind(cfg_.source) == SourceKind::nup) {
-                info += L"It is extracted into the data folder in the first step (Prepare).";
-            } else {
-                info = L"This folder has no exefs\\main and romfs\\ (also looked in updates\\<version>\\ and base\\).";
-            }
-            break;
-    }
-    SetWindowTextW(game_info_, info.c_str());
-    uint64_t need = remaining_disk_need(cfg_, st_);
-    ULARGE_INTEGER avail{};
-    std::wstring d = cfg_.data_dir;
-    while (!d.empty() && !dir_exists(d)) d = parent_of(d);
-    GetDiskFreeSpaceExW(d.c_str(), &avail, nullptr, nullptr);
-    SetWindowTextW(game_data_info_, (L"Free there: " + gib(avail.QuadPart) + L". The remaining steps write about " + gib(need) +
-                                     L" (the extracted game about 26 GB, the shader data about 10 GB).").c_str());
-    // prepare
-    for (int i = 0; i < S_COUNT; ++i) {
-        std::wstring t = (running_ && i == cur_) ? L"Running..." : step_state_text(need_[i], why_[i]);
-        ListView_SetItemText(prep_list_, i, 1, const_cast<wchar_t*>(t.c_str()));
-    }
-    bool partly = false;
-    for (int i = 0; i < S_COUNT; ++i) partly |= !need_[i] && i != S_EXTRACT;
-    SetWindowTextW(prep_start_, ready_to_play(need_) ? L"Check again" : partly ? L"Continue" : L"Start");
-    EnableWindow(prep_start_, !running_);
-    EnableWindow(prep_cancel_, running_);
-    EnableWindow(prep_rebuild_, !running_ && gid_.ok);
-    if (!running_) {
-        std::wstring t = ready_to_play(need_) ? L"Everything is prepared." : L"Press Start to run the steps marked \"To do\".";
-        if (!step_error_.empty()) t = L"Stopped: " + widen(step_error_);
-        else if (cancel_requested_ && !ready_to_play(need_)) t = L"Cancelled. Start continues where it stopped.";
-        SetWindowTextW(prep_text_, t.c_str());
-    }
-    // play
-    const bool ok = ready_to_play(need_);
-    bool req_bad = false;
-    for (const Check& c : checks_) req_bad |= c.level == Level::bad;
-    std::wstring ps = running_ ? L"The preparation is running (Prepare page)." : ok ? L"Ready to play." : L"Not ready yet: finish the steps on the Prepare page.";
-    SetWindowTextW(play_state_, ps.c_str());
-    EnableWindow(play_go_, !running_ && gid_.ok && !need_[S_EXTRACT]);
-    std::wstring note;
-    if (!ok && gid_.ok && !need_[S_EXTRACT] && !running_)
-        note = L"You can play before the shaders are ready, but the game then translates and compiles them while it runs: expect black objects "
-               L"and long stutters at first.";
-    if (need_[S_PREPARE] && !need_[S_CORPUS] && !need_[S_TRANSLATE] && !need_[S_PROGRAMS])
-        note = L"The shaders must be compiled again (" + why_[S_PREPARE] + L"). Press Start on the Prepare page.";
-    if (req_bad) note += (note.empty() ? L"" : L"\r\n\r\n") + std::wstring(L"Some requirements are missing (Requirements page).");
-    note += (note.empty() ? L"" : L"\r\n\r\n") + std::wstring(L"Settings: the game window has a menu bar (Game, Input, Graphics, Audio). Your saves stay in %APPDATA%\\" GAME_SAVE_FOLDER L".");
-    SetWindowTextW(play_note_, note.c_str());
-    // status bar
-    std::wstring sb = L"Data folder: " + cfg_.data_dir;
-    SendMessageW(status_, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(sb.c_str()));
-    // menu
-    HMENU m = GetMenu(wnd_);
-    EnableMenuItem(m, IDM_START, MF_BYCOMMAND | (running_ ? MF_GRAYED : MF_ENABLED));
-    EnableMenuItem(m, IDM_REBUILD, MF_BYCOMMAND | (running_ || !gid_.ok ? MF_GRAYED : MF_ENABLED));
-    EnableMenuItem(m, IDM_PLAY, MF_BYCOMMAND | (IsWindowEnabled(play_go_) ? MF_ENABLED : MF_GRAYED));
-}
-
-void App::start_requirements() {
-    if (checks_running_) return;
-    checks_running_ = true;
-    const Tools t = tools_;
-    const Config c = cfg_;
-    const uint64_t need = remaining_disk_need(cfg_, st_);
-    HWND w = wnd_;
-    std::thread([t, c, need, w] {
-        auto* r = new std::vector<Check>(run_checks(t, c, need));
-        if (!PostMessageW(w, kMsgReqs, 0, reinterpret_cast<LPARAM>(r))) delete r;
-    }).detach();
-    refresh();
-}
-
-void App::start_prepare_check() {
-    if (running_ || checking_prep_ || !gid_.ok || need_[S_CORPUS] || need_[S_TRANSLATE] || need_[S_PROGRAMS] || !file_exists(tools_.game_exe)) return;
-    if (!write_game_ini()) return;
-    checking_prep_ = true;
-    HWND w = wnd_;
-    auto got = std::make_shared<std::string>();
-    std::wstring err;
-    const bool ok = check_child_.start(tools_.game_exe, game_cmd(L"--prepare-shaders --check"), lay_.data, false,
-        [got](const std::string& l) { if (l.rfind("prepare: ", 0) == 0 && l.find("prepare: error") != 0) *got = l.substr(9); else if (l.rfind("prepare: error", 0) == 0) *got = l.substr(9); },
-        [got, w](DWORD code) {
-            std::string a = *got;
-            if (a.empty()) a = code == 7 ? "error the game is running from this folder" : "error the check ended with code " + std::to_string(code);
-            PostMessageW(w, kMsgCheck, 0, reinterpret_cast<LPARAM>(new std::string(a)));
-        }, &err);
-    if (!ok) { checking_prep_ = false; prep_check_ = L"error " + err; }
-    evaluate();
-    refresh();
-}
-
-// ---- steps ---------------------------------------------------------------------------------------------------------------------------
-std::wstring App::py_args(const std::wstring& script, const std::wstring& rest) const {
-    return (tools_.python_args.empty() ? L"" : tools_.python_args + L" ") + L"-I " + quote(script) + L" " + rest;
-}
-
-std::wstring App::game_cmd(const std::wstring& extra) const {
-    return L"--game " + quote(lay_.game) + L" --ini " + quote(lay_.game_ini) + L" --log " + quote(join(lay_.data, L"logs\\setup_" GAME_LOG)) + L" " + extra;
-}
-
-bool App::write_game_ini() {
-    std::error_code ec;
-    fs::create_directories(fs::path(lay_.data) / L"logs", ec);
-    auto fwd = [](std::wstring p) { for (wchar_t& c : p) if (c == L'\\') c = L'/'; return narrow(p); };
-    std::string t = "; Written by " GAME_SETUP_EXE ": where the game finds the shader data this setup prepared.\n[nvn]\n";
-    t += "shader_cache = " + fwd(lay_.spirv) + "\n";
-    t += "shader_corpus = " + fwd(lay_.corpus) + "\n";
-    if (!tools_.translator.empty()) t += "shader_translator = " + fwd(tools_.translator) + "\n";
-    // keep anything the player added below the setup's keys
-    std::string old;
-    {
-        FILE* f = _wfopen(lay_.game_ini.c_str(), L"rb");
-        if (f) {
-            char b[4096];
-            size_t n;
-            while ((n = std::fread(b, 1, sizeof b, f)) > 0) old.append(b, n);
-            std::fclose(f);
+    // the player's games first (in the library's order), then every known game without a dump yet
+    for (const LibraryEntry& e : lib_.games) make(e.id);
+    for (const GameDef& d : defs_) make(d.id);
+    for (auto& up : games_) {
+        GameItem& g = *up;
+        g.def = nullptr;
+        for (const GameDef& d : defs_) if (d.id == g.id) g.def = &d;
+        const LibraryEntry* e = lib_.find(g.id);
+        g.title_id = e ? e->title_id : g.def ? g.def->title_id : "";
+        if (g.def) { g.title = widen(g.def->title); g.short_title = widen(g.def->short_title); }
+        else {
+            g.title = e && !e->name.empty() ? widen(e->name) : L"Unknown game " + widen(g.title_id);
+            g.short_title = e && !e->name.empty() ? widen(e->name) : widen(g.title_id);
         }
+        g.cfg.source = e ? e->source : L"";
+        g.cfg.data_dir = e ? e->data_dir : default_data_dir(g.id);
+        g.cfg.game_ini = g.def ? widen(g.def->ini) : L"game.ini";
+        g.exe = g.def ? game_exe_path(tools_, *g.def) : L"";
+        evaluate(g);
     }
-    const size_t mark = old.find("\n; --- your settings below ---");
-    t += mark == std::string::npos ? std::string("\n; --- your settings below ---\n") : old.substr(mark);
-    fs::create_directories(fs::path(lay_.game_ini).parent_path(), ec);
-    FILE* f = _wfopen(lay_.game_ini.c_str(), L"wb");
-    if (!f) return false;
-    std::fwrite(t.data(), 1, t.size(), f);
-    std::fclose(f);
-    return true;
+    if (!item(lib_.selected)) lib_.selected = games_.empty() ? std::string() : games_.front()->id;
 }
 
-void App::log(const std::wstring& s) {
-    log_lines_.push_back(s);
-    while (log_lines_.size() > 300) log_lines_.pop_front();
+GameItem* App::item(const std::string& id) {
+    for (auto& g : games_) if (g->id == id) return g.get();
+    return nullptr;
+}
+GameItem* App::sel() { return item(lib_.selected); }
+
+void App::select(const std::string& id) {
+    if (!item(id)) return;
+    lib_.selected = id;
+    save_lib();
+    GameItem& g = *sel();
+    evaluate(g);
+    start_prepare_check(g);
+    // the log edit shows the selected game's output
     std::wstring all;
-    for (const std::wstring& l : log_lines_) all += l + L"\r\n";
-    SetWindowTextW(prep_log_, all.c_str());
-    SendMessageW(prep_log_, EM_SETSEL, all.size(), all.size());
-    SendMessageW(prep_log_, EM_SCROLLCARET, 0, 0);
+    for (const std::wstring& l : g.log) all += l + L"\r\n";
+    SetWindowTextW(log_, all.c_str());
+    update_settings();
+    refresh();
+    InvalidateRect(wnd_, nullptr, FALSE);
 }
 
-void App::start_steps(bool force_prepare) {
-    if (running_) return;
-    if (check_child_.running()) check_child_.wait();
-    step_error_.clear();
-    cancel_requested_ = false;
-    force_prepare_ = force_prepare;
-    evaluate();
-    bool req_bad = false;
-    for (const Check& c : checks_) req_bad |= c.level == Level::bad && c.item != L"Your game dump";
-    if (req_bad && MessageBoxW(wnd_, L"Some requirements are missing (Requirements page). Start anyway?", L"" GAME_PRODUCT L" setup",
-                               MB_YESNO | MB_ICONWARNING) != IDYES)
-        return;
-    const SourceKind sk = source_kind(cfg_.source);
-    if (sk != SourceKind::nup && sk != SourceKind::folder) {
-        MessageBoxW(wnd_, L"Choose your game dump first (Game files page).", L"" GAME_PRODUCT L" setup", MB_OK | MB_ICONINFORMATION);
-        show_page(P_GAME);
-        return;
-    }
-    running_ = true;
-    cur_ = -1;
-    show_page(P_PREP);
-    log(L"--- " + std::wstring(force_prepare ? L"rebuild" : L"start") + L" ---");
-    next_step();
+void App::update_settings() {
+    GameItem* g = sel();
+    if (!g) { settings::set_game(settings_, L"", L"", L"Add a game to the library first."); return; }
+    evaluate(*g);
+    std::wstring why;
+    if (!g->def) why = L"No port of this game yet.";
+    else if (!g->in_library()) why = L"Add your dump first.";
+    else if (g->lay.game.empty()) why = L"Available once the game is set up.";
+    settings::set_game(settings_, g->title, why.empty() ? join(g->lay.game, L"controls.ini") : L"", why);
 }
 
-void App::next_step() {
-    evaluate();
-    int s = -1;
-    for (int i = cur_ + 1; i < S_COUNT; ++i)
-        if (need_[i] || (i == S_PREPARE && force_prepare_)) { s = i; break; }
-    if (cur_ == -1 && s == -1) s = -1;
-    if (s < 0) {
-        running_ = false;
-        cur_ = -1;
-        log(L"--- finished ---");
-        prep_check_.clear();
-        evaluate();
-        refresh();
-        start_prepare_check();
-        if (ready_to_play(need_)) show_page(P_PLAY);
-        return;
+void App::save_lib() {
+    // the library holds the games with a dump; keep the order the player added them in
+    Library out;
+    out.selected = lib_.selected;
+    for (const LibraryEntry& e : lib_.games) {
+        const GameItem* g = item(e.id);
+        if (!g || !g->in_library()) continue;
+        LibraryEntry n = e;
+        n.source = g->cfg.source;
+        n.data_dir = g->cfg.data_dir;
+        out.games.push_back(n);
     }
-    // a step that cannot run yet: stop
-    if ((s != S_EXTRACT && !gid_.ok) || (s == S_EXTRACT && source_kind(cfg_.source) != SourceKind::nup)) {
-        running_ = false;
-        step_error_ = s == S_EXTRACT ? "the dump folder is not a game folder" : "the game files are not there";
-        cur_ = -1;
-        refresh();
-        return;
+    for (auto& up : games_) {
+        if (!up->in_library() || out.find(up->id)) continue;
+        LibraryEntry n;
+        n.id = up->id;
+        n.title_id = up->title_id;
+        n.source = up->cfg.source;
+        n.data_dir = up->cfg.data_dir;
+        out.games.push_back(n);
     }
-    cur_ = s;
-    done_ = total_ = 0;
-    step_t0_ = std::chrono::steady_clock::now();
-    step_result_ok_ = false;
-    SendMessageW(prep_bar_, PBM_SETPOS, 0, 0);
-    SetWindowLongPtrW(prep_bar_, GWL_STYLE, (GetWindowLongPtrW(prep_bar_, GWL_STYLE) & ~PBS_MARQUEE) | (s == S_PROGRAMS ? PBS_MARQUEE : 0));
-    SendMessageW(prep_bar_, PBM_SETMARQUEE, s == S_PROGRAMS, 30);
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    const std::wstring jobs = std::to_wstring(hw > 3 ? hw - 2 : 1);
-    std::wstring exe, args;
-    bool event = false;
-    std::error_code ec;
-    if (s == S_EXTRACT) {
-        exe = tools_.python;
-        args = py_args(tools_.nup_extract, quote(cfg_.source) + L" " + quote(lay_.dump));
-    } else if (s == S_CORPUS) {
-        fs::remove(fs::path(lay_.corpus) / L"unique.tsv", ec);   // a scan that stops before its end must not count
-        fs::remove(fs::path(lay_.corpus) / L"unique_all.tsv", ec);
-        fs::create_directories(lay_.corpus, ec);
-        exe = tools_.python;
-        args = py_args(join(tools_.shader_scripts, L"extract_generic.py"), L"--romfs " + quote(join(lay_.game, L"romfs")) + L" --exefs " +
-                       quote(join(lay_.game, L"exefs")) + L" --out " + quote(lay_.corpus) + L" --jobs " + jobs + L" --progress");
-    } else if (s == S_TRANSLATE) {
-        if (retranslate_all_ && dir_exists(lay_.spirv)) {
-            // a new translator: the old translations go (renamed at once, deleted in the background)
-            const std::wstring old = lay_.spirv + L"_old_" + std::to_wstring(GetTickCount64());
-            if (MoveFileW(lay_.spirv.c_str(), old.c_str())) {
-                log(L"old translations moved aside, deleting them: " + old);
-                std::thread([old] { std::error_code e; fs::remove_all(old, e); }).detach();
-            }
-            st_.translated_with.clear();
-            save_state(lay_.state_file, st_);
-        }
-        write_game_ini();
-        exe = tools_.game_exe;
-        args = game_cmd(L"--translate-shaders");
-        event = true;
-    } else if (s == S_PROGRAMS) {
-        exe = tools_.python;
-        args = py_args(join(tools_.shader_scripts, L"bnsh_programs.py"), L"--romfs " + quote(join(lay_.game, L"romfs")) + L" --out " + quote(lay_.programs));
+    lib_ = out;
+    save_library(lib_);
+}
+
+void App::evaluate(GameItem& g) {
+    g.lay = layout_of(g.cfg);
+    g.st = load_state(g.lay.state_file);
+    g.gid = game_id_of(g.lay.game);
+    if (g.def) g.exe = game_exe_path(tools_, *g.def);
+    for (int i = 0; i < S_COUNT; ++i) { g.need[i] = false; g.why[i].clear(); }
+    const SourceKind sk = source_kind(g.cfg.source);
+    const std::string gid = g.gid.ok ? g.gid.text() : std::string();
+    if (sk == SourceKind::nup) {
+        if (g.lay.game.empty()) g.need[S_EXTRACT] = true;
+        else if (g.st.extracted_from != nup_stamp(g.cfg.source)) { g.need[S_EXTRACT] = true; g.why[S_EXTRACT] = L"another .nup file was chosen"; }
+    } else if (sk == SourceKind::folder) {
+        g.why[S_EXTRACT] = g.lay.game.empty() ? L"the folder has no exefs\\main and romfs\\" : L"Not needed: an extracted folder";
     } else {
-        write_game_ini();
-        exe = tools_.game_exe;
-        args = game_cmd(force_prepare_ ? L"--prepare-shaders --force" : L"--prepare-shaders --if-needed");
-        event = true;
+        g.need[S_EXTRACT] = true;
+        g.why[S_EXTRACT] = L"add your dump first";
     }
-    if (exe.empty()) {
-        running_ = false;
-        step_error_ = s == S_TRANSLATE || s == S_PREPARE ? "the game program is missing" : "Python is missing (Requirements page)";
-        cur_ = -1;
-        refresh();
+    const bool known = g.gid.ok && !g.need[S_EXTRACT];
+    auto later = [&](int s, const std::wstring& w) { g.need[s] = true; if (g.why[s].empty()) g.why[s] = w; };
+    if (!known) {
+        for (int s : {S_CORPUS, S_TRANSLATE, S_PROGRAMS, S_PREPARE}) later(s, L"after the game files");
         return;
     }
-    log(L"> " + std::wstring(kStepName[s]));
-    fs::create_directories(lay_.data, ec);   // the children run in the data folder
-    HWND w = wnd_;
-    std::wstring err;
-    if (!child_.start(exe, args, lay_.data, event, [w](const std::string& l) { PostMessageW(w, kMsgLine, 0, reinterpret_cast<LPARAM>(new std::string(l))); },
-                      [w](DWORD c) { PostMessageW(w, kMsgExit, c, 0); }, &err)) {
-        running_ = false;
-        log(L"  " + err);
-        step_error_ = narrow(err);
-        cur_ = -1;
+    if (g.st.corpus_game != gid || !file_exists(join(g.lay.corpus, L"unique.tsv")))
+        later(S_CORPUS, g.st.corpus_game.empty() ? L"" : L"the game changed (an update)");
+    const std::string ts = translator_stamp(tools_.translator);
+    g.retranslate_all = !g.st.translated_with.empty() && g.st.translated_with != ts && file_exists(join(g.lay.spirv, L"results.tsv"));
+    if (g.retranslate_all) later(S_TRANSLATE, L"a new translator: every shader again");
+    else if (g.need[S_CORPUS] || g.st.translated_game != gid || g.st.translated_with != ts)
+        later(S_TRANSLATE, g.st.translated_game.empty() || g.need[S_CORPUS] ? L"" : L"new shaders of the game update");
+    if (g.st.programs_game != gid || !file_exists(g.lay.programs)) later(S_PROGRAMS, g.st.programs_game.empty() ? L"" : L"the game changed");
+    if (!g.exe_ok()) {
+        for (int s : {S_TRANSLATE, S_PREPARE}) later(s, L"needs the game program (not built)");
     }
-    refresh();
+    if (g.need[S_CORPUS] || g.need[S_TRANSLATE] || g.need[S_PROGRAMS]) later(S_PREPARE, L"after the steps above");
+    else if (g.prep_check == L"ready") g.why[S_PREPARE] = L"Done for this graphics card and driver";
+    else if (g.prep_check.rfind(L"needed", 0) == 0) {
+        std::wstring w = g.prep_check.size() > 7 ? g.prep_check.substr(7) : L"";
+        if (w.find(L"another GPU") != std::wstring::npos) w = L"your graphics card or driver changed";
+        later(S_PREPARE, w);
+    } else if (g.prep_check.rfind(L"error", 0) == 0) later(S_PREPARE, L"cannot check: " + g.prep_check.substr(std::min<size_t>(6, g.prep_check.size())));
+    else later(S_PREPARE, g.checking_prep ? L"checking..." : L"");
 }
 
-void App::step_line(const std::string& l) {
-    // progress lines: "@progress <label> i n" (nup_extract), "scan: d t" (extract_generic), "translate: d t", "prepare: d t"
-    unsigned long long a = 0, b = 0;
-    char label[64] = {};
-    bool progress = false;
-    if (std::sscanf(l.c_str(), "@progress %63s %llu %llu", label, &a, &b) == 3) progress = true;
-    else if (std::sscanf(l.c_str(), "scan: %llu %llu", &a, &b) == 2) progress = true;
-    else if (std::sscanf(l.c_str(), "translate: %llu %llu", &a, &b) == 2 && l.find("done") == std::string::npos) progress = true;
-    else if (std::sscanf(l.c_str(), "prepare: %llu %llu", &a, &b) == 2) progress = true;
-    if (progress) {
-        if (label[0] && b != total_) step_t0_ = std::chrono::steady_clock::now();   // the extraction's second part (romfs after exefs)
-        done_ = a;
-        total_ = b;
-        return;
-    }
-    if (l.rfind("@error ", 0) == 0 || l.rfind("translate: error ", 0) == 0 || l.rfind("prepare: error ", 0) == 0) step_error_ = l.substr(l.find(' ') + 1);
-    if (l.rfind("@result", 0) == 0 || l.rfind("translate: done", 0) == 0 || l.rfind("prepare: done", 0) == 0 || l == "prepare: ready")
-        step_result_ok_ = l.find("cancelled") == std::string::npos;
-    log(widen(l));
-}
-
-void App::step_exit(DWORD code) {
-    child_.wait();
-    const int s = cur_;
-    const std::string gid = gid_.text();
-    // A step that finished before the cancel reached it counts (the game exe says "done" without "cancelled"; a script exits 0).
-    bool ok = code == 0 && (!cancel_requested_ || step_result_ok_ || s == S_PROGRAMS || s == S_CORPUS);
-    if (ok) {
-        if (s == S_EXTRACT) {
-            st_.extracted_from = nup_stamp(cfg_.source);
-        } else if (s == S_CORPUS) {
-            ok = file_exists(join(lay_.corpus, L"unique.tsv"));
-            if (ok) st_.corpus_game = game_id_of(lay_.game).text();
-        } else if (s == S_TRANSLATE) {
-            st_.translated_game = game_id_of(lay_.game).text();
-            st_.translated_with = translator_stamp(tools_.translator);
-        } else if (s == S_PROGRAMS) {
-            ok = file_exists(lay_.programs);
-            if (ok) st_.programs_game = game_id_of(lay_.game).text();
-        } else if (s == S_PREPARE) {
-            prep_check_ = L"ready";
-            force_prepare_ = false;
+Status App::status_of(const GameItem& g) const {
+    Status s;
+    if (!g.def) { s.text = L"No port yet"; s.color = kMuted; return s; }
+    if (!g.in_library()) { s.text = L"Add your dump"; s.color = kAccentHi; return s; }
+    if (g.running) {
+        s.color = kAccentHi;
+        s.text = g.cancel_requested ? L"Stopping" : L"Setting up";
+        s.progress = 0;
+        if (g.total) {
+            // the steps as one bar: each step a fifth
+            const double part = static_cast<double>(std::min(g.done, g.total)) / static_cast<double>(g.total);
+            s.progress = (static_cast<double>(std::max(g.cur, 0)) + part) / static_cast<double>(S_COUNT);
+            wchar_t b[32];
+            std::swprintf(b, 32, L" \u00B7 %d%%", static_cast<int>(s.progress * 100));
+            s.text += b;
         }
-        save_state(lay_.state_file, st_);
+        return s;
     }
-    log(L"  exit code " + std::to_wstring(code));
-    if (!ok || cancel_requested_) {
-        running_ = false;
-        cur_ = -1;
-        if (!cancel_requested_ && step_error_.empty()) step_error_ = narrow(std::wstring(kStepName[s])) + " ended with code " + std::to_string(code) + " (see Output)";
-        SetWindowLongPtrW(prep_bar_, GWL_STYLE, GetWindowLongPtrW(prep_bar_, GWL_STYLE) & ~PBS_MARQUEE);
-        evaluate();
-        refresh();
-        return;
-    }
-    next_step();
+    if (g.queued) { s.text = L"Waiting"; s.color = kAccentHi; s.progress = 0; return s; }
+    if (!g.error.empty()) { s.text = L"Problem"; s.color = kBad; return s; }
+    if (!g.exe_ok()) { s.text = L"Not built yet"; s.color = kWarn; return s; }
+    if (g.ready()) { s.text = L"Ready"; s.color = kOk; return s; }
+    s.text = L"Setup needed";
+    s.color = kWarn;
+    return s;
 }
 
-void App::cancel_steps() {
-    if (!running_) return;
-    cancel_requested_ = true;
-    SetWindowTextW(prep_text_, L"Stopping (what is done is kept)...");
-    child_.cancel();
+std::wstring App::primary_label(const GameItem& g, bool* enabled) const {
+    *enabled = true;
+    if (!g.def) { *enabled = false; return L"No port yet"; }
+    if (!g.in_library()) return L"Add dump";
+    if (g.running || g.queued) { *enabled = false; return L"Setting up"; }
+    if (!g.exe_ok()) { *enabled = false; return L"Not built yet"; }
+    return L"Play";
 }
 
-// ---- dialogs ---------------------------------------------------------------------------------------------------------------------
-void App::set_source(const std::wstring& s) {
-    cfg_.source = s;
-    save_config(cfg_);
-    prep_check_.clear();
-    evaluate();
-    start_prepare_check();
-    start_requirements();
-    refresh();
+void App::primary(GameItem& g) {
+    bool en = false;
+    const std::wstring l = primary_label(g, &en);
+    if (!en) return;
+    if (!g.in_library()) { choose_source(g, false); return; }
+    if (g.ready()) { play(g); return; }
+    g.play_after = true;   // set up once, then the game starts
+    enqueue(g, false);
 }
 
-void App::choose_nup() {
+void App::add_game() {
+    // a .nup file or a folder: the file dialog picks a file; Shift+click (or Cancel then the folder dialog) is not discoverable, so ask first
+    TASKDIALOG_BUTTON b[] = {{101, L".nup file"}, {102, L"Extracted folder"}};
+    TASKDIALOGCONFIG c{sizeof c};
+    c.hwndParent = wnd_;
+    c.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+    c.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    c.pszWindowTitle = kAppName;
+    c.pszMainInstruction = L"Add a game";
+    c.pszContent = L"Tip: you can also drop a .nup file or a folder on this window.";
+    c.cButtons = 2;
+    c.pButtons = b;
+    int pick = 0;
+    if (FAILED(TaskDialogIndirect(&c, &pick, nullptr, nullptr)) || (pick != 101 && pick != 102)) return;
     IFileOpenDialog* d = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&d)))) return;
-    COMDLG_FILTERSPEC f[] = {{L"NUP package (*.nup)", L"*.nup"}, {L"All files", L"*.*"}};
-    d->SetFileTypes(2, f);
-    d->SetTitle(L"Choose your .nup package");
+    if (pick == 101) {
+        COMDLG_FILTERSPEC f[] = {{L"NUP package (*.nup)", L"*.nup"}, {L"All files", L"*.*"}};
+        d->SetFileTypes(2, f);
+        d->SetTitle(L"Choose your .nup package");
+    } else {
+        DWORD o = 0;
+        d->GetOptions(&o);
+        d->SetOptions(o | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+        d->SetTitle(L"Choose your extracted game folder");
+    }
+    std::wstring path;
     if (SUCCEEDED(d->Show(wnd_))) {
         IShellItem* it = nullptr;
         if (SUCCEEDED(d->GetResult(&it))) {
             PWSTR p = nullptr;
-            if (SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &p))) { set_source(p); CoTaskMemFree(p); }
+            if (SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &p))) { path = p; CoTaskMemFree(p); }
             it->Release();
         }
     }
     d->Release();
+    if (!path.empty()) add_dump(path, false);
 }
 
-void App::choose_folder(bool data) {
+// quiet: no questions or notes (the --add command line option).
+void App::add_dump(const std::wstring& path, bool quiet) {
+    SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    const DumpInfo info = identify_dump(path, tools_.python, tools_.python_args, tools_.nup_extract);
+    if (!info.ok) {
+        if (!quiet) MessageBoxW(wnd_, (L"Not a game dump.\r\n\r\n" + info.error).c_str(), kAppName, MB_OK | MB_ICONWARNING);
+        return;
+    }
+    const GameDef* def = nullptr;
+    for (const GameDef& gd : defs_) if (_stricmp(gd.title_id.c_str(), info.title_id.c_str()) == 0) def = &gd;
+    const std::string id = def ? def->id : "title-" + info.title_id;
+    GameItem* g = item(id);
+    if (g && g->running) { if (!quiet) MessageBoxW(wnd_, L"This game is being set up. Cancel that first.", kAppName, MB_OK | MB_ICONINFORMATION); return; }
+    if (g && g->in_library() && g->cfg.source != path && !quiet &&
+        MessageBoxW(wnd_, (g->title + L" is already in your library. Use this dump instead?").c_str(), kAppName,
+                    MB_YESNO | MB_ICONQUESTION) != IDYES)
+        return;
+    if (!g) {
+        games_.push_back(std::make_unique<GameItem>());
+        g = games_.back().get();
+        g->id = id;
+        g->def = def;
+        g->title_id = info.title_id;
+        g->title = info.name.empty() ? L"Unknown game " + widen(info.title_id) : widen(info.name);
+        g->short_title = info.name.empty() ? widen(info.title_id) : widen(info.name);
+        g->cfg.data_dir = default_data_dir(id);
+        g->cfg.game_ini = L"game.ini";
+    }
+    if (!def && !info.name.empty()) { g->title = widen(info.name); g->short_title = g->title; }
+    LibraryEntry* e = lib_.find(id);
+    if (!e) { lib_.games.push_back({}); e = &lib_.games.back(); e->id = id; e->data_dir = g->cfg.data_dir; }
+    e->title_id = info.title_id;
+    e->dump_version = version_text(info.version);
+    e->name = info.name;
+    set_source(*g, path);
+    select(id);
+    show_page(P_GAME);
+    std::wstring note;
+    if (quiet) return;
+    if (!def) {
+        MessageBoxW(wnd_, L"There is no port of this game yet. It stays in your library.", kAppName, MB_OK | MB_ICONINFORMATION);
+    } else if (!info.build_id.empty() && !def->main_build_id.empty() && _stricmp(info.build_id.c_str(), def->main_build_id.c_str()) != 0) {
+        note = L"Your dump is another version than " + widen(def->dump_version) + L". The game may not start.";
+        MessageBoxW(wnd_, note.c_str(), kAppName, MB_OK | MB_ICONWARNING);
+    }
+}
+
+void App::set_source(GameItem& g, const std::wstring& s) {
+    g.cfg.source = s;
+    g.prep_check.clear();
+    g.error.clear();
+    save_lib();
+    evaluate(g);
+    start_prepare_check(g);
+    start_requirements();
+    refresh();
+    InvalidateRect(cards_, nullptr, FALSE);
+}
+
+void App::choose_source(GameItem& g, bool folder) {
     IFileOpenDialog* d = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&d)))) return;
-    DWORD o = 0;
-    d->GetOptions(&o);
-    d->SetOptions(o | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-    d->SetTitle(data ? L"Choose the folder the setup writes to" : L"Choose your extracted game folder (exefs and romfs)");
+    if (folder) {
+        DWORD o = 0;
+        d->GetOptions(&o);
+        d->SetOptions(o | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+        d->SetTitle(L"Choose your extracted game folder (exefs and romfs)");
+    } else {
+        COMDLG_FILTERSPEC f[] = {{L"NUP package (*.nup)", L"*.nup"}, {L"All files", L"*.*"}};
+        d->SetFileTypes(2, f);
+        d->SetTitle(L"Choose your .nup package");
+    }
     if (SUCCEEDED(d->Show(wnd_))) {
         IShellItem* it = nullptr;
         if (SUCCEEDED(d->GetResult(&it))) {
             PWSTR p = nullptr;
             if (SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &p))) {
-                if (data) {
-                    cfg_.data_dir = p;
-                    save_config(cfg_);
-                    prep_check_.clear();
-                    evaluate();
-                    start_requirements();
-                    start_prepare_check();
-                    refresh();
-                } else set_source(p);
+                if (!lib_.find(g.id)) { lib_.games.push_back({}); lib_.games.back().id = g.id; lib_.games.back().title_id = g.title_id; }
+                set_source(g, p);
                 CoTaskMemFree(p);
             }
             it->Release();
@@ -800,60 +542,356 @@ void App::choose_folder(bool data) {
     d->Release();
 }
 
-void App::rebuild_dialog() {
-    if (running_ || !gid_.ok) return;
+void App::choose_data(GameItem& g) {
+    IFileOpenDialog* d = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&d)))) return;
+    DWORD o = 0;
+    d->GetOptions(&o);
+    d->SetOptions(o | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+    d->SetTitle(L"Choose the folder the library writes to for this game");
+    if (SUCCEEDED(d->Show(wnd_))) {
+        IShellItem* it = nullptr;
+        if (SUCCEEDED(d->GetResult(&it))) {
+            PWSTR p = nullptr;
+            if (SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &p))) {
+                g.cfg.data_dir = p;
+                CoTaskMemFree(p);
+                g.prep_check.clear();
+                save_lib();
+                evaluate(g);
+                start_requirements();
+                start_prepare_check(g);
+            }
+            it->Release();
+        }
+    }
+    d->Release();
+    refresh();
+}
+
+void App::remove_game(GameItem& g) {
+    if (g.running || g.queued) return;
+    if (MessageBoxW(wnd_, (L"Remove " + g.title + L" from the library? Nothing is deleted.").c_str(),
+                    kAppName, MB_YESNO | MB_ICONQUESTION) != IDYES)
+        return;
+    g.cfg.source.clear();
+    save_lib();
+    if (!g.def) {
+        const std::string id = g.id;
+        games_.erase(std::remove_if(games_.begin(), games_.end(), [&](const auto& p) { return p->id == id; }), games_.end());
+        if (!item(lib_.selected)) lib_.selected = games_.empty() ? std::string() : games_.front()->id;
+        save_lib();
+        show_page(P_LIB);
+    } else evaluate(g);
+    refresh();
+    InvalidateRect(wnd_, nullptr, FALSE);
+}
+
+// ---- preparation ---------------------------------------------------------------------------------------------------------------------
+void App::start_requirements() {
+    for (auto& g : games_)
+        if (g->def) {
+            g->checks = run_game_checks(tools_, *g->def, g->cfg, remaining_disk_need(g->cfg, g->st));
+            for (Check& c : g->checks) c.item = g->short_title + L": " + c.item;
+        }
+    if (checks_running_) { refresh(); return; }
+    checks_running_ = true;
+    const Tools t = tools_;
+    HWND w = wnd_;
+    std::thread([t, w] {
+        auto* r = new std::vector<Check>(run_system_checks(t));
+        if (!PostMessageW(w, kMsgReqs, 0, reinterpret_cast<LPARAM>(r))) delete r;
+    }).detach();
+    refresh();
+}
+
+void App::start_prepare_check(GameItem& g) {
+    if (g.running || g.checking_prep || !g.def || !g.gid.ok || g.need[S_CORPUS] || g.need[S_PROGRAMS] || !g.exe_ok()) return;
+    if (g.st.translated_game != g.gid.text()) return;
+    if (!write_game_ini(g)) return;
+    g.checking_prep = true;
+    HWND w = wnd_;
+    GameItem* gp_ = &g;
+    auto got = std::make_shared<std::string>();
+    std::wstring err;
+    const bool ok = g.check_child.start(g.exe, game_cmd(g, L"--prepare-shaders --check"), g.lay.data, false,
+        [got](const std::string& l) { if (l.rfind("prepare: ", 0) == 0) *got = l.substr(9); },
+        [got, w, gp_](DWORD code) {
+            std::string a = *got;
+            if (a.empty()) a = code == 7 ? "error the game is running from this folder" : "error the check ended with code " + std::to_string(code);
+            PostMessageW(w, kMsgCheck, reinterpret_cast<WPARAM>(gp_), reinterpret_cast<LPARAM>(new std::string(a)));
+        }, &err);
+    if (!ok) { g.checking_prep = false; g.prep_check = L"error " + err; }
+    evaluate(g);
+}
+
+std::wstring App::py_args(const std::wstring& script, const std::wstring& rest) const {
+    return (tools_.python_args.empty() ? L"" : tools_.python_args + L" ") + L"-I " + quote(script) + L" " + rest;
+}
+
+std::wstring App::game_cmd(const GameItem& g, const std::wstring& extra) const {
+    const std::wstring log_name = g.def ? widen(g.def->log) : L"game.log";
+    return L"--game " + quote(g.lay.game) + L" --ini " + quote(g.lay.game_ini) + L" --log " + quote(join(g.lay.data, L"logs\\setup_" + log_name)) + L" " + extra;
+}
+
+bool App::write_game_ini(GameItem& g) {
+    std::error_code ec;
+    fs::create_directories(fs::path(g.lay.data) / L"logs", ec);
+    auto fwd = [](std::wstring p) { for (wchar_t& c : p) if (c == L'\\') c = L'/'; return narrow(p); };
+    std::string t = "; Written by the game library: where the game finds the shader data it prepared.\n[nvn]\n";
+    t += "shader_cache = " + fwd(g.lay.spirv) + "\n";
+    t += "shader_corpus = " + fwd(g.lay.corpus) + "\n";
+    if (!tools_.translator.empty()) t += "shader_translator = " + fwd(tools_.translator) + "\n";
+    const std::string old = read_file_text(g.lay.game_ini);
+    const size_t mark = old.find("\n; --- your settings below ---");
+    t += mark == std::string::npos ? std::string("\n; --- your settings below ---\n") : old.substr(mark);
+    return write_file_atomic(g.lay.game_ini, t);
+}
+
+void App::log(GameItem& g, const std::wstring& s) {
+    g.log.push_back(s);
+    while (g.log.size() > 300) g.log.pop_front();
+    if (&g != sel()) return;
+    std::wstring all;
+    for (const std::wstring& l : g.log) all += l + L"\r\n";
+    SetWindowTextW(log_, all.c_str());
+    SendMessageW(log_, EM_SETSEL, all.size(), all.size());
+    SendMessageW(log_, EM_SCROLLCARET, 0, 0);
+}
+
+void App::enqueue(GameItem& g, bool force_prepare) {
+    if (!g.def || g.running || g.queued) return;
+    if (g.check_child.running()) g.check_child.wait();
+    g.error.clear();
+    g.cancel_requested = false;
+    g.force_prepare = force_prepare;
+    evaluate(g);
+    const SourceKind sk = source_kind(g.cfg.source);
+    if (sk != SourceKind::nup && sk != SourceKind::folder) {
+        MessageBoxW(wnd_, L"Add your dump first.", kAppName, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    bool bad = false;
+    for (const Check& c : sys_checks_) bad |= c.level == Level::bad;
+    if (bad && MessageBoxW(wnd_, L"Something is missing on this PC (see This PC). Continue anyway?", kAppName, MB_YESNO | MB_ICONWARNING) != IDYES)
+        return;
+    g.queued = true;
+    queue_.push_back(&g);
+    log(g, L"--- " + std::wstring(force_prepare ? L"rebuild" : L"queued") + L" ---");
+    run_queue();
+    refresh();
+    InvalidateRect(wnd_, nullptr, FALSE);
+    InvalidateRect(cards_, nullptr, FALSE);
+}
+
+void App::run_queue() {
+    if (active_ || queue_.empty()) return;
+    GameItem& g = *queue_.front();
+    queue_.pop_front();
+    g.queued = false;
+    g.running = true;
+    g.cur = -1;
+    active_ = &g;
+    next_step(g);
+}
+
+void App::next_step(GameItem& g) {
+    evaluate(g);
+    int s = -1;
+    for (int i = g.cur + 1; i < S_COUNT; ++i)
+        if (g.need[i] || (i == S_PREPARE && g.force_prepare)) { s = i; break; }
+    auto finish = [&](const std::string& error) {
+        g.running = false;
+        g.cur = -1;
+        g.error = error;
+        if (active_ == &g) active_ = nullptr;
+        evaluate(g);
+        if (error.empty()) { g.prep_check.clear(); start_prepare_check(g); }
+        if (g.play_after) {
+            g.play_after = false;
+            if (error.empty() && g.ready()) play(g);
+        }
+        refresh();
+        InvalidateRect(wnd_, nullptr, FALSE);
+        InvalidateRect(cards_, nullptr, FALSE);
+        run_queue();
+    };
+    if (s < 0) { log(g, L"--- finished ---"); finish({}); return; }
+    if ((s != S_EXTRACT && !g.gid.ok) || (s == S_EXTRACT && source_kind(g.cfg.source) != SourceKind::nup)) {
+        finish(s == S_EXTRACT ? "the dump folder is not a game folder" : "the game files are not there");
+        return;
+    }
+    if ((s == S_TRANSLATE || s == S_PREPARE) && !g.exe_ok()) {
+        log(g, L"--- the game program is not built: " + g.exe + L" ---");
+        finish("the game program is not built yet");
+        return;
+    }
+    g.cur = s;
+    g.done = g.total = 0;
+    g.t0 = std::chrono::steady_clock::now();
+    g.result_ok = false;
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const std::wstring jobs = std::to_wstring(hw > 3 ? hw - 2 : 1);
+    std::wstring exe, args;
+    bool event = false;
+    std::error_code ec;
+    if (s == S_EXTRACT) {
+        exe = tools_.python;
+        args = py_args(tools_.nup_extract, quote(g.cfg.source) + L" " + quote(g.lay.dump));
+    } else if (s == S_CORPUS) {
+        fs::remove(fs::path(g.lay.corpus) / L"unique.tsv", ec);   // a scan that stops before its end must not count
+        fs::remove(fs::path(g.lay.corpus) / L"unique_all.tsv", ec);
+        fs::create_directories(g.lay.corpus, ec);
+        exe = tools_.python;
+        args = py_args(join(tools_.shader_scripts, L"extract_generic.py"), L"--romfs " + quote(join(g.lay.game, L"romfs")) + L" --exefs " +
+                       quote(join(g.lay.game, L"exefs")) + L" --out " + quote(g.lay.corpus) + L" --jobs " + jobs + L" --progress");
+    } else if (s == S_TRANSLATE) {
+        if (g.retranslate_all && dir_exists(g.lay.spirv)) {
+            const std::wstring old = g.lay.spirv + L"_old_" + std::to_wstring(GetTickCount64());
+            if (MoveFileW(g.lay.spirv.c_str(), old.c_str())) {
+                log(g, L"old translations moved aside, deleting them: " + old);
+                std::thread([old] { std::error_code e; fs::remove_all(old, e); }).detach();
+            }
+            g.st.translated_with.clear();
+            save_state(g.lay.state_file, g.st);
+        }
+        write_game_ini(g);
+        exe = g.exe;
+        args = game_cmd(g, L"--translate-shaders");
+        event = true;
+    } else if (s == S_PROGRAMS) {
+        exe = tools_.python;
+        args = py_args(join(tools_.shader_scripts, L"bnsh_programs.py"), L"--romfs " + quote(join(g.lay.game, L"romfs")) + L" --out " + quote(g.lay.programs));
+    } else {
+        write_game_ini(g);
+        exe = g.exe;
+        args = game_cmd(g, g.force_prepare ? L"--prepare-shaders --force" : L"--prepare-shaders --if-needed");
+        event = true;
+    }
+    if (exe.empty()) { finish("Python is missing (This PC page)"); return; }
+    log(g, L"> " + std::wstring(kStepName[s]));
+    fs::create_directories(g.lay.data, ec);
+    HWND w = wnd_;
+    GameItem* gp_ = &g;
+    std::wstring err;
+    if (!g.child.start(exe, args, g.lay.data, event,
+                       [w, gp_](const std::string& l) { PostMessageW(w, kMsgLine, reinterpret_cast<WPARAM>(gp_), reinterpret_cast<LPARAM>(new std::string(l))); },
+                       [w, gp_](DWORD c) { PostMessageW(w, kMsgExit, reinterpret_cast<WPARAM>(gp_), static_cast<LPARAM>(c)); }, &err)) {
+        log(g, L"  " + err);
+        finish(narrow(err));
+        return;
+    }
+    refresh();
+}
+
+void App::step_line(GameItem& g, const std::string& l) {
+    unsigned long long a = 0, b = 0;
+    char label[64] = {};
+    bool progress = false;
+    if (std::sscanf(l.c_str(), "@progress %63s %llu %llu", label, &a, &b) == 3) progress = true;
+    else if (std::sscanf(l.c_str(), "scan: %llu %llu", &a, &b) == 2) progress = true;
+    else if (std::sscanf(l.c_str(), "translate: %llu %llu", &a, &b) == 2 && l.find("done") == std::string::npos) progress = true;
+    else if (std::sscanf(l.c_str(), "prepare: %llu %llu", &a, &b) == 2) progress = true;
+    if (progress) {
+        if (label[0] && b != g.total) g.t0 = std::chrono::steady_clock::now();
+        g.done = a;
+        g.total = b;
+        return;
+    }
+    if (l.rfind("@error ", 0) == 0 || l.rfind("translate: error ", 0) == 0 || l.rfind("prepare: error ", 0) == 0) g.error = l.substr(l.find(' ') + 1);
+    if (l.rfind("@result", 0) == 0 || l.rfind("translate: done", 0) == 0 || l.rfind("prepare: done", 0) == 0 || l == "prepare: ready")
+        g.result_ok = l.find("cancelled") == std::string::npos;
+    log(g, widen(l));
+}
+
+void App::step_exit(GameItem& g, DWORD code) {
+    g.child.wait();
+    const int s = g.cur;
+    bool ok = code == 0 && (!g.cancel_requested || g.result_ok || s == S_PROGRAMS || s == S_CORPUS);
+    if (ok) {
+        if (s == S_EXTRACT) g.st.extracted_from = nup_stamp(g.cfg.source);
+        else if (s == S_CORPUS) { ok = file_exists(join(g.lay.corpus, L"unique.tsv")); if (ok) g.st.corpus_game = game_id_of(g.lay.game).text(); }
+        else if (s == S_TRANSLATE) { g.st.translated_game = game_id_of(g.lay.game).text(); g.st.translated_with = translator_stamp(tools_.translator); }
+        else if (s == S_PROGRAMS) { ok = file_exists(g.lay.programs); if (ok) g.st.programs_game = game_id_of(g.lay.game).text(); }
+        else if (s == S_PREPARE) { g.prep_check = L"ready"; g.force_prepare = false; }
+        save_state(g.lay.state_file, g.st);
+    }
+    log(g, L"  exit code " + std::to_wstring(code));
+    if (!ok || g.cancel_requested) {
+        g.play_after = false;
+        std::string e;
+        if (!g.cancel_requested) e = g.error.empty() ? narrow(std::wstring(kStepName[s])) + " ended with code " + std::to_string(code) + " (see Output)" : g.error;
+        g.running = false;
+        g.cur = -1;
+        g.error = e;
+        if (active_ == &g) active_ = nullptr;
+        evaluate(g);
+        refresh();
+        InvalidateRect(wnd_, nullptr, FALSE);
+        InvalidateRect(cards_, nullptr, FALSE);
+        run_queue();
+        return;
+    }
+    g.error.clear();
+    next_step(g);
+}
+
+void App::cancel(GameItem& g) {
+    if (g.queued) {
+        queue_.erase(std::remove(queue_.begin(), queue_.end(), &g), queue_.end());
+        g.queued = false;
+        g.play_after = false;
+        log(g, L"--- removed from the queue ---");
+    } else if (g.running) {
+        g.play_after = false;
+        g.cancel_requested = true;
+        g.child.cancel();
+    }
+    refresh();
+    InvalidateRect(cards_, nullptr, FALSE);
+}
+
+void App::rebuild_dialog(GameItem& g) {
+    if (g.running || g.queued || !g.gid.ok) return;
     TASKDIALOG_BUTTON b[] = {
-        {101, L"Compile the shaders again\nAfter a new graphics driver or another graphics card. Uses the translations you have."},
-        {102, L"Translate every shader again\nAfter a new translator (a new release of this port). Then compiles them."},
-        {103, L"Everything again\nAfter a game update: finds the shaders, translates the new ones, lists the programs and compiles them."},
+        {101, L"Compile shaders again"},
+        {102, L"Translate and compile again"},
+        {103, L"Set up everything again"},
     };
     TASKDIALOGCONFIG c{sizeof c};
     c.hwndParent = wnd_;
     c.hInstance = inst_;
     c.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
     c.dwCommonButtons = TDCBF_CANCEL_BUTTON;
-    c.pszWindowTitle = L"" GAME_PRODUCT L" setup";
-    c.pszMainInstruction = L"Rebuild the shaders";
-    c.pszContent = L"The setup notices game updates, a new translator and a new graphics driver by itself. Use this when the game shows "
-                   L"broken or missing graphics, or stutters although everything is marked done.";
+    c.pszWindowTitle = kAppName;
+    const std::wstring head = L"Rebuild the shaders of " + g.short_title;
+    c.pszMainInstruction = head.c_str();
+    c.pszContent = L"Only needed when graphics look broken. Updates and new drivers are handled by themselves.";
     c.cButtons = 3;
     c.pButtons = b;
     int pick = 0;
     if (FAILED(TaskDialogIndirect(&c, &pick, nullptr, nullptr))) return;
-    if (pick == 101) {
-        start_steps(true);
-    } else if (pick == 102) {
-        st_.translated_game.clear();
-        st_.translated_with = "rebuild";   // differs from the stamp: evaluate() moves the old translations aside
-        save_state(lay_.state_file, st_);
-        start_steps(true);
-    } else if (pick == 103) {
-        st_.corpus_game.clear();
-        st_.programs_game.clear();
-        st_.translated_game.clear();
-        save_state(lay_.state_file, st_);
-        start_steps(true);
-    }
+    if (pick == 102) { g.st.translated_game.clear(); g.st.translated_with = "rebuild"; save_state(g.lay.state_file, g.st); }
+    else if (pick == 103) { g.st.corpus_game.clear(); g.st.programs_game.clear(); g.st.translated_game.clear(); save_state(g.lay.state_file, g.st); }
+    if (pick >= 101 && pick <= 103) enqueue(g, true);
 }
 
-void App::play() {
-    if (!gid_.ok) return;
-    write_game_ini();
-    const std::wstring log_path = join(lay_.data, L"logs\\" GAME_LOG);
-    std::wstring cmd = quote(tools_.game_exe) + L" --game " + quote(lay_.game) + L" --ini " + quote(lay_.game_ini) + L" --log " + quote(log_path);
+void App::play(GameItem& g) {
+    if (!g.playable()) return;
+    write_game_ini(g);
+    const std::wstring log_path = join(g.lay.data, L"logs\\" + widen(g.def->log));
+    std::wstring cmd = quote(g.exe) + L" --game " + quote(g.lay.game) + L" --ini " + quote(g.lay.game_ini) + L" --log " + quote(log_path);
     if (!game_args_.empty()) cmd += L" " + game_args_;
     std::vector<wchar_t> buf(cmd.begin(), cmd.end());
     buf.push_back(0);
     STARTUPINFOW si{sizeof si};
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(tools_.game_exe.c_str(), buf.data(), nullptr, nullptr, FALSE, 0, nullptr, tools_.exe_dir.c_str(), &si, &pi)) {
-        MessageBoxW(wnd_, (L"Could not start " + tools_.game_exe + L" (Windows error " + std::to_wstring(GetLastError()) + L").").c_str(),
-                    L"" GAME_PRODUCT L" setup", MB_OK | MB_ICONERROR);
+    if (!CreateProcessW(g.exe.c_str(), buf.data(), nullptr, nullptr, FALSE, 0, nullptr, parent_of(g.exe).c_str(), &si, &pi)) {
+        MessageBoxW(wnd_, (L"Could not start " + g.exe + L" (Windows error " + std::to_wstring(GetLastError()) + L").").c_str(), kAppName, MB_OK | MB_ICONERROR);
         return;
     }
     CloseHandle(pi.hThread);
-    // A game that ends within a few seconds did not start: say why instead of closing (exit code 7: another run of the game or too little
-    // free memory beside it; 1: a start-up error, its log says which).
+    // A game that ends within a few seconds did not start: say why (exit code 7: another run of it, or too little free memory beside one).
     SetCursor(LoadCursor(nullptr, IDC_WAIT));
     const bool ended = WaitForSingleObject(pi.hProcess, 4000) == WAIT_OBJECT_0;
     DWORD code = 0;
@@ -862,188 +900,698 @@ void App::play() {
     if (ended && code != 0) {
         const std::wstring why = code == 7 ? L"The game is already running, or another run of it leaves too little free memory. Close it first."
                                            : L"The game stopped while starting (exit code " + std::to_wstring(code) + L").";
-        MessageBoxW(wnd_, (why + L"\r\n\r\nIts log: " + log_path).c_str(), L"" GAME_PRODUCT L" setup", MB_OK | MB_ICONWARNING);
+        MessageBoxW(wnd_, (why + L"\r\n\r\nIts log: " + log_path).c_str(), kAppName, MB_OK | MB_ICONWARNING);
         return;
     }
-    if (SendMessageW(play_close_, BM_GETCHECK, 0, 0) == BST_CHECKED) DestroyWindow(wnd_);
+    if (!g.ready()) return;
+    ShowWindow(wnd_, SW_MINIMIZE);
 }
 
-void App::make_shortcut() {
-    if (!gid_.ok) return;
-    write_game_ini();
+void App::make_shortcut(GameItem& g) {
+    if (!g.playable()) return;
+    write_game_ini(g);
     IShellLinkW* sl = nullptr;
     if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&sl)))) return;
-    sl->SetPath(tools_.game_exe.c_str());
-    sl->SetArguments((L"--game " + quote(lay_.game) + L" --ini " + quote(lay_.game_ini)).c_str());
-    sl->SetWorkingDirectory(tools_.exe_dir.c_str());
-    sl->SetDescription(L"" GAME_PRODUCT);
+    sl->SetPath(g.exe.c_str());
+    sl->SetArguments((L"--game " + quote(g.lay.game) + L" --ini " + quote(g.lay.game_ini)).c_str());
+    sl->SetWorkingDirectory(parent_of(g.exe).c_str());
+    const std::wstring product = widen(g.def->product);
+    sl->SetDescription(product.c_str());
     PWSTR desk = nullptr;
     bool ok = false;
     std::wstring path;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &desk))) {
-        path = join(desk, L"" GAME_PRODUCT L".lnk");
+        path = join(desk, product + L".lnk");
         CoTaskMemFree(desk);
         IPersistFile* pf = nullptr;
-        if (SUCCEEDED(sl->QueryInterface(IID_PPV_ARGS(&pf)))) {
-            ok = SUCCEEDED(pf->Save(path.c_str(), TRUE));
-            pf->Release();
-        }
+        if (SUCCEEDED(sl->QueryInterface(IID_PPV_ARGS(&pf)))) { ok = SUCCEEDED(pf->Save(path.c_str(), TRUE)); pf->Release(); }
     }
     sl->Release();
-    MessageBoxW(wnd_, ok ? (L"Shortcut created: " + path).c_str() : L"The shortcut could not be created.", L"" GAME_PRODUCT L" setup",
-                MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONERROR));
+    MessageBoxW(wnd_, ok ? (L"Shortcut created: " + path).c_str() : L"The shortcut could not be created.", kAppName, MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONERROR));
 }
 
 void App::about() {
-    std::wstring t = L"" GAME_PRODUCT L" setup\r\n\r\nGame: " GAME_TITLE L" (" GAME_TITLE_ID L"), " GAME_DUMP_VERSION L"\r\nGame program: " + tools_.game_exe +
-                     L"\r\nTranslator: " + (tools_.translator.empty() ? L"(missing)" : tools_.translator) + L"\r\nPython: " +
-                     (tools_.python.empty() ? L"(missing)" : tools_.python) + L"\r\nSettings: " + config_path();
+    std::wstring t = std::wstring(kAppName) + L"\r\n\r\nGames known: " + std::to_wstring(defs_.size()) + L"\r\nTranslator: " +
+                     (tools_.translator.empty() ? L"(missing)" : tools_.translator) + L"\r\nPython: " + (tools_.python.empty() ? L"(missing)" : tools_.python) +
+                     L"\r\nLibrary: " + library_path();
+    for (const GameDef& d : defs_) t += L"\r\n  " + widen(d.title) + L" (" + widen(d.title_id) + L"): " + d.manifest;
     MessageBoxW(wnd_, t.c_str(), L"About", MB_OK | MB_ICONINFORMATION);
 }
 
-// ---- messages ----------------------------------------------------------------------------------------------------------------------
-void App::draw_nav(const DRAWITEMSTRUCT* d) {
-    if (d->itemID == static_cast<UINT>(-1)) return;
-    const int i = static_cast<int>(d->itemID);
-    const bool sel = i == page_;
-    HDC dc = d->hDC;
-    RECT r = d->rcItem;
-    HBRUSH bg = CreateSolidBrush(sel ? RGB(0xE5, 0xF1, 0xFB) : GetSysColor(COLOR_WINDOW));
-    FillRect(dc, &r, bg);
-    DeleteObject(bg);
-    if (sel) {
-        RECT bar{r.left, r.top + S(8), r.left + S(4), r.bottom - S(8)};
-        HBRUSH b = CreateSolidBrush(RGB(0x00, 0x5F, 0xB8));
-        FillRect(dc, &bar, b);
-        DeleteObject(b);
-    }
-    const wchar_t* names[P_COUNT] = {L"Requirements", L"Game files", L"Prepare", L"Play"};
-    std::wstring sub;
-    COLORREF sub_col = RGB(0x5F, 0x5F, 0x5F);
-    if (i == P_REQ) {
-        int bad = 0, warn = 0;
-        for (const Check& c : checks_) { bad += c.level == Level::bad; warn += c.level == Level::warn; }
-        sub = checks_.empty() ? L"Checking..." : bad ? std::to_wstring(bad) + L" missing" : warn ? L"OK, " + std::to_wstring(warn) + L" note(s)" : L"All there";
-        sub_col = checks_.empty() ? sub_col : bad ? RGB(0xB3, 0x1B, 0x1B) : warn ? RGB(0x8A, 0x5A, 0x00) : RGB(0x0F, 0x6B, 0x2F);
-    } else if (i == P_GAME) {
-        sub = gid_.ok ? L"Found" : source_kind(cfg_.source) == SourceKind::nup ? L"To extract" : L"Choose your dump";
-        sub_col = gid_.ok || source_kind(cfg_.source) == SourceKind::nup ? RGB(0x0F, 0x6B, 0x2F) : RGB(0xB3, 0x1B, 0x1B);
-    } else if (i == P_PREP) {
-        int todo = 0;
-        for (int s = 0; s < S_COUNT; ++s) todo += need_[s];
-        sub = running_ ? L"Running" : todo ? std::to_wstring(todo) + L" step(s) to do" : L"Done";
-        sub_col = running_ ? RGB(0x00, 0x5F, 0xB8) : todo ? RGB(0x8A, 0x5A, 0x00) : RGB(0x0F, 0x6B, 0x2F);
-    } else {
-        sub = ready_to_play(need_) ? L"Ready" : L"Not ready yet";
-        sub_col = ready_to_play(need_) ? RGB(0x0F, 0x6B, 0x2F) : sub_col;
-    }
-    SetBkMode(dc, TRANSPARENT);
-    HGDIOBJ of = SelectObject(dc, bold_);
-    SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
-    RECT t{r.left + S(18), r.top + S(8), r.right - S(8), r.top + S(30)};
-    const std::wstring name = std::to_wstring(i + 1) + L"   " + names[i];
-    DrawTextW(dc, name.c_str(), -1, &t, DT_SINGLELINE | DT_LEFT | DT_NOPREFIX);
-    SelectObject(dc, font_);
-    SetTextColor(dc, sub_col);
-    RECT s2{r.left + S(36), r.top + S(29), r.right - S(8), r.bottom - S(4)};
-    DrawTextW(dc, sub.c_str(), -1, &s2, DT_SINGLELINE | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
-    SelectObject(dc, of);
+// ---- controls -----------------------------------------------------------------------------------------------------------------------
+void App::make_fonts() {
+    for (HFONT* f : {&font_, &bold_, &small_, &title_, &big_})
+        if (*f) { DeleteObject(*f); *f = nullptr; }
+    LOGFONTW lf{};
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    wcscpy_s(lf.lfFaceName, L"Segoe UI Variable Text");
+    lf.lfHeight = -S(14);
+    font_ = CreateFontIndirectW(&lf);
+    lf.lfHeight = -S(12);
+    small_ = CreateFontIndirectW(&lf);
+    lf.lfHeight = -S(14);
+    lf.lfWeight = FW_SEMIBOLD;
+    bold_ = CreateFontIndirectW(&lf);
+    wcscpy_s(lf.lfFaceName, L"Segoe UI Variable Display");
+    lf.lfHeight = -S(24);
+    title_ = CreateFontIndirectW(&lf);
+    lf.lfHeight = -S(34);
+    lf.lfWeight = FW_BOLD;
+    big_ = CreateFontIndirectW(&lf);
 }
 
+HWND App::button(const wchar_t* t, int id, Btn kind) {
+    HWND h = CreateWindowExW(0, WC_BUTTONW, t, WS_CHILD | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 10, 10, wnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), inst_, nullptr);
+    btns_.push_back({h, kind});
+    return h;
+}
+
+void App::apply_theme(HWND h) {
+    SetWindowTheme(h, L"DarkMode_Explorer", nullptr);
+    SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+}
+
+void App::create_controls() {
+    cards_ = CreateWindowExW(0, kCardsClass, L"", WS_CHILD | WS_VSCROLL, 0, 0, 10, 10, wnd_, reinterpret_cast<HMENU>(ID_CARDS), inst_, nullptr);
+    SetWindowTheme(cards_, L"DarkMode_Explorer", nullptr);
+    ctls_.push_back({cards_, P_LIB});
+    // game page: the one button, a cancel while it sets up, and the rest in a menu
+    b_play_ = button(L"Play", ID_PLAY, Btn::primary);
+    b_cancel_ = button(L"Cancel", ID_CANCEL, Btn::danger);
+    b_more_ = button(L"\u2022\u2022\u2022", ID_MORE, Btn::normal);
+    for (HWND h : {b_play_, b_cancel_, b_more_}) ctls_.push_back({h, P_GAME});
+    steps_ = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER | LVS_NOCOLUMNHEADER, 0, 0, 10, 10, wnd_,
+                             reinterpret_cast<HMENU>(ID_STEPS), inst_, nullptr);
+    ListView_SetExtendedListViewStyle(steps_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    log_ = CreateWindowExW(0, WC_EDITW, L"", WS_CHILD | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 0, 0, 10, 10, wnd_,
+                           reinterpret_cast<HMENU>(ID_LOG), inst_, nullptr);
+    ctls_.push_back({steps_, -1});   // shown with details_
+    ctls_.push_back({log_, -1});
+    // settings page
+    settings_ = settings::create(wnd_, inst_, ID_SETTINGS);
+    ctls_.push_back({settings_, P_SET});
+    b_open_ini_ = button(L"Open file", ID_OPEN_INI, Btn::normal);
+    ctls_.push_back({b_open_ini_, P_SET});
+    // this PC
+    req_list_ = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_TABSTOP, 0, 0, 10, 10, wnd_,
+                                reinterpret_cast<HMENU>(ID_REQ_LIST), inst_, nullptr);
+    ListView_SetExtendedListViewStyle(req_list_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    req_fix_ = CreateWindowExW(0, WC_EDITW, L"", WS_CHILD | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 0, 0, 10, 10, wnd_,
+                               reinterpret_cast<HMENU>(ID_REQ_FIX), inst_, nullptr);
+    b_recheck_ = button(L"Check again", ID_RECHECK, Btn::normal);
+    b_copy_ = button(L"Copy", ID_COPY, Btn::normal);
+    for (HWND h : {req_list_, req_fix_, b_recheck_, b_copy_}) ctls_.push_back({h, P_PC});
+
+    for (HWND lv : {steps_, req_list_}) {
+        apply_theme(lv);
+        ListView_SetBkColor(lv, kCard);
+        ListView_SetTextBkColor(lv, kCard);
+        ListView_SetTextColor(lv, kText);
+        if (HWND hd = ListView_GetHeader(lv)) SetWindowTheme(hd, L"DarkMode_ItemsView", nullptr);
+    }
+    for (HWND e : {log_, req_fix_}) apply_theme(e);
+    for (auto& [h, k] : btns_) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(bold_), TRUE);
+    auto col = [](HWND lv, int i, const wchar_t* t, int w) {
+        LVCOLUMNW c{LVCF_TEXT | LVCF_WIDTH};
+        c.pszText = const_cast<wchar_t*>(t);
+        c.cx = w;
+        ListView_InsertColumn(lv, i, &c);
+    };
+    col(steps_, 0, L"Step", S(300));
+    col(steps_, 1, L"State", S(380));
+    for (int i = 0; i < S_COUNT; ++i) {
+        LVITEMW it{LVIF_TEXT};
+        it.iItem = i;
+        it.pszText = const_cast<wchar_t*>(kStepName[i]);
+        ListView_InsertItem(steps_, &it);
+    }
+    col(req_list_, 0, L"Missing", S(240));
+    col(req_list_, 1, L"", S(400));
+}
+
+constexpr int kSideW = 236;
+
+void App::layout() {
+    RECT rc;
+    GetClientRect(wnd_, &rc);
+    const int x = S(kSideW) + S(32), w = rc.right - x - S(32), bottom = rc.bottom;
+    auto put = [](HWND h, int x0, int y0, int w0, int h0) { MoveWindow(h, x0, y0, std::max(w0, 1), std::max(h0, 1), TRUE); };
+    // side nav
+    int ny = S(96);
+    for (int p = 0; p < P_COUNT; ++p) { nav_rect_[p] = {S(12), ny, S(kSideW) - S(12), ny + S(42)}; ny += S(46); }
+    add_rect_ = {S(12), bottom - S(60), S(kSideW) - S(12), bottom - S(16)};
+    // library
+    put(cards_, S(kSideW), S(92), rc.right - S(kSideW), bottom - S(92));
+    // game page: banner 0..S(200), the button row, a status line with the bar, then (details) the steps and the output
+    int y = S(214);
+    put(b_play_, x, y, S(200), S(48));
+    put(b_cancel_, x + S(212), y + S(6), S(110), S(36));
+    put(b_more_, x + w - S(48), y + S(6), S(48), S(36));
+    y += S(64);
+    prog_rect_ = {x, y, x + w, y + S(40)};
+    y += S(56);
+    const int steps_h = S_COUNT * S(26) + S(6);
+    put(steps_, x, y, w, steps_h);
+    ListView_SetColumnWidth(steps_, 0, S(300));
+    ListView_SetColumnWidth(steps_, 1, std::max(S(120), w - S(304)));
+    y += steps_h + S(12);
+    put(log_, x, y, w, bottom - y - S(24));
+    // settings: the panel below the page title, the file button in the title row
+    put(settings_, S(kSideW), S(92), rc.right - S(kSideW), bottom - S(92));
+    put(b_open_ini_, rc.right - S(32) - S(130), S(30), S(130), S(34));
+    // this PC: the problems only
+    const int bh = S(36);
+    const int list_h = std::max(S(120), (bottom - S(110)) / 3);
+    put(req_list_, x, S(110), w, list_h);
+    ListView_SetColumnWidth(req_list_, 0, S(240));
+    ListView_SetColumnWidth(req_list_, 1, std::max(S(120), w - S(244)));
+    const int fy = S(110) + list_h + S(14);
+    put(req_fix_, x, fy, w, bottom - fy - S(64));
+    put(b_recheck_, x, bottom - S(52), S(140), bh);
+    put(b_copy_, x + S(150), bottom - S(52), S(100), bh);
+    InvalidateRect(wnd_, nullptr, TRUE);
+}
+
+void App::show_page(int p) {
+    const int before = page_;
+    page_ = std::clamp(p, 0, P_COUNT - 1);
+    if (page_ != P_LIB && !sel()) page_ = P_LIB;
+    if (page_ == P_SET && before != P_SET) update_settings();
+    for (auto& [h, pg] : ctls_) ShowWindow(h, pg == page_ ? SW_SHOW : SW_HIDE);
+    refresh();
+    InvalidateRect(wnd_, nullptr, TRUE);
+}
+
+void App::refresh() {
+    GameItem* g = sel();
+    const bool game_page = page_ == P_GAME;
+    if (g) {
+        for (int i = 0; i < S_COUNT; ++i) {
+            std::wstring t = (g->running && i == g->cur) ? L"Running..." : step_state_text(g->need[i], g->why[i]);
+            ListView_SetItemText(steps_, i, 1, const_cast<wchar_t*>(t.c_str()));
+        }
+        bool en = false;
+        SetWindowTextW(b_play_, primary_label(*g, &en).c_str());
+        EnableWindow(b_play_, en);
+        ShowWindow(b_cancel_, game_page && (g->running || g->queued) ? SW_SHOW : SW_HIDE);
+        EnableWindow(b_cancel_, g->running || g->queued);
+        EnableWindow(b_open_ini_, g->in_library() && !g->lay.game.empty());
+        InvalidateRect(steps_, nullptr, FALSE);
+    }
+    for (HWND h : {steps_, log_}) ShowWindow(h, game_page && details_ ? SW_SHOW : SW_HIDE);
+    // this PC: only what needs the player (the PC's checks, then the selected game's)
+    ListView_DeleteAllItems(req_list_);
+    std::vector<const Check*> all;
+    for (const Check& c : sys_checks_) if (c.level == Level::bad || c.level == Level::warn) all.push_back(&c);
+    if (g) for (const Check& c : g->checks) if (c.level == Level::bad || c.level == Level::warn) all.push_back(&c);
+    std::wstring fixes;
+    for (size_t i = 0; i < all.size(); ++i) {
+        LVITEMW it{LVIF_TEXT | LVIF_PARAM};
+        it.iItem = static_cast<int>(i);
+        it.pszText = const_cast<wchar_t*>(all[i]->item.c_str());
+        it.lParam = static_cast<LPARAM>(all[i]->level);
+        ListView_InsertItem(req_list_, &it);
+        ListView_SetItemText(req_list_, static_cast<int>(i), 1, const_cast<wchar_t*>(all[i]->state.c_str()));
+        if (!all[i]->fix.empty()) fixes += all[i]->item + L":\r\n" + all[i]->fix + L"\r\n\r\n";
+    }
+    const bool problems = !all.empty();
+    for (HWND h : {req_list_, req_fix_, b_copy_}) ShowWindow(h, page_ == P_PC && problems ? SW_SHOW : SW_HIDE);
+    SetWindowTextW(req_fix_, fixes.c_str());
+    for (auto& [h, k] : btns_) InvalidateRect(h, nullptr, FALSE);
+}
+
+void App::more_menu() {
+    GameItem* g = sel();
+    if (!g) return;
+    const bool idle = !g->running && !g->queued;
+    HMENU m = CreatePopupMenu();
+    auto item = [&](int id, const wchar_t* t, bool en) { AppendMenuW(m, MF_STRING | (en ? 0 : MF_GRAYED), id, t); };
+    item(ID_DETAILS, details_ ? L"Hide details" : L"Show details", true);
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    item(ID_SRC_NUP, L"Choose another .nup file...", idle && g->def);
+    item(ID_SRC_FOLDER, L"Choose another folder...", idle && g->def);
+    item(ID_DATA, L"Move the data folder...", idle && g->in_library());
+    item(ID_OPEN_DATA, L"Open the data folder", g->in_library());
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    item(ID_REBUILD, L"Rebuild shaders...", idle && g->def && g->gid.ok);
+    item(ID_SHORTCUT, L"Desktop shortcut", g->playable());
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    item(ID_REMOVE, L"Remove from library", idle && g->in_library());
+    RECT r;
+    GetWindowRect(b_more_, &r);
+    const int id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_TOPALIGN, r.right, r.bottom + S(4), 0, wnd_, nullptr);
+    DestroyMenu(m);
+    if (id) command(id, 0);
+}
+
+// ---- painting ------------------------------------------------------------------------------------------------------------------------
+void App::paint_side(gp::Graphics& g, const RECT& rc) {
+    gp::SolidBrush side(C(kSide));
+    g.FillRectangle(&side, 0.f, 0.f, Sf(kSideW), static_cast<gp::REAL>(rc.bottom));
+    HDC dc = g.GetHDC();
+    gp::Font big(dc, title_), bold(dc, bold_), smallf(dc, small_), normal(dc, font_);
+    g.ReleaseHDC(dc);
+    // brand
+    gp::LinearGradientBrush lg(gp::PointF(Sf(20), Sf(28)), gp::PointF(Sf(52), Sf(60)), C(kAccent), C(RGB(0xB0, 0x6B, 0xFF)));
+    fill_round(g, gp::RectF(Sf(20), Sf(26), Sf(34), Sf(34)), Sf(9), lg);
+    text(g, L"R", bold, gp::RectF(Sf(20), Sf(26), Sf(34), Sf(34)), RGB(255, 255, 255), gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+    text(g, L"Recomp", bold, gp::RectF(Sf(64), Sf(24), Sf(160), Sf(20)), kText);
+    text(g, L"Library", smallf, gp::RectF(Sf(64), Sf(43), Sf(160), Sf(18)), kMuted);
+    // nav
+    const GameItem* s = const_cast<App*>(this)->sel();
+    const wchar_t* names[P_COUNT] = {L"Library", L"", L"Settings", L"This PC"};
+    for (int p = 0; p < P_COUNT; ++p) {
+        const RECT& r = nav_rect_[p];
+        std::wstring name = names[p];
+        if (p == P_GAME) name = s ? s->short_title : L"Game";
+        const bool on = p == page_, dim = p != P_LIB && p != P_PC && !s;
+        gp::RectF rf(static_cast<gp::REAL>(r.left), static_cast<gp::REAL>(r.top), static_cast<gp::REAL>(r.right - r.left), static_cast<gp::REAL>(r.bottom - r.top));
+        if (on || hover_nav_ == p) {
+            gp::SolidBrush b(C(on ? kCardHi : kCard));
+            fill_round(g, rf, Sf(8), b);
+        }
+        if (on) {
+            gp::SolidBrush a(C(kAccent));
+            fill_round(g, gp::RectF(rf.X, rf.Y + Sf(10), Sf(4), rf.Height - Sf(20)), Sf(2), a);
+        }
+        // a small mark: library count, game status dot, PC problems
+        std::wstring sub;
+        COLORREF dot = 0;
+        if (p == P_LIB) {
+            int n = 0;
+            for (auto& gi : games_) n += gi->in_library();
+            sub = std::to_wstring(n);
+        } else if (p == P_GAME && s) {
+            dot = status_of(*s).color;
+        } else if (p == P_PC) {
+            int bad = 0;
+            for (const Check& c : sys_checks_) bad += c.level == Level::bad;
+            if (bad) { sub = std::to_wstring(bad); dot = kBad; }
+            else if (!sys_checks_.empty()) dot = kOk;
+        }
+        if (p == P_GAME) {
+            text(g, L"GAME", smallf, gp::RectF(rf.X + Sf(16), rf.Y - Sf(2), rf.Width, Sf(14)), kMuted);
+        }
+        text(g, name, on ? bold : normal, gp::RectF(rf.X + Sf(16), rf.Y, rf.Width - Sf(56), rf.Height), dim ? kMuted : kText, gp::StringAlignmentNear,
+             gp::StringAlignmentCenter);
+        if (dot) {
+            gp::SolidBrush db(C(dot));
+            g.FillEllipse(&db, rf.X + rf.Width - Sf(24), rf.Y + rf.Height / 2 - Sf(4), Sf(8), Sf(8));
+        } else if (!sub.empty()) {
+            text(g, sub, smallf, gp::RectF(rf.X + rf.Width - Sf(44), rf.Y, Sf(32), rf.Height), kMuted, gp::StringAlignmentFar, gp::StringAlignmentCenter);
+        }
+    }
+    // the queue, at the bottom: what runs, what waits
+    float qy = static_cast<float>(add_rect_.top) - Sf(70);
+    if (active_ || !queue_.empty()) {
+        gp::SolidBrush card(C(kCard));
+        fill_round(g, gp::RectF(Sf(12), qy, Sf(kSideW - 24), Sf(60)), Sf(8), card);
+        std::wstring t = active_ ? active_->short_title : L"";
+        const Status st = active_ ? status_of(*active_) : Status{};
+        text(g, L"SETTING UP", smallf, gp::RectF(Sf(24), qy + Sf(6), Sf(180), Sf(14)), kMuted);
+        text(g, t + (queue_.empty() ? L"" : L"  +" + std::to_wstring(queue_.size()) + L" waiting"), bold, gp::RectF(Sf(24), qy + Sf(20), Sf(kSideW - 48), Sf(18)), kText);
+        const float pw = Sf(kSideW - 48);
+        gp::SolidBrush track(C(kLine)), fillb(C(kAccent));
+        fill_round(g, gp::RectF(Sf(24), qy + Sf(44), pw, Sf(5)), Sf(2.5f), track);
+        if (st.progress > 0) fill_round(g, gp::RectF(Sf(24), qy + Sf(44), std::max(Sf(5), pw * static_cast<float>(st.progress)), Sf(5)), Sf(2.5f), fillb);
+    }
+    // add a game
+    gp::RectF ar(static_cast<gp::REAL>(add_rect_.left), static_cast<gp::REAL>(add_rect_.top), static_cast<gp::REAL>(add_rect_.right - add_rect_.left),
+                 static_cast<gp::REAL>(add_rect_.bottom - add_rect_.top));
+    gp::SolidBrush ab(C(hover_nav_ == 99 ? kAccentHi : kAccent));
+    fill_round(g, ar, Sf(10), ab);
+    text(g, L"+  Add a game", bold, ar, RGB(255, 255, 255), gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+}
+
+void App::paint_game_header(gp::Graphics& g, const RECT& rc) {
+    GameItem* s = sel();
+    if (!s) return;
+    HDC dc = g.GetHDC();
+    gp::Font big(dc, big_), bold(dc, bold_), normal(dc, font_), smallf(dc, small_);
+    g.ReleaseHDC(dc);
+    const float x0 = Sf(kSideW), w = static_cast<float>(rc.right) - x0;
+    COLORREF a, b;
+    banner_colors(s->id, &a, &b);
+    gp::LinearGradientBrush lg(gp::PointF(x0, 0), gp::PointF(x0 + w, Sf(200)), C(a), C(b));
+    g.FillRectangle(&lg, x0, 0.f, w, Sf(196));
+    // fade into the background
+    gp::LinearGradientBrush fade(gp::PointF(0, Sf(110)), gp::PointF(0, Sf(197)), C(kBg, 0), C(kBg, 255));
+    g.FillRectangle(&fade, x0, Sf(110), w, Sf(87));
+    const float x = x0 + Sf(32);
+    text(g, s->title, big, gp::RectF(x, Sf(80), w - Sf(64), Sf(48)), RGB(255, 255, 255));
+    std::wstring sub = s->def ? widen(s->def->platform == "switch2" ? "Switch 2" : "Switch") + L"  ·  version " + widen(s->def->display_version)
+                              : std::wstring(L"No port yet");
+    text(g, sub, normal, gp::RectF(x, Sf(130), w - Sf(64), Sf(20)), RGB(0xD8, 0xDC, 0xE4));
+    const Status st = status_of(*s);
+    // status chip
+    HDC dc2 = g.GetHDC();
+    SIZE ts{};
+    HGDIOBJ of = SelectObject(dc2, bold_);
+    GetTextExtentPoint32W(dc2, st.text.c_str(), static_cast<int>(st.text.size()), &ts);
+    SelectObject(dc2, of);
+    g.ReleaseHDC(dc2);
+    const float cw = static_cast<float>(ts.cx) + Sf(34);
+    gp::SolidBrush chip(C(st.color, 40));
+    fill_round(g, gp::RectF(x, Sf(160), cw, Sf(26)), Sf(13), chip);
+    gp::SolidBrush dotb(C(st.color));
+    g.FillEllipse(&dotb, x + Sf(11), Sf(169), Sf(8), Sf(8));
+    text(g, st.text, bold, gp::RectF(x + Sf(24), Sf(160), cw, Sf(26)), st.color, gp::StringAlignmentNear, gp::StringAlignmentCenter);
+    // the status line under the button: what runs, what went wrong, or what to do
+    const float px = static_cast<float>(prog_rect_.left), py = static_cast<float>(prog_rect_.top), pw = static_cast<float>(prog_rect_.right - prog_rect_.left);
+    std::wstring pt;
+    COLORREF pc = kMuted;
+    bool bar = false;
+    if (s->running && s->cur >= 0) {
+        bar = true;
+        pt = L"Step " + std::to_wstring(s->cur + 1) + L" of " + std::to_wstring(S_COUNT);
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - s->t0).count();
+        if (s->total && s->done > 0 && s->done < s->total && secs > 5 && s->done * 20 >= s->total) {
+            const int left = static_cast<int>(secs / static_cast<double>(s->done) * static_cast<double>(s->total - s->done));
+            pt += left >= 120 ? L"  \u00B7  about " + std::to_wstring(left / 60) + L" min left" : L"  \u00B7  almost done";
+        }
+        if (s->play_after) pt += L"  \u00B7  the game starts when it is done";
+        if (s->cancel_requested) pt = L"Stopping...";
+    } else if (s->queued) {
+        bar = true;
+        pt = L"Waits for the game before it";
+    } else if (!s->error.empty()) {
+        pt = widen(s->error);
+        pc = kBad;
+    } else if (s->def && s->in_library() && !s->exe_ok()) {
+        pt = L"This release has no game program for it yet.";
+    } else if (s->def && s->in_library() && !s->ready()) {
+        pt = L"Play sets it up once first (takes a while).";
+    } else {
+        bool bad = false;
+        for (const Check& c : sys_checks_) bad |= c.level == Level::bad;
+        if (bad) { pt = L"Something is missing on this PC: see This PC."; pc = kWarn; }
+    }
+    text(g, pt, normal, gp::RectF(px, py, pw, Sf(18)), pc);
+    if (bar) {
+        gp::SolidBrush track(C(kLine)), fillb(C(kAccent));
+        fill_round(g, gp::RectF(px, py + Sf(26), pw, Sf(6)), Sf(3), track);
+        if (st.progress > 0) fill_round(g, gp::RectF(px, py + Sf(26), std::max(Sf(6), pw * static_cast<float>(st.progress)), Sf(6)), Sf(3), fillb);
+    }
+    (void)smallf;
+    (void)rc;
+}
+
+void App::paint(HDC hdc) {
+    RECT rc;
+    GetClientRect(wnd_, &rc);
+    HDC dc = CreateCompatibleDC(hdc);
+    HBITMAP bm = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+    HGDIOBJ old = SelectObject(dc, bm);
+    {
+        gp::Graphics g(dc);
+        g.SetSmoothingMode(gp::SmoothingModeAntiAlias);
+        g.SetTextRenderingHint(gp::TextRenderingHintClearTypeGridFit);
+        gp::SolidBrush bg(C(kBg));
+        g.FillRectangle(&bg, 0, 0, rc.right, rc.bottom);
+        paint_side(g, rc);
+        HDC fdc = g.GetHDC();
+        gp::Font title(fdc, title_), normal(fdc, font_), smallf(fdc, small_);
+        g.ReleaseHDC(fdc);
+        const float x = Sf(kSideW) + Sf(32), w = static_cast<float>(rc.right) - x - Sf(32);
+        if (page_ == P_LIB) {
+            text(g, L"Your games", title, gp::RectF(x, Sf(24), w, Sf(34)), kText);
+        } else if (page_ == P_GAME) {
+            paint_game_header(g, rc);
+        } else if (page_ == P_SET) {
+            const GameItem* sg = sel();
+            text(g, L"Settings", title, gp::RectF(x, Sf(24), w, Sf(34)), kText);
+            text(g, sg ? sg->title : std::wstring(), normal, gp::RectF(x, Sf(60), w - Sf(220), Sf(20)), kMuted);
+        } else if (page_ == P_PC) {
+            text(g, L"This PC", title, gp::RectF(x, Sf(24), w, Sf(34)), kText);
+            bool problems = false;
+            for (const Check& c : sys_checks_) problems |= c.level == Level::bad || c.level == Level::warn;
+            if (const GameItem* sg = sel()) for (const Check& c : sg->checks) problems |= c.level == Level::bad || c.level == Level::warn;
+            if (sys_checks_.empty()) text(g, L"Checking...", normal, gp::RectF(x, Sf(70), w, Sf(24)), kMuted);
+            else if (!problems) {
+                gp::SolidBrush ok(C(kOk, 40));
+                fill_round(g, gp::RectF(x, Sf(110), std::min(w, Sf(520)), Sf(64)), Sf(12), ok);
+                text(g, L"\u2713  Everything is ready", title, gp::RectF(x + Sf(20), Sf(110), w, Sf(64)), kOk, gp::StringAlignmentNear, gp::StringAlignmentCenter);
+            } else text(g, L"Select an item to see how to fix it.", normal, gp::RectF(x, Sf(70), w, Sf(24)), kMuted);
+        }
+    }
+    BitBlt(hdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, old);
+    DeleteObject(bm);
+    DeleteDC(dc);
+}
+
+void App::paint_cards(HWND h, HDC hdc) {
+    RECT rc;
+    GetClientRect(h, &rc);
+    HDC dc = CreateCompatibleDC(hdc);
+    HBITMAP bm = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+    HGDIOBJ old = SelectObject(dc, bm);
+    hits_.clear();
+    {
+        gp::Graphics g(dc);
+        g.SetSmoothingMode(gp::SmoothingModeAntiAlias);
+        g.SetTextRenderingHint(gp::TextRenderingHintClearTypeGridFit);
+        gp::SolidBrush bg(C(kBg));
+        g.FillRectangle(&bg, 0, 0, rc.right, rc.bottom);
+        HDC fdc = g.GetHDC();
+        gp::Font title(fdc, title_), bold(fdc, bold_), normal(fdc, font_), smallf(fdc, small_);
+        g.ReleaseHDC(fdc);
+        const float pad = Sf(32), gap = Sf(20), cw = Sf(300), ch = Sf(280);
+        const int cols = std::max(1, static_cast<int>((static_cast<float>(rc.right) - 2 * pad + gap) / (cw + gap)));
+        // the player's games first, then the known games without a dump, then "add"
+        std::vector<GameItem*> order;
+        for (auto& gi : games_) if (gi->in_library()) order.push_back(gi.get());
+        for (auto& gi : games_) if (!gi->in_library() && gi->def) order.push_back(gi.get());
+        const int n = static_cast<int>(order.size()) + 1;
+        content_h_ = static_cast<int>(pad + ((n + cols - 1) / cols) * (ch + gap));
+        const float oy = -static_cast<float>(scroll_);
+        for (int i = 0; i < n; ++i) {
+            const float x = pad + static_cast<float>(i % cols) * (cw + gap), y = Sf(8) + oy + static_cast<float>(i / cols) * (ch + gap);
+            const RECT card{static_cast<LONG>(x), static_cast<LONG>(y), static_cast<LONG>(x + cw), static_cast<LONG>(y + ch)};
+            if (i == n - 1) {
+                // add a game
+                const int hi = static_cast<int>(hits_.size());
+                hits_.push_back({card, nullptr, 4});
+                const bool hv = hover_hit_ == hi && !hover_game_;
+                gp::Pen pen(C(hv ? kAccent : kLine), Sf(2));
+                pen.SetDashStyle(gp::DashStyleDash);
+                gp::GraphicsPath p;
+                round_path(p, gp::RectF(x + Sf(1), y + Sf(1), cw - Sf(2), ch - Sf(2)), Sf(14));
+                if (hv) { gp::SolidBrush hb(C(kCard)); g.FillPath(&hb, &p); }
+                g.DrawPath(&pen, &p);
+                text(g, L"+", title, gp::RectF(x, y + ch / 2 - Sf(48), cw, Sf(40)), hv ? kAccentHi : kMuted, gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+                text(g, L"Add a game", bold, gp::RectF(x, y + ch / 2, cw, Sf(20)), hv ? kText : kMuted, gp::StringAlignmentCenter);
+                text(g, L"or drop it here", smallf, gp::RectF(x, y + ch / 2 + Sf(22), cw, Sf(18)), kMuted, gp::StringAlignmentCenter);
+                continue;
+            }
+            GameItem& gi = *order[static_cast<size_t>(i)];
+            hits_.push_back({card, &gi, 0});
+            const bool hv = hover_game_ == &gi;
+            gp::SolidBrush cb(C(hv ? kCardHi : kCard));
+            gp::GraphicsPath path;
+            round_path(path, gp::RectF(x, y, cw, ch), Sf(14));
+            g.FillPath(&cb, &path);
+            // banner
+            COLORREF a, b;
+            banner_colors(gi.id, &a, &b);
+            g.SetClip(&path);
+            gp::LinearGradientBrush lg(gp::PointF(x, y), gp::PointF(x + cw, y + Sf(140)), C(a), C(b));
+            g.FillRectangle(&lg, x, y, cw, Sf(140));
+            g.ResetClip();
+            const std::wstring initials = [&] {
+                std::wstring t;
+                bool next = true;
+                for (wchar_t c : gi.short_title) { if (next && iswalnum(c)) { t += static_cast<wchar_t>(towupper(c)); next = false; } if (c == L' ') next = true; }
+                return gi.def ? t.substr(0, 3) : std::wstring(L"?");
+            }();
+            text(g, initials, title, gp::RectF(x + Sf(18), y + Sf(14), cw - Sf(36), Sf(40)), RGB(255, 255, 255));
+            text(g, gi.def ? (gi.def->platform == "switch2" ? L"SWITCH 2" : L"SWITCH") : L"UNKNOWN", smallf, gp::RectF(x + Sf(18), y + Sf(112), cw - Sf(36), Sf(16)),
+                 RGB(0xE8, 0xEA, 0xF0));
+            // texts
+            text(g, gi.title, bold, gp::RectF(x + Sf(18), y + Sf(152), cw - Sf(36), Sf(20)), kText);
+            const Status st = status_of(gi);
+            gp::SolidBrush dotb(C(st.color));
+            g.FillEllipse(&dotb, x + Sf(18), y + Sf(186), Sf(8), Sf(8));
+            text(g, st.text, normal, gp::RectF(x + Sf(32), y + Sf(178), cw - Sf(50), Sf(22)), st.color, gp::StringAlignmentNear, gp::StringAlignmentCenter);
+            if (st.progress >= 0) {
+                gp::SolidBrush track(C(kLine)), fillb(C(kAccent));
+                fill_round(g, gp::RectF(x + Sf(18), y + Sf(206), cw - Sf(36), Sf(5)), Sf(2.5f), track);
+                if (st.progress > 0) fill_round(g, gp::RectF(x + Sf(18), y + Sf(206), std::max(Sf(5), (cw - Sf(36)) * static_cast<float>(st.progress)), Sf(5)), Sf(2.5f), fillb);
+            }
+            // buttons: Play and Prepare / Cancel
+            auto btn = [&](float bx, float bw, const std::wstring& t, int action, bool primary, bool enabled) {
+                const RECT r{static_cast<LONG>(bx), static_cast<LONG>(y + ch - Sf(52)), static_cast<LONG>(bx + bw), static_cast<LONG>(y + ch - Sf(16))};
+                const int idx = static_cast<int>(hits_.size());
+                if (enabled) hits_.push_back({r, &gi, action});
+                const bool h2 = enabled && hover_hit_ == idx;
+                COLORREF fill = primary ? (h2 ? kAccentHi : kAccent) : (h2 ? RGB(0x3A, 0x40, 0x4D) : RGB(0x30, 0x35, 0x40));
+                if (!enabled) fill = RGB(0x26, 0x2A, 0x33);
+                gp::SolidBrush bb(C(fill));
+                fill_round(g, gp::RectF(static_cast<gp::REAL>(r.left), static_cast<gp::REAL>(r.top), bw, Sf(36)), Sf(8), bb);
+                text(g, t, bold, gp::RectF(static_cast<gp::REAL>(r.left), static_cast<gp::REAL>(r.top), bw, Sf(36)), enabled ? RGB(255, 255, 255) : kMuted,
+                     gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+            };
+            const float full = cw - Sf(36);
+            if (gi.running || gi.queued) {
+                btn(x + Sf(18), full, L"Cancel", 3, false, true);
+            } else {
+                bool en = false;
+                const std::wstring l = primary_label(gi, &en);
+                if (en) btn(x + Sf(18), full, l == L"Play" ? L"\u25B6  Play" : l, 1, true, true);   // nothing to press: the status says why
+            }
+        }
+    }
+    BitBlt(hdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, old);
+    DeleteObject(bm);
+    DeleteDC(dc);
+    SCROLLINFO si{sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS, 0, std::max(0, content_h_), static_cast<UINT>(rc.bottom), scroll_};
+    SetScrollInfo(h, SB_VERT, &si, TRUE);
+}
+
+void App::draw_button(const DRAWITEMSTRUCT* d) {
+    Btn kind = Btn::normal;
+    for (auto& [h, k] : btns_) if (h == d->hwndItem) kind = k;
+    const bool enabled = IsWindowEnabled(d->hwndItem), pressed = d->itemState & ODS_SELECTED;
+    POINT pt;
+    GetCursorPos(&pt);
+    RECT wr;
+    GetWindowRect(d->hwndItem, &wr);
+    const bool hot = enabled && PtInRect(&wr, pt);
+    const RECT r = d->rcItem;
+    HDC dc = CreateCompatibleDC(d->hDC);
+    HBITMAP bm = CreateCompatibleBitmap(d->hDC, r.right, r.bottom);
+    HGDIOBJ old = SelectObject(dc, bm);
+    {
+        gp::Graphics g(dc);
+        g.SetSmoothingMode(gp::SmoothingModeAntiAlias);
+        g.SetTextRenderingHint(gp::TextRenderingHintClearTypeGridFit);
+        // the parent's background behind the rounded corners
+        COLORREF behind = kBg;
+        gp::SolidBrush bg(C(behind));
+        g.FillRectangle(&bg, 0, 0, r.right, r.bottom);
+        COLORREF fill = kind == Btn::primary ? (hot ? kAccentHi : kAccent) : kind == Btn::danger ? (hot ? RGB(0x5A, 0x2A, 0x2E) : RGB(0x45, 0x24, 0x28))
+                                                                                                 : (hot ? RGB(0x3A, 0x40, 0x4D) : RGB(0x2C, 0x31, 0x3C));
+        if (!enabled) fill = RGB(0x1E, 0x21, 0x29);
+        if (pressed) fill = kind == Btn::primary ? kAccent : RGB(0x24, 0x28, 0x31);
+        gp::SolidBrush b(C(fill));
+        fill_round(g, gp::RectF(0, 0, static_cast<gp::REAL>(r.right), static_cast<gp::REAL>(r.bottom)), Sf(8), b);
+        wchar_t t[128] = {};
+        GetWindowTextW(d->hwndItem, t, 128);
+        std::wstring label = t;
+        if (d->hwndItem == b_play_) label = L"▶  " + label;
+        HDC fdc = g.GetHDC();
+        gp::Font f(fdc, bold_);
+        g.ReleaseHDC(fdc);
+        COLORREF tc = !enabled ? RGB(0x5E, 0x64, 0x70) : kind == Btn::danger ? RGB(0xFF, 0xA0, 0xA0) : RGB(255, 255, 255);
+        text(g, label, f, gp::RectF(0, 0, static_cast<gp::REAL>(r.right), static_cast<gp::REAL>(r.bottom)), tc, gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+    }
+    BitBlt(d->hDC, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, old);
+    DeleteObject(bm);
+    DeleteDC(dc);
+}
+
+// ---- messages ----------------------------------------------------------------------------------------------------------------------
 LRESULT App::notify(NMHDR* n) {
-    if (n->idFrom == ID_REQ_LIST && n->code == NM_CUSTOMDRAW) {
+    if ((n->idFrom == ID_REQ_LIST || n->idFrom == ID_STEPS) && n->code == NM_CUSTOMDRAW) {
         auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(n);
         if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
         if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) return CDRF_NOTIFYSUBITEMDRAW;
         if (cd->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
-            const size_t i = cd->nmcd.dwItemSpec;
-            cd->clrText = GetSysColor(COLOR_WINDOWTEXT);
-            if (cd->iSubItem == 1 && i < checks_.size()) {
-                const Level lv = checks_[i].level;
-                cd->clrText = lv == Level::ok ? RGB(0x0F, 0x6B, 0x2F) : lv == Level::warn ? RGB(0x8A, 0x5A, 0x00) : lv == Level::bad ? RGB(0xB3, 0x1B, 0x1B) : RGB(0x5F, 0x5F, 0x5F);
+            const int i = static_cast<int>(cd->nmcd.dwItemSpec);
+            cd->clrText = kText;
+            cd->clrTextBk = kCard;
+            if (cd->iSubItem == 1) {
+                if (n->idFrom == ID_REQ_LIST) {
+                    LVITEMW it{LVIF_PARAM};
+                    it.iItem = i;
+                    ListView_GetItem(req_list_, &it);
+                    const Level lv = static_cast<Level>(it.lParam);
+                    cd->clrText = lv == Level::ok ? kOk : lv == Level::warn ? kWarn : lv == Level::bad ? kBad : kMuted;
+                } else if (const GameItem* g = sel(); g && i < S_COUNT) {
+                    cd->clrText = (g->running && i == g->cur) ? kAccentHi : g->need[i] ? kWarn : kOk;
+                }
             }
             return CDRF_NEWFONT;
         }
     }
     if (n->idFrom == ID_REQ_LIST && n->code == LVN_ITEMCHANGED) {
         auto* lv = reinterpret_cast<NMLISTVIEW*>(n);
-        if ((lv->uNewState & LVIS_SELECTED) && lv->iItem >= 0 && static_cast<size_t>(lv->iItem) < checks_.size()) {
-            const Check& c = checks_[static_cast<size_t>(lv->iItem)];
-            const std::wstring t = c.item + L": " + c.state + L"\r\n" + c.detail + L"\r\n\r\n" + (c.fix.empty() ? L"Nothing to do." : c.fix);
-            SetWindowTextW(req_fix_, t.c_str());
-        }
-    }
-    if (n->idFrom == ID_PREP_LIST && n->code == NM_CUSTOMDRAW) {
-        auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(n);
-        if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
-        if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) return CDRF_NOTIFYSUBITEMDRAW;
-        if (cd->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
-            const int i = static_cast<int>(cd->nmcd.dwItemSpec);
-            cd->clrText = GetSysColor(COLOR_WINDOWTEXT);
-            if (cd->iSubItem == 1 && i < S_COUNT)
-                cd->clrText = (running_ && i == cur_) ? RGB(0x00, 0x5F, 0xB8) : need_[i] ? RGB(0x8A, 0x5A, 0x00) : RGB(0x0F, 0x6B, 0x2F);
-            return CDRF_NEWFONT;
+        if ((lv->uNewState & LVIS_SELECTED) && lv->iItem >= 0) {
+            std::vector<const Check*> all;
+            for (const Check& c : sys_checks_) all.push_back(&c);
+            if (GameItem* g = sel()) for (const Check& c : g->checks) all.push_back(&c);
+            if (static_cast<size_t>(lv->iItem) < all.size()) {
+                const Check& c = *all[static_cast<size_t>(lv->iItem)];
+                SetWindowTextW(req_fix_, (c.item + L": " + c.state + L"\r\n" + c.detail + L"\r\n\r\n" + (c.fix.empty() ? L"Nothing to do." : c.fix)).c_str());
+            }
         }
     }
     return 0;
 }
 
 void App::command(int id, int code) {
-    // only clicks, menu items and accelerators (code 0 or 1); edit notifications (EN_CHANGE when refresh() sets a text) would recurse
-    if (id != ID_NAV && code != BN_CLICKED && code != 1) return;
+    if (code != BN_CLICKED && code != 1 && code != 0) return;
+    GameItem* g = sel();
     switch (id) {
-        case ID_NAV:
-            if (code == LBN_SELCHANGE) show_page(static_cast<int>(SendMessageW(nav_, LB_GETCURSEL, 0, 0)));
+        case ID_PLAY: if (g) primary(*g); break;
+        case ID_MORE: more_menu(); break;
+        case ID_DETAILS: details_ = !details_; break;
+        case ID_PREP:
+            if (!g) break;
+            if (g->ready()) { g->error.clear(); g->prep_check.clear(); evaluate(*g); start_prepare_check(*g); }
+            else enqueue(*g, false);
             break;
-        case ID_REQ_RECHECK: case IDM_RECHECK:
-            if (running_) break;
-            checks_.clear();
-            step_error_.clear();
-            cancel_requested_ = false;
-            prep_check_.clear();
-            evaluate();
+        case ID_CANCEL: if (g) cancel(*g); break;
+        case ID_REBUILD: if (g) rebuild_dialog(*g); break;
+        case ID_SRC_NUP: if (g) choose_source(*g, false); break;
+        case ID_SRC_FOLDER: if (g) choose_source(*g, true); break;
+        case ID_DATA: if (g) choose_data(*g); break;
+        case ID_OPEN_DATA:
+            if (g) { std::error_code ec; fs::create_directories(g->cfg.data_dir, ec); ShellExecuteW(wnd_, L"open", g->cfg.data_dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL); }
+            break;
+        case ID_SHORTCUT: if (g) make_shortcut(*g); break;
+        case ID_REMOVE: if (g) remove_game(*g); break;
+        case ID_OPEN_INI:
+            if (g && !g->lay.game.empty()) {
+                const std::wstring f = join(g->lay.game, L"controls.ini");
+                if (file_exists(f)) ShellExecuteW(wnd_, L"open", L"notepad.exe", quote(f).c_str(), nullptr, SW_SHOWNORMAL);
+                else MessageBoxW(wnd_, (L"There is no settings file yet:\r\n" + f + L"\r\n\r\nThe game writes it when it starts; a change on this page creates it too.").c_str(),
+                                 kAppName, MB_OK | MB_ICONINFORMATION);
+            }
+            break;
+        case ID_RECHECK: case IDM_RECHECK:
+            sys_checks_.clear();
+            for (auto& gi : games_) { gi->prep_check.clear(); evaluate(*gi); }
             start_requirements();
-            start_prepare_check();
+            if (g) start_prepare_check(*g);
             break;
-        case ID_REQ_COPY: {
+        case ID_COPY: {
             const int len = GetWindowTextLengthW(req_fix_);
             std::wstring t(static_cast<size_t>(len) + 1, L'\0');
             GetWindowTextW(req_fix_, t.data(), len + 1);
             if (OpenClipboard(wnd_)) {
                 EmptyClipboard();
-                HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, t.size() * sizeof(wchar_t));
-                if (g) {
-                    std::memcpy(GlobalLock(g), t.c_str(), t.size() * sizeof(wchar_t));
-                    GlobalUnlock(g);
-                    SetClipboardData(CF_UNICODETEXT, g);
+                if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, t.size() * sizeof(wchar_t))) {
+                    std::memcpy(GlobalLock(h), t.c_str(), t.size() * sizeof(wchar_t));
+                    GlobalUnlock(h);
+                    SetClipboardData(CF_UNICODETEXT, h);
                 }
                 CloseClipboard();
             }
             break;
         }
-        case ID_GAME_NUP: case IDM_CHOOSE_NUP: if (!running_) choose_nup(); break;
-        case ID_GAME_FOLDER: case IDM_CHOOSE_FOLDER: if (!running_) choose_folder(false); break;
-        case ID_GAME_DATA_CHANGE: case IDM_DATA: if (!running_) choose_folder(true); break;
-        case IDM_OPEN_DATA: {
-            std::error_code ec;
-            fs::create_directories(cfg_.data_dir, ec);
-            ShellExecuteW(wnd_, L"open", cfg_.data_dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-            break;
-        }
-        case ID_PREP_START: case IDM_START:
-            if (ready_to_play(need_) && id == ID_PREP_START) { step_error_.clear(); cancel_requested_ = false; prep_check_.clear(); evaluate(); start_prepare_check(); }
-            else start_steps(false);
-            break;
-        case ID_PREP_CANCEL: cancel_steps(); break;
-        case ID_PREP_REBUILD: case IDM_REBUILD: rebuild_dialog(); break;
-        case ID_PLAY_GO: case IDM_PLAY: play(); break;
-        case ID_PLAY_SHORTCUT: case IDM_SHORTCUT: make_shortcut(); break;
+        case ID_ADD: case IDM_ADD: add_game(); break;
         case IDM_ABOUT: about(); break;
         case IDM_EXIT: PostMessageW(wnd_, WM_CLOSE, 0, 0); break;
         default:
             if (id >= IDM_PAGE0 && id < static_cast<int>(IDM_PAGE0) + P_COUNT) show_page(id - static_cast<int>(IDM_PAGE0));
     }
-    if (id != ID_NAV) refresh();
+    refresh();
+    InvalidateRect(wnd_, nullptr, FALSE);
+    InvalidateRect(cards_, nullptr, FALSE);
 }
 
 LRESULT CALLBACK App::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -1051,192 +1599,318 @@ LRESULT CALLBACK App::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (!g_app || !g_app->wnd_) return DefWindowProcW(h, m, w, l);
     try {
         return g_app->on(m, w, l);
-    } catch (const std::exception& e) {   // a bug, not a player error: say what it was instead of vanishing
-        MessageBoxA(h, e.what(), GAME_PRODUCT " setup: internal error", MB_OK | MB_ICONERROR);
+    } catch (const std::exception& e) {
+        MessageBoxA(h, e.what(), "Recomp Library: internal error", MB_OK | MB_ICONERROR);
         return DefWindowProcW(h, m, w, l);
     }
 }
 
+LRESULT CALLBACK App::cards_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (!g_app) return DefWindowProcW(h, m, w, l);
+    return g_app->on_cards(h, m, w, l);
+}
+
+LRESULT App::on_cards(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            paint_cards(h, dc);
+            EndPaint(h, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND: return 1;
+        case WM_MOUSEMOVE: {
+            const POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            int hit = -1;
+            // the last matching rect wins: buttons are pushed after their card
+            for (int i = 0; i < static_cast<int>(hits_.size()); ++i) if (PtInRect(&hits_[static_cast<size_t>(i)].r, p)) hit = i;
+            GameItem* hg = hit >= 0 ? hits_[static_cast<size_t>(hit)].g : nullptr;
+            if (hit != hover_hit_ || hg != hover_game_) { hover_hit_ = hit; hover_game_ = hg; InvalidateRect(h, nullptr, FALSE); }
+            TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, h, 0};
+            TrackMouseEvent(&t);
+            SetCursor(LoadCursor(nullptr, hit >= 0 ? IDC_HAND : IDC_ARROW));
+            return 0;
+        }
+        case WM_MOUSELEAVE: hover_hit_ = -1; hover_game_ = nullptr; InvalidateRect(h, nullptr, FALSE); return 0;
+        case WM_SETCURSOR: return TRUE;
+        case WM_LBUTTONUP: {
+            const POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            int hit = -1;
+            for (int i = 0; i < static_cast<int>(hits_.size()); ++i) if (PtInRect(&hits_[static_cast<size_t>(i)].r, p)) hit = i;
+            if (hit < 0) return 0;
+            const Hit hh = hits_[static_cast<size_t>(hit)];
+            if (hh.action == 4) { add_game(); return 0; }
+            GameItem& g = *hh.g;
+            if (hh.action == 1) { select(g.id); primary(g); }
+            else if (hh.action == 3) cancel(g);
+            else { select(g.id); show_page(P_GAME); if (!g.in_library() && g.def) choose_source(g, false); }
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        }
+        case WM_MOUSEWHEEL: {
+            RECT rc;
+            GetClientRect(h, &rc);
+            scroll_ = std::clamp(scroll_ - GET_WHEEL_DELTA_WPARAM(w) * S(60) / WHEEL_DELTA, 0, std::max(0, content_h_ - static_cast<int>(rc.bottom)));
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        }
+        case WM_VSCROLL: {
+            RECT rc;
+            GetClientRect(h, &rc);
+            SCROLLINFO si{sizeof si, SIF_ALL};
+            GetScrollInfo(h, SB_VERT, &si);
+            int pos = scroll_;
+            switch (LOWORD(w)) {
+                case SB_LINEUP: pos -= S(40); break;
+                case SB_LINEDOWN: pos += S(40); break;
+                case SB_PAGEUP: pos -= rc.bottom; break;
+                case SB_PAGEDOWN: pos += rc.bottom; break;
+                case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = si.nTrackPos; break;
+            }
+            scroll_ = std::clamp(pos, 0, std::max(0, content_h_ - static_cast<int>(rc.bottom)));
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        }
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
 LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
     switch (m) {
-        case WM_CREATE:
+        case WM_CREATE: {
             dpi_ = static_cast<int>(GetDpiForWindow(wnd_));
+            BOOL dark = TRUE;
+            DwmSetWindowAttribute(wnd_, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof dark);
+            DragAcceptFiles(wnd_, TRUE);
             make_fonts();
+            settings::register_class(inst_);
             create_controls();
-            evaluate();
+            settings::set_fonts(settings_, {font_, bold_, small_, title_, dpi_});
+            update_settings();
             layout();
             show_page(page_);
             start_requirements();
-            start_prepare_check();
-            refresh();
+            if (GameItem* g = sel()) start_prepare_check(*g);
             SetTimer(wnd_, kTimer, 250, nullptr);
-            if (auto_start_) PostMessageW(wnd_, WM_COMMAND, IDM_START, 0);
+            for (const std::wstring& p : add_paths_) add_dump(p, true);
+            if (!add_paths_.empty()) show_page(page_);
+            if (auto_start_) if (GameItem* g = sel()) enqueue(*g, false);
             return 0;
+        }
         case WM_SIZE: layout(); return 0;
         case WM_GETMINMAXINFO: {
             auto* mm = reinterpret_cast<MINMAXINFO*>(l);
-            mm->ptMinTrackSize = {S(820), S(600)};
+            mm->ptMinTrackSize = {S(960), S(680)};
             return 0;
         }
         case WM_DPICHANGED: {
             dpi_ = HIWORD(w);
             make_fonts();
-            for (const Ctl& c : ctls_) SendMessageW(c.h, WM_SETFONT, reinterpret_cast<WPARAM>(c.h == play_state_ ? bold_ : font_), FALSE);
-            for (int p = 0; p < P_COUNT; ++p) SendMessageW(h1_[p], WM_SETFONT, reinterpret_cast<WPARAM>(title_), FALSE);
-            for (HWND hh : {req_fix_label_, game_src_label_, game_data_label_, prep_log_label_}) SendMessageW(hh, WM_SETFONT, reinterpret_cast<WPARAM>(bold_), FALSE);
+            settings::set_fonts(settings_, {font_, bold_, small_, title_, dpi_});
+            for (HWND h : {steps_, log_, req_list_, req_fix_}) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font_), FALSE);
+            for (auto& [h, k] : btns_) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(bold_), FALSE);
             const RECT* r = reinterpret_cast<const RECT*>(l);
             SetWindowPos(wnd_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
             layout();
             return 0;
         }
-        case WM_MEASUREITEM: {
-            auto* mi = reinterpret_cast<MEASUREITEMSTRUCT*>(l);
-            mi->itemHeight = static_cast<UINT>(S(54));
-            return TRUE;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(wnd_, &ps);
+            paint(dc);
+            EndPaint(wnd_, &ps);
+            return 0;
         }
-        case WM_DRAWITEM:
-            if (w == ID_NAV) { draw_nav(reinterpret_cast<const DRAWITEMSTRUCT*>(l)); return TRUE; }
+        case WM_ERASEBKGND: return 1;
+        case WM_DRAWITEM: {
+            auto* d = reinterpret_cast<const DRAWITEMSTRUCT*>(l);
+            if (d->CtlType == ODT_BUTTON) { draw_button(d); return TRUE; }
             break;
+        }
+        case WM_CTLCOLOREDIT:
         case WM_CTLCOLORSTATIC: {
             HDC dc = reinterpret_cast<HDC>(w);
-            HWND c = reinterpret_cast<HWND>(l);
-            SetBkColor(dc, GetSysColor(COLOR_WINDOW));
-            bool grey = c == game_nsp_ || c == game_data_info_;
-            for (int p = 0; p < P_COUNT; ++p) grey |= c == hint_[p];
-            SetTextColor(dc, grey ? RGB(0x5F, 0x5F, 0x5F) : GetSysColor(COLOR_WINDOWTEXT));
-            if (c == req_fix_ || c == prep_log_ || c == game_src_ || c == game_data_) return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
-            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+            SetTextColor(dc, RGB(0xC8, 0xCC, 0xD4));
+            SetBkColor(dc, kField);
+            return reinterpret_cast<LRESULT>(field_brush_);
         }
-        case WM_ERASEBKGND: {
-            RECT rc;
-            GetClientRect(wnd_, &rc);
-            FillRect(reinterpret_cast<HDC>(w), &rc, GetSysColorBrush(COLOR_WINDOW));
-            RECT line{S(200), 0, S(200) + 1, rc.bottom};
-            FillRect(reinterpret_cast<HDC>(w), &line, GetSysColorBrush(COLOR_3DLIGHT));
-            return 1;
+        case WM_MOUSEMOVE: {
+            const POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            int hov = -1;
+            for (int i = 0; i < P_COUNT; ++i) if (PtInRect(&nav_rect_[i], p)) hov = i;
+            if (PtInRect(&add_rect_, p)) hov = 99;
+            if (hov != hover_nav_) {
+                hover_nav_ = hov;
+                RECT side{0, 0, S(kSideW), 10000};
+                InvalidateRect(wnd_, &side, FALSE);
+            }
+            TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, wnd_, 0};
+            TrackMouseEvent(&t);
+            // the owner-drawn buttons show their hover state
+            for (auto& [h, k] : btns_) if (IsWindowVisible(h)) InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        }
+        case WM_MOUSELEAVE: {
+            hover_nav_ = -1;
+            RECT side{0, 0, S(kSideW), 10000};
+            InvalidateRect(wnd_, &side, FALSE);
+            for (auto& [h, k] : btns_) if (IsWindowVisible(h)) InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        }
+        case WM_SETCURSOR:
+            if (LOWORD(l) == HTCLIENT && (hover_nav_ >= 0)) { SetCursor(LoadCursor(nullptr, IDC_HAND)); return TRUE; }
+            break;
+        case WM_LBUTTONUP: {
+            const POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            for (int i = 0; i < P_COUNT; ++i)
+                if (PtInRect(&nav_rect_[i], p)) { show_page(i); return 0; }
+            if (PtInRect(&add_rect_, p)) add_game();
+            return 0;
         }
         case WM_COMMAND: command(LOWORD(w), HIWORD(w)); return 0;
+        case WM_DROPFILES: {
+            // a .nup file or a game folder dropped on the window: add it
+            HDROP d = reinterpret_cast<HDROP>(w);
+            const UINT n = DragQueryFileW(d, 0xFFFFFFFF, nullptr, 0);
+            std::vector<std::wstring> paths;
+            for (UINT i = 0; i < n; ++i) {
+                wchar_t p[MAX_PATH * 4];
+                if (DragQueryFileW(d, i, p, static_cast<UINT>(std::size(p)))) paths.push_back(p);
+            }
+            DragFinish(d);
+            for (const std::wstring& p : paths) add_dump(p, false);
+            return 0;
+        }
         case WM_NOTIFY: return notify(reinterpret_cast<NMHDR*>(l));
         case WM_TIMER:
-            if (running_ && cur_ >= 0) {
-                std::wstring t = std::wstring(kStepName[cur_]);
-                if (total_) {
-                    SendMessageW(prep_bar_, PBM_SETPOS, static_cast<WPARAM>(1000.0 * static_cast<double>(std::min(done_, total_)) / static_cast<double>(total_)), 0);
-                    t += L": " + with_commas(done_) + L" of " + with_commas(total_);
-                    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - step_t0_).count();
-                    // not before 5%: the compile step starts with its most expensive programs, so an early estimate is far too long
-                    if (done_ > 0 && done_ < total_ && secs > 5 && done_ * 20 >= total_) {
-                        const int left = static_cast<int>(secs / static_cast<double>(done_) * static_cast<double>(total_ - done_));
-                        t += left >= 120 ? L"  ·  about " + std::to_wstring(left / 60) + L" min left" : L"  ·  about " + std::to_wstring(std::max(left, 1)) + L" s left";
-                    }
-                } else {
-                    t += L"...";
+            if (active_) {
+                InvalidateRect(cards_, nullptr, FALSE);
+                RECT side{0, 0, S(kSideW), 10000};
+                InvalidateRect(wnd_, &side, FALSE);
+                if (page_ == P_GAME && sel() == active_) {
+                    RECT top{S(kSideW), 0, 10000, S(200)};
+                    InvalidateRect(wnd_, &top, FALSE);
+                    InvalidateRect(wnd_, &prog_rect_, FALSE);
                 }
-                if (cancel_requested_) t = L"Stopping (what is done is kept)...";
-                SetWindowTextW(prep_text_, t.c_str());
             }
             return 0;
         case kMsgLine: {
             std::unique_ptr<std::string> s(reinterpret_cast<std::string*>(l));
-            step_line(*s);
+            step_line(*reinterpret_cast<GameItem*>(w), *s);
             return 0;
         }
-        case kMsgExit: step_exit(static_cast<DWORD>(w)); return 0;
+        case kMsgExit: step_exit(*reinterpret_cast<GameItem*>(w), static_cast<DWORD>(l)); return 0;
         case kMsgCheck: {
             std::unique_ptr<std::string> s(reinterpret_cast<std::string*>(l));
-            check_child_.wait();
-            checking_prep_ = false;
-            prep_check_ = widen(*s);
-            evaluate();
+            GameItem& g = *reinterpret_cast<GameItem*>(w);
+            g.check_child.wait();
+            g.checking_prep = false;
+            g.prep_check = widen(*s);
+            evaluate(g);
             refresh();
+            InvalidateRect(wnd_, nullptr, FALSE);
+            InvalidateRect(cards_, nullptr, FALSE);
             return 0;
         }
         case kMsgReqs: {
             std::unique_ptr<std::vector<Check>> r(reinterpret_cast<std::vector<Check>*>(l));
-            checks_ = std::move(*r);
+            sys_checks_ = std::move(*r);
             checks_running_ = false;
             refresh();
+            RECT side{0, 0, S(kSideW), 10000};
+            InvalidateRect(wnd_, &side, FALSE);
             return 0;
         }
         case WM_CLOSE:
-            if (running_) {
-                if (MessageBoxW(wnd_, L"The preparation is running. Stop it and close the setup? What is done is kept; Start continues later.",
-                                L"" GAME_PRODUCT L" setup", MB_YESNO | MB_ICONQUESTION) != IDYES)
+            if (active_) {
+                if (MessageBoxW(wnd_, L"A game is being prepared. Stop it and close? What is done is kept; Prepare continues later.", kAppName,
+                                MB_YESNO | MB_ICONQUESTION) != IDYES)
                     return 0;
-                cancel_steps();
-                child_.wait();
+                queue_.clear();
+                cancel(*active_);
+                active_->child.wait();
             }
             DestroyWindow(wnd_);
             return 0;
         case WM_DESTROY:
             KillTimer(wnd_, kTimer);
-            if (check_child_.running()) check_child_.cancel();
+            for (auto& g : games_) if (g->check_child.running()) g->check_child.cancel();
             PostQuitMessage(0);
             return 0;
     }
     return DefWindowProcW(wnd_, m, w, l);
 }
 
-HMENU make_menu() {
-    HMENU bar = CreateMenu(), file = CreatePopupMenu(), set = CreatePopupMenu(), view = CreatePopupMenu(), help = CreatePopupMenu();
-    AppendMenuW(file, MF_STRING, IDM_CHOOSE_NUP, L"Choose a .nup &file...");
-    AppendMenuW(file, MF_STRING, IDM_CHOOSE_FOLDER, L"Choose a game &folder...");
-    AppendMenuW(file, MF_STRING, IDM_DATA, L"Change the &data folder...");
-    AppendMenuW(file, MF_STRING, IDM_OPEN_DATA, L"&Open the data folder");
+[[maybe_unused]] HMENU make_menu() {
+    HMENU bar = CreateMenu(), file = CreatePopupMenu(), view = CreatePopupMenu(), help = CreatePopupMenu();
+    AppendMenuW(file, MF_STRING, IDM_ADD, L"&Add a game...\tCtrl+O");
+    AppendMenuW(file, MF_STRING, IDM_RECHECK, L"&Check this PC again\tF5");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"E&xit");
-    AppendMenuW(set, MF_STRING, IDM_RECHECK, L"&Check requirements again\tF5");
-    AppendMenuW(set, MF_STRING, IDM_START, L"&Start or continue the preparation");
-    AppendMenuW(set, MF_STRING, IDM_REBUILD, L"&Rebuild shaders...");
-    AppendMenuW(set, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(set, MF_STRING, IDM_PLAY, L"&Play");
-    AppendMenuW(set, MF_STRING, IDM_SHORTCUT, L"Create a desktop s&hortcut");
-    const wchar_t* pages[P_COUNT] = {L"&1 Requirements", L"&2 Game files", L"&3 Prepare", L"&4 Play"};
+    const wchar_t* pages[P_COUNT] = {L"&Library\tCtrl+1", L"&Game\tCtrl+2", L"&Settings\tCtrl+3", L"&This PC\tCtrl+4"};
     for (int i = 0; i < P_COUNT; ++i) AppendMenuW(view, MF_STRING, IDM_PAGE0 + i, pages[i]);
     AppendMenuW(help, MF_STRING, IDM_ABOUT, L"&About");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&View");
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(set), L"&Setup");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"&Help");
     return bar;
 }
 
 int App::run(HINSTANCE inst, int show) {
     inst_ = inst;
+    gp::GdiplusStartupInput gsi;
+    gp::GdiplusStartup(&gdiplus_, &gsi, nullptr);
+    bg_brush_ = CreateSolidBrush(kBg);
+    field_brush_ = CreateSolidBrush(kField);
     tools_ = find_tools();
-    cfg_ = load_config();
+    load_games();
     // command line
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    bool changed = false;
+    std::wstring data, source;
     for (int i = 1; argv && i < argc; ++i) {
         const std::wstring a = argv[i];
         const bool more = i + 1 < argc;
-        if (a == L"--data" && more) { cfg_.data_dir = fs::absolute(argv[++i]).wstring(); changed = true; }
-        else if (a == L"--source" && more) { cfg_.source = fs::absolute(argv[++i]).wstring(); changed = true; }
+        if (a == L"--game" && more) { const std::string id = narrow(argv[++i]); if (item(id)) lib_.selected = id; }
+        else if (a == L"--data" && more) data = fs::absolute(argv[++i]).wstring();
+        else if (a == L"--source" && more) source = fs::absolute(argv[++i]).wstring();
         else if (a == L"--page" && more) page_ = _wtoi(argv[++i]);
         else if (a == L"--start") auto_start_ = true;
         else if (a == L"--game-args" && more) game_args_ = argv[++i];
+        else if (a == L"--add" && more) add_paths_.push_back(fs::absolute(argv[++i]).wstring());
     }
     if (argv) LocalFree(argv);
-    if (changed) save_config(cfg_);
+    if (GameItem* g = sel(); g && (!data.empty() || !source.empty())) {
+        if (!data.empty()) g->cfg.data_dir = data;
+        if (!source.empty()) {
+            g->cfg.source = source;
+            if (!lib_.find(g->id)) { lib_.games.push_back({}); lib_.games.back().id = g->id; lib_.games.back().title_id = g->title_id; }
+        }
+        save_lib();
+        evaluate(*g);
+    }
 
     WNDCLASSEXW wc{sizeof wc};
     wc.lpfnWndProc = proc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
+    wc.hbrBackground = bg_brush_;
     wc.lpszClassName = kClass;
     RegisterClassExW(&wc);
+    WNDCLASSEXW cc{sizeof cc};
+    cc.lpfnWndProc = cards_proc;
+    cc.hInstance = inst;
+    cc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    cc.lpszClassName = kCardsClass;
+    RegisterClassExW(&cc);
     const int sys = static_cast<int>(GetDpiForSystem());
-    const int w = MulDiv(940, sys, 96), h = MulDiv(680, sys, 96);
-    HACCEL acc = nullptr;
-    {
-        ACCEL a[] = {{FVIRTKEY, VK_F5, IDM_RECHECK}};
-        acc = CreateAcceleratorTableW(a, 1);
-    }
-    CreateWindowExW(0, kClass, L"" GAME_PRODUCT L" - Initial Setup", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, w, h, nullptr,
-                    make_menu(), inst, nullptr);
+    const int w = MulDiv(1180, sys, 96), h = MulDiv(780, sys, 96);
+    ACCEL a[] = {{FVIRTKEY, VK_F5, IDM_RECHECK}, {FVIRTKEY | FCONTROL, 'O', IDM_ADD}, {FVIRTKEY | FCONTROL, '1', IDM_PAGE0},
+                 {FVIRTKEY | FCONTROL, '2', IDM_PAGE0 + 1}, {FVIRTKEY | FCONTROL, '3', IDM_PAGE0 + 2}, {FVIRTKEY | FCONTROL, '4', IDM_PAGE0 + 3}};
+    HACCEL acc = CreateAcceleratorTableW(a, static_cast<int>(sizeof a / sizeof a[0]));
+    CreateWindowExW(0, kClass, kAppName, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, w, h, nullptr, nullptr, inst, nullptr);
     if (!wnd_) return 1;
     ShowWindow(wnd_, show);
     MSG msg;
@@ -1246,6 +1920,8 @@ int App::run(HINSTANCE inst, int show) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    games_.clear();
+    gp::GdiplusShutdown(gdiplus_);
     return 0;
 }
 
@@ -1259,7 +1935,7 @@ LONG WINAPI crash_note(EXCEPTION_POINTERS* e) {
     char b[160];
     std::snprintf(b, sizeof b, "exception 0x%08lx at exe+0x%llx\n", code,
                   static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(e->ExceptionRecord->ExceptionAddress) - base));
-    if (FILE* f = _wfopen(join(exe_dir(), L"" GAME_ID L"_setup_crash.txt").c_str(), L"ab")) { std::fputs(b, f); std::fclose(f); }
+    if (FILE* f = _wfopen(join(exe_dir(), L"game_setup_crash.txt").c_str(), L"ab")) { std::fputs(b, f); std::fclose(f); }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 

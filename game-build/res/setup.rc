@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Resources of the Initial Setup exe (runtime/apps/setup): its manifest (common controls v6, per-monitor DPI, UTF-8, asInvoker) and version info.
+// Resources of the game library exe (runtime/apps/setup): its manifest (common controls v6, per-monitor DPI, UTF-8, asInvoker) and version info.
 #include <winres.h>
-#include "game_manifest.h"
 
 #ifndef GAME_VER_MAJOR
 #define GAME_VER_MAJOR 0
@@ -28,11 +27,11 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", ""
-            VALUE "FileDescription", GAME_PRODUCT " setup"
+            VALUE "FileDescription", "Recomp Library"
             VALUE "FileVersion", GAME_VER_TEXT
-            VALUE "InternalName", GAME_ID "_setup"
-            VALUE "OriginalFilename", GAME_SETUP_EXE
-            VALUE "ProductName", GAME_PRODUCT
+            VALUE "InternalName", "recomp_library"
+            VALUE "OriginalFilename", "recomp_library.exe"
+            VALUE "ProductName", "Recomp Library"
             VALUE "ProductVersion", GAME_VER_TEXT
         END
     END

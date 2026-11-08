@@ -1,5 +1,5 @@
 name: Bug report
-description: Something is wrong in the game or the launcher.
+description: Something is wrong in a game or the library app.
 labels: [bug]
 body:
   - type: textarea
@@ -25,5 +25,5 @@ body:
   - type: textarea
     id: log
     attributes:
-      label: pkp.log
-      description: Drag in pkp.log from the session where it happened.
+      label: Log or F9 bug bundle
+      description: Drag in the game log (logs folder of the game's data folder) or the F9 bug bundle from the session where it happened.
