@@ -44,7 +44,9 @@ struct Info {
     // ---- identity ----
     const char* id = "";                    // short id, also the stem of the game's file names: "mpr"
     const char* title = "";                 // the game's own name: "Metroid Prime Remastered"
-    const char* product = "";               // the PC port's name in window titles and dialogs: "Metroid Prime Remastered PC"
+    const char* product = "";               // the build's neutral name (exe properties, shortcut descriptions): "Recomp module: mpr".
+                                            // Never the game's name (AGENTS.md, legal rules)
+    const char* window_title = "";          // window and dialog titles: "<short title> (unofficial recompilation)" (empty: title)
     const char* short_title = "";           // a short name for file headers (the launcher's ini comment): "Metroid Prime" (empty: product)
     uint64_t program_id = 0;                // the Switch title id
     const char* version = "";               // the game version the hooks were found in: "1.0.0"
@@ -58,7 +60,10 @@ struct Info {
     const char* launcher_ini = "";          // the launcher's own settings file: "mpr_launcher.ini"
     const char* game_ini = "";              // the settings file the setup tool writes and the game exe reads: "mpr.ini"
     const char* shader_pack = "";           // the shader pack file next to the setup tool: "shader_cache.mprshc"
-    const char* save_folder = "";           // save data folder under %APPDATA%: "MPRRecomp" (empty: "nxrt")
+    const char* save_folder = "";           // save data folder under %APPDATA%: "mpr-recomp" (empty: "nxrt")
+    // Earlier names of save_folder, ";"-separated: while save_folder does not exist, the first of these that does is moved to it the first
+    // time the save folder is asked for (services::save_dir), so saves made under an old name keep working.
+    const char* old_save_folders = "";
     // Runtime settings this title needs by default, as ini text ("[nvn]\nupscaler_replace = ...\n"): applied at start for keys that neither
     // the settings file nor an NXRT_* variable sets (the game exe, game-build/src/game_main.cpp).
     const char* config_defaults = "";
@@ -86,6 +91,12 @@ inline const Info& info() {
     static const Info none;
     const Info* g = current();
     return g ? *g : none;
+}
+// The title of the game's windows and dialogs: Info::window_title, else the game's title, else "nxrt".
+inline const char* window_title() {
+    const Info& g = info();
+    if (g.window_title && *g.window_title) return g.window_title;
+    return g.title && *g.title ? g.title : "nxrt";
 }
 
 }  // namespace nxrt::game

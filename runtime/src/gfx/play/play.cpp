@@ -494,8 +494,7 @@ void bug_hotkey() {
     if (dir.empty() || !g().window || !config_get_bool("bug", "note_prompt", true)) return;
     std::thread([dir] {
         services::swkbdui::Request q;
-        const char* product = game::info().product;
-        q.title = std::string(product && *product ? product : "Game") + ": bug capture";
+        q.title = std::string(game::window_title()) + ": bug capture";
         q.header = "Saved to " + dir;
         q.guide = "What went wrong? Enter saves the note, Escape leaves it out.";
         q.ok_text = "Save note";

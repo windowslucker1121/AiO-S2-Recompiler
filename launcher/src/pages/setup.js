@@ -24,39 +24,6 @@ function candidateHtml(c, chosen) {
     </div>`;
 }
 
-// Raw dump mode: NSP / XCI files plus the player's keys, extracted by Set up into <game folder>/dump.
-function rawHtml(raw) {
-  const list = (items, empty) =>
-    items.length
-      ? `<ul class="checks">${items.map((f, i) => `<li class="ok">${icon('file-text')}${esc(f)} <button class="btn quiet" data-del="${i}">Remove</button></li>`).join('')}</ul>`
-      : `<p class="faint">${empty}</p>`;
-  const keyList = raw.keys.length
-    ? `<ul class="checks">${raw.keys.map((f) => `<li class="ok">${icon('shield-check')}${esc(f)}</li>`).join('')}</ul>`
-    : '<p class="faint">No keys file chosen.</p>';
-  const f = raw.found;
-  return `
-    <div class="card" id="raw-card">
-      <h2>${icon('hard-drive')}Or: dump files (NSP / XCI)</h2>
-      <div class="stack">
-        <p class="dim">Pick the game's <code>.nsp</code> or <code>.xci</code> and, if the game needs it, its update <code>.nsp</code>, plus the <code>prod.keys</code> (and <code>title.keys</code>, if you have one) dumped from your own console. Set up decrypts and extracts them into <code>dump/</code> in the game folder (about as much space as the game) and then carries on as with a dump folder. The keys files are only read by the extractor; nothing copies, uploads or logs them.</p>
-        ${list(raw.inputs, 'No dump files chosen.')}
-        <div class="row">
-          <button class="btn" id="raw-add">${icon('folder-open')}Add dump files</button>
-          <button class="btn" id="raw-keys">${icon('shield-check')}Choose keys</button>
-          ${raw.inputs.length || raw.keys.length ? '<button class="btn quiet" id="raw-clear">Clear</button>' : ''}
-        </div>
-        ${keyList}
-        ${raw.error ? `<div class="banner danger">${icon('circle-x')}<div style="white-space: pre-wrap">${esc(raw.error)}</div></div>` : ''}
-        ${f ? `<p class="dim">${icon('circle-check')} Found ${f.dir === 'base' ? 'the base game' : `update ${esc(f.display_version || String(f.version))}`} (program build ${esc(f.build_id.slice(0, 16).toLowerCase())}..., ${f.files} data files, ${(f.bytes / 1e9).toFixed(1)} GB)${f.zbic_modules ? `, ${f.zbic_modules} ZBIC module(s)` : ''}.</p>` : ''}
-        ${f && f.notes.length ? `<ul class="checks">${f.notes.map((n) => `<li>${icon('circle-alert')}${esc(n)}</li>`).join('')}</ul>` : ''}
-        <div class="row">
-          <button class="btn ${raw.saved ? '' : 'primary'}" id="raw-use" ${raw.inputs.length && raw.keys.length && !raw.busy ? '' : 'disabled'}>${icon('circle-check')}${raw.busy ? 'Checking...' : 'Use these dump files'}</button>
-          ${raw.saved ? `<span class="chip ok">${icon('circle-check')}In use</span>` : ''}
-        </div>
-      </div>
-    </div>`;
-}
-
 function shadersHtml(s, saved) {
   const p = s.progress;
   const running = p.state === 'running';
@@ -117,15 +84,13 @@ export async function render(el, ctx) {
   let dlss = await api('dlss_status');
   let dlssBusy = false;
   let dlssProgress = null;
-  const raw = { inputs: [...(cfg.raw_inputs || [])], keys: [...(cfg.key_files || [])], found: null, error: '', busy: false, saved: (cfg.raw_inputs || []).length > 0 };
-
   function draw() {
     const ok = report && report.chosen;
     el.innerHTML = `
       <div class="page">
         <div class="hero">
           <h1>${ctx.firstRun ? 'Welcome. Set up your game files.' : 'Game files'}</h1>
-          <p class="dim">${esc(GAME.launcher_name)} does not include the game. You need your own legally dumped copy: a decrypted dump folder, or your NSP / XCI files with your own keys. The launcher only reads them and never writes to them.</p>
+          <p class="dim">${esc(GAME.launcher_name)} does not include the game. You need your own legally dumped copy as an already decrypted dump folder. The launcher only reads it and never writes to it.</p>
         </div>
 
         <div class="card">
@@ -147,9 +112,7 @@ export async function render(el, ctx) {
           ${ctx.firstRun ? '' : '<button class="btn quiet" id="cancel">Back</button>'}
         </div>
 
-        ${rawHtml(raw)}
-
-        ${shadersHtml(setup, raw.saved || (ok && saved === path && !(cfg.raw_inputs || []).length))}
+        ${shadersHtml(setup, ok && saved === path)}
 
         ${dlssHtml(dlss, dlssBusy, dlssProgress)}
       </div>`;
@@ -174,60 +137,11 @@ export async function render(el, ctx) {
       try {
         await api('save_dump', { path });
         saved = path;
-        cfg.raw_inputs = [];
-        cfg.key_files = [];
-        raw.saved = false;
         toast('Game files saved. Next: Set up.', 'ok');
         draw();
       } catch (e) {
         toast(errText(e), 'error');
       }
-    });
-    const rawChanged = () => {
-      raw.saved = false;
-      raw.found = null;
-      raw.error = '';
-      draw();
-    };
-    el.querySelector('#raw-add').addEventListener('click', async () => {
-      const files = await api('pick_files', { title: 'Choose your dump files (base game and update)', filterName: 'Switch dumps', extensions: ['nsp', 'xci', 'nsz', 'xcz'], multiple: true });
-      for (const f of files) if (!raw.inputs.includes(f)) raw.inputs.push(f);
-      if (files.length) rawChanged();
-    });
-    el.querySelector('#raw-keys').addEventListener('click', async () => {
-      const files = await api('pick_files', { title: 'Choose prod.keys (and title.keys, if you have one)', filterName: 'Keys', extensions: ['keys', 'txt'], multiple: true });
-      if (files.length) {
-        // prod.keys first: the extractor reads them in order
-        raw.keys = files.sort((a, b) => Number(/title\.keys$/i.test(a)) - Number(/title\.keys$/i.test(b)));
-        rawChanged();
-      }
-    });
-    el.querySelector('#raw-clear')?.addEventListener('click', () => {
-      raw.inputs = [];
-      raw.keys = [];
-      rawChanged();
-    });
-    el.querySelectorAll('[data-del]').forEach((b) =>
-      b.addEventListener('click', () => {
-        raw.inputs.splice(Number(b.dataset.del), 1);
-        rawChanged();
-      }),
-    );
-    el.querySelector('#raw-use').addEventListener('click', async () => {
-      raw.busy = true;
-      raw.error = '';
-      draw();
-      try {
-        raw.found = await api('save_raw', { inputs: raw.inputs, keys: raw.keys });
-        raw.saved = true;
-        cfg.raw_inputs = [...raw.inputs];
-        cfg.key_files = [...raw.keys];
-        toast('Dump files saved. Next: Set up.', 'ok');
-      } catch (e) {
-        raw.error = errText(e);
-      }
-      raw.busy = false;
-      draw();
     });
     el.querySelector('#cancel')?.addEventListener('click', () => ctx.go('play'));
     el.querySelector('#to-play')?.addEventListener('click', () => ctx.go('play'));

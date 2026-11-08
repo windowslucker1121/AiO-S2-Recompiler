@@ -225,7 +225,7 @@ Rules:
 | `account` | `nickname` | `Samus` | `NXRT_ACCOUNT_NICKNAME` | `src/services/common.cpp` | Nickname of the local user. |
 | `account` | `uid` | empty (`00000000000000014d50525265636f6d`) | `NXRT_ACCOUNT_UID` | `src/services/common.cpp` | Local user id as 32 hex digits. Anything that is not 32 hex digits keeps the default. |
 | `fs` | `romfs` | `game/romfs` | `NXRT_FS_ROMFS` | `src/services/common.cpp` | Host folder served as the game's RomFS, relative to the working directory. |
-| `fs` | `save_dir` | empty (`%APPDATA%\MPRRecomp\save`) | `NXRT_FS_SAVE_DIR` | `src/services/common.cpp` | Folder for save data. Empty: the APPDATA default. A named instance: `<instance folder>\save` (see "Named instances"). |
+| `fs` | `save_dir` | empty (`%APPDATA%\<save folder>\save`, e.g. `oot-recomp`) | `NXRT_FS_SAVE_DIR` | `src/services/common.cpp` | Folder for save data. Empty: the APPDATA default. A named instance: `<instance folder>\save` (see "Named instances"). |
 | `album` | `dir` | `album` | `NXRT_ALBUM_DIR` | `src/services/album.cpp` | Folder the game's photos (caps:su SaveScreenShotEx0/1/2) are written to, one PNG per photo named by the local date and time (`YYYY-MM-DD_HH-MM-SS-mmm.png`). A relative path is taken from the exe's folder. Created when the first photo is saved. |
 | `fatal` | `report_path` | unset (`<exe path without extension>_fatal.txt`) | `NXRT_FATAL_REPORT_PATH` | `src/services/logfault.cpp` | Fatal-error report file. Once the key is set, even to empty, its value is used. Empty: no file is written. |
 | `fatal` | `terminate` | `true` | `NXRT_FATAL_TERMINATE` | `src/services/logfault.cpp` | `true` ends the process with exit code 5 after a fatal report. `false` returns. |
@@ -547,7 +547,7 @@ nickname = Samus
 
 [fs]
 romfs = game/romfs
-; save_dir =  (empty: %APPDATA%\MPRRecomp\save)
+; save_dir =  (empty: %APPDATA%\<save folder>\save)
 
 [fatal]
 ; report_path is not listed: once set, even empty, it replaces the default report file.

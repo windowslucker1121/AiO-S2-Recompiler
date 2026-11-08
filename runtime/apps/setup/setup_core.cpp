@@ -171,7 +171,7 @@ SourceKind source_kind(const std::wstring& src) {
     std::wstring ext = src.size() > 4 ? src.substr(src.size() - 4) : L"";
     for (wchar_t& ch : ext) ch = static_cast<wchar_t>(towlower(ch));
     if (ext == L".nup") return SourceKind::nup;
-    return SourceKind::unsupported;   // NSP, XCI, NSZ, XCZ: the container readers (nx_extract) are not part of this build
+    return SourceKind::unsupported;   // NSP, XCI, NSZ, XCZ: encrypted containers, never read (no decryption)
 }
 
 namespace {
@@ -669,8 +669,8 @@ std::vector<Check> run_game_checks(const Tools& t, const GameDef& g, const Confi
             k.level = Level::bad;
             k.state = L"Not supported";
             k.detail = c.source;
-            k.fix = L"NSP, XCI, NSZ and XCZ files are not supported by this build yet. Extract the dump with your own tools into a folder with "
-                    L"exefs\\ and romfs\\, or make a .nup package, and choose that.";
+            k.fix = L"NSP, XCI, NSZ and XCZ files are not supported: they are encrypted, and this program decrypts nothing. Choose an "
+                    L"already decrypted dump: a folder with exefs\\ and romfs\\, or a .nup package.";
         } else {
             const GameId gi = game_id_of(l.game);
             if (!gi.ok) {

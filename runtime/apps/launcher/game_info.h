@@ -14,7 +14,7 @@
 namespace mprl {
 
 // ---- Branding: the registered game's names (nxrt/game.h Info) ---------------------------------------------------------------------
-std::wstring product_name();      // the window title and the dialogs: "Metroid Prime Remastered PC"
+std::wstring product_name();      // the window title and the dialogs: "Recomp module: mpr" (the manifest's neutral product name)
 std::wstring game_exe_name();     // "mpr.exe"
 std::wstring setup_exe_name();    // "mpr_setup.exe"
 std::wstring shader_pack_name();  // the shader pack next to the launcher: "shader_cache.mprshc"

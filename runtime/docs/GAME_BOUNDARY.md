@@ -27,9 +27,9 @@ a log line). It is header-only, so the launcher can use it without linking the r
 
 | Field | Kind | What the base does with it |
 | --- | --- | --- |
-| `id`, `title`, `product`, `short_title`, `program_id`, `version` | identity | logs, window titles, the controls.ini header, the launcher's branding and ini comment, the title profile |
+| `id`, `title`, `product`, `window_title`, `short_title`, `program_id`, `version` | identity | logs, window titles (`window_title`: "<short title> (unofficial recompilation)"), the controls.ini header, the launcher's branding and ini comment, the title profile. `product` is a neutral build name ("Recomp module: oot"): exe properties and shortcut descriptions never carry a game's name |
 | `main_base` | (a) | the default guest base of play mode, timestep and test tooling (`[play]`, `[time]`, `[test] game_base` still override) |
-| `exe_name`, `setup_exe_name`, `launcher_ini`, `game_ini`, `shader_pack`, `save_folder` | file names | the launcher finds and starts the programs; the game exe reads `game_ini`; services put saves under `%APPDATA%\<save_folder>` |
+| `exe_name`, `setup_exe_name`, `launcher_ini`, `game_ini`, `shader_pack`, `save_folder` | file names | the launcher finds and starts the programs; the game exe reads `game_ini`; services put saves under `%APPDATA%\<save_folder>` (an `old_save_folders` name found instead is moved there at the first start) |
 | `title_defaults(TitleProfile&)` | (a) | the services' title profile (program id, name, version, languages, save sizes, main thread, nickname, user id) |
 | `timestep` (`timestep::Sites`) | (b) | the frame-step patch: frame update entry, mid-function sites with their load kind, render timing counter and its wrap, movie update, per-tick sampler |
 | `probes` (`tt::GameProbes`) | (c) behind a generic API | test tooling: state readout, warp, grant, item, guest calls, object dump, ray casts, watches |

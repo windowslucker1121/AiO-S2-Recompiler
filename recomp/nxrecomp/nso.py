@@ -16,7 +16,7 @@ def nso_info(d):
     flags = struct.unpack_from('<I', d, 12)[0]
     if flags & 0x80:
         raise ValueError('ZBIC-compressed NSO (flag bit 7): the lifter reads plain NSOs; convert it first with '
-                         'nx_extract --plain-nso <exefs> <out> (tools/extract, runtime/docs/zbic.md)')
+                         'nx_plain_nso <exefs> <out> (tools/extract, runtime/docs/zbic.md)')
     segs = []
     for i, (ho, cso) in enumerate(((0x10, 0x60), (0x20, 0x64), (0x30, 0x68))):
         foff, moff, size = struct.unpack_from('<III', d, ho)

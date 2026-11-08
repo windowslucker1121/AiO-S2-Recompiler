@@ -118,7 +118,7 @@ Start recomp_library.exe and add your own dump of a supported game (drag and dro
 This package contains no game files, no game code and no keys; you need your own legally dumped copy.
 Bundled: the shader translator (Ryujinx's shader translator, MIT, with this project's patches; .NET runtime included),
 python.org's embeddable Python $PyVersion (PSF licence) with zstandard and lz4 (BSD), and the manifests of the games in games\.
-Source code: https://github.com/windowslucker1121/AiO-Switch2-Recompiler (GPL-3.0, see LICENSE).
+Source code: https://github.com/windowslucker1121/AiO-Recompiler (GPL-3.0, see LICENSE).
 "@ | Set-Content -Path (Join-Path $pkg 'README.txt') -Encoding utf8
 
 # 7. zip + checksum

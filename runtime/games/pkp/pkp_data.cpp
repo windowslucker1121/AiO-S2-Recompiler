@@ -12,6 +12,7 @@ const game::Info& data_info() {
         g.id = GAME_ID;
         g.title = GAME_TITLE;
         g.product = GAME_PRODUCT;
+        g.window_title = GAME_WINDOW_TITLE;
         g.short_title = GAME_SHORT_TITLE;
         g.program_id = GAME_PROGRAM_ID;
         g.version = GAME_TARGET_VERSION;
@@ -25,6 +26,7 @@ const game::Info& data_info() {
         g.game_ini = GAME_INI;
         g.shader_pack = GAME_SHADER_PACK;
         g.save_folder = GAME_SAVE_FOLDER;
+        g.old_save_folders = GAME_OLD_SAVE_FOLDERS;
         return g;
     }();
     return info;

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Resources of the Ocarina of Time launcher (mpr_launcher.exe; cmake/launcher.cmake takes them from the game module): manifest (Common Controls 6, per-monitor DPI, UTF-8, asInvoker) and version info.
+// Resources of the launcher of module oot (mpr_launcher.exe; cmake/launcher.cmake takes them from the game module): manifest (Common Controls 6, per-monitor DPI, UTF-8, asInvoker) and version info.
 #include <winres.h>
 
 1 24 "launcher.manifest"
@@ -18,11 +18,11 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", ""
-            VALUE "FileDescription", "Ocarina of Time PC - Launcher"
+            VALUE "FileDescription", "Recomp module: oot - launcher"
             VALUE "FileVersion", "1.0.0.0"
             VALUE "InternalName", "mpr_launcher"
             VALUE "OriginalFilename", "mpr_launcher.exe"
-            VALUE "ProductName", "Ocarina of Time PC - Launcher"
+            VALUE "ProductName", "Recomp module: oot - launcher"
             VALUE "ProductVersion", "1.0.0.0"
         END
     END

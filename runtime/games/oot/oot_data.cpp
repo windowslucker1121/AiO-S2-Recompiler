@@ -12,6 +12,7 @@ const game::Info& data_info() {
         g.id = GAME_ID;
         g.title = GAME_TITLE;
         g.product = GAME_PRODUCT;
+        g.window_title = GAME_WINDOW_TITLE;
         g.short_title = GAME_SHORT_TITLE;
         g.program_id = GAME_PROGRAM_ID;
         g.version = GAME_TARGET_VERSION;
@@ -24,6 +25,7 @@ const game::Info& data_info() {
         g.game_ini = GAME_INI;
         g.shader_pack = GAME_SHADER_PACK;
         g.save_folder = GAME_SAVE_FOLDER;
+        g.old_save_folders = GAME_OLD_SAVE_FOLDERS;
         // The game's upscaler (nvn_replay.cpp, upscaler_override): the 3D scene renders at a low internal size (854x480 or 960x540 seen) and a
         // chain of compute passes builds the output, one of them a tensor-core network (fea98fe7 / f90d726d by scale ratio). Since A10 the chain
         // runs and gives the right picture (sharper and anti-aliased against the copy, same brightness; ~2 ms of GPU time on an RTX 4080), so it

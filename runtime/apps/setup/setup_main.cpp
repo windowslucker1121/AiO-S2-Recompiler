@@ -917,11 +917,15 @@ void App::make_shortcut(GameItem& g) {
     sl->SetWorkingDirectory(parent_of(g.exe).c_str());
     const std::wstring product = widen(g.def->product);
     sl->SetDescription(product.c_str());
+    // The shortcut is named like the game window; characters a file name cannot hold become spaces (no ':' in a file name).
+    std::wstring name = widen(g.def->window_title);
+    for (wchar_t& c : name)
+        if (wcschr(L"<>:\"/\\|?*", c) || c < 32) c = L' ';
     PWSTR desk = nullptr;
     bool ok = false;
     std::wstring path;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &desk))) {
-        path = join(desk, product + L".lnk");
+        path = join(desk, name + L".lnk");
         CoTaskMemFree(desk);
         IPersistFile* pf = nullptr;
         if (SUCCEEDED(sl->QueryInterface(IID_PPV_ARGS(&pf)))) { ok = SUCCEEDED(pf->Save(path.c_str(), TRUE)); pf->Release(); }
