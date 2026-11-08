@@ -101,6 +101,46 @@ namespace Hwcheck
             return list;
         }
 
+        /// The game's shader corpus itself (unique.tsv, code/<h>.bin, ctrl/<h>.bin; read at run time only): every in-scope
+        /// instruction decoded with our decoder, up to `perShape` distinct words per shape (Shape) whose shape matches `only` (null:
+        /// all). For forms the nvdisasm oracle does not exist for; nvdisasm still checks every rewritten word (Program.Verify).
+        public static List<(ulong, ulong, string)> FromGameCorpus(string dir, string only, int perShape)
+        {
+            var rows = File.ReadLines(Path.Combine(dir, "unique.tsv")).Skip(1).Select(l => l.Split('\t')).Where(f => f.Length > 9)
+                           .OrderBy(f => f[0], StringComparer.Ordinal).ToList();
+            var re = only == null ? null : new Regex(only);
+            var found = new Dictionary<string, Dictionary<(ulong, ulong), (string text, int blocks)>>();
+            System.Threading.Tasks.Parallel.ForEach(rows, f =>
+            {
+                byte[] code, ctrl;
+                try { code = File.ReadAllBytes(Path.Combine(dir, "code", f[0] + ".bin")); ctrl = File.ReadAllBytes(Path.Combine(dir, "ctrl", f[9] + ".bin")); }
+                catch (IOException) { return; }
+                if (ctrl.Length < 0x58) return;
+                int stage = BitConverter.ToUInt16(ctrl, 0x56);
+                int end = Math.Min((int)BitConverter.ToUInt32(ctrl, 0x38), code.Length), start = stage == 5 ? 0 : 0x80;
+                if (end <= start) return;
+                var local = new Dictionary<(ulong, ulong), (string, string)>();
+                foreach (SassInst i in SassDecoder.DecodeBlock(code, start, end))
+                {
+                    if (!InScope.Contains(i.Opcode)) continue;
+                    string shape = Shape(i);
+                    if (re != null && !re.IsMatch(shape)) continue;
+                    local.TryAdd((i.Lo, i.Hi), (shape, i.ToSassText()));
+                }
+                lock (found)
+                    foreach (var (w, (shape, text)) in local)
+                    {
+                        if (!found.TryGetValue(shape, out var set)) found[shape] = set = new();
+                        set[w] = set.TryGetValue(w, out var e) ? (e.text, e.blocks + 1) : (text, 1);
+                    }
+            });
+            // per shape the words in the most blocks: real instructions recur, while data the decoder reads past a block's code
+            // (constants, names) is mostly unique and decodes to illegal forms; ties by word, so the selection is deterministic
+            return found.OrderBy(s => s.Key, StringComparer.Ordinal)
+                        .SelectMany(s => s.Value.Where(w => w.Value.blocks >= 2).OrderByDescending(w => w.Value.blocks).ThenBy(w => w.Key)
+                                             .Take(perShape).Select(w => (w.Key.Item1, w.Key.Item2, w.Value.text))).ToList();
+        }
+
         static ulong SetField(ulong lo, int start, int len, ulong v) { ulong m = ((1UL << len) - 1) << start; return (lo & ~m) | ((v << start) & m); }
 
         /// Shape of an instruction: what makes two encodings test different things (opcode, modifiers, guard sense, operand kinds

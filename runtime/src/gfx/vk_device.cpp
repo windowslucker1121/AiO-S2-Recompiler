@@ -790,10 +790,21 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     if (vkCreateFence(device_, &fci, nullptr, &impl_->once_fence) == VK_SUCCESS) vk_gauge_fences().add(1);
 
     {
+        // float16 arithmetic in translated shaders (the float16 and cooperative-matrix variants, AmpereCoopMat.cs): shaderFloat16 and
+        // the float-controls properties their DenormPreserve 16 / SignedZeroInfNanPreserve 16 execution modes need
+        VkPhysicalDeviceVulkan12Properties p12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
+        VkPhysicalDeviceProperties2 pp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &p12};
+        vkGetPhysicalDeviceProperties2(physical_, &pp);
+        const bool f16_ok = a12.shaderFloat16 && p12.shaderDenormPreserveFloat16 && p12.shaderSignedZeroInfNanPreserveFloat16;
+        const bool f16_on = f16_ok && config_get_bool("gfx", "float16_shaders", true);
+        set_float16_shaders_enabled(f16_on);
+        NXLOG_I(kTag, "float16 shader variants: %s (shaderFloat16 %d, denorm preserve %d, signed zero/inf/nan preserve %d)",
+                f16_on ? "on" : f16_ok ? "off ([gfx] float16_shaders)" : "off", a12.shaderFloat16, p12.shaderDenormPreserveFloat16,
+                p12.shaderSignedZeroInfNanPreserveFloat16);
         std::string why;
         if (!x_cm) why = config_get_bool("gfx", "cooperative_matrix", true) ? "no VK_KHR_cooperative_matrix" : "off ([gfx] cooperative_matrix)";
         else if (!acm.cooperativeMatrix) why = "cooperativeMatrix feature not supported";
-        else if (!a12.shaderFloat16) why = "no shaderFloat16";
+        else if (!f16_ok) why = "no shaderFloat16 with float16 denorm and signed zero/inf/nan preservation";
         else if (limits_.subgroup_size != 32) why = "subgroup size " + std::to_string(limits_.subgroup_size) + ", not 32";
         else features_.cooperative_matrix_hmma = coopmat_hmma_probe(*this, &why);
         set_coopmat_hmma_enabled(features_.cooperative_matrix_hmma);

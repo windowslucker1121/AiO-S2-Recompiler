@@ -46,7 +46,12 @@ namespace Hwcheck
             if (corpus != null && Directory.Exists(corpus))
                 raw.AddRange(Cases.FromCorpus(corpus, Path.Combine(outDir, "corpus_samples.tsv"), 64).Select(x => (x.Item1, x.Item2, x.Item3, "corpus")));
             else corpus = null;
-            Console.WriteLine($"sources: {opsCount} words from ops.ptx, {raw.Count - opsCount} from {(corpus ?? "no corpus")}");
+            int fromOracle = raw.Count - opsCount;
+            string game = Opt(args, "--game-corpus", null);   // the game's shader corpus itself (Cases.FromGameCorpus)
+            if (game != null)
+                raw.AddRange(Cases.FromGameCorpus(game, only, perShape).Select(x => (x.Item1, x.Item2, x.Item3, "game")));
+            Console.WriteLine($"sources: {opsCount} words from ops.ptx, {fromOracle} from {(corpus ?? "no corpus")}" +
+                              (game != null ? $", {raw.Count - opsCount - fromOracle} from {game}" : ""));
 
             var cases = new List<Case>();
             var perShapeCount = new Dictionary<string, int>();
@@ -126,7 +131,7 @@ namespace Hwcheck
                 next = k;
             }
             using var vk = new VkRunner(threads * Inputs.Words * 4);
-            Console.WriteLine($"Vulkan: {vk.DeviceName}");
+            Console.WriteLine($"Vulkan: {vk.DeviceName} ({vk.Float16Info})");
             foreach (Case c in todo)
             {
                 string errPath = Path.Combine(cudaDir, c.Id + ".err");

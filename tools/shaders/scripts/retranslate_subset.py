@@ -100,9 +100,10 @@ def main():
             _, new_rows = rows(os.path.join(out, 'results.tsv'))
             for r in new_rows:
                 h = r.split('\t')[0]
-                src = os.path.join(cache, h + '.spv')
-                if os.path.exists(src) and not os.path.exists(os.path.join(a.backup, h + '.spv')):
-                    shutil.copyfile(src, os.path.join(a.backup, h + '.spv'))
+                for ext in ('.spv',) + merge_results.VARIANTS:
+                    src = os.path.join(cache, h + ext)
+                    if os.path.exists(src) and not os.path.exists(os.path.join(a.backup, h + ext)):
+                        shutil.copyfile(src, os.path.join(a.backup, h + ext))
             if not os.path.exists(os.path.join(a.backup, 'results.tsv')):
                 shutil.copyfile(os.path.join(cache, 'results.tsv'), os.path.join(a.backup, 'results.tsv'))
         sys.argv = ['merge_results.py', out, cache]
