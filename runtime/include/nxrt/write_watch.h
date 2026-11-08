@@ -87,7 +87,9 @@ void ban_section(uint64_t offset, uint64_t size);
 // calls unguard(); if a page is still guarded when it returns, it is unguarded here (the access then sees what the pages hold). Only
 // armed pages (read-only because of arm) can be guarded; unguard makes them read-only again (armed, not valid). A file read into guarded
 // pages (before_os_write) calls the handler first; a change of mapping or protection (forget) drops the guard without it.
-using GuardHandler = void (*)(uint64_t addr);
+// access: what touched the page (kAccess*); host_pc: the faulting instruction (0 for the OS-call paths), for diagnostics.
+enum GuardAccess : int { kAccessRead = 0, kAccessWrite = 1, kAccessOsRead = 2, kAccessOsWrite = 3 };
+using GuardHandler = void (*)(uint64_t addr, int access, uint64_t host_pc);
 void set_guard_handler(GuardHandler fn);
 // Owner: guards pages [first, first + count). False when a page is not armed (written since, never armed, banned) or a file read is
 // in progress there: nothing is guarded then. Pages already guarded stay so.
