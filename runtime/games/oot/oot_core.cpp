@@ -4,7 +4,12 @@
 #include "oot_game.h"
 
 #include "nxrt/game.h"
+#include "nxrt/log.h"
 #include "nxrt/services.h"
+#include "nxrt/timestep.h"
+
+#include <algorithm>
+#include <cmath>
 
 namespace nxrt::games::oot {
 
@@ -37,12 +42,56 @@ void title_defaults(services::TitleProfile& p) {
     p.romfs_hide = {"/Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs"};
 }
 
+// ---- the frame step ----------------------------------------------------------------------------------------------------------------
+// The framework's per-frame virtual (main+0x3b4ea90, oot_game.cpp kFrameUpdate) runs the calc, then turns a target frame rate into the step
+// everything else multiplies its per-frame motion by: scale = 60.0f / (float)fps, with fps the u32 at this+0x2c8, stored as a float global
+// (main+0x4d41fc8; 1.0 at 60 fps, 2.0 at 30). The calc runs before that store, so it reads the scale the previous frame left. Retail keeps fps
+// at 60, so the game advances 1/60 s per presented frame. Real-time step ([time] mode = real, the OoT default): at the entry of that function
+// (before the calc) the scale is set to measured step * 60, so the calc moves by real time, and the fps field to the nearest whole rate, so the
+// function's own store after the calc lands close to it. Physics, animation, the camera and the event timeline all follow it (walking and the
+// camera checked at 10 and 27 fps); the movie player does not (one picture per frame), hence fixed_step_during_movies.
+constexpr uint64_t kFrameUpdate = 0x3b4ea90;
+constexpr uint64_t kStepScale = 0x4d41fc8;      // float, data of main
+constexpr uint64_t kFpsField = 0x2c8;           // u32 in the framework object (x0 at kFrameUpdate)
+
+// Main thread only (the frame update's entry).
+void apply_step(::Ctx* c, uint64_t base, float dt) {
+    const uint64_t self = c->x[0];
+    if (!self) return;
+    float* scale = reinterpret_cast<float*>(base + kStepScale);
+    uint32_t* fps = reinterpret_cast<uint32_t*>(self + kFpsField);
+    const float s = timestep::scale60(dt);
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        // The game puts its target rate back into the field after each frame (60, the same as the u32 at this+0xfc), so writing it per frame is
+        // needed and leaves nothing behind once the step is off.
+        NXLOG_I("oot", "frame step: framework object 0x%llx, fps field %u, scale %.3f; the step follows real time from now on",
+                static_cast<unsigned long long>(self), *fps, static_cast<double>(*scale));
+    }
+    *fps = static_cast<uint32_t>(std::lround(std::clamp(60.0f / s, 1.0f, 1000.0f)));
+    *scale = s;
+}
+
+const timestep::Sites& step_sites() {
+    static const timestep::Sites t = [] {
+        timestep::Sites s;
+        s.frame_update = kFrameUpdate;
+        s.apply_step = &apply_step;
+        s.cap_at_display_rate = false;          // the movie player shows one picture per frame: never above the console's 60
+        s.fixed_step_during_movies = true;
+        return s;
+    }();
+    return t;
+}
+
 }  // namespace
 
 const game::Info& core_info() {
     static const game::Info info = [] {
         game::Info g = data_info();
         g.title_defaults = &title_defaults;
+        g.timestep = &step_sites();
         return g;
     }();
     return info;

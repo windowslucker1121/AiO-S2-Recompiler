@@ -66,6 +66,7 @@
 #include "nxrt/play.h"
 #include "nxrt/nxmodule.h"
 #include "nxrt/runtime.h"
+#include "nxrt/timestep.h"
 
 #include "game_manifest.h"   // generated from the game manifest: GAME_* names, files and the module list
 #include GAME_HEADER      // the game module (runtime/games/<id>): every title-specific table the runtime uses
@@ -649,6 +650,11 @@ int main(int argc, char** argv) {
     nxrt::config_set("fs", "exefs", exefs.c_str());     // the one in use, for the About page
     nxrt::config_set("process", "program_id", "0x" GAME_TITLE_ID);     // GetInfo(ProgramId); an ini value or the environment still wins
     apply_game_config_defaults(nxrt::game::info().config_defaults);   // the title's own setting defaults (runtime/games/<id>)
+    // nxrt::init installed the frame step before these defaults existed: read [time] again (no frame has run yet).
+    if (nxrt::timestep::installed()) {
+        nxrt::timestep::remove();
+        nxrt::timestep::install(nxrt::timestep::load_config());
+    }
 #ifdef GAME_DEV_ROOT
     // Development build: the shader data this checkout prepared (DEVELOPMENT_SETUP.md section 7), unless the ini or NXRT_NVN_* name other.
     dev_default("nvn", "shader_cache", GAME_DEV_ROOT "/work/shaders/" GAME_ID "/spirv");

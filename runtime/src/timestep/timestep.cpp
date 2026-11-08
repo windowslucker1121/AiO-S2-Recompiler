@@ -22,6 +22,7 @@
 #include "nxrt/hooks.h"
 #include "nxrt/log.h"
 #include "nxrt/movie.h"
+#include "nxrt/video_codec.h"
 #include "nxrt/tt.h"
 
 namespace nxrt::timestep {
@@ -161,6 +162,10 @@ struct G {
     double render_frames = 0;
     double stuck_acc = 0.0;        // game time since the last stuck-tracker sample
     uint64_t render_addr = 0;
+    void (*apply_step)(::Ctx*, uint64_t, float) = nullptr;   // Sites::apply_step
+    bool movie_fixed = false;                                  // Sites::fixed_step_during_movies
+    uint64_t movie_pics = 0;                                   // movie_pictures() at the last change
+    double movie_pics_at = -1.0;                               // when it changed (clock_now seconds)
     double render_wrap = 0;            // the game's wrap of the render-timing counter (Sites::render_counter_wrap)
 
     // statistics
@@ -220,6 +225,9 @@ void publish_dt(float dt) {
 
 float read_dt() { return g().dt; }
 
+// Pictures of movies the game has taken so far: the movie list's (Switch 1 HLE) plus nn::codec's decoded pictures read (Switch 2).
+uint64_t movie_pictures() { return media::movie_stats().video_frames_delivered + media::video_codec_stats().frames_read; }
+
 // ---- the frame boundary: entry hook on CGameArchitectureSupport::Update -------------------------------------------------------------
 void begin_frame() {
     G& s = g();
@@ -251,7 +259,18 @@ void begin_frame() {
             }
         }
         elapsed = s.have_last ? now - s.last_start : -1.0;
-        if (!retail) publish_dt(static_cast<float>(s.stepper.step(elapsed)));
+        if (!retail) {
+            double dt = s.stepper.step(elapsed);
+            if (s.movie_fixed) {
+                const uint64_t pics = movie_pictures();
+                if (pics != s.movie_pics) {
+                    s.movie_pics = pics;
+                    s.movie_pics_at = now;
+                }
+                if (s.movie_pics_at >= 0.0 && now - s.movie_pics_at < 0.5) dt = kGameStep;   // a movie is showing: one picture, one 1/60 s step
+            }
+            publish_dt(static_cast<float>(dt));
+        }
         if (grid) {
             const double p = retail ? 1.0 / c.off_rate : 1.0 / c.rate;
             s.next_target = (s.have_last ? s.next_target : now) + p;
@@ -275,16 +294,18 @@ void begin_frame() {
     }
     if (s.csv)
         std::fprintf(s.csv, "%llu,%.6f,%.6f,%.6f,%.6f,%llu,%.4f\n", static_cast<unsigned long long>(s.frame), now, elapsed, static_cast<double>(s.dt), s.st.sim_seconds,
-                     static_cast<unsigned long long>(media::movie_stats().video_frames_delivered), s.st.render_seconds);
+                     static_cast<unsigned long long>(movie_pictures()), s.st.render_seconds);
     if (c.log_every > 0 && s.frame % static_cast<uint64_t>(c.log_every) == 0)
         NXLOG_I(kTag, "frame %llu: step %.3f ms (%.1f Hz), elapsed min/mean/max %.3f/%.3f/%.3f ms, waits %llu, sim %.3f s, movie frames %llu",
                 static_cast<unsigned long long>(s.frame), s.dt * 1e3, 1.0 / std::max(1e-9, static_cast<double>(s.dt)), s.st.min_elapsed * 1e3,
                 s.st.mean_elapsed * 1e3, s.st.max_elapsed * 1e3, static_cast<unsigned long long>(s.st.waits), s.st.sim_seconds,
-                static_cast<unsigned long long>(media::movie_stats().video_frames_delivered));
+                static_cast<unsigned long long>(movie_pictures()));
 }
 
-int hook_update(::Ctx*, uint64_t, void*) {
+int hook_update(::Ctx* c, uint64_t, void*) {
     begin_frame();
+    G& s = g();
+    if (s.apply_step && s.active.load(std::memory_order_acquire)) s.apply_step(c, s.cfg.game_base, read_dt());
     return 0;
 }
 
@@ -425,6 +446,10 @@ void install(const Config& cfg) {
     const Sites* sites = game::info().timestep;
     s.render_addr = sites && sites->render_timing_counter ? cfg.game_base + sites->render_timing_counter : 0;
     s.render_wrap = sites ? sites->render_counter_wrap : 0.0;
+    s.apply_step = sites ? sites->apply_step : nullptr;
+    s.movie_fixed = sites && sites->fixed_step_during_movies;
+    s.movie_pics = 0;
+    s.movie_pics_at = -1.0;
     s.st = Stats{};
     s.sum_elapsed = 0;
     s.n_elapsed = 0;
@@ -465,6 +490,12 @@ void remove() {
 }
 
 bool installed() { return g().installed; }
+
+bool active_mode() {
+    G& s = g();
+    const Sites* sites = game::info().timestep;
+    return s.installed && s.cfg.mode != Mode::Off && sites && sites->frame_update;
+}
 
 void init() { install(load_config()); }
 

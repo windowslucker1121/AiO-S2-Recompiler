@@ -90,6 +90,15 @@ struct Sites {
     double render_counter_wrap = 0;     // the counter is kept modulo this (0 = no wrap)
     uint64_t movie_update = 0;          // entry: s0 = the movie clock's delta seconds (0 = none)
     uint64_t per_tick_sampler = 0;      // entry, handled: a function that must run once per 1/60 s of game time; x0 stays as the result (0 = none)
+    // A game that takes its step from data instead of immediates (Ocarina of Time: a frame-step scale it derives from a target fps): called on
+    // the frame_update entry after the step of this frame is known, in real and fixed mode only. c: the guest context at that entry (x0 = this).
+    void (*apply_step)(::Ctx* c, uint64_t game_base, float dt) = nullptr;
+    // fps_limit = auto: true caps at the display's refresh rate (the step follows real time). false keeps the console's 60 ([display]
+    // console_fps): for a game that still advances something one unit per frame (OoT's movie pictures), so it never runs above 60.
+    bool cap_at_display_rate = true;
+    // The game's movie player shows one decoded picture per frame (OoT): while the game reads pictures (nn::codec, the last one under 0.5 s ago)
+    // the step is the console's 1/60, so the event timeline that starts the voice lines stays with the pictures (A11).
+    bool fixed_step_during_movies = false;
 };
 
 // ---- the frame-time policy (pure, no clock) -----------------------------------------------------------------------------------
@@ -124,6 +133,8 @@ void shutdown();
 float current_dt();
 // What the game was last given: false in off mode.
 bool active();
+// The installed mode feeds the game a step (real or fixed) and the game lists sites: known before the first frame.
+bool active_mode();
 
 struct Stats {
     uint64_t frames = 0;

@@ -36,7 +36,12 @@ const game::Info& data_info() {
             "upscaler_skip = 54ecc4b4d30b3e2c,4c60af1fa697e5f2,fea98fe719bc0348,f90d726d76bf9884\n"
             "upscaler_src = depth_rt\n"
             "upscaler_dst = fs:c63c3b8f092e5d4c:tex0\n"
-            "upscaler_fallback = 1\n";
+            "upscaler_fallback = 1\n"
+            // The real-time frame step (oot_core.cpp apply_step; [time] mode = off gives the console's fixed 1/60 s per frame). The game is
+            // made for 30-60 fps; on a PC that renders 15-25 fps in Kokiri Forest the step goes up to 1/10 s (scale 6; walking and the ladder
+            // checked at 10 fps). Frames slower than that slow the game down instead of taking larger steps.
+            "[time]\n"
+            "min_rate = 10\n";
             // (graphics_ssbo_slot_xor = 1 was set here for a while. It only hid the garbage sky lighting of the float-atomic bug, and it fed the
             // material shaders the light list as the cluster grid: NaN, unresolved lightmaps, a runaway light loop and device loss. A12.)
         return g;
