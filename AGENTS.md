@@ -132,6 +132,14 @@ took 25 min for 117,981 parts (both raster sets); a forced second one loads the 
   headers), `recomp_library.exe --add <dump>`, `runtime\apps\setup\tests\winshot.py` (shot, cmd ids of the `Id` enum, close).
   Not checked yet: Play running the setup and then the game; two games queued. Next: build a game from the library (lift + compile as a
   queue step), retire `runtime/apps/launcher` and `launcher/`, release layout `games\<id>\game.toml` next to the exe.
+  **Release package / CI (2026-11-08):** `.github/workflows/release.yml` builds `tools/release/package.ps1` on `windows-latest` (tag
+  `v*` or "Run workflow" with a version -> GitHub release with the zip + `.sha256`; PRs touching the library -> build only, zip as a
+  workflow artifact). The package: `recomp_library.exe` (standalone CMake `tools/release/library`, no game or runtime needed, no
+  `SETUP_DEV_ROOT`), `games\<id>\game.toml`, `tools\scripts` (3 .py), `tools\spirv_harness` (self-contained `dotnet publish`),
+  `tools\python` (python.org embeddable 3.13.17, SHA-256 pinned, + zstandard/lz4 wheels), licences. **No game exe** (it holds lifted
+  code; a player-side build is still missing), so a release can add dumps and run the extraction/shader steps but not Play yet.
+  Local run (49 MB zip, ~2 min warm): `recomp\scripts\nx_env.cmd powershell -File tools\release\package.ps1 -Version 0.1.0 -Out <dir>
+  -HostPython <a Python with pip>` (the venv has no pip; system 3.11 works). Checked locally 2026-11-08, not yet on GitHub's runners.
 The text below describes the preparation steps and checks, which the library keeps.
 **Initial Setup (`oot_setup.exe`, since 2026-11-07; `runtime/apps/setup`, target `game_setup`, name from `game.toml` `files.setup_exe`)**:
 the player's first program, native Win32 (menu bar, four pages: Requirements, Game files, Prepare, Play; task dialog for Rebuild).
