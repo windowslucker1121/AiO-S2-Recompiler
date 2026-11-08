@@ -249,7 +249,7 @@ folder first (`ninja -C runtime\build\release -t clean`): sccache cache hits lea
 
 ## 10. Moving to another computer
 
-The code comes from GitHub (`git clone https://github.com/windowslucker1121/switch2-win-oot.git`, default branch `oot-nup`, then
+The code comes from GitHub (`git clone https://github.com/windowslucker1121/oot-recomp-windows.git`, default branch `oot-nup`, then
 `git submodule update --init refs/ryubing`). Only the game must be copied; some generated data is worth copying to save time.
 
 | What | Size | Copy? |
