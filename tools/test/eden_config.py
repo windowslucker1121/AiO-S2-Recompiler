@@ -1,9 +1,8 @@
 """Portable Eden setup for the reference harness (work area S5).
 
-  python eden_config.py setup [--eden-dir work/eden] [--keys game/keys] [--nsp PATH]
-      Creates <eden-dir>/user/{keys,config,log,screenshots}, copies eden.exe/eden-cli.exe from toolchain/eden when missing (portable mode = a `user`
-      folder next to the exe), installs prod.keys/title.keys into <eden-dir>/user/keys (the only place the key files are ever copied to) and writes
-      the config settings the harness needs into user/config/sdl2-config.ini (created by a first short run of eden-cli when missing).
+  python eden_config.py setup [--eden-dir work/eden] [--nsp PATH]
+      Creates <eden-dir>/user/{config,log,screenshots}, copies eden.exe/eden-cli.exe from toolchain/eden when missing (portable mode = a `user`
+      folder next to the exe) and writes the config settings the harness needs into user/config/sdl2-config.ini (created by a first short run of eden-cli when missing).
   python eden_config.py set KEY=VALUE ...      change SDL config keys, e.g. Debugging.use_gdbstub=true  Renderer.resolution_setup=2
 
 The config is Qt-style ini: `key=value` plus a `key\\default=true|false` line saying whether the value is the built-in default. A value written by this
@@ -88,19 +87,15 @@ def set_values(lines, settings):
     return out
 
 
-def setup(eden_dir, keys_dir, nsp):
+def setup(eden_dir, nsp):
     eden_dir = os.path.abspath(eden_dir)
     src = os.path.join(ROOT, "toolchain", "eden")
-    for sub in ("keys", "config", "log", "screenshots", "nand", "sdmc", "dump"):
+    for sub in ("config", "log", "screenshots", "nand", "sdmc", "dump"):
         os.makedirs(os.path.join(eden_dir, "user", sub), exist_ok=True)
     for exe in ("eden.exe", "eden-cli.exe"):
         if not os.path.exists(os.path.join(eden_dir, exe)):
             shutil.copy2(os.path.join(src, exe), os.path.join(eden_dir, exe))
-    for k in ("prod.keys", "title.keys"):
-        s = os.path.join(keys_dir, k)
-        d = os.path.join(eden_dir, "user", "keys", k)
-        if os.path.exists(s) and not os.path.exists(d):
-            shutil.copy2(s, d)
+    # This tool handles no key files: an emulator that needs them is set up by the user, outside this repository.
     cfg = os.path.join(eden_dir, "user", "config", "sdl2-config.ini")
     if not os.path.exists(cfg):
         # a first start writes the default config; give it a moment and stop it
@@ -127,14 +122,13 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("setup")
     s.add_argument("--eden-dir", default=os.path.join(ROOT, "work", "eden"))
-    s.add_argument("--keys", default=os.path.join(ROOT, "game", "keys"))
     s.add_argument("--nsp")
     t = sub.add_parser("set")
     t.add_argument("--eden-dir", default=os.path.join(ROOT, "work", "eden"))
     t.add_argument("pairs", nargs="+")
     a = ap.parse_args(argv)
     if a.cmd == "setup":
-        setup(a.eden_dir, a.keys, a.nsp)
+        setup(a.eden_dir, a.nsp)
     else:
         kv = dict(p.split("=", 1) for p in a.pairs)
         apply(os.path.join(a.eden_dir, "user", "config", "sdl2-config.ini"), kv)

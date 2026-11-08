@@ -23,7 +23,7 @@ current. How to contribute: `CONTRIBUTING.md`.
 
 Porting **The Legend of Zelda: Ocarina of Time** (Switch 2, program `0400486024DEC000`, update 2.0.0 / `131072`) next to the
 existing Pokopia port. Game id `oot`: `recomp/games/oot/` (manifest `game.toml`, `config.py`, `CMakeLists.txt`, `main.sites`).
-The dump is `The Legend of Zelda Ocarina of Time [0400486024DEC000][v131072].nup` in the repo root (25.6 GB, git-ignored).
+The dump is `oot.nup` in the repo root (25.6 GB, git-ignored; the docs call it `oot.nup`: the user may rename the local file to that).
 
 The user's goal is a port that is **actually playable** on this PC. Milestones in the user's order: (1) boot into the **main menu
 without artifacts**; (2) **basic gamepad** (XInput / SDL gamepad drives the game, menus included); (3) last, **FPS**: measure first
@@ -654,7 +654,7 @@ objects; nothing can write that out and recreate it). A state = the game's commi
 steps from `recomp/games/oot/ai_states.toml` (routes `title`, `new_game`, `continue`, `in_game`; built-in states `title`,
 `first_scene`) + build/settings/env + the instance it came from. `load_state` copies the save into the save folder of the instance it
 starts (`work\ai_run\oot\save`, or `work\ai_run\oot\<instance>\save`) and launches with `[fs] save_dir` there: the player's
-`%APPDATA%\OcarinaRecompPC\save` is never touched. A state or bundle starts the instance it came from again unless `instance=` says
+`%APPDATA%\oot-recomp\save` is never touched (the folder was `OcarinaRecompPC` before 2026-11-08; the game moves it at its first start, `old_save_folders` in `game.toml`). A state or bundle starts the instance it came from again unless `instance=` says
 otherwise (pass one while another session may use that name). The routes use the main shader cache `work\shaders\oot\spirv` (A8 fix in,
 no loop cap) and `[media] video_max_pictures = 120`. OoT has an auto-save manager (`AutoSaveMgr`, `TriggerRequestAutoSave` in main's strings),
 so states made right after an autosave are exact. Bug bundles: the player presses **F9** in game (note prompt follows; `[bug]` keys in
@@ -726,7 +726,7 @@ first (`ninja -C runtime\build\release -t clean`, then `build.ps1 -Test`); `ninj
 
 ```bat
 rem 1. program files only (about 40 MB); drop --exefs-only for the whole game (about 26 GB)
-tools\.venv\Scripts\python.exe tools\extract\nup_extract.py "<game>.nup" game\oot --exefs-only
+tools\.venv\Scripts\python.exe tools\extract\nup_extract.py oot.nup game\oot --exefs-only
 rem 2. main is ZBIC-compressed: write plain NSOs for the lifter (checks every segment against the NSO header hashes)
 tools\extract\build\msvc\bin\nx_plain_nso.exe game\oot\updates\131072\exefs game\oot\plain\exefs
 rem 3. lift + compile (one module: append oot_sdk, oot_main, ...; keep going after errors: -k 0)
@@ -735,7 +735,7 @@ recomp\scripts\build_game.cmd oot
 
 ```bat
 rem 4. the whole game (about 26 GB, hash-checked) for the runtime
-tools\.venv\Scripts\python.exe tools\extract\nup_extract.py "<game>.nup" game\oot
+tools\.venv\Scripts\python.exe tools\extract\nup_extract.py oot.nup game\oot
 rem 5. once: the ASTC -> BC7 transcoder the runtime links (sources: tools\textures\scripts\fetch_third_party.ps1, pinned)
 recomp\scripts\nx_env.cmd cmake -S tools\textures -B tools\textures\build\release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
 recomp\scripts\nx_env.cmd cmake --build tools\textures\build\release

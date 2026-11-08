@@ -20,7 +20,12 @@ projects stays under GPL-3.0, the licence of this repository (`LICENSE` at the r
   Vulkan examples (https://github.com/SaschaWillems/Vulkan, MIT, Copyright (c) Sascha Willems). Test data only; no game shaders.
 - `launcher/`: uses the Lucide icon set (npm `lucide`, ISC; Copyright (c) Lucide Contributors) for its icons, including
   `launcher/src-tauri/icons/icon-source.svg` (Lucide's gamepad icon), and Tauri (MIT or Apache-2.0), fetched by npm/cargo at build time.
-- `tools/shaders/oozx/`: a C ABI over the `oozextract` crate (fetched by cargo at build time, not in the repository).
+- `tools/shaders/oozx/`: a C ABI over the `oozextract` crate, version 0.5.7 pinned in `Cargo.toml` / `Cargo.lock` (fetched by cargo at
+  build time, not in the repository). Licence (checked 2026-11-08): crates.io and the crate's `Cargo.toml` say `license = "MIT"`; the
+  repository (https://github.com/lvlvllvlvllvlvl/oozextract) has no LICENSE file and no copyright line. Its description calls it a Rust
+  port of ooz (https://github.com/powzix/ooz, "Copyright (C) 2016, Powzix", GPL-3.0-or-later per its source headers, no LICENSE file).
+  Either way the licence is compatible with this project's GPL-3.0; treat the crate as GPL-3.0-or-later if it is a derived work of ooz.
+  The built `oozx.dll` is a developer tool for shader extraction and is not shipped in releases.
 - `tools/shaders/licenses/`, `tools/tiling/licenses/`, `tools/textures/licenses/` and `tools/textures/THIRD_PARTY.md`: the licences of
   the code those tools adapt or fetch (Ryujinx/ryubing, SuperMarioWonderRecomp, Mesa NAK, nxnative, smo-recomp, astc-encoder,
   bc7enc_rdo, ISPC). `recomp/THIRD_PARTY.md` covers the recompiler.
@@ -136,7 +141,7 @@ Copyright 2015-2026 The Khronos Group Inc. Files fall under Apache-2.0 or MIT (S
 
 ### NVN header (MIT) and shader cache module
 
-`src/gfx/nvn/third_party/nvn/nvn.h` is the NVN header of the mp1r-practice-mod repository, copied with its MIT notice ("Copyright (c) 2020 h1k421") and a few corrected typedefs (marked in the file). `src/gfx/nvn/nvn_shaders.h` and `nvn_shaders.cpp` are adapted from SuperMarioWonderRecomp `runtime/src/nvn/nvn_shaders.{h,cpp}` (MIT, Copyright (c) 2026 BelmanteGu; MIT text as above), which in turn follows Ryujinx's `SupportBuffer.cs` (MIT, Copyright Ryujinx Team and Contributors). The translator patches in `tools/shaders` are Ryujinx source in context lines (MIT).
+`src/gfx/nvn/third_party/nvn/nvn.h` is the NVN header of the mp1r-practice-mod repository (`src_framework/nvn/nvn.h`), copied with its MIT notice ("Copyright (c) 2020 h1k421") and a few corrected typedefs (marked "NXRT NOTE" in the file). Provenance, as the file states: its author reconstructed the declarations from the DWARF debug information of a retail game (Darksiders II); it is not Nintendo SDK source or documentation, and it holds only interface declarations (types, enums, structs, function pointer typedefs), no implementation. The mp1r-practice-mod repository as a whole is GPL-2.0; this file is under its own MIT notice. The provenance is repeated at the top of the file. `src/gfx/nvn/nvn_shaders.h` and `nvn_shaders.cpp` are adapted from SuperMarioWonderRecomp `runtime/src/nvn/nvn_shaders.{h,cpp}` (MIT, Copyright (c) 2026 BelmanteGu; MIT text as above), which in turn follows Ryujinx's `SupportBuffer.cs` (MIT, Copyright Ryujinx Team and Contributors). The translator patches in `tools/shaders` are Ryujinx source in context lines (MIT).
 
 ### Tools linked at build time
 

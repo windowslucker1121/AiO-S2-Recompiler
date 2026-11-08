@@ -30,7 +30,7 @@ bool parse_toml(const std::string& text, Toml* out, std::string* error);
 // ---- a game this setup knows (one manifest) ------------------------------------------------------------------------------------------
 struct GameDef {
     std::wstring manifest;        // path of its game.toml
-    std::string id, title, short_title, product, title_id, version, platform;
+    std::string id, title, short_title, product, window_title, title_id, version, platform;
     std::string exe, ini, log, save_folder;      // [files]
     std::string dump_version, display_version, main_build_id;   // [dump]
     std::string shader_extractor;                 // [shaders] extractor
@@ -54,7 +54,7 @@ struct DumpInfo {
     uint32_t version = 0;         // the newest update's, else 0
     std::string build_id;         // main's, when the code is readable (folder sources)
     std::vector<DumpPackage> packages;
-    std::string name;             // a guess from the file or folder name ("Super Mario ... [0100...].nup" -> "Super Mario ..."), UTF-8
+    std::string name;             // a guess from the file or folder name ("Some Game [0100...].nup" -> "Some Game"), UTF-8
     std::wstring error;
 };
 std::string version_text(uint32_t v);        // 327680 -> "5.0.0"

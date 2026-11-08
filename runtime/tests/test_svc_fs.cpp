@@ -4,11 +4,16 @@
 #define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
 #include <windows.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <string>
 
 #include "nxrt/config.h"
+#include "nxrt/game.h"
+#include "nxrt/services.h"
 #include "nxrt/services_api.h"
 #include "svc_test_util.h"
 
@@ -367,4 +372,74 @@ NXTEST(multi_commit_manager_opens) {
     // (Add / Commit are exercised through the file system's own Commit: the manager only forwards)
     CHECK(fsys.call(10).ok());
     CHECK(stdfs::is_directory(f.save / "account" / "03000000000000000400000000000000" / "d"));
+}
+
+// Saves made under an earlier save folder name (game::Info old_save_folders) are moved to the current one the first time it is asked for.
+namespace {
+stdfs::path fresh_base(const char* tag) {
+    stdfs::path b = stdfs::temp_directory_path() / ("nxrt_savemig_" + std::string(tag) + "_" + std::to_string(GetCurrentProcessId()));
+    std::error_code ec;
+    stdfs::remove_all(b, ec);
+    stdfs::create_directories(b, ec);
+    return b;
+}
+std::string slurp(const stdfs::path& p) {
+    std::ifstream i(p, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(i), std::istreambuf_iterator<char>());
+}
+}  // namespace
+
+NXTEST(save_folder_migration_moves_an_old_folder) {
+    const stdfs::path b = fresh_base("move");
+    stdfs::create_directories(b / "OldName" / "save" / "account");
+    Fixture::write(b / "OldName" / "save" / "account" / "slot.bin", "progress");
+    const std::string got = nxrt::services::migrate_save_folder(b.string(), "new-name", "Missing; OldName");
+    CHECK(stdfs::path(got) == b / "new-name");
+    CHECK_EQ(slurp(b / "new-name" / "save" / "account" / "slot.bin"), std::string("progress"));
+    CHECK(!stdfs::exists(b / "OldName"));
+    // A second start finds the new folder and leaves it alone.
+    CHECK(stdfs::path(nxrt::services::migrate_save_folder(b.string(), "new-name", "OldName")) == b / "new-name");
+    std::error_code ec;
+    stdfs::remove_all(b, ec);
+}
+
+NXTEST(save_folder_migration_keeps_an_existing_new_folder) {
+    const stdfs::path b = fresh_base("keep");
+    stdfs::create_directories(b / "OldName" / "save");
+    stdfs::create_directories(b / "new-name" / "save");
+    Fixture::write(b / "OldName" / "save" / "a.bin", "old");
+    Fixture::write(b / "new-name" / "save" / "a.bin", "new");
+    CHECK(stdfs::path(nxrt::services::migrate_save_folder(b.string(), "new-name", "OldName")) == b / "new-name");
+    CHECK_EQ(slurp(b / "new-name" / "save" / "a.bin"), std::string("new"));
+    CHECK_EQ(slurp(b / "OldName" / "save" / "a.bin"), std::string("old"));
+    // Nothing to move: the new path, nothing created.
+    CHECK(stdfs::path(nxrt::services::migrate_save_folder(b.string(), "other", "Absent")) == b / "other");
+    CHECK(!stdfs::exists(b / "other"));
+    std::error_code ec;
+    stdfs::remove_all(b, ec);
+}
+
+// The default save folder of the registered game under a fake %APPDATA%: a folder with the game's old name is moved to the new one.
+NXTEST(save_dir_moves_the_registered_games_old_save_folder) {
+    const nxrt::game::Info& g = nxrt::game::info();
+    std::string old = g.old_save_folders ? g.old_save_folders : "";
+    if (old.find(';') != std::string::npos) old.resize(old.find(';'));
+    if (old.empty() || !g.save_folder || !*g.save_folder) {
+        nxtest::skip("the registered game names no old save folder");
+        return;
+    }
+    const stdfs::path b = fresh_base("appdata");
+    stdfs::create_directories(b / old / "save" / "device");
+    Fixture::write(b / old / "save" / "device" / "d.bin", "device save");
+    const char* prev = std::getenv("APPDATA");
+    const std::string keep = prev ? prev : "";
+    _putenv_s("APPDATA", b.string().c_str());
+    nxrt::config_clear();
+    const std::string dir = nxrt::services::save_dir();
+    _putenv_s("APPDATA", keep.c_str());
+    CHECK(stdfs::path(dir) == b / g.save_folder / "save");
+    CHECK_EQ(slurp(b / g.save_folder / "save" / "device" / "d.bin"), std::string("device save"));
+    CHECK(!stdfs::exists(b / old));
+    std::error_code ec;
+    stdfs::remove_all(b, ec);
 }

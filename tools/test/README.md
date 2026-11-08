@@ -27,11 +27,11 @@ Trace format (JSON lines, shared by the runtime and the Eden side): `{"f":12,"h"
 
 ## Eden reference harness
 
-Eden v0.2.1 (`toolchain/eden`) runs in portable mode from `work\eden` (a `user\` folder next to the exe; the key files are copied only into `work\eden\user\keys`; `work` is git-ignored). Reference captures are game-derived and live under `work\eden_ref` (never in git).
+Eden v0.2.1 (`toolchain/eden`) runs in portable mode from `work\eden` (a `user\` folder next to the exe; this repository copies no key files into it; `work` is git-ignored). Reference captures are game-derived and live under `work\eden_ref` (never in git).
 
 | Tool | What it does |
 |---|---|
-| `eden_config.py setup` | Creates the portable folder, installs the keys, writes the harness settings (GDB stub on port 6543, null audio, 1x resolution) into `user\config\sdl2-config.ini`. |
+| `eden_config.py setup` | Creates the portable folder (no key files: it never copies any), writes the harness settings (GDB stub on port 6543, null audio, 1x resolution) into `user\config\sdl2-config.ini`. |
 | `eden_run.py --out DIR --every N --seconds S [--timeline t.json]` | Launches `eden-cli` on the NSP with the LunarG screenshot layer, converts the captured frames to PNG, posts timed key presses, optionally samples game state over GDB. |
 | `edeninput.py` | Posts WM_KEYDOWN/UP to the Eden window (works in a disconnected session, where SendInput does not). Switch buttons map to Eden's default keyboard profile. |
 | `edengdb.py info\|state\|trace` | GDB remote client for Eden's stub. `state` reads the same fields as the runtime's probes (same offsets), `trace` writes a per-frame JSONL by breaking on `CGameArchitectureSupport::Update`. |

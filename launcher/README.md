@@ -1,6 +1,6 @@
-# Pokopia Launcher
+# Recomp Launcher
 
-Tauri 2 launcher for the Pokopia PC port (`pkp.exe`). It ships no game files and never changes yours. It reads the game
+Tauri 2 launcher for a game module's exe (here module `pkp`, `pkp.exe`; names come from the module's `game.toml`). It ships no game files and never changes yours. It reads the game
 files you extracted from your own copy, writes `pkp.ini` next to `pkp.exe` and builds the shader cache from your romfs.
 
 ## First run
@@ -36,7 +36,7 @@ The launcher looks for its tools in `tools\` next to its own exe. A release fold
 
 ```
 pkp.exe                     the game (game-build, -Release)
-PokopiaLauncher.exe         this launcher (npm run tauri build)
+pkp_launcher.exe            this launcher (<launcher.product_name>.exe) (npm run tauri build)
 Play.bat                    release\Play.bat (optional)
 tools\
   spirv_harness\            self-contained publish of nx tools/shaders/harness:

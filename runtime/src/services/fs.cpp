@@ -3,7 +3,7 @@
 //   * RomFS: OpenDataStorageByCurrentProcess returns an IStorage over a RomFS image synthesised from the loose game folder
 //     ([fs] romfs, default game/romfs; fs_romfs.h). The SDK parses the RomFS itself (nn::fs::MountRom), so the storage is byte addressed.
 //     OpenDataFileSystemByCurrentProcess serves the same folder as a read-only IFileSystem.
-//   * Save data: account, device and cache saves live in folders under [fs] save_dir (default %APPDATA%\<game save_folder>\save, nxrt/game.h; MPRRecomp for Metroid Prime Remastered) with the journal
+//   * Save data: account, device and cache saves live in folders under [fs] save_dir (default %APPDATA%\<game save_folder>\save, nxrt/game.h; a folder under an old name is moved there first) with the journal
 //     semantics of fs_volume.h: writes are invisible to the committed state until IFileSystem::Commit.
 //   * SD card, game card, BIS: absent (the results of a console without them).
 // Command ids, argument layouts: Switchbrew "Filesystem services", ScarletNX fs.swipc (GPL-3.0-or-later), Ryujinx IFileSystemProxy (MIT).

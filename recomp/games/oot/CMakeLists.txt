@@ -6,7 +6,7 @@
 #   recomp\scripts\build_game.cmd oot          (configure + build into work\build\oot; NX_ROOT is the repository root)
 #
 # Inputs (read-only): <root>\game\oot\plain\exefs\<module files>, the plain NSOs of the dump:
-#   python tools\extract\nup_extract.py <game.nup> game\oot --exefs-only
+#   python tools\extract\nup_extract.py oot.nup game\oot --exefs-only
 #   tools\extract\build\msvc\bin\nx_plain_nso.exe game\oot\updates\131072\exefs game\oot\plain\exefs
 # Generated C++ goes to <root>\work\lift\oot\<module>, build output to work\build\oot: neither is ever committed.
 cmake_minimum_required(VERSION 3.25)

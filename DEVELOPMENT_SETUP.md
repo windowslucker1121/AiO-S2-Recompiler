@@ -1,4 +1,4 @@
-# Development setup (Ocarina of Time port)
+# Development setup (AiO Recompiler, module oot)
 
 Everything a Windows machine needs to **develop** the port: lift and compile the game code, build the runtime and `oot.exe`, build
 the shader translator, translate and prepare shaders, and run the game for testing. Playing a finished build needs much less (see
@@ -48,7 +48,7 @@ the CUDA toolkit (only `nvdisasm` is used, from the redistributable below), Powe
 
 ```bat
 git clone <this repository>
-cd switch2-recomp
+cd AiO-Recompiler
 git checkout oot-nup
 git submodule update --init refs/ryubing
 ```
@@ -144,12 +144,12 @@ NSP/XCI reader `nx_extract` is not built here.
 ## 5. Game data (supplied by the developer)
 
 A decrypted dump of The Legend of Zelda: Ocarina of Time for Switch 2 (program `0400486024DEC000`, update 2.0.0 / `131072`) as a
-`.nup` package (`The Legend of Zelda Ocarina of Time [0400486024DEC000][v131072].nup`, 25.6 GB, in the repository root, git-ignored).
+`.nup` package, called `oot.nup` here (25.6 GB, in the repository root, git-ignored; name your file that way or put its name in the commands).
 
 ```bat
 rem program files (~40 MB), then the whole game (~26 GB, hash-checked)
-tools\.venv\Scripts\python.exe tools\extract\nup_extract.py "<game>.nup" game\oot --exefs-only
-tools\.venv\Scripts\python.exe tools\extract\nup_extract.py "<game>.nup" game\oot
+tools\.venv\Scripts\python.exe tools\extract\nup_extract.py oot.nup game\oot --exefs-only
+tools\.venv\Scripts\python.exe tools\extract\nup_extract.py oot.nup game\oot
 rem plain NSOs for the lifter (checks every segment against the NSO header hashes)
 tools\extract\build\msvc\bin\nx_plain_nso.exe game\oot\updates\131072\exefs game\oot\plain\exefs
 ```
@@ -249,7 +249,7 @@ folder first (`ninja -C runtime\build\release -t clean`): sccache cache hits lea
 
 ## 10. Moving to another computer
 
-The code comes from GitHub (`git clone https://github.com/windowslucker1121/AiO-Switch2-Recompiler.git`, default branch `oot-nup`, then
+The code comes from GitHub (`git clone https://github.com/windowslucker1121/AiO-Recompiler.git`, default branch `oot-nup`, then
 `git submodule update --init refs/ryubing`). Only the game must be copied; some generated data is worth copying to save time.
 
 | What | Size | Copy? |

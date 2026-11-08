@@ -93,7 +93,8 @@ bool load_game_def(const std::wstring& manifest, GameDef* g, std::string* error)
     if (g->id.empty()) { if (error) *error = "no [game] id"; return false; }
     g->title = t.get("game", "title", g->id);
     g->short_title = t.get("game", "short_title", g->title);
-    g->product = t.get("game", "product", g->title);
+    g->product = t.get("game", "product", "Recomp module: " + g->id);
+    g->window_title = t.get("game", "window_title", g->short_title + " (unofficial recompilation)");
     g->title_id = t.get("game", "title_id");
     std::transform(g->title_id.begin(), g->title_id.end(), g->title_id.begin(), [](char c) { return static_cast<char>(toupper(static_cast<unsigned char>(c))); });
     g->version = t.get("game", "version");
@@ -152,7 +153,7 @@ std::string npdm_program_id(const std::wstring& npdm) {
 }
 
 namespace {
-// "Super Mario Bros Wonders Switch 2 Edition [010015100B514000].nup" -> "Super Mario Bros Wonders Switch 2 Edition"
+// "Some Game Name [0100000000000000][v0].nup" -> "Some Game Name"
 std::string name_from_path(const std::wstring& source) {
     std::wstring n = source;
     while (!n.empty() && (n.back() == L'\\' || n.back() == L'/')) n.pop_back();
