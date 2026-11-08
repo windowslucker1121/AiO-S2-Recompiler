@@ -1957,13 +1957,14 @@ void out_draw_bindings() {
 // that follow in the current list (and the lists it calls) are scanned up to the first one that ends the pass anyway (anything other than
 // state binds, draws, counters and uniform updates: render target changes, dispatches, copies, clears, barriers), with the buffer bindings
 // those commands make tracked on the side, and the reads of their draws are settled now, outside the pass. The draws then find their
-// ranges servable or no longer held and keep the pass open. Each distinct range is checked once per scan.
+// ranges servable or no longer held and keep the pass open. Each distinct range is checked once per scan. Off by default: paired A/B in the first
+// scene and on a Kokiri walk showed no gain (33.8 vs 34.7 fps, 28.7 vs 29.4): the bytes copied stay the same, only the pass breaks move.
 const RecordReader* g_rd_cur[kMaxDepth + 2] = {};   // the reader of the command being run, per list depth (run_list)
 int g_rd_depth = -1;
 uint64_t g_la_scans = 0, g_la_settled = 0;            // statistics
 
 bool pass_lookahead_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "pass_lookahead", true);
+    static const bool on = nxrt::config_get_bool("nvn", "pass_lookahead", false);   // off: no fps gain measured (2026-11-08), costs scan time
     return on;
 }
 

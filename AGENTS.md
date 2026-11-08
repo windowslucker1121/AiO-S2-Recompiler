@@ -554,6 +554,13 @@ first scene 30.1 -> 34.0 fps (chunks alone) and 29.1 -> 32.8 (both), Kokiri walk
 house (static view) 46.6 -> 48.2 (both). Most of the gain is the chunks; set reuse adds ~1-2 fps where the render thread matters. After it
 the first scene and the house are GPU-bound (P ~ frame time). The biggest render-thread item left is `out_overlaps` (nvn_gpu_pool.cpp, ~15%
 of nvn-render samples, its own loop under a mutex), then build_set (~20%, half of it pool_lookup / resolve_in_pool / out_add).
+After the merge with the coherence work (1769f1f), all of it on vs off in one run: first scene 36.7 -> 39.2 fps, Kokiri walk 36.0 -> 43.0.
+`[nvn] pass_lookahead` (settle the coming draws' reads over held results before a pass begins, so they do not break it) works (replay
+SSIM 1.0) but gained nothing in paired runs (first scene 34.7 -> 33.8, Kokiri 29.4 -> 28.7): the "fill failed" reads still go back
+whole, only earlier. It is off by default. Testing pitfall: after merging header changes into this worktree, 4 test groups and possibly the
+game exe had stale sccache objects (bugcapture/kernel_sync segfaults); `ninja -t clean` in runtime\build\release and game-build\build\release
+fixed it (all 172 pass). A sccache server another worktree started can point at a deleted worktree's clang-cl: set `SCCACHE_SERVER_PORT`
+to a free port for your own builds.
 
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
