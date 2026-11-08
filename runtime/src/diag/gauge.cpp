@@ -385,6 +385,10 @@ void soak_note_frame() {
 }
 
 uint64_t hitch_ticks() { return qpc(); }
+double hitch_phase_seconds(int phase) {
+    return phase >= 0 && phase < kHpCount ? static_cast<double>(g_phase[phase].load(std::memory_order_relaxed)) / qpc_freq() : 0.0;
+}
+
 void hitch_phase_add(int phase, uint64_t ticks) {
     if (phase >= 0 && phase < kHpCount) g_phase[phase].fetch_add(ticks, std::memory_order_relaxed);
 }

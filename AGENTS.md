@@ -70,6 +70,23 @@ after changing the HMMA path. OoT's network passes fea98fe7 / 49659bca / f90d726
 `work\shaders\oot\missing`): translate them with the single mode (`spirv_harness code_<h>.bin ctrl_<h>.bin -o <cache>\<h>.spv`
 writes `<h>.cm.spv` next to it; the scalar `.spv` stays byte-identical). fea98fe7 on the village capture: 2.1 ms -> 0.05 ms of GPU
 per frame, final picture SSIM 0.9999 against the scalar module (within replay-to-replay noise).
+**Float16 variants (`<hash>.f16.spv`, 2026-11-08):** a block with HADD2/HMUL2/HFMA2 with a half result also gets a module that computes
+them in native float16 in any stage (DenormPreserve 16 + SignedZeroInfNanPreserve 16); the runtime loads it when the device has
+shaderFloat16 and both float16 float-controls properties (`[gfx] float16_shaders`, log `float16 shader variants: on`); the
+cooperative-matrix variant now needs the same. OoT's corpus has only 11 such blocks, all compute HMMA blocks (they also got `.cm.spv`,
+which wins on the RTX 4080): **OoT's fragment shaders use no half-result math** (only HADD2.F32 conversions). The ~100 fp64 operations
+in each hot material fragment shader (957527e8, 4097c13f, dcfaa938, ...) came from **FMUL.FTZ.RZ** (the x / 2pi before MUFU.SIN/COS;
+39,126 corpus blocks), whose directed rounding compared against an fp64 product; it now uses the sign of `fma(a, b, -r)` in fp32
+(AmpereEmit.cs FMUL). Both checked bit for bit with `hwcheck --game-corpus` on the RTX 4080 (hwcheck README, findings 2026-11-08;
+the CUDA tools are the 13.3 redistributables in `tools\nvdisasm\cuda_path\bin`, `CUDA_PATH` set to that folder's parent).
+Measured on the village capture (`20261108-000413-a9g1-village`, `[capture] reset = 0`, `[prof] gpu_draws`, median per draw over
+137-2,300 loops after every pipeline was built; old-vs-old noise -0.3 ms): draw stamps 40.2 -> 38.5 ms per loop, mostly fs 86d325e2
+(1.74 -> 0.60 ms); 4097c13f / 40478981 +0.09 ms each (the fp32 sequence is longer than the fp64 one there); the fern 957527e8 is
+unchanged (its FMUL.RZ is not on the hot path; with reset 0 its mesh counts accumulate, with reset 1 its fastest loop is 1.04 ms both
+ways). Picture pixel-identical (SSIM 1.000, old vs new screenshots). **Not merged into `work\shaders\oot\spirv` yet** (only the 11
+float16-variant blocks are, backup `work\shaders\d1s\backup_f16`): the 39,061 changed blocks need their pipelines built again (290 s
+for the village frame's ~1,000 parts on the replay) or a preparation. The translated cache is `work\shaders\d1s\full2` (complete:
+corpus re-translated plus the main cache's non-corpus rows); merge with `merge_results.py work\shaders\d1s\full2 work\shaders\oot\spirv`.
 
 Batch translation (cache in `work\shaders\oot\spirv`): 46,357 of 47,428 rows ok (was 37,576 before the bindless work, 2026-11-06);
 236 unsupported (mostly "runtime"-group compute blocks whose range runs into ASCII names: `.UNKNOWN_656`, `e6e`, ... are text), 833
@@ -334,7 +351,8 @@ Open points besides the milestones:
 - **Movies** need libvpx (vcpkg `libvpx:x64-windows-static`, `NXRT_LIBVPX_ROOT`); not installed.
 - **Launcher** (`runtime/apps/launcher`, mpr's, not built for OoT) accepts an extracted folder; the Initial Setup (`oot_setup.exe`) takes `.nup` (through `nup_extract.py`) or an extracted folder. Encrypted NSP/XCI are not supported (removed 2026-11-08: no code reads keys or decrypts).
 - **Pokopia regression risk** (no Pokopia dump here): shared changes in funcs.py (header/MOD0, ADR starts, RETAA/RETAB, zero FDEs), a64.py
-  (PAC decode), tier2 FP16, used-memory accounting, NVN minor 40, TLS +0x110, MapMemory Alias sources, WaitIfEqual64, bsd descriptors.
+  (PAC decode, DMB LD/ST as compiler barriers, single-store scalar FP writes), tier2 FP16, `nx::fmax_`/`fmin_` NaN order, lifted-code
+  flags (/O2, x86-64-v3, forced inlining), used-memory accounting, NVN minor 40, TLS +0x110, MapMemory Alias sources, WaitIfEqual64, bsd descriptors.
   Oracles, from `recomp\`: `..\tools\.venv\Scripts\python oracle/difftest/difftest.py all`, `oracle/e2e/run_e2e.py`,
   `oracle/hooks/test_hooks.py`; runtime tests `runtime\scripts\build.ps1 -Test` (all 170 groups pass, see "Runtime tests" below).
 
@@ -585,13 +603,45 @@ game exe had stale sccache objects (bugcapture/kernel_sync segfaults); `ninja -t
 fixed it (all 172 pass). A sccache server another worktree started can point at a deleted worktree's clang-cl: set `SCCACHE_SERVER_PORT`
 to a free port for your own builds.
 
+**Session 2026-11-08 (D1-P: checks, compute-out lock, interval index).** Checks (RTX 4080, logs of this branch): (1) the guest page
+table (`pt::g_buf`, 32 MiB, MemoryUse::Upload) lives in **device-local host-visible memory (resizable BAR, type flags 0x7)**: vulkaninfo
+shows type 4 DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT on the 15.7 GiB VRAM heap, and the new info line `vk: host-visible buffer nvn guest
+page table ... device-local (resizable BAR)` confirms it; moving it was not needed (D2's VRAM-leaf idea has nothing to gain from the table's
+placement itself). (2) **No draws run on linked pipelines** once the cache is warm: `nvn.pipe: pipeline binds over 10.0 s: 0 of linked
+pipelines, 120-200k of whole ones` (first scene). (3) The game's nvnSyncWait waits on **queue fence syncs** (nvnQueueFenceSync), 2.0
+submissions behind the newest, ~220 of ~320 calls per 10 s actually wait; its window acquire syncs are always signaled already
+(`nvn: nvnSyncWait over 10 s on ...` lines). Changes: `out_fetch` submits and waits with the compute-out lock free (`[nvn]
+out_fetch_unlocked`; entries marked fetching, found again by id; neutral in fps: guard faults are rare now, the render thread's lock waits
+were < 0.01 ms per frame both ways). **Interval index** (`[nvn] out_index`): the held-result overlap questions (~17 M per 10 s in Link's
+house, ~35 entries) are answered from sorted merged page intervals rebuilt when their version moves (~45k rebuilds / 10 s, ~0.2-0.4 ms per
+frame), plus per-op page dedupe and a no-overlap cache for the pointer windows in `gmem_before_op` (~60% hits). Paired windows (`[nvn]
+out_index_ab = 300`, 854x480): Link's house 47.5 -> 51.8 fps, render-thread replay 20.5 -> 17.9 ms, 1% low 34.4 -> 34.8; Kokiri outside
+21.2 -> 23.8 fps, median frame 46.6 -> 36.4 ms (1% low 15.7 -> 14.7); first scene 50-260 s 26.5 -> 28.9 fps, replay 35.3 -> 29.1 ms, and in
+its heavy late part (~1500 draws more per frame) 15.8 -> 18.0 fps. These scenes were render-thread bound in these runs (Kokiri outside R
+~45 ms at 22 fps, lower than earlier sessions' Kokiri walk: another view). Measuring: `[nvn] out_index_ab` / `out_fetch_ab` write one `ab
+window` line per window (fps, 1% low, median, replay/idle ms, sync waits, lock waits); the capture replay does not exercise held results
+(0 entries even with `compute_out_lazy = 1`), so in-game screenshots across on/off windows were compared (SSIM as within a window).
+Pitfalls: the `kill` of the MCP CLI refuses a run another CLI process started unless `force=true` (a run kept going for minutes); several
+agents share the scratchpad and one cleanup deleted its subfolders: keep scripts in a git-ignored folder of your worktree (`work\`).
+
+**Session 2026-11-08 (D1-R: long passes, barrier masks, memo, gap counters).** Paired windows with `[nvn] cpuperf_ab_what` (one feature at a time; the trace's `cpuperf.rcpu` marks give the render thread's CPU ms per frame per window; compare an "on" window with the mean of its two neighbours, fps drifts over a run). In every scene the render thread's CPU time per frame was about the frame time (render-thread bound; GPU busy 30-80 %), so GPU-side changes do not show. (1) `submit_chunk_pass_draws` now defaults to **256**: first scene +2.7 fps (14 of 20 windows better, render CPU 23.3 -> 22.3 ms), Kokiri +0.4 / +0.2, Link's house +0.5 (noise); 120 cost Kokiri 0.6 fps (0 of 7 better). (2) Stage-scoped barriers after dispatches and copies: no gain (Kokiri -0.2, first scene +0.3 median), dropped: the full barrier at each pass end already drains graphics before every dispatch. (3) Scoping the set-reuse memo invalidation to the copied/written ranges: dropped (Link's house +0.07 fps, -0.13 ms render CPU; with an `out_overlaps` per binding -1.5 fps). The memo is cleared by results sent back only tens of times per run; the epoch moves on commands (Link's house: Barrier 1.37 M, SetRenderTargets 1.21 M, Dispatch 0.82 M, ClearColor 0.39 M, WaitEvent 0.25 M per ~250 s; the statistics block now logs `resolve epoch moves by command`) and on new passes. Game barriers end the render pass (`Op::Barrier` -> `end_pass`): about 110 per frame in Link's house, the next thing to look at for both the memo and pass breaks; WaitEvent is a no-op here and could keep sets. (4) `nxrt::GapCounter` for hot `gap()` callers (140 ns -> 1.8 ns per call). Measured while other sessions shared the machine: absolute fps varied a lot between runs (Kokiri 15-21 fps at times, against 36 earlier), so only paired windows of one run count.
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
 `nvn.compute_out_lazy: 1` to test the game's path) and its CPU profile is not the game's.
 
-**Performance notes so far:** the lifted code is built for baseline x86-64, so every FMADD is a CRT `fmaf` call (software FMA): a worker
-spent its time in `fmaf` in main+0x370a5a0. `/arch:AVX2`-style flags (FMA3) would need a full rebuild. `[nvn] compute_shadows` copies
+**Lifted-code compilation (D1-L, 2026-11-08):** the lifted code is built with `/O2 -march=x86-64-v3` (`NX_LIFT_OPT`, `NX_ISA` in
+`recomp/cmake/NxRecomp.cmake`; it was `/O1` = -Os and baseline x86-64, where every FMADD was a CRT `fmaf` call). `-ffp-contract=off`
+stays (no FMUL+FADD fusion), so the results are bit-identical: difftest 566,331 of 566,331 at /Od and with the tests built at
+/O2 v3 (that build found a real bug: `nx::fmax_`/`fmin_` took the NaN result from `a + b`, which the optimiser may commute; now
+FPProcessNaNs order). Release builds for CPUs without AVX2: `set NX_ISA=baseline` before `build_game.cmd` (a cache value of the build
+folder). The per-instruction helpers of ctx.h / neon.h / fpexact.h are `NX_HELPER` (always inline), the NaN slow paths
+`NX_COLD_HELPER`; DMB/DSB LD and ST forms are compiler barriers; scalar FP writes store the V128 once (`vmk*`). Measured alone, 854x480,
+base (main checkout's /O1 libraries) -> new, same runtime source, 160 s windows from 60 s: G (main thread, nvnSyncWait end to the next
+one) p50 16.9 -> 13.8 ms (first scene), 12.0 -> 10.7 (Link's house), 17.2 -> 14.3 (Kokiri outside); fps 36.4 -> 38.7, 49.3 -> 47.9,
+22.1 -> 22.0 (the last two are GPU / render-thread bound). main.lib 427 -> 485 MB; a full lift + build took 19.5 min with other
+agents' builds and runs on the machine. `[nvn] compute_shadows` copies
 every storage buffer of a dispatch to device-local memory and back (40 GB in 10 s during NDVE): pointless on an integrated GPU.
 
 ## D3: state and next steps (2026-11-08)

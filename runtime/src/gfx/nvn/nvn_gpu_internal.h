@@ -115,6 +115,7 @@ void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImag
                    uint32_t base_level, uint32_t level_count, uint32_t base_layer, uint32_t layer_count);
 // All commands before, all commands after, all memory (used after passes, dispatches, copies and fills).
 void memory_barrier(VkCommandBuffer cb);
+uint64_t thread_cpu_us();     // CPU time of the calling thread in microseconds (measurement: [nvn] cpuperf_ab)
 // [nvn] pass_barriers = tracked (S38): image_barrier derives its stage and access masks from the two layouts instead of all commands and
 // all memory. Set by the replay for each submission; any thread may record image barriers, so it is an atomic.
 void set_narrow_barriers(bool on);
@@ -202,6 +203,8 @@ bool out_touches(uint64_t addr, uint64_t size);
 bool out_overlaps_shadow(uint64_t addr, uint64_t size);
 // Some page of [addr, +size) holds a result that is newer in the copy than in the pool.
 bool out_overlaps(uint64_t addr, uint64_t size);
+// out_overlaps for a pointer window (gmem_before_op): render thread; "no overlap" answers are remembered until the held results change.
+bool out_overlaps_window(uint64_t page, uint64_t size);
 // resolve_read would bind the copy for [addr, +size) (every page current there).
 bool out_servable(uint64_t addr, uint64_t size);
 // Why results went back (the stats line): the end of a submission, or the GPU reader of the pool that needed them.

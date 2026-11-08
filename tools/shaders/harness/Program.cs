@@ -149,7 +149,7 @@ namespace SpirvHarness
             bool glsl = args.Contains("--glsl");
             string output = Opt(args, "-o", Path.ChangeExtension(args[0], glsl ? ".glsl" : ".spv"));
             string glslcPath = Opt(args, "--glslc", null);
-            Result r = TranslateVariants(File.ReadAllBytes(args[0]), File.ReadAllBytes(args[1]), out byte[] spv, out byte[] spvCm, glsl, glslcPath);
+            Result r = TranslateVariants(File.ReadAllBytes(args[0]), File.ReadAllBytes(args[1]), out byte[] spv, out byte[] spvCm, out byte[] spvF16, glsl, glslcPath);
             if (spv != null) File.WriteAllBytes(output, spv);
             Console.WriteLine($"{r.Stage} {r.Status} {r.SpvBytes} bytes {r.Ms:F1} ms -> {(spv != null ? output : "-")}");
             if (spvCm != null)   // the cooperative-matrix variant next to it (AmpereCoopMat.cs)
@@ -157,6 +157,12 @@ namespace SpirvHarness
                 string cm = Path.ChangeExtension(output, ".cm.spv");
                 File.WriteAllBytes(cm, spvCm);
                 Console.WriteLine($"cooperative-matrix variant {spvCm.Length} bytes -> {cm}");
+            }
+            if (spvF16 != null)   // the float16 variant
+            {
+                string f = Path.ChangeExtension(output, ".f16.spv");
+                File.WriteAllBytes(f, spvF16);
+                Console.WriteLine($"float16 variant {spvF16.Length} bytes -> {f}");
             }
             Console.WriteLine($"resources: {r.Resources}");
             foreach (string m in r.Messages) Console.WriteLine($"translator: {m}");
@@ -168,25 +174,39 @@ namespace SpirvHarness
 
         // --no-coopmat or NXRT_HARNESS_COOPMAT=0: no cooperative-matrix variants (<hash>.cm.spv, ampere/frontend/AmpereCoopMat.cs)
         static bool NoCoopMat = Environment.GetEnvironmentVariable("NXRT_HARNESS_COOPMAT") == "0";
+        // NXRT_HARNESS_F16=0: no float16 variants (<hash>.f16.spv, AmpereCoopMat.cs "native float16")
+        static bool NoHalf = Environment.GetEnvironmentVariable("NXRT_HARNESS_F16") == "0";
 
-        // Translate, plus the cooperative-matrix variant of a compute block with HMMA (AmpereCoopMat.cs): the same block again with
-        // HMMA as OpCooperativeMatrixMulAddKHR, kept only when it translates with the same status and the same resources (the
-        // runtime applies the one results.tsv record to either module). spvCm is null otherwise.
-        static Result TranslateVariants(byte[] code, byte[] ctrl, out byte[] spv, out byte[] spvCm, bool glsl = false, string glslcPath = null)
+        // Translate, plus two variants, each kept only when it translates with the same status and the same resources (the runtime
+        // applies the one results.tsv record to any of the modules), else null:
+        //   spvCm: the cooperative-matrix variant of a compute block with HMMA (AmpereCoopMat.cs): HMMA as OpCooperativeMatrixMulAddKHR;
+        //   spvF16: the float16 variant of a block with packed-half arithmetic (HADD2 / HMUL2 / HFMA2 with a half result in float16).
+        static Result TranslateVariants(byte[] code, byte[] ctrl, out byte[] spv, out byte[] spvCm, out byte[] spvF16, bool glsl = false, string glslcPath = null)
         {
-            spvCm = null;
+            spvCm = spvF16 = null;
             AmpereCoopMat.Eligible = false;
+            AmpereCoopMat.HalfEligible = false;
             Result r = Translate(code, ctrl, out spv, glsl, glslcPath);
-            if (glsl || spv == null || NoCoopMat || AmpereCoopMat.EnvActive || !AmpereCoopMat.Eligible) return r;
-            AmpereCoopMat.Active = true;
+            bool cmEligible = AmpereCoopMat.Eligible, halfEligible = AmpereCoopMat.HalfEligible;
+            if (glsl || spv == null) return r;
+            if (!NoHalf && !AmpereCoopMat.EnvHalf && !AmpereCoopMat.EnvActive && halfEligible)
+                spvF16 = Variant(code, ctrl, r, glslcPath, "float16", v => AmpereCoopMat.HalfActive = v);
+            if (!NoCoopMat && !AmpereCoopMat.EnvActive && cmEligible)
+                spvCm = Variant(code, ctrl, r, glslcPath, "cooperative-matrix", v => AmpereCoopMat.Active = v);
+            return r;
+        }
+
+        static byte[] Variant(byte[] code, byte[] ctrl, Result r, string glslcPath, string name, Action<bool> on)
+        {
+            on(true);
             try
             {
                 Result c = Translate(code, ctrl, out byte[] s, false, glslcPath);
-                if (s != null && c.Status == r.Status && c.Resources == r.Resources) spvCm = s;
-                else r.Messages.Add($"cooperative-matrix variant dropped: {c.Status} {c.Error} [{c.Resources}]");
+                if (s != null && c.Status == r.Status && c.Resources == r.Resources) return s;
+                r.Messages.Add($"{name} variant dropped: {c.Status} {c.Error} [{c.Resources}]");
+                return null;
             }
-            finally { AmpereCoopMat.Active = false; }
-            return r;
+            finally { on(false); }
         }
 
         // One code block through the translator. Never throws: failures are recorded in the result.
@@ -508,13 +528,13 @@ namespace SpirvHarness
                 Result r;
                 byte[] spv = null;
                 // A translator bug could loop forever; run on a task so a stuck block is reported, not waited on.
-                byte[] spvCm = null;
-                Task<(Result, byte[], byte[])> t = Task.Run(() =>
+                byte[] spvCm = null, spvF16 = null;
+                Task<(Result, byte[], byte[], byte[])> t = Task.Run(() =>
                 {
-                    Result x = TranslateVariants(File.ReadAllBytes(job.CodePath), File.ReadAllBytes(job.CtrlPath), out byte[] s, out byte[] cm, false, job.GlslcPath);
-                    return (x, s, cm);
+                    Result x = TranslateVariants(File.ReadAllBytes(job.CodePath), File.ReadAllBytes(job.CtrlPath), out byte[] s, out byte[] cm, out byte[] f16, false, job.GlslcPath);
+                    return (x, s, cm, f16);
                 });
-                if (t.Wait(Timeout)) (r, spv, spvCm) = t.Result;
+                if (t.Wait(Timeout)) (r, spv, spvCm, spvF16) = t.Result;
                 else r = new Result { Status = "timeout", Error = $"no result after {Timeout.TotalSeconds} s" };
                 r.Hash = job.Hash;
                 r.Group = job.Group;
@@ -526,6 +546,9 @@ namespace SpirvHarness
                     string cmPath = Path.Combine(outDir, job.Hash + ".cm.spv");   // the cooperative-matrix variant (AmpereCoopMat.cs)
                     if (spvCm != null) File.WriteAllBytes(cmPath, spvCm);
                     else if (File.Exists(cmPath)) File.Delete(cmPath);
+                    string f16Path = Path.Combine(outDir, job.Hash + ".f16.spv");   // the float16 variant (AmpereCoopMat.cs)
+                    if (spvF16 != null) File.WriteAllBytes(f16Path, spvF16);
+                    else if (File.Exists(f16Path)) File.Delete(f16Path);
                     if (validate)
                     {
                         r.ValError = RunSpirvVal(spirvVal, targetEnv, spvPath);

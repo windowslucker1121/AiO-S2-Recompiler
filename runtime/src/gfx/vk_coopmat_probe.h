@@ -17,4 +17,9 @@ bool coopmat_hmma_probe(Device& dev, std::string* why);
 // harness wrote one (nvn_shaders.cpp, spv_file).
 bool coopmat_hmma_enabled();
 void set_coopmat_hmma_enabled(bool on);
+
+// Process-wide: the last device made has Features::float16_shaders. The shader cache then loads <hash>.f16.spv (packed-half
+// arithmetic in float16, AmpereCoopMat.cs) in place of <hash>.spv where the harness wrote one.
+bool float16_shaders_enabled();
+void set_float16_shaders_enabled(bool on);
 }  // namespace nxrt::gfx

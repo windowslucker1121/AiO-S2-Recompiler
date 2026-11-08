@@ -151,11 +151,35 @@ std::unordered_map<uint64_t, VkDescriptorSet> g_set_cache;
 uint64_t g_desc_epoch = 1;      // the resolve epoch of [nvn] set_reuse (bind_sets): moves whenever a binding could resolve differently
 enum BumpWhy { kBumpOp, kBumpWrite, kBumpPass, kBumpSubmit, kBumpWhyN };
 uint64_t g_bump_n[kBumpWhyN] = {};   // statistics: epoch moves by cause
+uint64_t g_bump_op[256] = {};        // statistics: epoch moves by command (kBumpOp)
 void desc_epoch_bump(BumpWhy why) { ++g_desc_epoch; ++g_bump_n[why]; }
 uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program changes (out_draw_bindings)
 // [nvn] cpuperf_ab = N: submission chunks, set reuse, the skipped draw buffer checks and the pass look-ahead are off in even windows of N presents and on (as
 // configured) in odd ones, marked cpuperf.on / cpuperf.off in the frame trace: paired fps windows of one run (measurement only).
+// [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
+// checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
+enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16 };
+uint32_t ab_mask() {
+    static const uint32_t m = [] {
+        const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
+        static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
+                                                                 {"lookahead", kAbLookahead}};
+        uint32_t r = 0;
+        size_t i = 0;
+        while (i <= v.size()) {
+            size_t j = v.find(',', i);
+            if (j == std::string::npos) j = v.size();
+            const std::string w = v.substr(i, j - i);
+            for (const auto& [n, b] : names) if (w == n) r |= b;
+            i = j + 1;
+        }
+        return r;
+    }();
+    return m;
+}
+// False only in an "off" window of [nvn] cpuperf_ab for a feature it switches.
+inline bool ab_on(AbFeat f) { return g_cpu_ab_on || !(ab_mask() & f); }
 enum class SetReuse { Off, On, Verify };
 SetReuse set_reuse_mode() {
     static const SetReuse m = [] {
@@ -560,10 +584,23 @@ int storage_nonzero_pct(const Texture* t) {
     return static_cast<int>(nz * 100 / n);
 }
 
-void log_once(const char* key, const char* msg) {
-    nxrt::gap("nvn", msg);   // counted every time, logged once
-    static std::unordered_map<std::string, bool> seen;
-    if (seen.emplace(key, true).second) NXLOG_W(kTag, "%s", msg);
+void log_once(const char* key, const char* msg) {   // render thread only; counted every time, logged once
+    // Keys are literals: looked up by address (a per-op call costs one hash look-up and an atomic add), the text compared to catch a
+    // reused address.
+    struct Seen { const char* key; const char* msg; nxrt::GapCounter* gap; };
+    static std::unordered_map<const char*, Seen> by_addr;
+    static std::unordered_map<std::string, nxrt::GapCounter*> by_text;   // key text + msg text -> counter (logged once per text)
+    auto it = by_addr.find(key);
+    if (it == by_addr.end() || it->second.msg != msg || std::strcmp(it->second.key, key) != 0) {
+        std::string k = std::string(key) + '\x1f' + msg;
+        auto [t, fresh] = by_text.try_emplace(std::move(k), nullptr);
+        if (fresh) {
+            t->second = new nxrt::GapCounter("nvn", msg);   // never freed (registered)
+            NXLOG_W(kTag, "%s", msg);
+        }
+        it = by_addr.insert_or_assign(key, Seen{key, msg, t->second}).first;
+    }
+    it->second.gap->hit();
 }
 
 bool first_time_key(const std::string& key) {   // render thread only
@@ -692,7 +729,7 @@ void end_pass(bool to_pass = false) {
 // A frame's main submission (OoT: ~13,000 draws) used to reach the GPU only when all of it was recorded, so recording and GPU execution of
 // it ran one after the other. With chunks, what is recorded so far goes to the GPU (frame_chunk, no wait) whenever enough draws and
 // dispatches have been recorded since the last part, at a point where no render pass is open: between passes (ensure_pass) or between
-// commands outside a pass (run_list). [nvn] submit_chunk_pass_draws additionally ends a long pass for it (the pass then goes on with
+// commands outside a pass (run_list). [nvn] submit_chunk_pass_draws (default 256) additionally ends a long pass for it (the pass then goes on with
 // LOAD). Only command-buffer state is reset afterwards; barriers owed to earlier work stay owed (a barrier also orders against work
 // submitted before it), and the submission's serial still signals at its very end. 0 = off.
 struct ChunkCfg { uint32_t draws = 0, pass_draws = 0; uint64_t ns = 0; };
@@ -700,7 +737,7 @@ const ChunkCfg& chunk_cfg() {
     static const ChunkCfg c = [] {
         ChunkCfg k;
         k.draws = static_cast<uint32_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "submit_chunk_draws", 256), 0, 1 << 20));
-        k.pass_draws = static_cast<uint32_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "submit_chunk_pass_draws", 0), 0, 1 << 20));
+        k.pass_draws = static_cast<uint32_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "submit_chunk_pass_draws", 256), 0, 1 << 20));
         k.ns = static_cast<uint64_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "submit_chunk_us", 0), 0, 1000000)) * 1000;
         if (k.draws || k.pass_draws)
             NXLOG_I("nvn.replay", "submission chunks: every %u draws/dispatches between passes, %u inside a pass, %llu us", k.draws, k.pass_draws,
@@ -712,8 +749,8 @@ const ChunkCfg& chunk_cfg() {
 uint32_t g_chunk_work = 0;    // draws and dispatches recorded since the submission began or the last chunk
 uint64_t g_chunk_t0 = 0;      // ft::now_ns() then
 
-bool chunk_due(uint32_t threshold) {
-    if (!threshold || !g_chunk_work || !g_cpu_ab_on) return false;
+bool chunk_due(uint32_t threshold, AbFeat feat = kAbChunks) {
+    if (!threshold || !g_chunk_work || !ab_on(feat)) return false;
     if (g_chunk_work >= threshold) return true;
     const ChunkCfg& c = chunk_cfg();
     return c.ns && ft::now_ns() - g_chunk_t0 >= c.ns;
@@ -737,7 +774,7 @@ void chunk_at_op() {
     const ChunkCfg& c = chunk_cfg();
     if (!P.open) {
         if (chunk_due(c.draws)) chunk_now();
-    } else if (chunk_due(c.pass_draws)) {
+    } else if (chunk_due(c.pass_draws, kAbPassChunks)) {
         end_pass(true);
         chunk_now();
     }
@@ -1872,6 +1909,16 @@ void gmem_before_op(bool compute) {
     uint64_t seen[kGmemMaxPointers];
     int n = 0;
     bool full = false;
+    // every page a reader asked about in this op, matched or not (open addressing; a full table only stops remembering)
+    uint64_t asked[512];
+    std::memset(asked, 0, sizeof asked);
+    auto asked_before = [&](uint64_t page) {
+        for (uint32_t h = static_cast<uint32_t>((page >> 12) * 0x9E3779B1u) >> 23, k = 0; k < 16; ++k, h = (h + 1) & 511) {
+            if (asked[h] == page) return true;
+            if (!asked[h]) { asked[h] = page; return false; }
+        }
+        return false;
+    };
     for (int st = 0; st < kStages && !full; ++st) {
         if ((st == kCompute) != compute) continue;
         const ShaderInfo* s = S.stage[st];
@@ -1906,7 +1953,8 @@ void gmem_before_op(bool compute) {
                 for (int i = 0; i < n && !dup; ++i) dup = seen[i] == page;
                 if (dup) continue;
                 if (!w_st) {   // a reader: only results held there matter
-                    if (out_overlaps(page, kGmemWindow)) {
+                    if (asked_before(page)) continue;
+                    if (out_overlaps_window(page, kGmemWindow)) {
                         if (n == kGmemMaxPointers) { full = true; break; }
                         seen[n++] = page;
                         compute_out_guard(page, kGmemWindow, kOutGlobal);
@@ -1929,7 +1977,12 @@ void gmem_before_op(bool compute) {
     }
     if (writes) {
         const ShaderInfo* s0 = S.stage[compute ? kCompute : kFragment];
-        nxrt::gap("gmem", "global memory writes: ranges assumed from uniform pointers", s0 ? s0->hash : std::string("?"));
+        static std::unordered_map<std::string, nxrt::GapCounter*> per_shader;   // render thread; counters never freed (registered)
+        static const std::string unknown = "?";
+        const std::string& h = s0 ? s0->hash : unknown;
+        auto it = per_shader.find(h);
+        if (it == per_shader.end()) it = per_shader.emplace(h, new nxrt::GapCounter("gmem", "global memory writes: ranges assumed from uniform pointers", h)).first;
+        it->second->hit();
     }
 }
 
@@ -1938,7 +1991,7 @@ void gmem_before_op(bool compute) {
 // same conditions as [nvn] set_reuse), the check would find what it found then, so it is skipped ([nvn] set_reuse = off checks every draw).
 uint64_t g_odb_ver = ~0ull, g_odb_epoch = 0, g_odb_skipped = 0;
 void out_draw_bindings() {
-    const bool memo = set_reuse_mode() != SetReuse::Off && g_cpu_ab_on;
+    const bool memo = set_reuse_mode() != SetReuse::Off && ab_on(kAbOdb);
     if (memo && g_odb_ver == g_buf_ver && g_odb_epoch == g_desc_epoch * 0x100000001b3ull + out_bytes_total()) { ++g_odb_skipped; return; }
     for (const GState::Bind& b : S.vtx) out_draw_read(b.addr, b.size, true, kOutDrawBuffer);
     const VkDeviceSize ualign = device().properties().limits.minUniformBufferOffsetAlignment;
@@ -2062,7 +2115,7 @@ bool la_scan(RecordReader rd, int depth, LookSim& sim, std::unordered_set<uint64
 
 // ensure_pass, before the pass begins (no pass open).
 void pass_lookahead() {
-    if (!pass_lookahead_on() || g_rd_depth < 0 || !g_rd_cur[g_rd_depth] || !out_lazy() || !out_any() || !g_cpu_ab_on) return;
+    if (!pass_lookahead_on() || g_rd_depth < 0 || !g_rd_cur[g_rd_depth] || !out_lazy() || !out_any() || !ab_on(kAbLookahead)) return;
     static LookSim sim;
     std::memcpy(sim.vtx, S.vtx, sizeof sim.vtx);
     std::memcpy(sim.ubo, S.ubo, sizeof sim.ubo);
@@ -2970,15 +3023,23 @@ uint64_t set_signature(const ProgLayout& pl, uint32_t set) {
 std::unordered_map<uint64_t, VkDescriptorSet> g_set_memo;   // signature -> set, valid for g_set_memo_epoch
 uint64_t g_set_memo_epoch = 0;
 uint64_t g_sets_reused = 0, g_sets_verify_bad = 0;          // statistics
+uint64_t g_memo_clr[3] = {}, g_memo_last[3] = {};            // statistics: memo clears by the resolve epoch, texture state, results sent back
 
 void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
-    const SetReuse mode = bp == VK_PIPELINE_BIND_POINT_GRAPHICS && g_cpu_ab_on ? set_reuse_mode() : SetReuse::Off;
+    const SetReuse mode = bp == VK_PIPELINE_BIND_POINT_GRAPHICS && ab_on(kAbSetReuse) ? set_reuse_mode() : SetReuse::Off;
     uint8_t reusable = 0;
     if (mode != SetReuse::Off && g_fb_use.empty() && g_vol3d_use.empty() && !g_su_view && !g_trace &&
         !nxrt::gfx::tuning().ufs_hash.load(std::memory_order_relaxed) && !extras::temporal_wanted()) {
         reusable = set_reuse_mask(pl);
-        const uint64_t epoch = g_desc_epoch * 0x100000001b3ull ^ g_tex_state_gen.load(std::memory_order_relaxed) * 0x9e3779b97f4a7c15ull ^ out_bytes_total();
+        const uint64_t tg = g_tex_state_gen.load(std::memory_order_relaxed), ob = out_bytes_total();
+        const uint64_t epoch = g_desc_epoch * 0x100000001b3ull ^ tg * 0x9e3779b97f4a7c15ull ^ ob;
         if (epoch != g_set_memo_epoch) {
+            if (!g_set_memo.empty()) {   // statistics: what cleared a memo that held sets
+                if (g_desc_epoch != g_memo_last[0]) ++g_memo_clr[0];
+                else if (tg != g_memo_last[1]) ++g_memo_clr[1];
+                else ++g_memo_clr[2];
+            }
+            g_memo_last[0] = g_desc_epoch; g_memo_last[1] = tg; g_memo_last[2] = ob;
             g_set_memo.clear();
             g_set_memo_epoch = epoch;
         }
@@ -5177,7 +5238,7 @@ void run_list(const CmdList& list, int depth) {
         g_rd_cur[depth] = &r;
         g_rd_depth = depth;
         chunk_at_op();
-        if (!op_keeps_sets(r.op())) desc_epoch_bump(kBumpOp);
+        if (!op_keeps_sets(r.op())) { desc_epoch_bump(kBumpOp); ++g_bump_op[static_cast<size_t>(r.op()) & 255]; }
         mark_dirty(r);
         if (out_lazy()) out_before_op(r);                                                   // compute shadows: results back to the pool first
         else if (out_any() && !compute_out_may_wait(r.op())) flush_compute_out(kOutOther);
@@ -5725,7 +5786,10 @@ void replay_begin_submit(Frame& f) {
         static const int64_t cab = config_get_int("nvn", "cpuperf_ab", 0);
         if (cab > 0) {
             const bool con = ((counters().presents.load() / static_cast<uint64_t>(cab)) & 1) != 0;
-            if (con != g_cpu_ab_on) ft::mark(con ? "cpuperf.on" : "cpuperf.off", static_cast<uint32_t>(counters().presents.load()));
+            if (con != g_cpu_ab_on) {   // the render thread's CPU time so far (ms) with each switch: CPU cost per window when the GPU limits the fps
+                ft::mark("cpuperf.rcpu", static_cast<uint32_t>(thread_cpu_us() / 1000));
+                ft::mark(con ? "cpuperf.on" : "cpuperf.off", static_cast<uint32_t>(counters().presents.load()));
+            }
             g_cpu_ab_on = con;
         }
         if (static_cast<int>(on) != last_on) {
@@ -5778,10 +5842,19 @@ void replay_begin_submit(Frame& f) {
                     (unsigned long long)(g_dr_fail_bytes[1] >> 10), (unsigned long long)g_dr_fail[2], (unsigned long long)(g_dr_fail_bytes[2] >> 10));
             NXLOG_I(kTag, "occlusion reports: %llu in their pass, %llu with a pass break; %llu queries ended early by a pass break (split)",
                     (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
-            NXLOG_I(kTag, "submissions: %llu, parts sent ahead while recording (submit_chunk_draws): %llu; draw buffer checks skipped %llu; pass look-aheads %llu settled %llu ranges; descriptor sets resolved %llu, %llu of them already in the submission's cache; %llu bound again without resolving (set_reuse), %llu differed (verify); resolve epoch moves: commands %llu, GPU writes %llu, passes %llu",
+            NXLOG_I(kTag, "submissions: %llu, parts sent ahead while recording (submit_chunk_draws): %llu; draw buffer checks skipped %llu; pass look-aheads %llu settled %llu ranges; descriptor sets resolved %llu, %llu of them already in the submission's cache; %llu bound again without resolving (set_reuse), %llu differed (verify); resolve epoch moves: commands %llu, GPU writes %llu, passes %llu; set memo cleared by the epoch %llu, texture state %llu, results sent back %llu",
                     (unsigned long long)counters().submits.load(), (unsigned long long)counters().submit_chunks.load(), (unsigned long long)g_odb_skipped, (unsigned long long)g_la_scans, (unsigned long long)g_la_settled, (unsigned long long)g_sets_built, (unsigned long long)g_sets_cached,
                     (unsigned long long)g_sets_reused, (unsigned long long)g_sets_verify_bad, (unsigned long long)g_bump_n[kBumpOp],
-                    (unsigned long long)g_bump_n[kBumpWrite], (unsigned long long)g_bump_n[kBumpPass]);
+                    (unsigned long long)g_bump_n[kBumpWrite], (unsigned long long)g_bump_n[kBumpPass], (unsigned long long)g_memo_clr[0], (unsigned long long)g_memo_clr[1],
+                    (unsigned long long)g_memo_clr[2]);
+            {   // the commands that moved the resolve epoch most often
+                std::vector<std::pair<uint64_t, int>> v;
+                for (int i = 0; i < 256; ++i) if (g_bump_op[i]) v.emplace_back(g_bump_op[i], i);
+                std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                std::string s;
+                for (size_t i = 0; i < v.size() && i < 8; ++i) s += std::string(i ? ", " : "") + op_name(static_cast<Op>(v[i].second)) + " " + std::to_string(v[i].first);
+                NXLOG_I(kTag, "resolve epoch moves by command: %s", s.c_str());
+            }
             {   // the three pass sizes with the most draws
                 std::vector<std::pair<uint64_t, uint64_t>> v(g_pass_size_draws.begin(), g_pass_size_draws.end());
                 std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second > b.second; });

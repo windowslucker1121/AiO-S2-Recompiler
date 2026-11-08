@@ -1085,10 +1085,21 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     if (vkCreateFence(device_, &fci, nullptr, &impl_->once_fence) == VK_SUCCESS) vk_gauge_fences().add(1);
 
     {
+        // float16 arithmetic in translated shaders (the float16 and cooperative-matrix variants, AmpereCoopMat.cs): shaderFloat16 and
+        // the float-controls properties their DenormPreserve 16 / SignedZeroInfNanPreserve 16 execution modes need
+        VkPhysicalDeviceVulkan12Properties p12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
+        VkPhysicalDeviceProperties2 pp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &p12};
+        vkGetPhysicalDeviceProperties2(physical_, &pp);
+        const bool f16_ok = a12.shaderFloat16 && p12.shaderDenormPreserveFloat16 && p12.shaderSignedZeroInfNanPreserveFloat16;
+        const bool f16_on = f16_ok && config_get_bool("gfx", "float16_shaders", true);
+        set_float16_shaders_enabled(f16_on);
+        NXLOG_I(kTag, "float16 shader variants: %s (shaderFloat16 %d, denorm preserve %d, signed zero/inf/nan preserve %d)",
+                f16_on ? "on" : f16_ok ? "off ([gfx] float16_shaders)" : "off", a12.shaderFloat16, p12.shaderDenormPreserveFloat16,
+                p12.shaderSignedZeroInfNanPreserveFloat16);
         std::string why;
         if (!x_cm) why = config_get_bool("gfx", "cooperative_matrix", true) ? "no VK_KHR_cooperative_matrix" : "off ([gfx] cooperative_matrix)";
         else if (!acm.cooperativeMatrix) why = "cooperativeMatrix feature not supported";
-        else if (!a12.shaderFloat16) why = "no shaderFloat16";
+        else if (!f16_ok) why = "no shaderFloat16 with float16 denorm and signed zero/inf/nan preservation";
         else if (limits_.subgroup_size != 32) why = "subgroup size " + std::to_string(limits_.subgroup_size) + ", not 32";
         else features_.cooperative_matrix_hmma = coopmat_hmma_probe(*this, &why);
         set_coopmat_hmma_enabled(features_.cooperative_matrix_hmma);
@@ -1385,7 +1396,11 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
         static std::atomic<uint64_t> n_dl{0}, n_sys{0}, b_dl{0}, b_sys{0};
         (dl ? n_dl : n_sys).fetch_add(1);
         (dl ? b_dl : b_sys).fetch_add(size);
-        if (logged.load() < 6 || (size >= (8u << 20) && logged.load() < 40)) {
+        static std::atomic<int> logged_big{0};
+        if (size >= (16u << 20) && logged_big.fetch_add(1) < 16) {   // info: the big ones (the guest page table, 32 MiB) say where they went
+            NXLOG_I("vk", "host-visible buffer %s: %llu KiB in %s memory (memory type flags 0x%x)", name ? name : "?", static_cast<unsigned long long>(size >> 10),
+                    dl ? "device-local (resizable BAR)" : "system", static_cast<unsigned>(mp));
+        } else if (logged.load() < 6 || (size >= (8u << 20) && logged.load() < 40)) {
             logged.fetch_add(1);
             NXLOG_D("vk", "host-visible buffer %s: %llu KiB in %s memory (flags 0x%x); so far %llu in device-local (%llu MiB), %llu in system memory (%llu MiB)", name ? name : "?",
                     static_cast<unsigned long long>(size >> 10), dl ? "device-local" : "system", static_cast<unsigned>(mp), static_cast<unsigned long long>(n_dl.load()),

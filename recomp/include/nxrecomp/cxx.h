@@ -302,15 +302,23 @@ inline F fminnm(F a, F b) {
     if (a == 0 && b == 0) return std::signbit(a) ? a : b;
     return a < b ? a : b;
 }
+// The NaN result of a two-operand operation (FPProcessNaNs): the first signalling NaN, quietened, else the first quiet NaN.
+// (Was `a + b`, which relied on x86 returning the first operand's NaN: an optimising compiler may commute the add.)
+template <typename F>
+inline F nan2(F a, F b) {
+    if (is_snan(a)) return quiet(a);
+    if (is_snan(b)) return quiet(b);
+    return std::isnan(a) ? a : b;
+}
 template <typename F>
 inline F fmax_(F a, F b) {
-    if (std::isnan(a) || std::isnan(b)) return a + b;
+    if (std::isnan(a) || std::isnan(b)) return nan2(a, b);
     if (a == 0 && b == 0) return std::signbit(a) ? b : a;
     return a > b ? a : b;
 }
 template <typename F>
 inline F fmin_(F a, F b) {
-    if (std::isnan(a) || std::isnan(b)) return a + b;
+    if (std::isnan(a) || std::isnan(b)) return nan2(a, b);
     if (a == 0 && b == 0) return std::signbit(a) ? a : b;
     return a < b ? a : b;
 }

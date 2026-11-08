@@ -78,7 +78,18 @@ bool write_records(const std::vector<GapRecord>& v, const std::string& path) {
 
 }  // namespace
 
-void gap(const char* area, std::string_view what, std::string_view detail) {
+void gap(const char* area, std::string_view what, std::string_view detail) { gap_n(area, what, detail, 1); }
+
+namespace {
+std::mutex& counters_mu() {
+    static std::mutex* m = new std::mutex;   // never destroyed, as the store
+    return *m;
+}
+GapCounter* g_counters = nullptr;            // registry, under counters_mu
+}  // namespace
+
+void gap_n(const char* area, std::string_view what, std::string_view detail, uint64_t n) {
+    if (!n) return;
     Store& s = store();
     const double t = now_s();
     std::string key;
@@ -95,7 +106,7 @@ void gap(const char* area, std::string_view what, std::string_view detail) {
             e.detail = std::string(detail);
             e.first_s = t;
         }
-        ++e.count;
+        e.count += n;
         e.last_s = t;
         // Rewrite the file every 30 s, and within 5 s of a kind of gap not in the last file, so a run that dies still leaves its list.
         if (t - s.last_write_s >= 30.0 || (s.map.size() != s.written_size && t - s.last_write_s >= 5.0)) {
@@ -107,7 +118,34 @@ void gap(const char* area, std::string_view what, std::string_view detail) {
     if (!to_write.empty()) write_records(to_write, default_path());
 }
 
+GapCounter::GapCounter(const char* area, std::string_view what, std::string_view detail) : area_(area), what_(what), detail_(detail) {
+    std::lock_guard<std::mutex> lk(counters_mu());
+    next_ = g_counters;
+    g_counters = this;
+}
+
+void GapCounter::flush() {
+    uint64_t n;
+    {
+        std::lock_guard<std::mutex> lk(counters_mu());
+        const uint64_t t = total_.load(std::memory_order_relaxed);
+        n = t - flushed_;
+        flushed_ = t;
+    }
+    gap_n(area_, what_, detail_, n);
+}
+
+void gap_counters_flush() {
+    std::vector<GapCounter*> v;
+    {
+        std::lock_guard<std::mutex> lk(counters_mu());
+        for (GapCounter* c = g_counters; c; c = c->next_) v.push_back(c);
+    }
+    for (GapCounter* c : v) c->flush();
+}
+
 std::vector<GapRecord> gaps_snapshot() {
+    gap_counters_flush();
     Store& s = store();
     std::lock_guard<std::mutex> lk(s.m);
     return snapshot_locked(s);

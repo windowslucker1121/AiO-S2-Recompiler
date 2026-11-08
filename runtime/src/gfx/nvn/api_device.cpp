@@ -24,6 +24,9 @@
 // Layouts and enum values are those of the NVN header (third_party/nvn/nvn.h). Event signal mode WRITE is the header's
 // NVN_EVENT_SIGNAL_MODE_WRITE. Constants used by the device info table: nvn_device_info.inc.
 #include <atomic>
+#include <chrono>
+#include <mutex>
+#include <unordered_map>
 #include <cstring>
 #include <vector>
 
@@ -295,6 +298,40 @@ void nvnQueueFinish(NVNqueue* queue) {
     be::gpu::finish();
 }
 
+// Diagnostics: which syncs the game waits on (nvnSyncWait), by how they were armed: the window's acquire sync (armed with the newest queued
+// serial, so a wait on it waits for every submitted frame) or a queue fence (nvnQueueFenceSync). One line every 10 s.
+enum SyncKind { kSyncNone = 0, kSyncAcquire, kSyncFence, kSyncKinds };
+std::mutex g_sync_kind_mu;
+std::unordered_map<const be::Sync*, int> g_sync_kind;
+struct SyncWaitStat { uint64_t calls = 0, signaled = 0, waits = 0, wait_ns = 0, lag = 0, max_wait_ns = 0; };
+SyncWaitStat g_sync_stat[kSyncKinds];
+void sync_note_kind(const be::Sync* s, int kind) {
+    std::lock_guard<std::mutex> lk(g_sync_kind_mu);
+    g_sync_kind[s] = kind;
+}
+void sync_wait_note(const be::Sync* s, bool waited, uint64_t ns, uint64_t lag) {
+    std::lock_guard<std::mutex> lk(g_sync_kind_mu);
+    auto it = g_sync_kind.find(s);
+    SyncWaitStat& st = g_sync_stat[it == g_sync_kind.end() ? kSyncNone : it->second];
+    st.calls++;
+    if (waited) { st.waits++; st.wait_ns += ns; st.lag += lag; st.max_wait_ns = std::max(st.max_wait_ns, ns); }
+    else st.signaled++;
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(10)) return;
+    const double secs = std::chrono::duration<double>(now - last).count();
+    last = now;
+    static const char* const kName[kSyncKinds] = {"unarmed/other", "window acquire", "queue fence"};
+    for (int k = 0; k < kSyncKinds; ++k) {
+        SyncWaitStat& w = g_sync_stat[k];
+        if (!w.calls) continue;
+        NXLOG_I(kTag, "nvnSyncWait over %.1f s on %s syncs: %llu calls, %llu already signaled, %llu waited %.1f ms in all (max %.1f), mean %.2f submissions behind the newest",
+                secs, kName[k], (unsigned long long)w.calls, (unsigned long long)w.signaled, (unsigned long long)w.waits, w.wait_ns / 1e6, w.max_wait_ns / 1e6,
+                w.waits ? static_cast<double>(w.lag) / static_cast<double>(w.waits) : 0.0);
+        w = SyncWaitStat{};
+    }
+}
+
 // Shared by nvnWindowAcquireTexture and nvnQueueAcquireTexture (the queue variant passes no sync object).
 NVNwindowAcquireTextureResult acquire_texture(be::Window* w, NVNsync* sync, int* index) {
     if (!w) return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_NATIVE_ERROR;
@@ -308,6 +345,7 @@ NVNwindowAcquireTextureResult acquire_texture(be::Window* w, NVNsync* sync, int*
     if (be::Sync* s = be::host_of<be::Sync>(sync)) {
         s->serial.store(be::gpu::last_serial());
         s->armed.store(true);
+        sync_note_kind(s, kSyncAcquire);
     }
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
@@ -344,6 +382,7 @@ void nvnQueueFenceSync(NVNqueue* queue, NVNsync* sync, NVNsyncCondition, int) {
     if (!s) return;
     s->serial.store(be::gpu::last_serial());   // a serial of 0 reads as already signaled (see nvnSyncWait)
     s->armed.store(true);
+    sync_note_kind(s, kSyncFence);
 }
 
 // One GPU queue, in order: a later command already waits for an earlier one, so there is nothing to do.
@@ -371,6 +410,10 @@ NVNboolean nvnSyncInitializeFromFencedGLSync(NVNsync*, NVNdevice*, int, int* sta
 
 void nvnSyncFinalize(NVNsync* sync) {
     if (!be::host_of<be::Sync>(sync)) return;
+    {
+        std::lock_guard<std::mutex> lk(g_sync_kind_mu);
+        g_sync_kind.erase(be::host_of<be::Sync>(sync));
+    }
     g_syncs.sub(1);
     be::unbind_guest(sync);
 }
@@ -381,9 +424,13 @@ NVNsyncWaitResult nvnSyncWait(const NVNsync* sync, uint64_t timeout_ns) {
     const be::Sync* s = be::host_of<be::Sync>(sync);
     if (!s || !s->armed.load()) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
     const uint64_t serial = s->serial.load();
-    if (serial == 0 || be::gpu::serial_done(serial)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
-    return be::gpu::wait_serial(serial, timeout_ns) ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED
-                                                    : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+    if (serial == 0 || be::gpu::serial_done(serial)) { sync_wait_note(s, false, 0, 0); return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; }
+    const uint64_t newest = be::gpu::last_serial();
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = be::gpu::wait_serial(serial, timeout_ns);
+    sync_wait_note(s, true, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()),
+                   newest > serial ? newest - serial : 0);
+    return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 
 // ---- event --------------------------------------------------------------------------------------------------------------

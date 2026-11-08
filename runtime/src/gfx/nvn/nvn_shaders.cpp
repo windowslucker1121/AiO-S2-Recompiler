@@ -1049,10 +1049,16 @@ bool read_file(const std::string& path, std::string& out) {
 }
 
 // The module of `hash` in `dir`: its cooperative-matrix variant <hash>.cm.spv (HMMA on tensor cores, which the harness writes next to
-// <hash>.spv for blocks with HMMA) when this device passed the probe (gfx/vk_coopmat_probe.h), else <hash>.spv.
+// <hash>.spv for blocks with HMMA) when this device passed the probe (gfx/vk_coopmat_probe.h), else its float16 variant <hash>.f16.spv
+// (packed-half arithmetic in float16, for blocks with HADD2/HMUL2/HFMA2) when the device has the float16 support it needs, else
+// <hash>.spv. All three share the block's one results.tsv record (the harness keeps a variant only with the same resources).
 bool read_spv(const std::string& dir, const std::string& hash, std::string& out) {
     if (nxrt::gfx::coopmat_hmma_enabled() && read_file(dir + "/" + hash + ".cm.spv", out) && !out.empty() && out.size() % 4 == 0) {
         NXLOG_I("nvn", "shader %s: cooperative-matrix variant (%zu bytes)", hash.c_str(), out.size());
+        return true;
+    }
+    if (nxrt::gfx::float16_shaders_enabled() && read_file(dir + "/" + hash + ".f16.spv", out) && !out.empty() && out.size() % 4 == 0) {
+        NXLOG_D("nvn", "shader %s: float16 variant (%zu bytes)", hash.c_str(), out.size());
         return true;
     }
     return read_file(dir + "/" + hash + ".spv", out);

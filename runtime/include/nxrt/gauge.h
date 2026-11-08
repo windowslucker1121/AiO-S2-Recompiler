@@ -89,6 +89,7 @@ enum HitchPhase : int {
 };
 uint64_t hitch_ticks();                                  // QueryPerformanceCounter
 void hitch_phase_add(int phase, uint64_t ticks);
+double hitch_phase_seconds(int phase);                   // the phase's total so far (measurement windows, e.g. [nvn] out_index_ab)
 struct HitchTimer {
     int phase;
     uint64_t t0;
