@@ -12,10 +12,13 @@ namespace nxrt::gfx {
 
 namespace {
 std::atomic<bool> g_enabled{false};
+std::atomic<bool> g_float16{false};
 }
 
 bool coopmat_hmma_enabled() { return g_enabled.load(std::memory_order_relaxed); }
 void set_coopmat_hmma_enabled(bool on) { g_enabled.store(on, std::memory_order_relaxed); }
+bool float16_shaders_enabled() { return g_float16.load(std::memory_order_relaxed); }
+void set_float16_shaders_enabled(bool on) { g_float16.store(on, std::memory_order_relaxed); }
 
 bool coopmat_hmma_probe(Device& dev, std::string* why) {
     auto fail = [&](const std::string& w) { if (why) *why = w; return false; };

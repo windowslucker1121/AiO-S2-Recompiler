@@ -386,9 +386,18 @@ namespace Ryujinx.Graphics.Shader.Instructions
                         IrOperand r = ctx.FPMultiply(fa, fb);
                         if (Directed(i))
                         {
-                            // the product of two fp32 values is exact in fp64
-                            IrOperand dr = F64(ctx, r), prod = ctx.FPMultiply(F64(ctx, fa), F64(ctx, fb), Instruction.FP64);
-                            r = DirectedRound(ctx, i, r, ctx.FPCompareLess(prod, dr, Instruction.FP64), ctx.FPCompareLess(dr, prod, Instruction.FP64), AllFinite(ctx, Raw(ctx, o[1]), Raw(ctx, o[2])));
+                            // Which side of r the exact product lies on: the sign of e = fma(a, b, -r) = a*b - r, which is exact in
+                            // fp32 (the error of a rounded product is representable) as long as it does not fall below FLT_MIN.
+                            // That needs |r| >= 2^-79 (|e| >= |r| * 2^-47); below 2^-78 the smaller operand and r are scaled by 2^64
+                            // first, exactly (such a product's smaller operand is below 2^-39). No fp64: FMUL.FTZ.RZ is in 25,000
+                            // of OoT's fragment shaders (the x / 2pi before MUFU.SIN/COS, about 20 in each hot material shader),
+                            // and the earlier fp64 compare cost five fp64 operations each (1/64 rate on GeForce). hwcheck checks it.
+                            IrOperand tiny = ctx.FPCompareLess(ctx.FPAbsolute(r), ConstF(MathF.ScaleB(1f, -78)));
+                            IrOperand k2 = ctx.ConditionalSelect(tiny, ConstF(MathF.ScaleB(1f, 64)), ConstF(1));
+                            IrOperand aSmall = ctx.FPCompareLess(ctx.FPAbsolute(fa), ctx.FPAbsolute(fb));
+                            IrOperand sa = ctx.FPMultiply(ctx.ConditionalSelect(aSmall, fa, fb), k2), sb = ctx.ConditionalSelect(aSmall, fb, fa);
+                            IrOperand e = ctx.FPFusedMultiplyAdd(sa, sb, ctx.FPNegate(ctx.FPMultiply(r, k2)));
+                            r = DirectedRound(ctx, i, r, ctx.FPCompareLess(e, ConstF(0)), ctx.FPCompareLess(ConstF(0), e), AllFinite(ctx, Raw(ctx, o[1]), Raw(ctx, o[2])));
                         }
                         if (!Has(i, "FTZ"))
                         {
@@ -598,7 +607,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // ---- directed rounding (.RZ/.RM/.RP) ----------------------------------------------------------------------
         // The host rounds to nearest only. The result is the round-to-nearest one moved by one ulp when the exact value lies on
         // the wrong side of it; `below`/`above` say exact < r / exact > r, found with fp64 compares (an fp32 TwoSum
-        // did not survive the host compiler: hwcheck still saw round-to-nearest results). Overflow to infinity from finite
+        // did not survive the host compiler: hwcheck still saw round-to-nearest results), except for FMUL, whose error is one
+        // fused multiply-add in fp32 (hwcheck, RTX 4080: bit-identical). Overflow to infinity from finite
         // inputs becomes FLT_MAX where the mode says so. Results at zero are left alone (the directed step would give a
         // denormal, which .FTZ flushes anyway); an exact zero sum is -0 under .RM unless both terms are +0. hwcheck, RTX 3080.
 
@@ -1380,18 +1390,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
             IrOperand[] a = HalfFtz(ctx, ftz, HalfPair(ctx, o, ref k));
             IrOperand[] b = HalfFtz(ctx, ftz, HalfPair(ctx, o, ref k));
             IrOperand[] r = new IrOperand[2];
-            // the cooperative-matrix variant of a block computes half results in float16 itself (AmpereCoopMat.TryHalf)
-            bool f16 = !Has(i, "F32") && Ryujinx.Graphics.Shader.CodeGen.Spirv.AmpereCoopMat.Active;
+            // the float16 and cooperative-matrix variants of a block compute half results in float16 itself (AmpereCoopMat.TryHalf;
+            // null in the plain module, which computes in fp32)
+            bool f16 = !Has(i, "F32");
             switch (i.Opcode)
             {
-                case "HADD2": for (int n = 0; n < 2; n++) r[n] = f16 ? Ryujinx.Graphics.Shader.CodeGen.Spirv.AmpereCoopMat.TryHalf(ctx, 0, a[n], b[n], null) : ctx.FPAdd(a[n], b[n]); break;
-                case "HMUL2": for (int n = 0; n < 2; n++) r[n] = f16 ? Ryujinx.Graphics.Shader.CodeGen.Spirv.AmpereCoopMat.TryHalf(ctx, 1, a[n], b[n], null) : ctx.FPMultiply(a[n], b[n]); break;
+                case "HADD2": for (int n = 0; n < 2; n++) r[n] = (f16 ? Ryujinx.Graphics.Shader.CodeGen.Spirv.AmpereCoopMat.TryHalf(ctx, 0, a[n], b[n], null) : null) ?? ctx.FPAdd(a[n], b[n]); break;
+                case "HMUL2": for (int n = 0; n < 2; n++) r[n] = (f16 ? Ryujinx.Graphics.Shader.CodeGen.Spirv.AmpereCoopMat.TryHalf(ctx, 1, a[n], b[n], null) : null) ?? ctx.FPMultiply(a[n], b[n]); break;
                 case "HFMA2":
                     {
                         IrOperand[] c = HalfFtz(ctx, ftz, HalfPair(ctx, o, ref k));
                         for (int n = 0; n < 2; n++)
                         {
-                            if (f16) { r[n] = Ryujinx.Graphics.Shader.CodeGen.Spirv.AmpereCoopMat.TryHalf(ctx, 2, a[n], b[n], c[n]); continue; }
+                            if (f16 && (r[n] = Ryujinx.Graphics.Shader.CodeGen.Spirv.AmpereCoopMat.TryHalf(ctx, 2, a[n], b[n], c[n])) != null) continue;
                             r[n] = ctx.FPFusedMultiplyAdd(a[n], b[n], c[n]);
                             // fp16 FMA done in fp32 rounds twice (fp32, then fp16 when packed). Rounding the fp32 result to odd
                             // instead (24 >= 11 + 2 bits) makes the second rounding the correct one (hwcheck: HFMA2 was 1 ulp off in

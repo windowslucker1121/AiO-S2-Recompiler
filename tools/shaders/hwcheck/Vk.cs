@@ -76,6 +76,8 @@ namespace Hwcheck
         /// VK_KHR_cooperative_matrix properties (M, N, K, A, B, C, result type, saturating, scope) when made with coopMat.
         public readonly System.Collections.Generic.List<(uint m, uint n, uint k, uint a, uint b, uint c, uint r, uint sat, uint scope)> CoopMatProps = new();
         public uint SubgroupSize { get; private set; }
+        /// shaderFloat16 and the float16 float-controls properties of the device.
+        public string Float16Info { get; private set; }
 
         public VkRunner(int bytes) : this(bytes, false) { }
 
@@ -125,6 +127,16 @@ namespace Hwcheck
                 U32(fpe, 0, 1000269000); Ptr(fcm, 8, fpe);   // VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR (PipelineStats)
             }
             vkGetPhysicalDeviceFeatures2(_pd, f2);
+            {
+                // float16 support of the float16 variant (AmpereCoopMat.cs): shaderFloat16 and the float-controls properties
+                byte* p12 = Z(1024), pp2 = Z(1024);
+                U32(p12, 0, 52);   // VkPhysicalDeviceVulkan12Properties
+                U32(pp2, 0, 1000059001); Ptr(pp2, 8, p12);
+                vkGetPhysicalDeviceProperties2(_pd, pp2);
+                uint P(int off) => *(uint*)(p12 + off);
+                Float16Info = $"shaderFloat16 {*(uint*)(f12 + 44)}, denorm preserve f16/f32 {P(556)}/{P(560)}, " +
+                              $"signed-zero-inf-nan preserve f16/f32 {P(544)}/{P(548)}, denorm independence {P(536)}";
+            }
 
             float prio = 1;
             byte* qci = Z(40);

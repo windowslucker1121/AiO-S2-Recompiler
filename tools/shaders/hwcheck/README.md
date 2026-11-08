@@ -21,6 +21,15 @@ Options:
 - `--threads N`: threads per case (default 1024).
 - `--seed N`: seed for the input generator.
 - `--out <dir>`: output folder.
+- `--game-corpus <dir>`: also take encodings from a game's shader corpus itself (`unique.tsv`, `code/`, `ctrl/`, as
+  `scripts/extract_generic.py` writes it), decoded with our decoder: per shape the words found in the most blocks (data past a block's
+  code decodes to illegal forms and is mostly unique; words in only one block are skipped). Read at run time only. Use it where no
+  nvdisasm oracle exists (OoT): `--no-corpus --game-corpus work\shaders\oot\corpus --only "H(ADD2|MUL2|FMA2)"`.
+- The CUDA tools (`ptxas`, `cuobjdump`, `nvdisasm`) can be the CUDA 13.3 redistributables (`cuda_nvcc`, `cuda_cuobjdump`,
+  `cuda_nvdisasm` archives from developer.download.nvidia.com/compute/cuda/redist, SHA-256 from `redistrib_13.3.1.json`) copied into
+  one `bin` folder that `CUDA_PATH` names; no toolkit install is needed.
+- `NXRT_HARNESS_F16=1` in the environment checks the float16 variant (packed-half arithmetic in float16, `AmpereCoopMat.cs`)
+  instead of the plain translation.
 
 Needs:
 - an NVIDIA sm_86 GPU with its driver (`nvcuda.dll`, `vulkan-1.dll`);
@@ -125,6 +134,18 @@ sums, the tensor core's own rounding; F32: bit-identical to the scalar emulation
   by 1 ulp, the emulation's double rounding; none seen on the RTX 4080).
 - `hwcheck --pipeline-stats <a.spv> ...` prints the driver's statistics of compute modules with the network passes' descriptor layout
   (VK_KHR_pipeline_executable_properties: registers, binary size, shared memory) and the pipeline build time.
+## Findings (2026-11-08, RTX 4080, driver 610.88)
+
+- **Float16 variant** (`NXRT_HARNESS_F16=1`, `--game-corpus` on OoT's corpus, `--only "H(ADD2|MUL2|FMA2)"`, seeds 1-5): every
+  packed-half form that could be run passes bit for bit against the hardware, as the plain translation does: HADD2, HADD2.FTZ.SAT,
+  HADD2.F32 (fp32 result: no float16 arithmetic), HMUL2, HFMA2, HFMA2.RELU (immediate and register forms, .H0_H0/.H1_H1 swizzles,
+  negation), HFMA2.BF16_V2. The other corpus words of these opcodes are data decoded as instructions (nvdisasm refuses them or reads
+  other modifiers, or the GPU raises an illegal instruction) in both translations alike. The device reports shaderFloat16 and
+  shaderDenormPreserveFloat16 / shaderSignedZeroInfNanPreserveFloat16, which the variant's execution modes need.
+- **FMUL with a directed rounding mode** (`--only "^(@!?P )?FMUL\..*(RZ|RM|RP)"`, seeds 1-3): the error term as one fp32 fused
+  multiply-add (scaled by 2^64 for products below 2^-78) instead of an fp64 product: every FMUL.FTZ.RZ form passes (register and
+  immediate operands, the 1/(2 pi) scaling before MUFU.SIN/COS).
+
 ## Findings (2026-11-04, RTX 3080, driver 617.42)
 
 - **fp32 denormals without .FTZ.** The 3080's Vulkan driver reports `shaderDenormPreserveFloat32 = false` (and `shaderDenormFlushToZeroFloat32 = false`), so DenormPreserve cannot be used. The front end emulates the IEEE result of FADD, FMUL, FFMA, FMNMX, FSETP and FSET without .FTZ: a fast path, and an fp64 slow path when an input is denormal or the result is tiny (`AmpereEmit.Denorm.cs`).
