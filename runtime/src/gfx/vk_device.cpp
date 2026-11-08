@@ -63,7 +63,7 @@ constexpr const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
 // address of a pool, through bufferDeviceAddressCaptureReplay's opaque capture addresses? Tries device-local and imported host memory at
 // a few addresses and logs what the driver gave.
 void probe_bda_placement(VkPhysicalDevice pd, VkDevice dev, VkBool32 capture_replay) {
-    if (!capture_replay) { NXLOG_I(kTag, "caps: BDA placement probe: bufferDeviceAddressCaptureReplay not available"); return; }
+    if (!capture_replay) { NXLOG_W(kTag, "caps: BDA placement probe: bufferDeviceAddressCaptureReplay not available"); return; }
     VkPhysicalDeviceMemoryProperties mp{};
     vkGetPhysicalDeviceMemoryProperties(pd, &mp);
     constexpr VkDeviceSize kSize = 1ull << 20;
@@ -79,7 +79,7 @@ void probe_bda_placement(VkPhysicalDevice pd, VkDevice dev, VkBool32 capture_rep
         bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         VkBuffer buf = VK_NULL_HANDLE;
         VkResult r = vkCreateBuffer(dev, &bi, nullptr, &buf);
-        if (r != VK_SUCCESS) { NXLOG_I(kTag, "caps: BDA placement %s at 0x%llx: vkCreateBuffer %d", what, (unsigned long long)want, (int)r); return; }
+        if (r != VK_SUCCESS) { NXLOG_W(kTag, "caps: BDA placement %s at 0x%llx: vkCreateBuffer %d", what, (unsigned long long)want, (int)r); return; }
         VkMemoryRequirements req{};
         vkGetBufferMemoryRequirements(dev, buf, &req);
         uint32_t bits = req.memoryTypeBits;
@@ -88,7 +88,7 @@ void probe_bda_placement(VkPhysicalDevice pd, VkDevice dev, VkBool32 capture_rep
             VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
             if (!vkGetMemoryHostPointerPropertiesEXT ||
                 vkGetMemoryHostPointerPropertiesEXT(dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host, &hp) != VK_SUCCESS) {
-                NXLOG_I(kTag, "caps: BDA placement %s: no host pointer properties", what);
+                NXLOG_W(kTag, "caps: BDA placement %s: no host pointer properties", what);
                 vkDestroyBuffer(dev, buf, nullptr);
                 return;
             }
@@ -99,7 +99,7 @@ void probe_bda_placement(VkPhysicalDevice pd, VkDevice dev, VkBool32 capture_rep
         uint32_t type = UINT32_MAX;
         for (uint32_t t = 0; t < mp.memoryTypeCount && type == UINT32_MAX; ++t)
             if ((bits & (1u << t)) && (host || (mp.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))) type = t;
-        if (type == UINT32_MAX) { vkDestroyBuffer(dev, buf, nullptr); NXLOG_I(kTag, "caps: BDA placement %s: no memory type", what); return; }
+        if (type == UINT32_MAX) { vkDestroyBuffer(dev, buf, nullptr); NXLOG_W(kTag, "caps: BDA placement %s: no memory type", what); return; }
         VkMemoryOpaqueCaptureAddressAllocateInfo moc = {VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO};
         moc.opaqueCaptureAddress = want;
         if (host) moc.pNext = &imp;
@@ -116,7 +116,7 @@ void probe_bda_placement(VkPhysicalDevice pd, VkDevice dev, VkBool32 capture_rep
             dai.buffer = buf;
             got = vkGetBufferDeviceAddress(dev, &dai);
         }
-        NXLOG_I(kTag, "caps: BDA placement %s: asked 0x%llx, vkAllocateMemory %d, device address 0x%llx (%s)", what, (unsigned long long)want, (int)r,
+        NXLOG_W(kTag, "caps: BDA placement %s: asked 0x%llx, vkAllocateMemory %d, device address 0x%llx (%s)", what, (unsigned long long)want, (int)r,
                 (unsigned long long)got, got == want ? "as asked" : "different");
         vkDestroyBuffer(dev, buf, nullptr);
         if (mem) vkFreeMemory(dev, mem, nullptr);
@@ -129,6 +129,141 @@ void probe_bda_placement(VkPhysicalDevice pd, VkDevice dev, VkBool32 capture_rep
         attempt(reinterpret_cast<uint64_t>(host), host, "host import at its own address");
         VirtualFree(host, 0, MEM_RELEASE);
     }
+}
+
+// [gfx] exp_bda_probe, second part (bet 2 by another route): one sparse buffer as large as a guest address window, with imported host
+// memory bound into it at (guest address - window base). Then device address = buffer address + (guest - base) for every pool in the window:
+// pointer accesses need one add instead of a page walk. Checks that the driver allows host imports in a sparse buffer, binds them, and that
+// the GPU reads the host bytes through the window (a copy from the window into a readback buffer).
+void probe_sparse_window(VkPhysicalDevice pd, VkDevice dev, VkQueue q, uint32_t family) {
+    VkPhysicalDeviceFeatures f{};
+    vkGetPhysicalDeviceFeatures(pd, &f);
+    uint32_t nq = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, nullptr);
+    std::vector<VkQueueFamilyProperties> qf(nq);
+    vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, qf.data());
+    const bool sparse_q = family < nq && (qf[family].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT);
+    VkPhysicalDeviceProperties pp{};
+    vkGetPhysicalDeviceProperties(pd, &pp);
+    NXLOG_W(kTag, "caps: sparse window probe: sparseBinding %u, sparseResidencyBuffer %u, queue sparse %d, sparse address space %.0f GiB",
+            f.sparseBinding, f.sparseResidencyBuffer, sparse_q ? 1 : 0, pp.limits.sparseAddressSpaceSize / 1073741824.0);
+    if (!f.sparseBinding || !f.sparseResidencyBuffer || !sparse_q) return;
+    constexpr VkDeviceSize kWin = 16ull << 30, kTile = 1ull << 20, kAt = 0x3'0000'0000ull;   // 16 GiB window, 1 MiB bound at 12 GiB
+    VkExternalMemoryBufferCreateInfo ebi = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+    ebi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, &ebi};
+    bi.flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
+    bi.size = kWin;
+    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VkBuffer win = VK_NULL_HANDLE;
+    VkResult r = vkCreateBuffer(dev, &bi, nullptr, &win);
+    if (r != VK_SUCCESS) { NXLOG_W(kTag, "caps: sparse window: vkCreateBuffer (16 GiB, host-import handle type) %d", (int)r); return; }
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(dev, win, &req);
+    void* host = VirtualAlloc(nullptr, kTile, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+    if (!host || !vkGetMemoryHostPointerPropertiesEXT ||
+        vkGetMemoryHostPointerPropertiesEXT(dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host, &hp) != VK_SUCCESS) {
+        NXLOG_W(kTag, "caps: sparse window: no host pointer properties");
+        vkDestroyBuffer(dev, win, nullptr);
+        if (host) VirtualFree(host, 0, MEM_RELEASE);
+        return;
+    }
+    const uint32_t bits = req.memoryTypeBits & hp.memoryTypeBits;
+    NXLOG_W(kTag, "caps: sparse window: alignment %llu, buffer types 0x%x, host import types 0x%x, both 0x%x", (unsigned long long)req.alignment,
+            req.memoryTypeBits, hp.memoryTypeBits, bits);
+    for (uint32_t i = 0; i < kTile / 4; ++i) static_cast<uint32_t*>(host)[i] = 0xC0DE0000u + i;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    if (bits) {
+        VkImportMemoryHostPointerInfoEXT imp = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+        imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+        imp.pHostPointer = host;
+        VkMemoryAllocateFlagsInfo fi = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, &imp};
+        fi.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &fi};
+        ai.allocationSize = kTile;
+        for (uint32_t t = 0; t < 32; ++t) if (bits & (1u << t)) { ai.memoryTypeIndex = t; break; }
+        r = vkAllocateMemory(dev, &ai, nullptr, &mem);
+        NXLOG_W(kTag, "caps: sparse window: host import (type %u) %d", ai.memoryTypeIndex, (int)r);
+    }
+    bool ok = false;
+    uint64_t addr = 0;
+    if (mem) {
+        VkSparseMemoryBind mb = {};
+        mb.resourceOffset = kAt;
+        mb.size = kTile;
+        mb.memory = mem;
+        VkSparseBufferMemoryBindInfo sb = {win, 1, &mb};
+        VkBindSparseInfo bs = {VK_STRUCTURE_TYPE_BIND_SPARSE_INFO};
+        bs.bufferBindCount = 1;
+        bs.pBufferBinds = &sb;
+        VkFence fence = VK_NULL_HANDLE;
+        VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        vkCreateFence(dev, &fci, nullptr, &fence);
+        r = vkQueueBindSparse(q, 1, &bs, fence);
+        if (r == VK_SUCCESS) r = vkWaitForFences(dev, 1, &fence, VK_TRUE, 5'000'000'000ull);
+        NXLOG_W(kTag, "caps: sparse window: bind 1 MiB of host memory at +0x%llx: %d", (unsigned long long)kAt, (int)r);
+        VkBufferDeviceAddressInfo dai = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        dai.buffer = win;
+        addr = vkGetBufferDeviceAddress(dev, &dai);
+        // the GPU reads the host bytes through the window: copy 4 KiB at +kAt + 8 KiB into a host-visible buffer
+        VkBufferCreateInfo rbi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        rbi.size = 4096;
+        rbi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        VkBuffer rb = VK_NULL_HANDLE;
+        VkDeviceMemory rmem = VK_NULL_HANDLE;
+        if (r == VK_SUCCESS && vkCreateBuffer(dev, &rbi, nullptr, &rb) == VK_SUCCESS) {
+            VkMemoryRequirements rr{};
+            vkGetBufferMemoryRequirements(dev, rb, &rr);
+            VkPhysicalDeviceMemoryProperties mp{};
+            vkGetPhysicalDeviceMemoryProperties(pd, &mp);
+            VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            ai.allocationSize = rr.size;
+            ai.memoryTypeIndex = UINT32_MAX;
+            for (uint32_t t = 0; t < mp.memoryTypeCount; ++t)
+                if ((rr.memoryTypeBits & (1u << t)) && (mp.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+                    (mp.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) { ai.memoryTypeIndex = t; break; }
+            if (ai.memoryTypeIndex != UINT32_MAX && vkAllocateMemory(dev, &ai, nullptr, &rmem) == VK_SUCCESS && vkBindBufferMemory(dev, rb, rmem, 0) == VK_SUCCESS) {
+                VkCommandPoolCreateInfo cpi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+                cpi.queueFamilyIndex = family;
+                VkCommandPool cp = VK_NULL_HANDLE;
+                vkCreateCommandPool(dev, &cpi, nullptr, &cp);
+                VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+                cai.commandPool = cp;
+                cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                cai.commandBufferCount = 1;
+                VkCommandBuffer cb = VK_NULL_HANDLE;
+                vkAllocateCommandBuffers(dev, &cai, &cb);
+                VkCommandBufferBeginInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                vkBeginCommandBuffer(cb, &cbi);
+                VkBufferCopy c = {kAt + 8192, 0, 4096};
+                vkCmdCopyBuffer(cb, win, rb, 1, &c);
+                vkEndCommandBuffer(cb);
+                VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                si.commandBufferCount = 1;
+                si.pCommandBuffers = &cb;
+                vkResetFences(dev, 1, &fence);
+                if (vkQueueSubmit(q, 1, &si, fence) == VK_SUCCESS && vkWaitForFences(dev, 1, &fence, VK_TRUE, 5'000'000'000ull) == VK_SUCCESS) {
+                    void* p = nullptr;
+                    vkMapMemory(dev, rmem, 0, 4096, 0, &p);
+                    const uint32_t* w = static_cast<const uint32_t*>(p);
+                    ok = w && w[0] == 0xC0DE0000u + 2048 && w[1023] == 0xC0DE0000u + 2048 + 1023;
+                    NXLOG_W(kTag, "caps: sparse window: GPU read through the window: %08x %08x (%s)", w ? w[0] : 0, w ? w[1023] : 0, ok ? "the host bytes" : "WRONG");
+                    vkUnmapMemory(dev, rmem);
+                }
+                vkDestroyCommandPool(dev, cp, nullptr);
+            }
+        }
+        if (rb) vkDestroyBuffer(dev, rb, nullptr);
+        if (rmem) vkFreeMemory(dev, rmem, nullptr);
+        vkQueueWaitIdle(q);
+        vkDestroyFence(dev, fence, nullptr);
+    }
+    NXLOG_W(kTag, "caps: sparse window probe: %s (window device address 0x%llx)", ok ? "WORKS: host imports bound in a sparse buffer, read by the GPU" : "does not work",
+            (unsigned long long)addr);
+    vkDestroyBuffer(dev, win, nullptr);
+    if (mem) vkFreeMemory(dev, mem, nullptr);
+    VirtualFree(host, 0, MEM_RELEASE);
 }
 
 // Memory heaps, resizable BAR and the extensions a different binding/memory model would need (architecture experiment E2b),
@@ -920,6 +1055,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     volkLoadDevice(device_);
     if (config_get_bool("gfx", "exp_bda_probe", false)) probe_bda_placement(physical_, device_, a12.bufferDeviceAddressCaptureReplay);
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
+    if (config_get_bool("gfx", "exp_bda_probe", false)) probe_sparse_window(physical_, device_, queue_, queue_family_);
 
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physical_, &nq, nullptr);
