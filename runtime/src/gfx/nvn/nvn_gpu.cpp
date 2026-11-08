@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
@@ -113,7 +114,7 @@ struct Gpu {
     extras::OutputPass output;                 // HDR encode and FSR 1 (S14); used instead of `present` when the extras are on
     bool output_ok = false;
     std::mutex unsupported_mu;
-    std::map<std::string, uint64_t> unsupported;
+    std::map<std::string, uint64_t, std::less<>> unsupported;
 };
 
 Gpu* g = nullptr;
@@ -365,12 +366,30 @@ uint64_t poll_completed() { return g ? read_completed() : 0; }
 uint64_t current_serial() { return g ? (g->recording ? g->recording : g->submitted) : 0; }
 
 void note_unsupported(const char* what) {
-    nxrt::gap("nvn", what);
+    {   // the gap count without the gap store's mutex and map per call (WaitEvent, per op): a counter per text, found by address
+        struct Hot { const char* what; nxrt::GapCounter* gap; };
+        thread_local std::unordered_map<const char*, Hot> cache;
+        auto it = cache.find(what);
+        if (it == cache.end() || std::strcmp(it->second.what, what) != 0) {
+            static std::mutex mu;
+            static std::unordered_map<std::string, nxrt::GapCounter*> by_text;   // counters never freed (registered)
+            nxrt::GapCounter* gc;
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                auto [t, fresh] = by_text.try_emplace(what, nullptr);
+                if (fresh) t->second = new nxrt::GapCounter("nvn", what);
+                gc = t->second;
+            }
+            it = cache.insert_or_assign(what, Hot{what, gc}).first;
+        }
+        it->second.gap->hit();
+    }
     if (!g) return;
     g->ctr.unsupported_ops.fetch_add(1);
     std::lock_guard<std::mutex> lk(g->unsupported_mu);
-    uint64_t& n = g->unsupported[what];
-    if (n++ == 0) NXLOG_W(kTag, "not implemented, skipped: %s", what);
+    auto u = g->unsupported.find(std::string_view(what));
+    if (u == g->unsupported.end()) u = g->unsupported.emplace(what, 0).first;
+    if (u->second++ == 0) NXLOG_W(kTag, "not implemented, skipped: %s", what);
 }
 
 void defer_destroy(std::function<void()> fn) {

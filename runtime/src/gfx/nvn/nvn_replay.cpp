@@ -559,10 +559,23 @@ int storage_nonzero_pct(const Texture* t) {
     return static_cast<int>(nz * 100 / n);
 }
 
-void log_once(const char* key, const char* msg) {
-    nxrt::gap("nvn", msg);   // counted every time, logged once
-    static std::unordered_map<std::string, bool> seen;
-    if (seen.emplace(key, true).second) NXLOG_W(kTag, "%s", msg);
+void log_once(const char* key, const char* msg) {   // render thread only; counted every time, logged once
+    // Keys are literals: looked up by address (a per-op call costs one hash look-up and an atomic add), the text compared to catch a
+    // reused address.
+    struct Seen { const char* key; const char* msg; nxrt::GapCounter* gap; };
+    static std::unordered_map<const char*, Seen> by_addr;
+    static std::unordered_map<std::string, nxrt::GapCounter*> by_text;   // key text + msg text -> counter (logged once per text)
+    auto it = by_addr.find(key);
+    if (it == by_addr.end() || it->second.msg != msg || std::strcmp(it->second.key, key) != 0) {
+        std::string k = std::string(key) + '\x1f' + msg;
+        auto [t, fresh] = by_text.try_emplace(std::move(k), nullptr);
+        if (fresh) {
+            t->second = new nxrt::GapCounter("nvn", msg);   // never freed (registered)
+            NXLOG_W(kTag, "%s", msg);
+        }
+        it = by_addr.insert_or_assign(key, Seen{key, msg, t->second}).first;
+    }
+    it->second.gap->hit();
 }
 
 bool first_time_key(const std::string& key) {   // render thread only
@@ -1928,7 +1941,12 @@ void gmem_before_op(bool compute) {
     }
     if (writes) {
         const ShaderInfo* s0 = S.stage[compute ? kCompute : kFragment];
-        nxrt::gap("gmem", "global memory writes: ranges assumed from uniform pointers", s0 ? s0->hash : std::string("?"));
+        static std::unordered_map<std::string, nxrt::GapCounter*> per_shader;   // render thread; counters never freed (registered)
+        static const std::string unknown = "?";
+        const std::string& h = s0 ? s0->hash : unknown;
+        auto it = per_shader.find(h);
+        if (it == per_shader.end()) it = per_shader.emplace(h, new nxrt::GapCounter("gmem", "global memory writes: ranges assumed from uniform pointers", h)).first;
+        it->second->hit();
     }
 }
 
