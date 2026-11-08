@@ -96,7 +96,7 @@ jobs:
           python --version
 
       - name: Cache vcpkg binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/vcpkg-bin
           key: vcpkg-bin-${{ env.VCPKG_COMMIT }}-dav1d-libvpx-opus
@@ -125,7 +125,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'build failed' }
 
       - name: Cache NuGet packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.nuget/packages
           key: nuget-${{ hashFiles('tools/shaders/harness/**/*.csproj', 'refs/ryubing/Directory.Packages.props') }}
