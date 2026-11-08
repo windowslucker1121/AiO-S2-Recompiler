@@ -351,7 +351,8 @@ Open points besides the milestones:
 - **Movies** need libvpx (vcpkg `libvpx:x64-windows-static`, `NXRT_LIBVPX_ROOT`); not installed.
 - **Launcher** (`runtime/apps/launcher`, mpr's, not built for OoT) accepts an extracted folder; the Initial Setup (`oot_setup.exe`) takes `.nup` (through `nup_extract.py`) or an extracted folder. Encrypted NSP/XCI are not supported (removed 2026-11-08: no code reads keys or decrypts).
 - **Pokopia regression risk** (no Pokopia dump here): shared changes in funcs.py (header/MOD0, ADR starts, RETAA/RETAB, zero FDEs), a64.py
-  (PAC decode), tier2 FP16, used-memory accounting, NVN minor 40, TLS +0x110, MapMemory Alias sources, WaitIfEqual64, bsd descriptors.
+  (PAC decode, DMB LD/ST as compiler barriers, single-store scalar FP writes), tier2 FP16, `nx::fmax_`/`fmin_` NaN order, lifted-code
+  flags (/O2, x86-64-v3, forced inlining), used-memory accounting, NVN minor 40, TLS +0x110, MapMemory Alias sources, WaitIfEqual64, bsd descriptors.
   Oracles, from `recomp\`: `..\tools\.venv\Scripts\python oracle/difftest/difftest.py all`, `oracle/e2e/run_e2e.py`,
   `oracle/hooks/test_hooks.py`; runtime tests `runtime\scripts\build.ps1 -Test` (all 170 groups pass, see "Runtime tests" below).
 
@@ -628,8 +629,17 @@ similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:`
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
 `nvn.compute_out_lazy: 1` to test the game's path) and its CPU profile is not the game's.
 
-**Performance notes so far:** the lifted code is built for baseline x86-64, so every FMADD is a CRT `fmaf` call (software FMA): a worker
-spent its time in `fmaf` in main+0x370a5a0. `/arch:AVX2`-style flags (FMA3) would need a full rebuild. `[nvn] compute_shadows` copies
+**Lifted-code compilation (D1-L, 2026-11-08):** the lifted code is built with `/O2 -march=x86-64-v3` (`NX_LIFT_OPT`, `NX_ISA` in
+`recomp/cmake/NxRecomp.cmake`; it was `/O1` = -Os and baseline x86-64, where every FMADD was a CRT `fmaf` call). `-ffp-contract=off`
+stays (no FMUL+FADD fusion), so the results are bit-identical: difftest 566,331 of 566,331 at /Od and with the tests built at
+/O2 v3 (that build found a real bug: `nx::fmax_`/`fmin_` took the NaN result from `a + b`, which the optimiser may commute; now
+FPProcessNaNs order). Release builds for CPUs without AVX2: `set NX_ISA=baseline` before `build_game.cmd` (a cache value of the build
+folder). The per-instruction helpers of ctx.h / neon.h / fpexact.h are `NX_HELPER` (always inline), the NaN slow paths
+`NX_COLD_HELPER`; DMB/DSB LD and ST forms are compiler barriers; scalar FP writes store the V128 once (`vmk*`). Measured alone, 854x480,
+base (main checkout's /O1 libraries) -> new, same runtime source, 160 s windows from 60 s: G (main thread, nvnSyncWait end to the next
+one) p50 16.9 -> 13.8 ms (first scene), 12.0 -> 10.7 (Link's house), 17.2 -> 14.3 (Kokiri outside); fps 36.4 -> 38.7, 49.3 -> 47.9,
+22.1 -> 22.0 (the last two are GPU / render-thread bound). main.lib 427 -> 485 MB; a full lift + build took 19.5 min with other
+agents' builds and runs on the machine. `[nvn] compute_shadows` copies
 every storage buffer of a dispatch to device-local memory and back (40 GB in 10 s during NDVE): pointless on an integrated GPU.
 
 ## Frame capture and replay (since 2026-11-07, `runtime/docs/CAPTURE.md`)
