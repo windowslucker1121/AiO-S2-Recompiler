@@ -2,12 +2,13 @@ Ryujinx shader IR types for the Ampere front end's cooperative-matrix instructio
 and destination is a 32-bit register word. The Ryujinx code in the context lines is MIT.
 --- a/StructuredIr/InstructionInfo.cs
 +++ b/StructuredIr/InstructionInfo.cs
-@@ -133,6 +133,8 @@
+@@ -133,6 +133,9 @@
              Add(Instruction.VoteAll,                  AggregateType.Bool,   AggregateType.Bool);
              Add(Instruction.VoteAllEqual,             AggregateType.Bool,   AggregateType.Bool);
              Add(Instruction.VoteAny,                  AggregateType.Bool,   AggregateType.Bool);
 +            Add(Instruction.CooperativeMatrixMulAdd,  AggregateType.U32,    AggregateType.U32,     AggregateType.U32,     AggregateType.U32,     AggregateType.U32,
 +                AggregateType.U32, AggregateType.U32, AggregateType.U32, AggregateType.U32, AggregateType.U32, AggregateType.U32);
++            Add(Instruction.Float16Arithmetic,        AggregateType.FP32,   AggregateType.FP32,    AggregateType.FP32,    AggregateType.FP32);
  #pragma warning restore IDE0055
          }
 

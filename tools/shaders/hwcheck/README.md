@@ -119,6 +119,12 @@ swapped), B and C/D in fragment order, for both accumulators; 16 orders match, a
 and B). The translator's order then agrees with the CPU reference within the HMMA tolerance (F16: up to 160 ulp on near-cancelling
 sums, the tensor core's own rounding; F32: bit-identical to the scalar emulation).
 
+- **Packed-half arithmetic.** The variant also computes HADD2 / HMUL2 / HFMA2 with a half result in float16 (one rounding)
+  instead of fp32 arithmetic rounded twice and, for HFMA2, an fp64 round-to-odd step. `--coopmat` checks nine forms from OoT's
+  network passes against the scalar emulation on hwcheck's input generator (edge values, denormals): bit-identical (HADD2 may differ
+  by 1 ulp, the emulation's double rounding; none seen on the RTX 4080).
+- `hwcheck --pipeline-stats <a.spv> ...` prints the driver's statistics of compute modules with the network passes' descriptor layout
+  (VK_KHR_pipeline_executable_properties: registers, binary size, shared memory) and the pipeline build time.
 ## Findings (2026-11-04, RTX 3080, driver 617.42)
 
 - **fp32 denormals without .FTZ.** The 3080's Vulkan driver reports `shaderDenormPreserveFloat32 = false` (and `shaderDenormFlushToZeroFloat32 = false`), so DenormPreserve cannot be used. The front end emulates the IEEE result of FADD, FMUL, FFMA, FMNMX, FSETP and FSET without .FTZ: a fast path, and an fp64 slow path when an input is denormal or the result is tiny (`AmpereEmit.Denorm.cs`).

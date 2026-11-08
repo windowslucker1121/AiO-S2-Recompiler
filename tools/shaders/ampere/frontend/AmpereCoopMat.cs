@@ -112,6 +112,34 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             return true;
         }
 
+        /// Packed-half arithmetic of the variant (HADD2 / HMUL2 / HFMA2 with a half result): one lane's add (kind 0), multiply (1) or
+        /// fused multiply-add (2) of fp32 operands holding fp16 values, done in float16. The hardware's own rounding (once, to nearest)
+        /// instead of fp32 arithmetic rounded twice (and, for HFMA2, the fp64 round-to-odd step that avoids that: AmpereEmit.cs
+        /// HalfFmaOdd), which made most of the network passes' cost after HMMA. Null outside the variant: the caller emits fp32.
+        internal static IrOperand TryHalf(EmitterContext ctx, int kind, IrOperand a, IrOperand b, IrOperand c)
+        {
+            if (!Active) return null;
+            IrOperand d = OperandHelper.Local();
+            ctx.Add(new Operation(Instruction.Float16Arithmetic, kind, d, kind == 2 ? new[] { a, b, c } : new[] { a, b }));
+            return d;
+        }
+
+        internal static OperationResult GenerateFloat16(CodeGenContext c, AstOperation op)
+        {
+            Types t = TypesOf(c);
+            SpvInstruction f32 = c.TypeFP32();
+            SpvInstruction H(int s) => c.FConvert(t.F16, c.GetFP32(op.GetSource(s)));   // exact: the operands are fp16 values
+            SpvInstruction r = op.Index switch
+            {
+                0 => c.FAdd(t.F16, H(0), H(1)),
+                1 => c.FMul(t.F16, H(0), H(1)),
+                2 => c.GlslFma(t.F16, H(0), H(1), H(2)),
+                _ => throw new InvalidOperationException($"Float16Arithmetic kind {op.Index}"),
+            };
+            if (op.Index != 2) c.Decorate(r, Decoration.NoContraction);   // HMUL2 then HADD2 are two roundings, never one fma
+            return new OperationResult(AggregateType.FP32, c.FConvert(f32, r));
+        }
+
         // ---- SPIR-V back end ---------------------------------------------------------------------------------------------
 
         internal sealed class Types

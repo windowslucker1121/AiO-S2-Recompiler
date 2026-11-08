@@ -40,6 +40,21 @@ namespace Hwcheck
 
         static string Opt(string[] a, string n, string d) { int i = Array.IndexOf(a, n); return i >= 0 && i + 1 < a.Length ? a[i + 1] : d; }
 
+        /// hwcheck --pipeline-stats <a.spv> [b.spv ...]: the driver's statistics (registers, instructions, ...) of compute modules with
+        /// the layout of OoT's network passes (set 0: two uniform buffers, set 1: a storage buffer, set 2: a sampled texture, set 3: a
+        /// storage image). Builds each pipeline once, so it also times the driver's compile.
+        public static int Stats(string[] args)
+        {
+            using var vk = new VkRunner(4096, true);
+            uint[][] layout = { new uint[] { 6, 6 }, new uint[] { 7 }, new uint[] { 1 }, new uint[] { 3 } };
+            foreach (string f in args.Skip(1).Where(a => a.EndsWith(".spv")))
+            {
+                Console.WriteLine(f);
+                foreach (string l in vk.PipelineStats(File.ReadAllBytes(f), layout)) Console.WriteLine("  " + l);
+            }
+            return 0;
+        }
+
         public static int Run(string[] args, string bin, string outDir)
         {
             int warps = int.Parse(Opt(args, "--warps", "64"));
@@ -142,8 +157,74 @@ namespace Hwcheck
                     Console.WriteLine($"  wrote {header}");
                 }
             }
+            failures += HalfOps(vk, bin, outDir, threads, seed);
             Console.WriteLine(failures == 0 ? "coopmat: OK" : $"coopmat: {failures} failure(s)");
             return failures == 0 ? 0 : 1;
+        }
+
+        // ---- packed-half arithmetic of the variant ------------------------------------------------------------------------
+
+        // HADD2 / HMUL2 / HFMA2 forms as OoT's network passes use them (operand swizzles, negation, abs, immediates), as ptxas
+        // encodes them; the hwcheck rewrite moves their registers into the window.
+        static readonly (ulong lo, ulong hi)[] HalfWords =
+        {
+            (0x2000001838217231UL, 0x000fe20000000021UL),   // HFMA2 R33, R56, R24.H0_H0, R33
+            (0xa000001621207231UL, 0x000fe20000040821UL),   // HFMA2 R32, R33.H0_H0, -R22.H0_H0, R33.H0_H0
+            (0x300000181c1d7231UL, 0x000fe20000040c1dUL),   // HFMA2 R29, R28.H1_H1, R24.H1_H1, R29.H0_H0
+            (0x32cd2c9e13237831UL, 0x000fe40000000016UL),   // HFMA2 R35, R19, 0.2125.., 0.0721.., R22
+            (0x2000002007077230UL, 0x100fe20000000000UL),   // HADD2 R7, R7, R32.H0_H0
+            (0x2000002029297230UL, 0x000fe40000000800UL),   // HADD2 R41, R41.H0_H0, R32.H0_H0
+            (0x4000000707077232UL, 0x000fe20000000000UL),   // HMUL2 R7, R7, |R7|
+            (0x39b839b808207832UL, 0x000fe40000000c00UL),   // HMUL2 R32, R8.H1_H1, 0.71484375, 0.71484375
+            (0x2000000f4a367232UL, 0x002fc60000000000UL),   // HMUL2 R54, R74, R15.H0_H0
+        };
+
+        /// The variant's float16 arithmetic against the scalar emulation (checked against the tensor-core GPU's own results by the
+        /// normal hwcheck run): HFMA2 and HMUL2 bit for bit (the emulation rounds once, as float16 does), HADD2 within 1 ulp (the
+        /// emulation adds in fp32 and rounds twice); any NaN equals any NaN. Inputs: hwcheck's generator (edge values, denormals).
+        static int HalfOps(VkRunner vk, string bin, string outDir, int threads, int seed)
+        {
+            var cases = new List<(string id, string text, List<(ulong lo, ulong hi)> words, int rd)>();
+            foreach (var (lo, hi) in HalfWords)
+            {
+                var w = Cases.Rewrite(lo, hi, out SassInst inst, out string why);
+                if (w == null) { Console.WriteLine($"  half op {lo:x16}: not rewritable ({why})"); return 1; }
+                cases.Add(($"h{cases.Count}", inst.ToSassText(), w, inst.Operands[0].Reg));
+            }
+            string tsv = Path.Combine(outDir, "coopmat_half.tsv");
+            File.WriteAllLines(tsv, cases.Select(c => c.id + "\t" + string.Join(' ', c.words.SelectMany(x => new[] { x.lo.ToString("x16"), x.hi.ToString("x16") }))));
+            string Translate(string name, string coop)
+            {
+                string dir = Path.Combine(outDir, "coopmat_half_" + name);
+                if (Directory.Exists(dir)) Directory.Delete(dir, true);
+                Environment.SetEnvironmentVariable("NXRT_HARNESS_COOPMAT", coop);
+                Tools.Run("dotnet", $"\"{Path.Combine(bin, "spirv_harness.dll")}\" --hwcheck \"{tsv}\" --out \"{dir}\" --local-x 32");
+                Environment.SetEnvironmentVariable("NXRT_HARNESS_COOPMAT", null);
+                return dir;
+            }
+            string sd = Translate("scalar", ""), cd = Translate("f16", "1");
+            int failures = 0;
+            foreach (var c in cases)
+            {
+                uint[] input = Inputs.Make(threads, seed * 7919 + c.id.GetHashCode() % 1000);
+                uint[] a = (uint[])input.Clone(), b = (uint[])input.Clone();
+                string e1 = vk.Run(File.ReadAllBytes(Path.Combine(sd, c.id + ".spv")), a, threads / 32);
+                string e2 = vk.Run(File.ReadAllBytes(Path.Combine(cd, c.id + ".spv")), b, threads / 32);
+                if (e1 != null || e2 != null) { Console.WriteLine($"  {c.text}: {e1 ?? e2}"); failures++; continue; }
+                bool add = c.text.StartsWith("HADD2");
+                int bad = 0, near = 0;
+                for (int t = 0; t < threads; t++)
+                    for (int h = 0; h < 2; h++)
+                    {
+                        uint x = (a[t * Inputs.Words + c.rd] >> (16 * h)) & 0xffff, y = (b[t * Inputs.Words + c.rd] >> (16 * h)) & 0xffff;
+                        if (x == y || ((x & 0x7fff) > 0x7c00 && (y & 0x7fff) > 0x7c00)) continue;
+                        bool oneUlp = (x & 0x8000) == (y & 0x8000) && Math.Abs((int)(x & 0x7fff) - (int)(y & 0x7fff)) == 1;
+                        if (add && oneUlp) near++; else bad++;
+                    }
+                Console.WriteLine($"  {c.text}: {bad} differing halves{(add ? $", {near} within 1 ulp" : "")} of {threads * 2}");
+                if (bad > 0) failures++;
+            }
+            return failures;
         }
 
         // ---- inputs -------------------------------------------------------------------------------------------------------
