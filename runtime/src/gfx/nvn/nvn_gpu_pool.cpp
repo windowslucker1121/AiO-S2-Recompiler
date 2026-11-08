@@ -857,6 +857,16 @@ void bit_put(std::vector<uint64_t>& v, uint64_t i, bool on) {
 }
 
 bool page_valid(const Mirror& m, uint64_t p) { return mem::ww::page_valid(m.ww, p); }
+// Sets or clears bits [first, last] of v a word at a time.
+void bits_put(std::vector<uint64_t>& v, uint64_t first, uint64_t last, bool on) {
+    for (uint64_t p = first; p <= last;) {
+        const uint64_t lo = p & 63, hi = std::min<uint64_t>(63, lo + (last - p));
+        const uint64_t mask = (hi - lo == 63) ? ~uint64_t{0} : (((uint64_t{1} << (hi - lo + 1)) - 1) << lo);
+        if (on) v[static_cast<size_t>(p >> 6)] |= mask;
+        else v[static_cast<size_t>(p >> 6)] &= ~mask;
+        p += hi - lo + 1;
+    }
+}
 void out_register(Mirror* m);
 bool new_servable(const Mirror& m, uint64_t first, uint64_t last);
 
@@ -1054,13 +1064,13 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) {
         out.buffer = cb;
         out.offset = poff - (first / chunk_pages) * kChunkBytes;
         out.avail = std::min<uint64_t>(kChunkBytes, m->pool_bytes - (first / chunk_pages) * kChunkBytes) - out.offset;
-        for (uint64_t p = first; p <= last; ++p) bit_put(m->used, p, true);
+        bits_put(m->used, first, last, true);
         g_st_dev_binds.fetch_add(1, std::memory_order_relaxed);
         g_use_dev[use % 3]++;
         return out;
     }
     g_use_host[use % 3]++;
-    for (uint64_t p = first; p <= last; ++p) bit_put(m->want, p, true);
+    bits_put(m->want, first, last, true);
     m->any_want = true;
     g_st_host_binds.fetch_add(1, std::memory_order_relaxed);
     return out;
@@ -1167,10 +1177,9 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
     const uint64_t first = off / kPageBytes, last = std::min<uint64_t>((off + size - 1) / kPageBytes, m.npages - 1);
     g_wr_calls[use % 6]++;
     g_wr_pages[use % 6] += static_cast<int64_t>(last - first + 1);
-    bool stale = false;
-    for (uint64_t p = first; p <= last && !stale; ++p) stale = page_valid(m, p);
+    const bool stale = mem::ww::any_valid(m.ww, first, last - first + 1);
     mem::ww::invalidate(m.ww, first, last - first + 1);
-    for (uint64_t p = first; p <= last; ++p) bit_put(m.want, p, false);
+    bits_put(m.want, first, last, false);
     return stale;
 }
 
@@ -1329,12 +1338,8 @@ void out_register(Mirror* m) {
     std::call_once(once, [] { mem::ww::set_guard_handler([](uint64_t addr) { out_fetch(addr, kPageBytes, true); }); });
 }
 
-bool new_servable(const Mirror& m, uint64_t first, uint64_t last) {
-    for (uint64_t p = first; p <= last; ++p) {
-        if (page_valid(m, p)) continue;
-        if (!new_get(m, p) || !mem::ww::all_armed(m.ww, p, 1)) return false;   // armed: the CPU has not written it since
-    }
-    return true;
+bool new_servable(const Mirror& m, uint64_t first, uint64_t last) {   // every page valid, or newer in the copy and armed (the CPU has not written it since)
+    return mem::ww::all_valid_or_armed(m.ww, first, last - first + 1, m.gpu_new.get());
 }
 
 bool overlaps(const OutEntry& e, uint64_t lo, uint64_t hi) {      // page granular: [lo, hi) of addresses

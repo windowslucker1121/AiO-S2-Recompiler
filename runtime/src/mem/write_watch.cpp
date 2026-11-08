@@ -488,6 +488,10 @@ bool all_valid(const Region* r, uint64_t first, uint64_t count) {
 }
 
 bool page_valid(const Region* r, uint64_t page) { return r && page < r->npages && test(r->valid.get(), page); }
+bool any_valid(const Region* r, uint64_t first, uint64_t count) {
+    if (!r || !count || first >= r->npages) return false;
+    return any_set(r->valid.get(), first, std::min(count, r->npages - first));
+}
 bool page_banned(const Region* r, uint64_t page) { return !r || page >= r->npages || test(r->ban.get(), page); }
 
 void invalidate(Region* r, uint64_t first, uint64_t count) {
@@ -525,6 +529,25 @@ void unguard(Region* r, uint64_t first, uint64_t count) {
 bool all_armed(const Region* r, uint64_t first, uint64_t count) {
     if (!r || !count || first >= r->npages || count > r->npages - first) return false;
     return all_set(r->prot.get(), first, count);
+}
+
+bool all_valid_or_armed(const Region* r, uint64_t first, uint64_t count, const std::atomic<uint64_t>* extra) {
+    if (!r || !count || first >= r->npages || count > r->npages - first) return false;
+    uint64_t p = first;
+    const uint64_t end = first + count;
+    while (p < end) {
+        const uint64_t w = p >> 6;
+        const uint64_t lo = p & 63;
+        const uint64_t hi = std::min<uint64_t>(64, lo + (end - p));
+        const uint64_t mask = (hi - lo == 64) ? ~uint64_t{0} : (((uint64_t{1} << (hi - lo)) - 1) << lo);
+        const uint64_t v = r->valid[w].load(std::memory_order_acquire);
+        if ((v & mask) != mask) {
+            const uint64_t ok = v | (extra[w].load(std::memory_order_acquire) & r->prot[w].load(std::memory_order_acquire));
+            if ((ok & mask) != mask) return false;
+        }
+        p += hi - lo;
+    }
+    return true;
 }
 
 uint64_t guard_faults() { return g_guard_faults.load(std::memory_order_relaxed); }

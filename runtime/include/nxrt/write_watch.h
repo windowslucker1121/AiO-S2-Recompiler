@@ -14,6 +14,7 @@
 //    (PAGE_NOACCESS, the read guards below). Callers hold an OsReadScope over the source first.
 //  * Granularity is the 4 KiB page.
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -35,6 +36,7 @@ bool arm(Region* r, uint64_t first, uint64_t count);
 // Owner: true when every page of the run is armed and nobody wrote it since.
 bool all_valid(const Region* r, uint64_t first, uint64_t count);
 bool page_valid(const Region* r, uint64_t page);
+bool any_valid(const Region* r, uint64_t first, uint64_t count);   // some page of the run is valid (word at a time)
 bool page_banned(const Region* r, uint64_t page);
 // Owner: the owner changed the pages itself (the GPU wrote them): no longer valid, still armed (the next arm() re-validates them).
 void invalidate(Region* r, uint64_t first, uint64_t count);
@@ -94,6 +96,9 @@ bool guard(Region* r, uint64_t first, uint64_t count);
 void unguard(Region* r, uint64_t first, uint64_t count);
 // Owner: true when every page of the run is still armed (read-only or guarded: the CPU did not write it since it was armed).
 bool all_armed(const Region* r, uint64_t first, uint64_t count);
+// Owner: true when every page of the run is valid, or armed with its bit set in `extra` (a caller's bitmap over the same page indices,
+// one bit per page, 64 per word). Word at a time: the per-binding check of the NVN replay (new_servable) over runs of thousands of pages.
+bool all_valid_or_armed(const Region* r, uint64_t first, uint64_t count, const std::atomic<uint64_t>* extra);
 uint64_t guard_faults();   // accesses that hit a guarded page (statistics)
 
 uint64_t faults();     // write faults handled so far (statistics)
