@@ -13,7 +13,7 @@
 #include <map>
 #include <sstream>
 
-#include "game_manifest.h"
+#include "setup_games.h"
 
 namespace fs = std::filesystem;
 
@@ -118,6 +118,9 @@ std::wstring search_path(const wchar_t* name) {
 
 }  // namespace
 
+std::string read_file_text(const std::wstring& p) { return read_text(p); }
+bool write_file_atomic(const std::wstring& path, const std::string& text) { return write_atomic(path, text); }
+
 // ---- tools -----------------------------------------------------------------------------------------------------------------------------
 Tools find_tools() {
     Tools t;
@@ -125,8 +128,9 @@ Tools find_tools() {
 #ifdef SETUP_DEV_ROOT
     t.dev_root = widen(SETUP_DEV_ROOT);
     for (wchar_t& c : t.dev_root) if (c == L'/') c = L'\\';
+    wchar_t full[MAX_PATH];
+    if (GetFullPathNameW(t.dev_root.c_str(), MAX_PATH, full, nullptr)) t.dev_root = full;
 #endif
-    t.game_exe = join(t.exe_dir, widen(GAME_EXE));
     // A release folder carries its tools next to the setup exe; a development build uses the checkout's.
     const std::wstring rel = join(t.exe_dir, L"tools");
     auto pick = [](std::initializer_list<std::wstring> c) {
@@ -152,22 +156,12 @@ Tools find_tools() {
 }
 
 // ---- settings and layout ------------------------------------------------------------------------------------------------------------
-std::wstring config_path() { return join(exe_dir(), widen(GAME_ID "_setup.ini")); }
-
-Config load_config() {
-    Config c;
-    auto kv = read_kv(config_path());
-    c.data_dir = widen(kv["data_dir"]);
-    c.source = widen(kv["source"]);
-    if (c.data_dir.empty()) c.data_dir = join(exe_dir(), L"game_data");
-    return c;
-}
-
-bool save_config(const Config& c) {
-    std::string t = "; " GAME_PRODUCT " setup: the folder it writes to and the player's dump.\n[setup]\n";
-    t += "data_dir = " + narrow(c.data_dir) + "\n";
-    t += "source = " + narrow(c.source) + "\n";
-    return write_atomic(config_path(), t);
+std::wstring game_exe_path(const Tools& t, const GameDef& g) {
+    const std::wstring exe = widen(g.exe);
+    const std::wstring here = join(t.exe_dir, exe);
+    if (file_exists(here) || t.dev_root.empty()) return here;
+    const std::wstring dev = join(t.dev_root, L"game-build\\build\\release\\" + exe);
+    return file_exists(dev) ? dev : here;
 }
 
 SourceKind source_kind(const std::wstring& src) {
@@ -212,7 +206,7 @@ Layout layout_of(const Config& c) {
     l.spirv = join(l.shaders, L"spirv");
     l.programs = join(l.shaders, L"programs.bin");
     l.prepare_state = join(l.shaders, L"prepare.state");
-    l.game_ini = join(l.data, widen(GAME_INI));
+    l.game_ini = join(l.data, c.game_ini.empty() ? std::wstring(L"game.ini") : c.game_ini);
     l.state_file = join(l.data, L"setup_state.ini");
     if (source_kind(c.source) == SourceKind::folder) l.game = game_folder_in(c.source);
     else if (file_exists(join(l.dump, L"extract.json"))) l.game = game_folder_in(l.dump);
@@ -386,7 +380,7 @@ std::vector<GpuInfo> query_gpus(std::wstring* error) {
     if (!create) { *error = L"the Vulkan loader is broken (no vkCreateInstance)"; FreeLibrary(vk); return out; }
     if (loader < VK_API_VERSION_1_3) { *error = L"the Vulkan loader offers less than Vulkan 1.3"; FreeLibrary(vk); return out; }
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.pApplicationName = GAME_ID "_setup";
+    app.pApplicationName = "game_setup";
     app.apiVersion = VK_API_VERSION_1_3;
     VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ci.pApplicationInfo = &app;
@@ -445,7 +439,7 @@ uint64_t remaining_disk_need(const Config& c, const State& s) {
     return need;
 }
 
-std::vector<Check> run_checks(const Tools& t, const Config& c, uint64_t disk_need) {
+std::vector<Check> run_system_checks(const Tools& t) {
     std::vector<Check> out;
     // Windows
     {
@@ -508,59 +502,6 @@ std::vector<Check> run_checks(const Tools& t, const Config& c, uint64_t disk_nee
             k.fix = L"The game holds 13-16 GB while it plays. With less memory Windows pages to disk and the game stutters. Close other programs "
                     L"while playing; keep the page file on (Windows default).";
         } else k.state = L"OK";
-        out.push_back(k);
-    }
-    // Disk space
-    {
-        Check k{L"Disk space", L"", L"", L"", Level::ok};
-        const uint64_t free = free_bytes(c.data_dir);
-        k.detail = gib(free) + L" free where the setup writes (" + c.data_dir + L"); still needed: about " + gib(disk_need);
-        if (free < disk_need) {
-            k.level = Level::bad;
-            k.state = L"Too little";
-            k.fix = L"Free up " + gib(disk_need - free) + L" on that drive, or choose a data folder on another drive (Game files page, Change...).";
-        } else k.state = L"OK";
-        out.push_back(k);
-    }
-    // The game exe and the DLLs it imports (the Visual C++ runtime is linked in statically; this finds whatever else is missing)
-    {
-        Check k{L"Game program", L"", L"", L"", Level::ok};
-        if (!file_exists(t.game_exe)) {
-            k.level = Level::bad;
-            k.state = L"Missing";
-            k.detail = t.game_exe;
-            k.fix = L"" GAME_EXE L" must sit next to this setup program. Unpack the whole release archive into one folder and start the setup from there.";
-        } else {
-            std::vector<std::wstring> missing;
-            std::vector<std::wstring> mods = {t.game_exe};
-            WIN32_FIND_DATAW fd;
-            const HANDLE f = FindFirstFileW(join(t.exe_dir, L"*.dll").c_str(), &fd);
-            if (f != INVALID_HANDLE_VALUE) {
-                do mods.push_back(join(t.exe_dir, fd.cFileName));
-                while (FindNextFileW(f, &fd));
-                FindClose(f);
-            }
-            bool vc = false;
-            for (const std::wstring& m : mods)
-                for (const std::string& d : pe_imports(m))
-                    if (!dll_found(d, t.exe_dir) && std::find(missing.begin(), missing.end(), widen(d)) == missing.end()) {
-                        missing.push_back(widen(d));
-                        std::string l = d;
-                        for (char& ch : l) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
-                        if (l.rfind("vcruntime", 0) == 0 || l.rfind("msvcp", 0) == 0 || l.rfind("concrt", 0) == 0) vc = true;
-                    }
-            if (missing.empty()) {
-                k.state = L"OK";
-                k.detail = std::wstring(L"" GAME_EXE) + L" and every DLL it needs are there (no Visual C++ Redistributable needed)";
-            } else {
-                k.level = Level::bad;
-                k.state = L"DLL missing";
-                for (const std::wstring& m : missing) k.detail += (k.detail.empty() ? L"" : L", ") + m;
-                k.fix = vc ? L"Install the Microsoft Visual C++ Redistributable (x64):\r\n  https://aka.ms/vs/17/release/vc_redist.x64.exe\r\n"
-                             L"or in a terminal:\r\n  winget install Microsoft.VCRedist.2015+.x64"
-                           : L"These DLLs belong next to " GAME_EXE L": unpack the whole release archive again.";
-            }
-        }
         out.push_back(k);
     }
     // .NET for the shader translator (a self-contained translator needs none)
@@ -648,17 +589,80 @@ std::vector<Check> run_checks(const Tools& t, const Config& c, uint64_t disk_nee
         }
         out.push_back(k);
     }
+    return out;
+}
+
+std::vector<Check> run_game_checks(const Tools& t, const GameDef& g, const Config& c, uint64_t disk_need) {
+    std::vector<Check> out;
+    const std::wstring game_exe = game_exe_path(t, g);
+    const std::wstring game_dir = parent_of(game_exe);
+    const std::wstring exe_name = widen(g.exe);
+    const std::wstring title = widen(g.title);
+    const std::wstring want_ver = widen(g.dump_version);
+    // Disk space
+    {
+        Check k{L"Disk space", L"", L"", L"", Level::ok};
+        const uint64_t free = free_bytes(c.data_dir);
+        k.detail = gib(free) + L" free where the setup writes (" + c.data_dir + L"); still needed: about " + gib(disk_need);
+        if (free < disk_need) {
+            k.level = Level::bad;
+            k.state = L"Too little";
+            k.fix = L"Free up " + gib(disk_need - free) + L" on that drive, or choose a data folder on another drive (Game files page, Change...).";
+        } else k.state = L"OK";
+        out.push_back(k);
+    }
+    // The game exe and the DLLs it imports (the Visual C++ runtime is linked in statically; this finds whatever else is missing)
+    {
+        Check k{L"Game program", L"", L"", L"", Level::ok};
+        if (!file_exists(game_exe)) {
+            k.level = Level::bad;
+            k.state = L"Missing";
+            k.detail = game_exe;
+            k.fix = exe_name + L" is not built or not installed. A release has it next to this program; a development checkout builds it with game-build\\scripts\\build.ps1 -Manifest <its game.toml>.";
+        } else {
+            std::vector<std::wstring> missing;
+            std::vector<std::wstring> mods = {game_exe};
+            WIN32_FIND_DATAW fd;
+            const HANDLE f = FindFirstFileW(join(game_dir, L"*.dll").c_str(), &fd);
+            if (f != INVALID_HANDLE_VALUE) {
+                do mods.push_back(join(game_dir, fd.cFileName));
+                while (FindNextFileW(f, &fd));
+                FindClose(f);
+            }
+            bool vc = false;
+            for (const std::wstring& m : mods)
+                for (const std::string& d : pe_imports(m))
+                    if (!dll_found(d, game_dir) && std::find(missing.begin(), missing.end(), widen(d)) == missing.end()) {
+                        missing.push_back(widen(d));
+                        std::string l = d;
+                        for (char& ch : l) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+                        if (l.rfind("vcruntime", 0) == 0 || l.rfind("msvcp", 0) == 0 || l.rfind("concrt", 0) == 0) vc = true;
+                    }
+            if (missing.empty()) {
+                k.state = L"OK";
+                k.detail = exe_name + L" and every DLL it needs are there (no Visual C++ Redistributable needed)";
+            } else {
+                k.level = Level::bad;
+                k.state = L"DLL missing";
+                for (const std::wstring& m : missing) k.detail += (k.detail.empty() ? L"" : L", ") + m;
+                k.fix = vc ? L"Install the Microsoft Visual C++ Redistributable (x64):\r\n  https://aka.ms/vs/17/release/vc_redist.x64.exe\r\n"
+                             L"or in a terminal:\r\n  winget install Microsoft.VCRedist.2015+.x64"
+                           : L"These DLLs belong next to " + exe_name + L": unpack the whole release archive again.";
+            }
+        }
+        out.push_back(k);
+    }
     // The player's dump
     {
         Check k{L"Your game dump", L"", L"", L"", Level::ok};
         const SourceKind sk = source_kind(c.source);
         const Layout l = layout_of(c);
-        const std::wstring want = L"" GAME_TITLE L" (" GAME_TITLE_ID L"), " GAME_DUMP_VERSION;
+        const std::wstring want = title + L" (" + widen(g.title_id) + L"), " + want_ver;
         if (sk == SourceKind::none || sk == SourceKind::missing) {
             k.level = Level::bad;
             k.state = sk == SourceKind::none ? L"Not chosen" : L"Not found";
             k.detail = sk == SourceKind::none ? want : c.source;
-            k.fix = L"Dump your own copy of " GAME_TITLE L", version " GAME_DUMP_VERSION L", from your console, then choose it on the Game files page:\r\n"
+            k.fix = L"Dump your own copy of " + title + L", version " + want_ver + L", from your console, then choose it on the Game files page:\r\n"
                     L"  a .nup package, or a folder with exefs\\ and romfs\\ (also updates\\<version>\\ or base\\ inside it).\r\n"
                     L"This setup never downloads game files.";
         } else if (sk == SourceKind::unsupported) {
@@ -668,18 +672,18 @@ std::vector<Check> run_checks(const Tools& t, const Config& c, uint64_t disk_nee
             k.fix = L"NSP, XCI, NSZ and XCZ files are not supported by this build yet. Extract the dump with your own tools into a folder with "
                     L"exefs\\ and romfs\\, or make a .nup package, and choose that.";
         } else {
-            const GameId g = game_id_of(l.game);
-            if (!g.ok) {
+            const GameId gi = game_id_of(l.game);
+            if (!gi.ok) {
                 k.level = sk == SourceKind::nup ? Level::info : Level::bad;
                 k.state = sk == SourceKind::nup ? L"To extract" : L"Not a game folder";
                 k.detail = c.source;
                 if (sk != SourceKind::nup) k.fix = L"The folder needs exefs\\main and romfs\\ (directly, or in updates\\<version>\\ or base\\).";
             } else {
-                k.detail = l.game + L" (main " + widen(g.build_id.substr(0, 16)) + L")";
-                if (*GAME_MAIN_BUILD_ID && _stricmp(g.build_id.c_str(), GAME_MAIN_BUILD_ID) != 0) {
+                k.detail = l.game + L" (main " + widen(gi.build_id.substr(0, 16)) + L")";
+                if (!g.main_build_id.empty() && _stricmp(gi.build_id.c_str(), g.main_build_id.c_str()) != 0) {
                     k.level = Level::warn;
                     k.state = L"Other version";
-                    k.fix = L"This release is made for " GAME_DUMP_VERSION L". Your dump has another main module: the game may not start. Dump "
+                    k.fix = L"This port is made for " + want_ver + L". Your dump has another main module: the game may not start. Dump "
                             L"the game again with that update installed.";
                 } else k.state = L"OK";
             }
@@ -765,7 +769,7 @@ bool Child::start(const std::wstring& exe, const std::wstring& args, const std::
     std::wstring a = args;
     if (with_cancel_event) {
         static std::atomic<int> seq{0};
-        const std::wstring name = L"Local\\" GAME_ID L"_setup_cancel_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(++seq);
+        const std::wstring name = L"Local\\game_setup_cancel_" +std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(++seq);
         event_ = CreateEventW(nullptr, TRUE, FALSE, name.c_str());
         a += L" --cancel-event " + name;
     }

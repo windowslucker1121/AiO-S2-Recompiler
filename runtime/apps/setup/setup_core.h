@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Initial Setup (the <id>_setup.exe the player starts first): everything that is not window code. Which tools there are, what the PC has
 // (requirements), where the setup writes, which preparation steps are done or must be done again, and child processes with their
-// output read line by line. Game independent: names come from the game manifest (game_manifest.h, recomp/games/<id>/game.toml).
+// output read line by line. Game independent: every game name comes from its manifest, read at run time (setup_games.h).
 #pragma once
 #include <windows.h>
 
@@ -24,12 +24,15 @@ bool dir_exists(const std::wstring& p);
 std::wstring join(const std::wstring& a, const std::wstring& b);
 std::wstring parent_of(const std::wstring& p);
 std::wstring exe_dir();
+std::string read_file_text(const std::wstring& p);                    // the whole file, empty when it cannot be read
+bool write_file_atomic(const std::wstring& path, const std::string& text);
+
+struct GameDef;   // setup_games.h
 
 // ---- tools: where each one is in a release folder (next to the setup exe) or in a development checkout ---------------------------------
 struct Tools {
     std::wstring exe_dir;          // folder of the setup exe
     std::wstring dev_root;         // development build: the checkout (GAME_DEV_ROOT), else empty
-    std::wstring game_exe;         // <exe dir>\<id>.exe
     std::wstring nup_extract;      // nup_extract.py
     std::wstring shader_scripts;   // folder with extract_generic.py and bnsh_programs.py
     std::wstring translator;       // spirv_harness.exe
@@ -37,15 +40,15 @@ struct Tools {
     std::wstring python_args;      // "-3" for the py.exe launcher
 };
 Tools find_tools();
+// The game's exe: <exe dir>\<files.exe>; a development build also looks in the checkout's game-build\build\release.
+std::wstring game_exe_path(const Tools& t, const GameDef& g);
 
-// ---- the setup's own settings (<exe dir>\<id>_setup.ini) and its data folder ---------------------------------------------------------
+// ---- one game's choices (from the library, setup_games.h) ----------------------------------------------------------------------
 struct Config {
     std::wstring data_dir;   // where the setup writes: the extracted game (dump\), the shader data (shader_cache\), the game ini
     std::wstring source;     // the player's dump: a .nup file or an extracted folder
+    std::wstring game_ini;   // the ini name of the game ([files] ini)
 };
-std::wstring config_path();
-Config load_config();
-bool save_config(const Config& c);
 
 enum class SourceKind { none, nup, folder, unsupported, missing };
 SourceKind source_kind(const std::wstring& source);
@@ -98,8 +101,10 @@ struct GpuInfo {
     std::wstring why;             // not usable: why
 };
 std::vector<GpuInfo> query_gpus(std::wstring* error);
-// Every check. disk_need: bytes the remaining steps will still write.
-std::vector<Check> run_checks(const Tools& t, const Config& c, uint64_t disk_need);
+// The PC's checks (Windows, GPU, memory, translator, Python): the same for every game.
+std::vector<Check> run_system_checks(const Tools& t);
+// One game's checks: disk space for its remaining steps, its program and the DLLs it needs, its dump. disk_need: bytes still to write.
+std::vector<Check> run_game_checks(const Tools& t, const GameDef& g, const Config& c, uint64_t disk_need);
 uint64_t remaining_disk_need(const Config& c, const State& s);
 
 // ---- child processes -----------------------------------------------------------------------------------------------------------------

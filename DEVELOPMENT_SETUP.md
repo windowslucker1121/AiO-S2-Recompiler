@@ -2,7 +2,7 @@
 
 Everything a Windows machine needs to **develop** the port: lift and compile the game code, build the runtime and `oot.exe`, build
 the shader translator, translate and prepare shaders, and run the game for testing. Playing a finished build needs much less (see
-`README.md`). Current status and next steps: `OOT_HANDOFF.md`; running notes for agents: `AGENTS.md`.
+`README.md`). Current status, next steps and running notes: `AGENTS.md`.
 
 Rule for tools: repo-local tools go into git-ignored folders (`tools\llvm`, `tools\sccache`, `tools\vcpkg`, `tools\nvdisasm`,
 `tools\uv`, `tools\.venv`, `tools\shaders\third_party`) and come from official releases with checksum checks. Game files (`game\`, `*.nup`) and

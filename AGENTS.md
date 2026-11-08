@@ -2,8 +2,8 @@
 
 What a new agent needs to know before working here. Keep it current: add what you learn, remove what stops being true.
 Repository basics are in `README.md`, the recompiler in `recomp/README.md`, the game boundary in `runtime/docs/GAME_BOUNDARY.md`.
-**Start with `OOT_HANDOFF.md`** (status, the current blocker, next steps, where to pick up) and `DEVELOPMENT_SETUP.md` (everything a
-development machine needs). Keep both current together with this file.
+**Start with this file** (state, artifacts, next steps) and `DEVELOPMENT_SETUP.md` (everything a development machine needs). Keep both
+current. How to contribute: `CONTRIBUTING.md`.
 
 ## State (branch `oot-nup`, 2026-11-06)
 
@@ -95,11 +95,30 @@ preparation made (x ms each), M new (y ms each); the overlay shows K left` track
 took 25 min for 117,981 parts (both raster sets); a forced second one loads the file, rebuilds everything in 58 s and saves the same
 2,305,488,425 bytes. Test folder: `work\shaders\pcfix` (deleted after the merge; runs `work\run\pcfix_*`).
 
-**Game library (`recomp_library.exe`, 2026-11-08, replaces `oot_setup.exe`; same sources and target `game_setup`)**: the one front end the
-user chose (native Win32, not the Tauri `launcher/`): game cards, a preparation queue per game, Play; manifests read at run time, so one
-exe serves every game; `library.ini` next to the exe. State, test route (`work\build\library\build.cmd`, `--add <dump>`, `tests\winshot.py`)
-and next steps (settings pages, building games from the library): `MULTIGAME_PLAN.md`. The text below describes the steps and checks,
-which it keeps; game names now come from the manifest at run time instead of `game_manifest.h`.
+**Multi-game goal and the game library (2026-11-08; user: one app "to rule it all", for every Switch 2 game).**
+- Static recompilation stays one build per game (and per game update): module bases are baked into the lifted code and the runtime is
+  process-global. The front end hides that. The game boundary is mostly data; what a new game really needs is hook sites (frame update)
+  and whatever the lifter, services or shader translator do not cover yet. Gaps for a generic pipeline: nothing parses `main.npdm` /
+  `control.nacp` (OoT's values are hand-copied); `Info::platform` defaults to Switch 1; without a frame hook pads are never polled
+  (`play.cpp:880` is the only `poll_pads`); untranslated instructions do not fail a build (`guest_unimpl` at run time); no NRO loader;
+  A57 CPU constants in `a64.py`; `release_b/game_build.py` (Zig) is the only path that compiles on a player's PC.
+- Dumps in the repo root (static analysis only): **Mario Wonder** `.nup` (title 010015100B514000, update 5.0.0, addon with content
+  only) is a **Switch 1 binary** (SDK 16.2.12, NVN1, Maxwell bnsh/bfsha, no subsdk; it calls `nn::pl::IsRunningOnOunce`): the runtime's
+  untested Switch 1 path; its ExeFS is in `game\smbw`. **Pokopia** folder (update 655360 = 2.0.1, build id matches `recomp/games/pkp`):
+  main/sdk/subsdk0 do **not** decode as LZ4 (invalid match offset in every segment, sha256 differ from the manifest; rtld and npdm match):
+  needs a re-dump before it can be lifted.
+- **`recomp_library.exe`** (`runtime/apps/setup`, target `game_setup`, replaces `oot_setup.exe`; native Win32 + GDI+, dark theme; the
+  user chose this over the Tauri `launcher/` and `runtime/apps/launcher`): manifests read at run time (`setup_games.cpp`), so one exe
+  serves every game; `library.ini` next to the exe; dumps identified by title id (`nup_extract.py --list` or ACI0 of `main.npdm`), unknown
+  titles stay as "No port yet". One button per game, **Play**: the five preparation steps below run once as one queued job (one game at a
+  time, the others wait), then the game starts. Status words only; extras in the "•••" menu; This PC lists only problems; drag and drop
+  adds a dump. Settings page (`setup_settings.cpp`): Graphics, Display, Controller, Keyboard & mouse (press-to-bind, SDL key names from
+  `setup_keynames.inc`), Audio; edits the game folder's `controls.ini` in place (only changed keys). User preference: minimal text.
+  Test route: `recomp\scripts\nx_env.cmd work\build\library\build.cmd` (standalone build, needs game-build's fetched Vulkan and SDL
+  headers), `recomp_library.exe --add <dump>`, `runtime\apps\setup\tests\winshot.py` (shot, cmd ids of the `Id` enum, close).
+  Not checked yet: Play running the setup and then the game; two games queued. Next: build a game from the library (lift + compile as a
+  queue step), retire `runtime/apps/launcher` and `launcher/`, release layout `games\<id>\game.toml` next to the exe.
+The text below describes the preparation steps and checks, which the library keeps.
 **Initial Setup (`oot_setup.exe`, since 2026-11-07; `runtime/apps/setup`, target `game_setup`, name from `game.toml` `files.setup_exe`)**:
 the player's first program, native Win32 (menu bar, four pages: Requirements, Game files, Prepare, Play; task dialog for Rebuild).
 Game independent: names from `game_manifest.h` (`GAME_DUMP_VERSION`, `GAME_MAIN_BUILD_ID` were added to `GameManifest.cmake`); it links

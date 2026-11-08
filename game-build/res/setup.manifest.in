@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="@GAME_ID@.Setup" version="1.0.0.0" processorArchitecture="amd64"/>
-  <description>@GAME_PRODUCT@ setup</description>
+  <assemblyIdentity type="win32" name="Recomp.Library" version="1.0.0.0" processorArchitecture="amd64"/>
+  <description>Recomp Library</description>
   <dependency>
     <dependentAssembly>
       <!-- common controls v6: themed controls, command links, task dialogs -->
