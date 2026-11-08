@@ -51,8 +51,8 @@ PoolGauges g_pool_gauges;
 // [nvn] pool_lookup_snapshot (D3, bet 1.3 step 1): pool_lookup without the registry lock. Every register / unregister publishes an immutable
 // sorted snapshot (bases, ends, pools); lookups load it with one acquire and search it, starting from the thread's last hit. Old snapshots are
 // freed two seconds after they were replaced (a lookup holds one for microseconds). The registry lock was 8.5% of the render thread's busy
-// samples (first scene, 2026-11-08), most of it the shared lock's cache-line traffic with the game's threads. on | off (default) | ab (paired
-// windows with [nvn] d3_ab, measurement only).
+// samples (first scene, 2026-11-08), most of it the shared lock's cache-line traffic with the game's threads. on (default) | off | ab (paired
+// windows with [nvn] d3_ab, measurement only). First scene, d3_ab = 300, 11 pairs of ~7 s windows: on 35.0 / off 33.1 fps, paired median +1.9 fps.
 struct PoolSnap {
     std::vector<uint64_t> base, end;
     std::vector<MemoryPool*> pool;
@@ -111,7 +111,7 @@ std::atomic<int> g_pool_snapshot_ab{1};   // [nvn] pool_lookup_snapshot = ab: th
 
 int pool_snapshot_mode() {   // 0 off, 1 on, 2 ab
     static const int m = [] {
-        const std::string v = config_get_str("nvn", "pool_lookup_snapshot", "off");
+        const std::string v = config_get_str("nvn", "pool_lookup_snapshot", "on");
         return v == "off" || v == "0" ? 0 : v == "ab" ? 2 : 1;
     }();
     return m;
