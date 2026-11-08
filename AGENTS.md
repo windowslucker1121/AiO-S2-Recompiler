@@ -492,7 +492,7 @@ Next steps, in the order they would pay:
    help).
 3. Render thread (24 ms, the next limit once the GPU is under it): per-draw `build_set` (pool_lookup, out_overlaps under a mutex,
    resolve_texture), descriptor set allocation per draw; `out_overlaps` could keep a page bitmap instead of walking g_out.
-4. Dynamic resolution: OoT's internal resolution follows the frame time (854x480 at 30 ms, 953x536 at 28 ms; the console's output is
+4. ~~Dynamic resolution~~ pinned to 1920x1080 since 2026-11-08 (`[oot] render_height`, see "Render resolution pinned" below). Was: OoT's internal resolution follows the frame time (854x480 at 30 ms, 953x536 at 28 ms; the console's output is
    2560x1440 after the upscaler). The game's timestamps are CPU record times (`timestamp_ns()` in ReportCounter), not GPU times. Pinning
    it to full scale costs GPU; measure both once the GPU has room.
 5. ~~Real-time game step (A16)~~ done (5b4c504): the game speed no longer depends on the fps; the fps targets stay.
@@ -672,6 +672,27 @@ Next steps, in order: bet 1.2
 thread), it needs a harness mode where bound and uniform handles are read by the shader and every sample goes through the pool arrays, plus a
 full re-translation (all pipelines rebuild: measure on replays first); with `VK_KHR_unified_image_layouts` available, the per-draw layout
 checks of prepare_textures can go too. Bet 2 in its planned form (GPU address = device address) is not possible on this driver (E2b).
+
+**Render resolution pinned (WP7, 2026-11-08, `runtime/games/oot/oot_drs.cpp`, no lifted rebuild).** The game's dynamic resolution: renderer
+R = `[[main+0x4e30498] + 0x228]` (found by a pointer search from main's data at run time), its controller C = `[R + 0xb48]` (per-frame step
+main+0x805aa0, called from main+0x31d3ee0): a list of 10 levels (end node C+400, first C+408; node: scale float at -8, level u32 at -4, next
++8), level 0 = 0.75 ... level 9 = 0.3334 of the output height R+3664 (1440); current level C+372, previous C+376; the scale in force R+3676
+(taken over only when the level changes). On the RTX 4080 it sat at level 9 (854x480). The pin (frame-update entry hook, registered from
+`GamePlay::install`): every level's scale = `[oot] render_height` / 1440 (default 1080 = 0.75 = **1920x1080, the console's maximum**; `0`
+= the game's own dynamic resolution), and C+376 is made to differ from C+372 while R+3676 differs, so the game resizes its targets itself
+(672 forced updates at start, none later). Log `oot: render resolution pinned to 1920x1080 ...`. **The upscaler network variants for
+0.75 (f90d726d) and 0.667 (02dcb888) are broken in translation** (f90d726d: 8-px column stripes in 16-row bands, scalar and coop-matrix
+alike; 02dcb888: blocky noise; fea98fe7 at 0.333 and 49659bca are right): `[nvn] pass_copy` (new, generic) makes their dispatches a scaled
+copy tex0 (RGB9E5 composite) -> img1, OoT default until a shader fix (capture `work/captures/20261108-221243-drs-drs1080`, kept, shows the
+stripes). Also: 02dcb888 takes 270 s to build in the driver and the fallback list does not cover it (black scene meanwhile; pass_copy
+avoids it). **Measured at 1920x1080 (alone, before the second lifted build of that evening):** first scene 25-43 fps in its first 90 s
+(median ~35; at 854x480 it was 34-39), render thread `replay` 25.4 ms and `gpu.exec` 27.7 ms per frame; Link's house 31-33 fps (854x480:
+47-52), replay 27.0 ms; Kokiri outside ~16 fps (1% low 10-12; 854x480: 21-24), replay 56.6 ms (partly during another agent's build).
+GPU per frame with `[prof] gpu_passes` (stamps drain the GPU): first scene 32.8 ms of stamps = 1920x1080 main pass 10.1 (526 draws),
+gaps 9.1 (GPU waiting for the render thread), compute out 2.3, tail 2.2, shadow pass 1.6x1.6k 1.8, write memory 0.9, uploads/layouts 0.6,
+compute ~2.5; Link's house 23.8 ms = main pass 7.0 (346 draws), gaps 3.4, compute out 2.3, tail 2.2, uploads/layouts 1.2, write memory 1.0.
+So at 1080 the frame is still bound by the render thread and its waits (replay ~ frame time); the GPU-side items that are ours are the
+copy-backs (compute out + tail + write memory ~5.5 ms) and the main pass's pointer shaders (E3/E5). No GPU change was kept this session.
 
 ## Frame capture and replay (since 2026-11-07, `runtime/docs/CAPTURE.md`)
 

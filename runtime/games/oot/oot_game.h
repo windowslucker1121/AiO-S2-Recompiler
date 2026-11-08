@@ -17,4 +17,7 @@ namespace nxrt::games::oot {
 const game::Info& data_info();     // oot_data.cpp
 const game::Info& core_info();     // oot_core.cpp
 const game::Info& full_info();     // oot_game.cpp
+// The game's dynamic resolution pinned to a fixed internal size ([oot] resolution keys, oot_drs.cpp); from play mode's install / remove.
+void drs_install(uint64_t base);
+void drs_remove();
 }  // namespace nxrt::games::oot

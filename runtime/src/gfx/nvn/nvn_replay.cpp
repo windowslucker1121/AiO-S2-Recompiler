@@ -4403,6 +4403,63 @@ bool upscaler_dispatch(const std::string& hash) {
     return false;
 }
 
+// [nvn] pass_copy = <hash prefix>:<src>:<dst>[,...]: each dispatch of such a compute program becomes a linearly filtered scaled copy from its
+// binding src (texN / imgN) to its image binding dst (imgN), whatever else the upscaler override does. For passes whose translation is known
+// to be wrong, so the picture stays usable (OoT: the network variants f90d726d / 02dcb888 the game picks at internal scales 0.75 / 0.667).
+struct PassCopy {
+    std::string prefix;
+    bool src_img = false;
+    int src = 0, dst = 0;
+};
+
+const std::vector<PassCopy>& pass_copies() {
+    static const std::vector<PassCopy> v = [] {
+        std::vector<PassCopy> out;
+        const std::string list = nxrt::config_get_str("nvn", "pass_copy", "");
+        for (size_t at = 0; at < list.size();) {
+            size_t end = list.find_first_of(", ", at);
+            if (end == std::string::npos) end = list.size();
+            const std::string item = list.substr(at, end - at);
+            at = end + 1;
+            const size_t c1 = item.find(':'), c2 = c1 == std::string::npos ? c1 : item.find(':', c1 + 1);
+            if (c2 == std::string::npos) continue;
+            PassCopy p;
+            p.prefix = item.substr(0, c1);
+            const std::string s = item.substr(c1 + 1, c2 - c1 - 1), d = item.substr(c2 + 1);
+            p.src_img = s.rfind("img", 0) == 0;
+            p.src = std::atoi(s.c_str() + 3);   // "texN" / "imgN"
+            p.dst = std::atoi(d.c_str() + 3);
+            if (p.prefix.empty() || d.rfind("img", 0) != 0) continue;
+            NXLOG_I(kTag, "pass copy: %s becomes a scaled copy %s -> %s ([nvn] pass_copy)", p.prefix.c_str(), s.c_str(), d.c_str());
+            out.push_back(p);
+        }
+        return out;
+    }();
+    return v;
+}
+
+bool pass_copy_dispatch(const std::string& hash) {
+    const auto& v = pass_copies();
+    if (v.empty() || hash.empty()) return false;
+    for (const PassCopy& p : v) {
+        if (hash.compare(0, p.prefix.size(), p.prefix) != 0) continue;
+        Texture* src = pool_texture(p.src_img ? S.img[kCompute][p.src & 15] : S.tex[kCompute][p.src & 63]);
+        Texture* dst = pool_texture(S.img[kCompute][p.dst & 15]);
+        if (!src || !dst || same_image(src, dst)) return true;
+        P_CopyTexTex c = {};
+        c.src = src;
+        c.dst = dst;
+        c.flags = NVN_COPY_FLAGS_LINEAR_FILTER_BIT;
+        char a[96], b[96];
+        TRACE("    pass copy: %s -> %s", tex_desc(src, a, sizeof a), tex_desc(dst, b, sizeof b));
+        if (first_time_key(("pass-copy-" + p.prefix).c_str()))
+            NXLOG_I(kTag, "pass copy: first copy for %s: %s -> %s", hash.c_str(), tex_desc(src, a, sizeof a), tex_desc(dst, b, sizeof b));
+        do_copy_texture_texture(c);
+        return true;
+    }
+    return false;
+}
+
 void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     const ShaderInfo* cs = S.stage[kCompute];
     TRACE("dispatch %u %u %u indirect %llx cs %s%s%s", x, y, z, static_cast<unsigned long long>(indirect), cs ? cs->hash.c_str() : "-",
@@ -4425,6 +4482,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
                   S.small.push_cs_stage, c.c0_ubos, c.c0_ssbos, c.c0_textures, c.c0_images, words.empty() ? "" : "; push words:", words.c_str());
         }
     }
+    if (pass_copy_dispatch(cs ? cs->hash : g_cs_missing)) return;   // [nvn] pass_copy
     if (upscaler_dispatch(cs ? cs->hash : g_cs_missing)) return;   // [nvn] upscaler_replace: the game's upscaler, replaced
     if (g_cs_pending) { note_pending_skip(true); return; }
     if (!cs) { if (!g_cs_missing.empty()) nxrt::gap("dispatch", "skipped: untranslated compute shader", g_cs_missing); return; }
