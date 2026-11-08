@@ -6,13 +6,13 @@
 #define NXRECOMP_FPEXACT_H
 
 /* x86 produces a negative quiet NaN for invalid operations, AArch64 a positive one. */
-static inline float fnan32(float r) {
+NX_HELPER float fnan32(float r) {
     uint32_t b;
     memcpy(&b, &r, 4);
     if (b == 0xffc00000u) { b = 0x7fc00000u; memcpy(&r, &b, 4); }
     return r;
 }
-static inline double fnan64(double r) {
+NX_HELPER double fnan64(double r) {
     uint64_t b;
     memcpy(&b, &r, 8);
     if (b == 0xfff8000000000000ull) { b = 0x7ff8000000000000ull; memcpy(&r, &b, 8); }
@@ -80,10 +80,10 @@ static inline uint64_t fp_rsqrte_bits(uint64_t bits, int dbl) {
     return ((uint64_t)rexp << fbits) | (est << (fbits - 8));
 }
 
-static inline float recpe_f(float x) { uint32_t b; memcpy(&b, &x, 4); b = (uint32_t)fp_recpe_bits(b, 0); memcpy(&x, &b, 4); return x; }
-static inline double recpe_d(double x) { uint64_t b; memcpy(&b, &x, 8); b = fp_recpe_bits(b, 1); memcpy(&x, &b, 8); return x; }
-static inline float rsqrte_f(float x) { uint32_t b; memcpy(&b, &x, 4); b = (uint32_t)fp_rsqrte_bits(b, 0); memcpy(&x, &b, 4); return x; }
-static inline double rsqrte_d(double x) { uint64_t b; memcpy(&b, &x, 8); b = fp_rsqrte_bits(b, 1); memcpy(&x, &b, 8); return x; }
+NX_HELPER float recpe_f(float x) { uint32_t b; memcpy(&b, &x, 4); b = (uint32_t)fp_recpe_bits(b, 0); memcpy(&x, &b, 4); return x; }
+NX_HELPER double recpe_d(double x) { uint64_t b; memcpy(&b, &x, 8); b = fp_recpe_bits(b, 1); memcpy(&x, &b, 8); return x; }
+NX_HELPER float rsqrte_f(float x) { uint32_t b; memcpy(&b, &x, 4); b = (uint32_t)fp_rsqrte_bits(b, 0); memcpy(&x, &b, 4); return x; }
+NX_HELPER double rsqrte_d(double x) { uint64_t b; memcpy(&b, &x, 8); b = fp_rsqrte_bits(b, 1); memcpy(&x, &b, 8); return x; }
 
 /* FCVT between half precision (IEEE binary16, FPCR.AHP = 0) and single / double: FPConvert of the Arm manual with
  * round-to-nearest-even and FPCR.DN = 0. A NaN keeps its sign and the top bits of its payload and becomes quiet
@@ -128,16 +128,16 @@ static inline uint64_t fp_from_half_bits(uint16_t h, int dbl) {
     } else e = exp - 15;
     return sign | ((uint64_t)(e + bias) << fbits) | (frac << (fbits - 10));
 }
-static inline uint16_t f32_to_half(float x) { uint32_t b; memcpy(&b, &x, 4); return fp_to_half_bits(b, 0); }
-static inline uint16_t f64_to_half(double x) { uint64_t b; memcpy(&b, &x, 8); return fp_to_half_bits(b, 1); }
-static inline float half_to_f32(uint16_t h) { uint32_t b = (uint32_t)fp_from_half_bits(h, 0); float x; memcpy(&x, &b, 4); return x; }
-static inline double half_to_f64(uint16_t h) { uint64_t b = fp_from_half_bits(h, 1); double x; memcpy(&x, &b, 8); return x; }
+NX_HELPER uint16_t f32_to_half(float x) { uint32_t b; memcpy(&b, &x, 4); return fp_to_half_bits(b, 0); }
+NX_HELPER uint16_t f64_to_half(double x) { uint64_t b; memcpy(&b, &x, 8); return fp_to_half_bits(b, 1); }
+NX_HELPER float half_to_f32(uint16_t h) { uint32_t b = (uint32_t)fp_from_half_bits(h, 0); float x; memcpy(&x, &b, 4); return x; }
+NX_HELPER double half_to_f64(uint16_t h) { uint64_t b = fp_from_half_bits(h, 1); double x; memcpy(&x, &b, 8); return x; }
 
 /* FMAX / FMIN / FMAXNM / FMINNM (FPMax, FPMin, FPMaxNum, FPMinNum of the Arm manual, FPCR.DN = 0), on bit patterns.
  * A signalling NaN operand wins (first operand first) and is returned quiet; then a quiet NaN (first operand first),
  * except that the NM forms return the other operand when exactly one operand is a quiet NaN and none is signalling.
  * +0 is greater than -0. The C library's fmax / fmin do neither. */
-static inline uint32_t fp_maxmin32_bits(uint32_t a, uint32_t b, int is_min, int num) {
+NX_HELPER uint32_t fp_maxmin32_bits(uint32_t a, uint32_t b, int is_min, int num) {
     int na = (a & 0x7fffffffu) > 0x7f800000u, nb = (b & 0x7fffffffu) > 0x7f800000u;
     if (na | nb) {
         int sa = na && !(a & 0x00400000u), sb = nb && !(b & 0x00400000u);
@@ -149,7 +149,7 @@ static inline uint32_t fp_maxmin32_bits(uint32_t a, uint32_t b, int is_min, int 
     memcpy(&fa, &a, 4); memcpy(&fb, &b, 4);
     return (is_min ? fa < fb : fa > fb) ? a : b;
 }
-static inline uint64_t fp_maxmin64_bits(uint64_t a, uint64_t b, int is_min, int num) {
+NX_HELPER uint64_t fp_maxmin64_bits(uint64_t a, uint64_t b, int is_min, int num) {
     int na = (a & 0x7fffffffffffffffull) > 0x7ff0000000000000ull, nb = (b & 0x7fffffffffffffffull) > 0x7ff0000000000000ull;
     if (na | nb) {
         int sa = na && !(a & 0x0008000000000000ull), sb = nb && !(b & 0x0008000000000000ull);
@@ -161,14 +161,14 @@ static inline uint64_t fp_maxmin64_bits(uint64_t a, uint64_t b, int is_min, int 
     memcpy(&fa, &a, 8); memcpy(&fb, &b, 8);
     return (is_min ? fa < fb : fa > fb) ? a : b;
 }
-static inline float fp_maxmin32(float x, float y, int is_min, int num) {
+NX_HELPER float fp_maxmin32(float x, float y, int is_min, int num) {
     uint32_t a, b;
     memcpy(&a, &x, 4); memcpy(&b, &y, 4);
     a = fp_maxmin32_bits(a, b, is_min, num);
     memcpy(&x, &a, 4);
     return x;
 }
-static inline double fp_maxmin64(double x, double y, int is_min, int num) {
+NX_HELPER double fp_maxmin64(double x, double y, int is_min, int num) {
     uint64_t a, b;
     memcpy(&a, &x, 8); memcpy(&b, &y, 8);
     a = fp_maxmin64_bits(a, b, is_min, num);
@@ -185,22 +185,22 @@ static inline double fp_maxmin64(double x, double y, int is_min, int num) {
 #define FP_QBIT32 0x00400000u
 #define FP_QBIT64 0x0008000000000000ull
 
-static inline uint32_t fp_bits32(float x) { uint32_t b; memcpy(&b, &x, 4); return b; }
-static inline float fp_from_bits32(uint32_t b) { float x; memcpy(&x, &b, 4); return x; }
-static inline uint64_t fp_bits64(double x) { uint64_t b; memcpy(&b, &x, 8); return b; }
-static inline double fp_from_bits64(uint64_t b) { double x; memcpy(&x, &b, 8); return x; }
+NX_HELPER uint32_t fp_bits32(float x) { uint32_t b; memcpy(&b, &x, 4); return b; }
+NX_HELPER float fp_from_bits32(uint32_t b) { float x; memcpy(&x, &b, 4); return x; }
+NX_HELPER uint64_t fp_bits64(double x) { uint64_t b; memcpy(&b, &x, 8); return b; }
+NX_HELPER double fp_from_bits64(uint64_t b) { double x; memcpy(&x, &b, 8); return x; }
 
-static inline int fp_nan32b(uint32_t b) { return (b & 0x7fffffffu) > 0x7f800000u; }
-static inline int fp_snan32b(uint32_t b) { return fp_nan32b(b) && !(b & FP_QBIT32); }
-static inline int fp_inf32b(uint32_t b) { return (b & 0x7fffffffu) == 0x7f800000u; }
-static inline int fp_zero32b(uint32_t b) { return (b & 0x7fffffffu) == 0; }
-static inline int fp_nan64b(uint64_t b) { return (b & 0x7fffffffffffffffull) > 0x7ff0000000000000ull; }
-static inline int fp_snan64b(uint64_t b) { return fp_nan64b(b) && !(b & FP_QBIT64); }
-static inline int fp_inf64b(uint64_t b) { return (b & 0x7fffffffffffffffull) == 0x7ff0000000000000ull; }
-static inline int fp_zero64b(uint64_t b) { return (b & 0x7fffffffffffffffull) == 0; }
+NX_HELPER int fp_nan32b(uint32_t b) { return (b & 0x7fffffffu) > 0x7f800000u; }
+NX_HELPER int fp_snan32b(uint32_t b) { return fp_nan32b(b) && !(b & FP_QBIT32); }
+NX_HELPER int fp_inf32b(uint32_t b) { return (b & 0x7fffffffu) == 0x7f800000u; }
+NX_HELPER int fp_zero32b(uint32_t b) { return (b & 0x7fffffffu) == 0; }
+NX_HELPER int fp_nan64b(uint64_t b) { return (b & 0x7fffffffffffffffull) > 0x7ff0000000000000ull; }
+NX_HELPER int fp_snan64b(uint64_t b) { return fp_nan64b(b) && !(b & FP_QBIT64); }
+NX_HELPER int fp_inf64b(uint64_t b) { return (b & 0x7fffffffffffffffull) == 0x7ff0000000000000ull; }
+NX_HELPER int fp_zero64b(uint64_t b) { return (b & 0x7fffffffffffffffull) == 0; }
 
 /* The NaN result for n operands (ARM order; unused operands are ignored). */
-static inline float fp_nan_result32(int n, float x0, float x1, float x2) {
+NX_COLD_HELPER float fp_nan_result32(int n, float x0, float x1, float x2) {
     uint32_t op[3] = { fp_bits32(x0), fp_bits32(x1), fp_bits32(x2) };
     uint32_t res = 0x7fc00000u;
     int i, found = 0;
@@ -208,7 +208,7 @@ static inline float fp_nan_result32(int n, float x0, float x1, float x2) {
     for (i = 0; i < n && !found; i++) if (fp_nan32b(op[i])) { res = op[i]; found = 1; }
     return fp_from_bits32(res);
 }
-static inline double fp_nan_result64(int n, double x0, double x1, double x2) {
+NX_COLD_HELPER double fp_nan_result64(int n, double x0, double x1, double x2) {
     uint64_t op[3] = { fp_bits64(x0), fp_bits64(x1), fp_bits64(x2) };
     uint64_t res = 0x7ff8000000000000ull;
     int i, found = 0;
@@ -217,50 +217,55 @@ static inline double fp_nan_result64(int n, double x0, double x1, double x2) {
     return fp_from_bits64(res);
 }
 
-static inline float fp_add32(float a, float b) { float r = a + b; return r == r ? r : fp_nan_result32(2, a, b, 0); }
-static inline float fp_sub32(float a, float b) { float r = a - b; return r == r ? r : fp_nan_result32(2, a, b, 0); }
-static inline float fp_mul32(float a, float b) { float r = a * b; return r == r ? r : fp_nan_result32(2, a, b, 0); }
-static inline float fp_div32(float a, float b) { float r = a / b; return r == r ? r : fp_nan_result32(2, a, b, 0); }
-static inline float fp_sqrt32(float a) { float r = sqrtf(a); return r == r ? r : fp_nan_result32(1, a, 0, 0); }
-static inline float fp_neg32(float a) { return fp_from_bits32(fp_bits32(a) ^ 0x80000000u); }
-static inline float fp_abs32(float a) { return fp_from_bits32(fp_bits32(a) & 0x7fffffffu); }
+NX_HELPER float fp_add32(float a, float b) { float r = a + b; return r == r ? r : fp_nan_result32(2, a, b, 0); }
+NX_HELPER float fp_sub32(float a, float b) { float r = a - b; return r == r ? r : fp_nan_result32(2, a, b, 0); }
+NX_HELPER float fp_mul32(float a, float b) { float r = a * b; return r == r ? r : fp_nan_result32(2, a, b, 0); }
+NX_HELPER float fp_div32(float a, float b) { float r = a / b; return r == r ? r : fp_nan_result32(2, a, b, 0); }
+NX_HELPER float fp_sqrt32(float a) { float r = sqrtf(a); return r == r ? r : fp_nan_result32(1, a, 0, 0); }
+NX_HELPER float fp_neg32(float a) { return fp_from_bits32(fp_bits32(a) ^ 0x80000000u); }
+NX_HELPER float fp_abs32(float a) { return fp_from_bits32(fp_bits32(a) & 0x7fffffffu); }
 
-static inline double fp_add64(double a, double b) { double r = a + b; return r == r ? r : fp_nan_result64(2, a, b, 0); }
-static inline double fp_sub64(double a, double b) { double r = a - b; return r == r ? r : fp_nan_result64(2, a, b, 0); }
-static inline double fp_mul64(double a, double b) { double r = a * b; return r == r ? r : fp_nan_result64(2, a, b, 0); }
-static inline double fp_div64(double a, double b) { double r = a / b; return r == r ? r : fp_nan_result64(2, a, b, 0); }
-static inline double fp_sqrt64(double a) { double r = sqrt(a); return r == r ? r : fp_nan_result64(1, a, 0, 0); }
-static inline double fp_neg64(double a) { return fp_from_bits64(fp_bits64(a) ^ 0x8000000000000000ull); }
-static inline double fp_abs64(double a) { return fp_from_bits64(fp_bits64(a) & 0x7fffffffffffffffull); }
+NX_HELPER double fp_add64(double a, double b) { double r = a + b; return r == r ? r : fp_nan_result64(2, a, b, 0); }
+NX_HELPER double fp_sub64(double a, double b) { double r = a - b; return r == r ? r : fp_nan_result64(2, a, b, 0); }
+NX_HELPER double fp_mul64(double a, double b) { double r = a * b; return r == r ? r : fp_nan_result64(2, a, b, 0); }
+NX_HELPER double fp_div64(double a, double b) { double r = a / b; return r == r ? r : fp_nan_result64(2, a, b, 0); }
+NX_HELPER double fp_sqrt64(double a) { double r = sqrt(a); return r == r ? r : fp_nan_result64(1, a, 0, 0); }
+NX_HELPER double fp_neg64(double a) { return fp_from_bits64(fp_bits64(a) ^ 0x8000000000000000ull); }
+NX_HELPER double fp_abs64(double a) { return fp_from_bits64(fp_bits64(a) & 0x7fffffffffffffffull); }
 
 /* Fused n * m + a. NaN order is addend, n, m (measured on Unicorn, not the order of the operands in the encoding). A quiet
  * NaN addend with an invalid product (inf * 0) gives the default NaN, not the addend. */
-static inline float fp_fma32(float n, float m, float a) {
-    float r = fmaf(n, m, a);
-    if (r == r) return r;
+NX_COLD_HELPER float fp_fma_nan32(float n, float m, float a) {
     uint32_t bn = fp_bits32(n), bm = fp_bits32(m), ba = fp_bits32(a);
     if (fp_nan32b(ba) && !fp_snan32b(ba) &&
         ((fp_inf32b(bn) && fp_zero32b(bm)) || (fp_zero32b(bn) && fp_inf32b(bm))))
         return fp_from_bits32(0x7fc00000u);
     return fp_nan_result32(3, a, n, m);       /* the addend has the first place (Unicorn, probed), then n, then m */
 }
-static inline double fp_fma64(double n, double m, double a) {
-    double r = fma(n, m, a);
-    if (r == r) return r;
+NX_COLD_HELPER double fp_fma_nan64(double n, double m, double a) {
     uint64_t bn = fp_bits64(n), bm = fp_bits64(m), ba = fp_bits64(a);
     if (fp_nan64b(ba) && !fp_snan64b(ba) &&
         ((fp_inf64b(bn) && fp_zero64b(bm)) || (fp_zero64b(bn) && fp_inf64b(bm))))
         return fp_from_bits64(0x7ff8000000000000ull);
     return fp_nan_result64(3, a, n, m);
 }
+/* With FMA3 (-march=x86-64-v3) fmaf / fma compile to one vfmadd, which rounds once like the Arm instruction. */
+NX_HELPER float fp_fma32(float n, float m, float a) {
+    float r = fmaf(n, m, a);
+    return r == r ? r : fp_fma_nan32(n, m, a);
+}
+NX_HELPER double fp_fma64(double n, double m, double a) {
+    double r = fma(n, m, a);
+    return r == r ? r : fp_fma_nan64(n, m, a);
+}
 
 /* FPRecipStepFused (FRECPS) and FPRecipSqrtStepFused (FRSQRTS): the inf * 0 cases are fixed values, else a fused step. */
-static inline float fp_recps32(float a, float b) {
+NX_HELPER float fp_recps32(float a, float b) {
     uint32_t ba = fp_bits32(a), bb = fp_bits32(b);
     if ((fp_inf32b(ba) && fp_zero32b(bb)) || (fp_zero32b(ba) && fp_inf32b(bb))) return 2.0f;
     return fp_fma32(fp_neg32(a), b, 2.0f);
 }
-static inline float fp_rsqrts32(float a, float b) {
+NX_HELPER float fp_rsqrts32(float a, float b) {
     uint32_t ba = fp_bits32(a), bb = fp_bits32(b);
     if ((fp_inf32b(ba) && fp_zero32b(bb)) || (fp_zero32b(ba) && fp_inf32b(bb))) return 1.5f;
     /* (3 - a*b) / 2, rounded once. Halving a normal operand is exact, so fold the / 2 into it: the fused multiply-add then
@@ -272,12 +277,12 @@ static inline float fp_rsqrts32(float a, float b) {
     }
     return fp_fma32(na, b, 3.0f) * 0.5f;
 }
-static inline double fp_recps64(double a, double b) {
+NX_HELPER double fp_recps64(double a, double b) {
     uint64_t ba = fp_bits64(a), bb = fp_bits64(b);
     if ((fp_inf64b(ba) && fp_zero64b(bb)) || (fp_zero64b(ba) && fp_inf64b(bb))) return 2.0;
     return fp_fma64(fp_neg64(a), b, 2.0);
 }
-static inline double fp_rsqrts64(double a, double b) {
+NX_HELPER double fp_rsqrts64(double a, double b) {
     uint64_t ba = fp_bits64(a), bb = fp_bits64(b);
     if ((fp_inf64b(ba) && fp_zero64b(bb)) || (fp_zero64b(ba) && fp_inf64b(bb))) return 1.5;
     double na = fp_neg64(a);
@@ -291,13 +296,13 @@ static inline double fp_rsqrts64(double a, double b) {
 /* FCVT between single and double (FPConvert, FPCR.DN = 0). A signalling NaN becomes quiet with its payload kept (the
  * top payload bits), sign kept. The host conversion does not quieten every such NaN (measured on Unicorn), so the NaN
  * case is done on the bit patterns. */
-static inline float fp_d2s(double x) {
+NX_HELPER float fp_d2s(double x) {
     uint64_t b = fp_bits64(x);
     if (fp_nan64b(b))
         return fp_from_bits32(((uint32_t)(b >> 32) & 0x80000000u) | 0x7f800000u | 0x00400000u | ((uint32_t)(b >> 29) & 0x3fffffu));
     return (float)x;
 }
-static inline double fp_s2d(float x) {
+NX_HELPER double fp_s2d(float x) {
     uint32_t b = fp_bits32(x);
     if (fp_nan32b(b))
         return fp_from_bits64(((uint64_t)(b & 0x80000000u) << 32) | 0x7ff0000000000000ull | FP_QBIT64 | ((uint64_t)(b & 0x3fffffu) << 29));
@@ -307,7 +312,7 @@ static inline double fp_s2d(float x) {
 /* FRINTx: mode 0 nearest-even (FRINTN, FRINTX, FRINTI in the default rounding mode), 1 nearest ties away (FRINTA),
  * 2 floor (FRINTM), 3 ceiling (FRINTP), 4 towards zero (FRINTZ). A quiet NaN stays; a signalling NaN is quietened
  * (payload and sign kept); the sign of a zero result is that of the operand. */
-static inline float fp_frint32(float x, int mode) {
+NX_HELPER float fp_frint32(float x, int mode) {
     uint32_t b = fp_bits32(x);
     if (fp_nan32b(b)) return fp_from_bits32(b | FP_QBIT32);
     switch (mode) {
@@ -318,7 +323,7 @@ static inline float fp_frint32(float x, int mode) {
     default: return rintf(x);
     }
 }
-static inline double fp_frint64(double x, int mode) {
+NX_HELPER double fp_frint64(double x, int mode) {
     uint64_t b = fp_bits64(x);
     if (fp_nan64b(b)) return fp_from_bits64(b | FP_QBIT64);
     switch (mode) {
