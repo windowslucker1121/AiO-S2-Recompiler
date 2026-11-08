@@ -2065,10 +2065,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (rd.Reg >= 255 && rd2.Reg >= 255) return;
             foreach (string m in i.Mods)
             {
-                if (m is not ("AOFFI" or "NODEP" or "EF" or "EL" or "LU" or "EU" or "NA")) throw Unsup($"modifier {m}");
+                if (m is not ("AOFFI" or "NODEP" or "EF" or "EL" or "LU" or "EU" or "NA" or "F16.RN")) throw Unsup($"modifier {m}");
             }
             if (rb == null) throw Unsup("missing Rb");
             bool aoffi = Has(i, "AOFFI");
+            bool f16 = Has(i, "F16.RN");   // as TEX .F16.RN: Rd = (c0, c1), Rd2 = (c2, c3) as fp16 pairs (no TXD.F16 seen in OoT yet)
             (SamplerType type, bool array) = DimOf(dim);
             int coords = (type & SamplerType.Mask) switch { SamplerType.Texture1D => 1, SamplerType.Texture2D => 2, _ => 3 };
             int a = ra.Reg, bReg = rb.Reg;
@@ -2099,7 +2100,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 flags |= TextureFlags.Offset;
             }
             SetBindingPair binding = ctx.ResourceManager.GetTextureOrImageBinding(Instruction.TextureSample, type, TextureFormat.Unknown, flags, CbufSlotOf(ctx, bank), handle);
-            ctx.TextureSample(type, flags, binding, mask, TexDests(rd, rd2, mask), sources.ToArray());
+            if (!f16)
+            {
+                ctx.TextureSample(type, flags, binding, mask, TexDests(rd, rd2, mask), sources.ToArray());
+                return;
+            }
+            IrOperand[] dests = new IrOperand[BitOperations.PopCount((uint)mask)];
+            for (int k = 0; k < dests.Length; k++) dests[k] = Local();
+            ctx.TextureSample(type, flags, binding, mask, dests, sources.ToArray());
+            IrOperand C(int k) => k < dests.Length ? dests[k] : ConstF(0);
+            if (rd.Reg < 255) ctx.Copy(Gpr(rd.Reg), ctx.PackHalf2x16(C(0), C(1)));
+            if (rd2.Reg < 255 && dests.Length > 2) ctx.Copy(Gpr(rd2.Reg), ctx.PackHalf2x16(C(2), C(3)));
         }
 
         static void EmitTmmlAmpere(EmitterContext ctx, SassInst i)
