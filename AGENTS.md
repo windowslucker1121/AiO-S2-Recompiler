@@ -405,6 +405,40 @@ second frame because some of its pages count as CPU-read; "draw storage/xfb" flu
 are newer in the copy but not armed (`mirror_fill` skips them as "have", `new_servable` wants them armed). The replay with
 `[capture] reset = 0` is useless for timing mesh draws: the culling counts accumulate loop to loop (fern draw 25 ms there).
 
+**Session 2026-11-08 (gmem lookup, translator): GPU draw time -3.7 ms per frame, fps unchanged.** The A17 pointer accesses
+(AmpereGlobal.cs) did, for every 32-bit word, a 16-slot search of the stage's bound storage descriptors and then a page walk with early
+exits. Now: (1) the search only runs over the slots the runtime marks in c[0] 0xfc0 + 4 * index (`AmpereGlobal.SlotMaskC0`; index 0
+compute, a graphics stage its descriptor base >> 8: vertex 1 ... fragment 5, task 6, mesh 7). `graphics_c0` (nvn_replay.cpp) marks a slot
+whose binding may differ from the pool: a result held in the device-local copy (out_overlaps) or a virtual pool; compute marks every slot
+(shadows). Most draws have mask 0 and go straight to the page table. (2) The walk is one loop without early exits and remembers the last
+leaf (page or 2 MiB span) per invocation in a Private array (`gmem_page_cache`, cleared at main's entry), so the four words of an LDG.128
+and the fields of one record walk once. NVIDIA 610.88's compiler crashed (access violation in nvoglv64.dll, pipeline build) on the first
+form of the cache, a cache test branching over the old walk loop whose exits jumped to the miss label: keep the walk free of early exits.
+Measured (first scene, `[prof] gpu_draws`, ms per frame, before -> after): fern mesh draw fs 957527e8 / mesh fbb731e2 2.43 -> 0.90,
+a5bfd19f 0.58 -> 0.31, 40953571 0.51 -> 0.29, 301aa659 0.47 -> 0.24, 76b1c776 0.46 -> 0.26, b8b873e5 0.44 -> 0.22, a873d795 0.34 -> 0.19;
+6ec65625 / f3054ac2 unchanged (~0.85: their slots are marked); sum of all draw stamps 14.6 -> 10.9. fps 20-100 s after the scene: 34.0
+-> 33.5 (pf6; same within the spread), so the frame is not bound by draw time alone (render thread ~23 ms, main waits ~25 ms in
+nvnSyncWait; next: find what serializes them). Picture: replay of capture 20261107-144949-a10-deku old vs new cache SSIM 0.998 (fern
+close-up), Deku Tree capture (crowns) 0.998. Tried and dropped: trying the page table before the bound descriptors for every access (fast,
+but then a pointer read of a bound buffer whose result is held in the copy reads the stale pool, and flushing those results for every
+pointer reader cost 450,000 flushes in 200 s: 19-27 fps); the search first with the cached walk after it (fern 1.23 ms).
+**The whole gpt set is re-translated in `work\shaders\oot\spirv`** (3,413 corpus blocks; the 23 `gpt` rows of blocks not in the corpus
+were deleted, so the on-demand translator redoes them; list in `work\shaders\gpt_backup_old\dropped_rows.txt`; the old .spv files and
+results.tsv are in `work\shaders\gpt_backup_old`). Every pipeline with one of these shaders builds again on demand (14-70 s each, the
+"Preparing shaders" overlay counts them) until **the full shader preparation runs again (due; the user runs it at the very end of the
+project)**. `prepare.state`'s key changed with results.tsv, so the default run's start opens the "Preparing shaders" window by itself.
+Re-translating a subset now: `tools\.venv\Scripts\python -I tools\shaders\scripts\retranslate_subset.py --corpus work\shaders\oot\corpus
+--cache work\shaders\oot\spirv (--token gpt | --hashes FILE | PREFIX ...) [--backup DIR]` (temporary subset and output folders, removed
+when done; `--keep-temp` keeps them).
+Copy-backs, measured and dropped the same day: splitting results that are still guarded from an earlier frame (so the eight culling
+buffers no longer go back whole every second frame: end-of-submission copies 6.6 -> 3.3 GB per 10 s) raised the GPU-reader flushes
+(9,800 -> 14,800 per 10 s, each before a draw or dispatch) and cost fps (33.5 -> 24.5): the bulk copy at submission end is cheaper than
+holding these results. `[nvn] compute_out_lazy = 0` (everything back at submission end): 29.5 fps. The remaining copy-back cost is the
+"draw storage/xfb" flushes (~410 MB/s, ~8 per frame, `fill failed` = pages newer in the copy but not armed); fixing them needs the copies
+before the render pass opens (look ahead in the command list), not inside it.
+Measuring tips: give `[prof] trace_events` 20000000 for runs past ~110 s (the default 6M fills up); per-10-s fps from the log: hitch lines `N frames in X s`.
+`gfx_nvn_scene_state`: passed in every full test run of this session (no flake seen).
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass

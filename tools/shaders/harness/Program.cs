@@ -280,7 +280,7 @@ namespace SpirvHarness
                 AmpereProgram prog = null;
                 try
                 {
-                    AmpereGlobal.Begin(NoGlobalFallback ? null : StaticGpuAccessor.GlobalFallbackWords(ctrl));   // A17: untraceable global accesses
+                    AmpereGlobal.Begin(NoGlobalFallback ? null : StaticGpuAccessor.GlobalFallbackWords(ctrl), compute);   // A17: untraceable global accesses
                     TranslatorContext tctx = AmpereTranslator.CreateContext(gpu, options, insts, out prog, mesh);
                     ShaderProgram sp = tctx.Translate();
                     if (prog.Unsupported.Count == 0)

@@ -2142,6 +2142,9 @@ constexpr size_t kPoolTableC0 = 0xff8;
 // The guest page table (nvn_gpu_pool.cpp page_table_words; AmpereGlobal.EmitPageWalk), for shaders with the "gpt" token: c[0] 0xfe0 the level
 // shifts, 0xfe4 the root entry count, 0xfe8 the table's device address. The sorted import table above only for older translations (no "gpt").
 constexpr size_t kPageTableC0 = 0xfe0;
+// One u32 per stage (AmpereGlobal.SlotMaskC0): bit k = storage descriptor slot k is checked before the page table. Index 0 compute, a graphics
+// stage (storage_c0_base(stage) >> 8) & 7.
+constexpr size_t kGmemSlotMaskC0 = 0xfc0;
 void pool_table_words(uint8_t* c0, bool old_table) {
     {
         uint32_t w[2] = {0, 0};
@@ -2200,6 +2203,11 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_tabl
     for (int i = 0; i < c.c0_ssbos; ++i) desc(i < 16 ? &S.ssbo[kCompute][i] : nullptr);
     for (int i = 0; i < c.c0_textures; ++i, off += 8) put64(i < 64 ? S.tex[kCompute][i] : 0);
     for (int i = 0; i < c.c0_images; ++i, off += 8) put64(i < 16 ? S.img[kCompute][i] : 0);
+    if (n >= kPoolTableC0 + 8 && off <= kGmemSlotMaskC0) {
+        // compute: every bound storage descriptor before the page table (compute shadows and virtual pools are bound, not in the table)
+        const uint32_t all = ~0u;
+        std::memcpy(p + kGmemSlotMaskC0, &all, 4);
+    }
     if (n >= kPoolTableC0 + 8 && off <= kPageTableC0) pool_table_words(p, old_table);
     return true;
 }
@@ -2228,6 +2236,18 @@ bool graphics_c0(VkDescriptorBufferInfo& bi, bool old_table) {
     }
     std::memcpy(u.ptr, consts, static_cast<size_t>(kGraphicsC0Bytes));
     static const int kStagesWithStorage[] = {kVertex, kTessCtl, kTessEval, kGeometry, kFragment, kTask, kMesh};
+    // The slots a pointer shader checks before the page table (AmpereGlobal.SlotMaskC0): those whose binding may differ from the pool, a
+    // result held in the copy (build_set binds the copy then) or a virtual pool (not in the table). Others go straight to the table.
+    uint32_t mask_of[kStages] = {};
+    for (int st : kStagesWithStorage) {
+        if (!S.stage[st] || !S.stage[st]->refl.global_fallback) continue;
+        for (int k = 0; k < 16; ++k) {
+            const GState::Bind& b = S.ssbo[st][k];
+            if (!b.addr) continue;
+            const PoolHit hit = pool_lookup(b.addr);
+            if (!hit.pool || hit.pool->is_virtual || !hit.pool->base || out_overlaps(b.addr, b.size ? b.size : 1)) mask_of[st] |= 1u << k;
+        }
+    }
     for (int st : kStagesWithStorage) {
         const int base = storage_c0_base(st);
         for (int k = 0; k < 16; ++k) {
@@ -2237,6 +2257,7 @@ bool graphics_c0(VkDescriptorBufferInfo& bi, bool old_table) {
             std::memcpy(u.ptr + base + 0x10 * k, &addr, 8);
             std::memcpy(u.ptr + base + 0x10 * k + 8, &size, 4);
         }
+        std::memcpy(u.ptr + kGmemSlotMaskC0 + 4 * ((base >> 8) & 7), &mask_of[st], 4);
     }
     pool_table_words(u.ptr, old_table);
     uint64_t h = 1469598103934665603ull;

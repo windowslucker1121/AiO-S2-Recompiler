@@ -2,11 +2,19 @@ Ryujinx shader translator: when a global address is the sum of two constant-buff
 second one, so "c[1][0x20] + c[0][0x40]" (an offset from the shader's constant data plus the storage descriptor) became a
 storage buffer bound from c[1]. A c[0] (driver reserved) addend is now preferred over one from another bank. The Ryujinx
 code in the context lines is MIT.
-Also: an access no descriptor can be traced for checks every storage descriptor of the stage at run time (AmpereGlobal.cs; the Lichii emulator's fallback) instead of being dropped.
+Also: an access no descriptor can be traced for is resolved at run time instead of being dropped: the storage descriptors of the stage the runtime marks (the Lichii emulator's fallback), then the guest page table (AmpereGlobal.cs).
 
 --- a/Translation/Optimizations/GlobalToStorage.cs
 +++ b/Translation/Optimizations/GlobalToStorage.cs
-@@ -224,7 +224,7 @@
+@@ -214,6 +214,7 @@
+             TargetLanguage targetLanguage)
+         {
+             GtsContext gtsContext = new(hfm);
++            AmpereGlobal.NoteFunction(blocks);   // main's entry block: where the fallback's page cache is cleared (AmpereGlobal.cs)
+ 
+             foreach (BasicBlock block in blocks)
+             {
+@@ -224,7 +225,7 @@
                          continue;
                      }
  
@@ -15,7 +23,7 @@ Also: an access no descriptor can be traced for checks every storage descriptor 
                      {
                          LinkedListNode<INode> nextNode = ReplaceGlobalMemoryWithStorage(
                              gtsContext,
-@@ -653,6 +653,16 @@
+@@ -653,6 +654,16 @@
  
              targetCbs.Sort();
  
@@ -32,18 +40,20 @@ Also: an access no descriptor can be traced for checks every storage descriptor 
              if (targetCbs.Count == 0)
              {
                  gpuAccessor.Log($"Failed to find storage buffer for global memory operation \"{operation.Inst}\".");
-@@ -678,6 +688,10 @@
- 
+@@ -679,6 +690,12 @@
              Operand globalAddressLow = Argument(0);
              Operand globalAddressHigh = Argument(1);
+ 
++            bool returnsValue = operation.Dest != null;
 +
-+            // The fallback's candidates are searched in a loop first (AmpereGlobal.cs: the drivers inline this function at every access)
++            // The fallback's candidates: the bound descriptors the runtime marks (AmpereGlobal.SlotMaskC0) are searched in a loop first
 +            Operand fallbackHit = viaFallback ? AmpereGlobal.EmitCandidateSearch(context, resourceManager.GetConstantBufferBinding(0)) : null;
 +            int targetIndex = 0;
- 
++
              foreach (uint targetCb in targetCbs)
              {
-@@ -687,6 +701,13 @@
+                 (int sbCbSlot, int sbCbOffset) = UnpackCbSlotAndOffset(targetCb);
+@@ -687,6 +704,13 @@
                  Operand baseAddrHigh = Cbuf(sbCbSlot, sbCbOffset + 1);
                  Operand size = Cbuf(sbCbSlot, sbCbOffset + 2);
  
@@ -57,7 +67,7 @@ Also: an access no descriptor can be traced for checks every storage descriptor 
                  Operand offset = context.ISubtract(globalAddressLow, baseAddrLow);
                  Operand borrow = context.ICompareLessUnsigned(globalAddressLow, baseAddrLow);
  
-@@ -696,7 +717,9 @@
+@@ -696,7 +720,9 @@
  
                  Operand inRangeHigh = context.ICompareEqual(addrHighBorrowed, baseAddrHigh);
  
@@ -68,17 +78,18 @@ Also: an access no descriptor can be traced for checks every storage descriptor 
  
                  Operand lblSkip = Label();
                  context.BranchIfFalse(lblSkip, inRange);
-@@ -750,6 +773,9 @@
+@@ -749,7 +775,9 @@
+                 context.MarkLabel(lblSkip);
              }
  
-             bool returnsValue = operation.Dest != null;
+-            bool returnsValue = operation.Dest != null;
 +
-+            // No bound storage buffer holds the address: the pool address table and a device address pointer (AmpereGlobal.cs, A17)
-+            if (viaFallback) AmpereGlobal.EmitDeviceAddressAccess(context, operation.Inst, operation.StorageKind, inArgumentsCount, returnsValue);
++            // No marked bound storage buffer holds the address: the guest page table and a device address pointer (AmpereGlobal.cs, A17)
++            if (viaFallback) AmpereGlobal.EmitDeviceAddressAccess(context, resourceManager, operation.Inst, operation.StorageKind, inArgumentsCount, returnsValue);
  
              if (returnsValue)
              {
-@@ -1046,6 +1072,14 @@
+@@ -1046,6 +1074,14 @@
              // because constant buffer are always encoded as the second operand,
              // so the second operand will always be the one from the last instruction.
  
