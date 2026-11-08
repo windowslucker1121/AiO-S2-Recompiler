@@ -728,7 +728,7 @@ void end_pass(bool to_pass = false) {
 // A frame's main submission (OoT: ~13,000 draws) used to reach the GPU only when all of it was recorded, so recording and GPU execution of
 // it ran one after the other. With chunks, what is recorded so far goes to the GPU (frame_chunk, no wait) whenever enough draws and
 // dispatches have been recorded since the last part, at a point where no render pass is open: between passes (ensure_pass) or between
-// commands outside a pass (run_list). [nvn] submit_chunk_pass_draws additionally ends a long pass for it (the pass then goes on with
+// commands outside a pass (run_list). [nvn] submit_chunk_pass_draws (default 256) additionally ends a long pass for it (the pass then goes on with
 // LOAD). Only command-buffer state is reset afterwards; barriers owed to earlier work stay owed (a barrier also orders against work
 // submitted before it), and the submission's serial still signals at its very end. 0 = off.
 struct ChunkCfg { uint32_t draws = 0, pass_draws = 0; uint64_t ns = 0; };
@@ -736,7 +736,7 @@ const ChunkCfg& chunk_cfg() {
     static const ChunkCfg c = [] {
         ChunkCfg k;
         k.draws = static_cast<uint32_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "submit_chunk_draws", 256), 0, 1 << 20));
-        k.pass_draws = static_cast<uint32_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "submit_chunk_pass_draws", 0), 0, 1 << 20));
+        k.pass_draws = static_cast<uint32_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "submit_chunk_pass_draws", 256), 0, 1 << 20));
         k.ns = static_cast<uint64_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "submit_chunk_us", 0), 0, 1000000)) * 1000;
         if (k.draws || k.pass_draws)
             NXLOG_I("nvn.replay", "submission chunks: every %u draws/dispatches between passes, %u inside a pass, %llu us", k.draws, k.pass_draws,
