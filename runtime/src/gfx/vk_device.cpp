@@ -1101,7 +1101,11 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
         static std::atomic<uint64_t> n_dl{0}, n_sys{0}, b_dl{0}, b_sys{0};
         (dl ? n_dl : n_sys).fetch_add(1);
         (dl ? b_dl : b_sys).fetch_add(size);
-        if (logged.load() < 6 || (size >= (8u << 20) && logged.load() < 40)) {
+        static std::atomic<int> logged_big{0};
+        if (size >= (16u << 20) && logged_big.fetch_add(1) < 16) {   // info: the big ones (the guest page table, 32 MiB) say where they went
+            NXLOG_I("vk", "host-visible buffer %s: %llu KiB in %s memory (memory type flags 0x%x)", name ? name : "?", static_cast<unsigned long long>(size >> 10),
+                    dl ? "device-local (resizable BAR)" : "system", static_cast<unsigned>(mp));
+        } else if (logged.load() < 6 || (size >= (8u << 20) && logged.load() < 40)) {
             logged.fetch_add(1);
             NXLOG_D("vk", "host-visible buffer %s: %llu KiB in %s memory (flags 0x%x); so far %llu in device-local (%llu MiB), %llu in system memory (%llu MiB)", name ? name : "?",
                     static_cast<unsigned long long>(size >> 10), dl ? "device-local" : "system", static_cast<unsigned>(mp), static_cast<unsigned long long>(n_dl.load()),

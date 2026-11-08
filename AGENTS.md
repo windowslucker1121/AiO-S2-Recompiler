@@ -602,6 +602,27 @@ game exe had stale sccache objects (bugcapture/kernel_sync segfaults); `ninja -t
 fixed it (all 172 pass). A sccache server another worktree started can point at a deleted worktree's clang-cl: set `SCCACHE_SERVER_PORT`
 to a free port for your own builds.
 
+**Session 2026-11-08 (D1-P: checks, compute-out lock, interval index).** Checks (RTX 4080, logs of this branch): (1) the guest page
+table (`pt::g_buf`, 32 MiB, MemoryUse::Upload) lives in **device-local host-visible memory (resizable BAR, type flags 0x7)**: vulkaninfo
+shows type 4 DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT on the 15.7 GiB VRAM heap, and the new info line `vk: host-visible buffer nvn guest
+page table ... device-local (resizable BAR)` confirms it; moving it was not needed (D2's VRAM-leaf idea has nothing to gain from the table's
+placement itself). (2) **No draws run on linked pipelines** once the cache is warm: `nvn.pipe: pipeline binds over 10.0 s: 0 of linked
+pipelines, 120-200k of whole ones` (first scene). (3) The game's nvnSyncWait waits on **queue fence syncs** (nvnQueueFenceSync), 2.0
+submissions behind the newest, ~220 of ~320 calls per 10 s actually wait; its window acquire syncs are always signaled already
+(`nvn: nvnSyncWait over 10 s on ...` lines). Changes: `out_fetch` submits and waits with the compute-out lock free (`[nvn]
+out_fetch_unlocked`; entries marked fetching, found again by id; neutral in fps: guard faults are rare now, the render thread's lock waits
+were < 0.01 ms per frame both ways). **Interval index** (`[nvn] out_index`): the held-result overlap questions (~17 M per 10 s in Link's
+house, ~35 entries) are answered from sorted merged page intervals rebuilt when their version moves (~45k rebuilds / 10 s, ~0.2-0.4 ms per
+frame), plus per-op page dedupe and a no-overlap cache for the pointer windows in `gmem_before_op` (~60% hits). Paired windows (`[nvn]
+out_index_ab = 300`, 854x480): Link's house 47.5 -> 51.8 fps, render-thread replay 20.5 -> 17.9 ms, 1% low 34.4 -> 34.8; Kokiri outside
+21.2 -> 23.8 fps, median frame 46.6 -> 36.4 ms (1% low 15.7 -> 14.7); first scene 50-260 s 26.5 -> 28.9 fps, replay 35.3 -> 29.1 ms, and in
+its heavy late part (~1500 draws more per frame) 15.8 -> 18.0 fps. These scenes were render-thread bound in these runs (Kokiri outside R
+~45 ms at 22 fps, lower than earlier sessions' Kokiri walk: another view). Measuring: `[nvn] out_index_ab` / `out_fetch_ab` write one `ab
+window` line per window (fps, 1% low, median, replay/idle ms, sync waits, lock waits); the capture replay does not exercise held results
+(0 entries even with `compute_out_lazy = 1`), so in-game screenshots across on/off windows were compared (SSIM as within a window).
+Pitfalls: the `kill` of the MCP CLI refuses a run another CLI process started unless `force=true` (a run kept going for minutes); several
+agents share the scratchpad and one cleanup deleted its subfolders: keep scripts in a git-ignored folder of your worktree (`work\`).
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass

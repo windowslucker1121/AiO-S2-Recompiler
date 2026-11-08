@@ -65,8 +65,26 @@ struct GfxEntry {
     VkPipeline second = VK_NULL_HANDLE;
     VkPipeline alt = VK_NULL_HANDLE;                 // measurement only ([nvn] gpl_ab): the optimised pipeline, kept next to the linked one
     std::shared_ptr<PipeUpgrade> up;
+    bool linked = false;                             // second came from pipeline library parts (gpl_link) and was not replaced by a whole one yet
 };
 std::unordered_map<uint64_t, std::vector<GfxEntry>> g_gfx;
+// Statistics (render thread): pipeline look-ups that returned a linked vs a whole pipeline, logged every 10 s (linked_pipeline_log).
+uint64_t g_lk_linked = 0, g_lk_whole = 0, g_lk_upgraded = 0;
+void linked_pipeline_log() {
+    static auto last = std::chrono::steady_clock::now();
+    static uint64_t p_l = 0, p_w = 0;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(10)) return;
+    const double s = std::chrono::duration<double>(now - last).count();
+    last = now;
+    size_t live_linked = 0, live = 0;
+    for (const auto& kv : g_gfx)
+        for (const GfxEntry& e : kv.second) { ++live; live_linked += e.linked ? 1 : 0; }
+    NXLOG_I(kTag, "pipeline binds over %.1f s: %llu of linked pipelines, %llu of whole ones; %zu of %zu graphics pipelines are still linked (%llu replaced so far)", s,
+            static_cast<unsigned long long>(g_lk_linked - p_l), static_cast<unsigned long long>(g_lk_whole - p_w), live_linked, live,
+            static_cast<unsigned long long>(g_lk_upgraded));
+    p_l = g_lk_linked; p_w = g_lk_whole;
+}
 std::map<std::pair<const ShaderInfo*, VkPipelineLayout>, VkPipeline> g_compute;
 VkPipelineCache g_cache = VK_NULL_HANDLE;
 bool g_cache_tried = false;
@@ -878,8 +896,14 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     for (auto& e : bucket)
         if (e.first == key) {
             counters().pipeline_cache_hits.fetch_add(1, std::memory_order_relaxed);
-            if (e.up && e.up->state.load(std::memory_order_acquire) != 0) gpl_take_upgrade(e.second, e.alt, e.up);
-            if (e.alt && gpl_ab_whole()) return e.alt;
+            if (e.up && e.up->state.load(std::memory_order_acquire) != 0) {
+                const VkPipeline before = e.second;
+                gpl_take_upgrade(e.second, e.alt, e.up);
+                if (e.second != before && e.linked) { e.linked = false; ++g_lk_upgraded; }
+            }
+            linked_pipeline_log();
+            if (e.alt && gpl_ab_whole()) { ++g_lk_whole; return e.alt; }
+            ++(e.linked ? g_lk_linked : g_lk_whole);
             return e.second;
         }
     prewarm_init();
@@ -924,7 +948,7 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     g_gfx_keys.add(1);                           // every path below adds one entry to the bucket
     if (pipe) {
         ++g_pipeline_count;
-        bucket.push_back({key, pipe, VK_NULL_HANDLE, up});
+        bucket.push_back({key, pipe, VK_NULL_HANDLE, up, true});
         return pipe;
     }
     if (pending) {                               // (rare) parts gone missing between the check and the link: skipped until the whole pipeline is in

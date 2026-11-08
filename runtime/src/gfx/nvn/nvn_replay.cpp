@@ -1871,6 +1871,16 @@ void gmem_before_op(bool compute) {
     uint64_t seen[kGmemMaxPointers];
     int n = 0;
     bool full = false;
+    // every page a reader asked about in this op, matched or not (open addressing; a full table only stops remembering)
+    uint64_t asked[512];
+    std::memset(asked, 0, sizeof asked);
+    auto asked_before = [&](uint64_t page) {
+        for (uint32_t h = static_cast<uint32_t>((page >> 12) * 0x9E3779B1u) >> 23, k = 0; k < 16; ++k, h = (h + 1) & 511) {
+            if (asked[h] == page) return true;
+            if (!asked[h]) { asked[h] = page; return false; }
+        }
+        return false;
+    };
     for (int st = 0; st < kStages && !full; ++st) {
         if ((st == kCompute) != compute) continue;
         const ShaderInfo* s = S.stage[st];
@@ -1905,7 +1915,8 @@ void gmem_before_op(bool compute) {
                 for (int i = 0; i < n && !dup; ++i) dup = seen[i] == page;
                 if (dup) continue;
                 if (!w_st) {   // a reader: only results held there matter
-                    if (out_overlaps(page, kGmemWindow)) {
+                    if (asked_before(page)) continue;
+                    if (out_overlaps_window(page, kGmemWindow)) {
                         if (n == kGmemMaxPointers) { full = true; break; }
                         seen[n++] = page;
                         compute_out_guard(page, kGmemWindow, kOutGlobal);
