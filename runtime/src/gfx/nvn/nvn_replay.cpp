@@ -37,6 +37,7 @@
 #include "nvn_mask_clear.h"
 #include "nvn_capture.h"
 #include "nvn_gpu_internal.h"
+#include "nvn_arch_exp.h"
 #include "nvn_tess_gen.h"
 #include "nxrt/lowlat.h"
 #include "nxrt/gaps.h"
@@ -2423,6 +2424,7 @@ void pool_table_words(uint8_t* c0, bool old_table) {
         std::memcpy(c0 + kPageTableC0, w, 8);
         std::memcpy(c0 + kPageTableC0 + 8, &a, 8);
     }
+    if (!old_table && archexp::gmem_window_on()) archexp::gmem_window_words(c0 + 0xff0);   // E3 (measurement only)
     if (!old_table) return;
     static Frame* frame = nullptr;
     static uint64_t gen = ~0ull, addr = 0;
@@ -2527,7 +2529,8 @@ bool graphics_c0(VkDescriptorBufferInfo& bi, bool old_table) {
             std::memcpy(u.ptr + base + 0x10 * k, &addr, 8);
             std::memcpy(u.ptr + base + 0x10 * k + 8, &size, 4);
         }
-        std::memcpy(u.ptr + kGmemSlotMaskC0 + 4 * ((base >> 8) & 7), &mask_of[st], 4);
+        const uint32_t smask = archexp::gmem_no_slots() ? 0u : mask_of[st];   // E3: [nvn] exp_gmem_no_slots (measurement only)
+        std::memcpy(u.ptr + kGmemSlotMaskC0 + 4 * ((base >> 8) & 7), &smask, 4);
     }
     pool_table_words(u.ptr, old_table);
     uint64_t h = 1469598103934665603ull;
@@ -5799,6 +5802,7 @@ void replay_begin_submit(Frame& f) {
         g_pass_unsafe = false;
         mirror_begin_submit(f, on);
     }
+    if (archexp::gmem_window_on()) archexp::gmem_window_refresh(f);   // E3 (measurement only)
     S.window_origin = window_origin_mode();
     S.depth_mode = depth_mode();
     g_draw_idx = 0;

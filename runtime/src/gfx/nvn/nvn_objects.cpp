@@ -3,7 +3,12 @@
 #include <algorithm>
 #include <map>
 #include <shared_mutex>
+#include <string>
+#include <vector>
 
+#include <windows.h>
+
+#include "nxrt/config.h"
 #include "nxrt/gauge.h"
 #include "nvn_core.h"
 
@@ -42,6 +47,40 @@ struct PoolGauges {
     ~PoolGauges() { nxrt::gauge_unregister("nvn.pool_registry"); }
 };
 PoolGauges g_pool_gauges;
+
+// [nvn] pool_lookup_snapshot (D3, bet 1.3 step 1): pool_lookup without the registry lock. Every register / unregister publishes an immutable
+// sorted snapshot (bases, ends, pools); lookups load it with one acquire and search it, starting from the thread's last hit. Old snapshots are
+// freed two seconds after they were replaced (a lookup holds one for microseconds). The registry lock was 8.5% of the render thread's busy
+// samples (first scene, 2026-11-08), most of it the shared lock's cache-line traffic with the game's threads. on (default) | off | ab (paired
+// windows with [nvn] d3_ab, measurement only). First scene, d3_ab = 300, 11 pairs of ~7 s windows: on 35.0 / off 33.1 fps, paired median +1.9 fps.
+struct PoolSnap {
+    std::vector<uint64_t> base, end;
+    std::vector<MemoryPool*> pool;
+};
+std::atomic<const PoolSnap*> g_snap{nullptr};
+std::vector<std::pair<const PoolSnap*, ULONGLONG>> g_retired;   // g_pool_mu held exclusive
+void publish_snapshot() {                                          // g_pool_mu held exclusive
+    auto* s = new PoolSnap();
+    s->base.reserve(g_pools.size()); s->end.reserve(g_pools.size()); s->pool.reserve(g_pools.size());
+    for (auto& [b, p] : g_pools) { s->base.push_back(b); s->end.push_back(b + p->size); s->pool.push_back(p); }
+    const ULONGLONG now = GetTickCount64();
+    if (const PoolSnap* old = g_snap.exchange(s, std::memory_order_acq_rel)) g_retired.emplace_back(old, now);
+    size_t keep = 0;
+    for (auto& r : g_retired) { if (now - r.second > 2000) delete r.first; else g_retired[keep++] = r; }
+    g_retired.resize(keep);
+}
+thread_local const PoolSnap* tl_snap = nullptr;
+thread_local size_t tl_idx = 0;
+PoolHit lookup_snapshot(const PoolSnap* s, uint64_t a) {
+    if (tl_snap == s && tl_idx < s->base.size() && a >= s->base[tl_idx] && a < s->end[tl_idx]) return {s->pool[tl_idx], a - s->base[tl_idx]};
+    const auto it = std::upper_bound(s->base.begin(), s->base.end(), a);
+    if (it == s->base.begin()) return {};
+    const size_t i = static_cast<size_t>(it - s->base.begin()) - 1;
+    if (a >= s->end[i]) return {};
+    tl_snap = s;
+    tl_idx = i;
+    return {s->pool[i], a - s->base[i]};
+}
 }  // namespace
 
 std::atomic<uint64_t> g_pool_gen{0};
@@ -49,6 +88,7 @@ std::atomic<uint64_t> g_pool_gen{0};
 void pool_register(MemoryPool* p) {
     std::unique_lock<std::shared_mutex> lk(g_pool_mu);
     g_pools[p->gpu_base] = p;
+    publish_snapshot();
     g_pool_gen.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -58,6 +98,7 @@ void pool_unregister(MemoryPool* p) {
     std::unique_lock<std::shared_mutex> lk(g_pool_mu);
     auto it = g_pools.find(p->gpu_base);
     if (it != g_pools.end() && it->second == p) g_pools.erase(it);
+    publish_snapshot();
     g_pool_gen.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -66,7 +107,21 @@ void pool_collect(std::vector<Ref<MemoryPool>>& out) {
     for (auto& [base, p] : g_pools) out.push_back(Ref<MemoryPool>::share(p));
 }
 
+std::atomic<int> g_pool_snapshot_ab{1};   // [nvn] pool_lookup_snapshot = ab: the d3_ab window (nvn_arch_exp.cpp) sets it
+
+int pool_snapshot_mode() {   // 0 off, 1 on, 2 ab
+    static const int m = [] {
+        const std::string v = config_get_str("nvn", "pool_lookup_snapshot", "on");
+        return v == "off" || v == "0" ? 0 : v == "ab" ? 2 : 1;
+    }();
+    return m;
+}
+
 PoolHit pool_lookup(uint64_t gpu_address) {
+    const int mode = pool_snapshot_mode();
+    if (mode == 1 || (mode == 2 && g_pool_snapshot_ab.load(std::memory_order_relaxed))) {
+        if (const PoolSnap* s = g_snap.load(std::memory_order_acquire)) return lookup_snapshot(s, gpu_address);
+    }
     std::shared_lock<std::shared_mutex> lk(g_pool_mu);
     auto it = g_pools.upper_bound(gpu_address);
     if (it == g_pools.begin()) return {};
