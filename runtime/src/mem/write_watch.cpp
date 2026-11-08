@@ -168,6 +168,16 @@ bool release_page(Region* r, uint64_t page) {
         DWORD was = 0;
         if (!VirtualProtect(reinterpret_cast<void*>(addr), kPage, PAGE_READWRITE, &was)) {
             ok = false;
+        } else if ((was & 0xff) == PAGE_NOACCESS && test(r->guard.get(), page)) {
+            // guard() took the page between this fault's guard check (guarded_at, false then) and the shared lock: the page is ours and
+            // guarded now. It goes back to what guard() left (prot bit set again, no access) and the write retries: its next fault finds
+            // the guard, and the owner makes the page current first. Letting the fault through crashed the game ("unhandled write fault
+            // ... prot 0 valid 0 guard 1", a write into a compute input page) and left a guarded page without its prot bit.
+            DWORD tmp = 0;
+            VirtualProtect(reinterpret_cast<void*>(addr), kPage, was, &tmp);
+            r->prot[w].fetch_or(b, std::memory_order_acq_rel);
+            rel.fetch_sub(1, std::memory_order_seq_cst);
+            return true;
         } else if ((was & 0xff) != PAGE_READONLY) {    // somebody else set this protection: give it back and let the fault through
             DWORD tmp = 0;
             VirtualProtect(reinterpret_cast<void*>(addr), kPage, was, &tmp);
