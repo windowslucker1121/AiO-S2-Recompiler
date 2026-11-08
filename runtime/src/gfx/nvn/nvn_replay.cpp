@@ -140,9 +140,28 @@ bool g_prog_writes = false;     // the bound program has storage buffer or stora
 bool g_mirror_stale = false;    // a GPU write made pages of a pool copy stale while a draw was being set up: bind again at the next draw
 
 uint32_t g_pass_draws = 0;      // draws recorded in the open pass (GPU pass profiler)
+// Draws per render pass size since the last statistics line: the size with the most draws is the game's internal render size (dynamic
+// resolution; logged with the statistics so fps measurements can be compared at equal sizes).
+std::unordered_map<uint64_t, uint64_t> g_pass_size_draws;
 uint64_t g_pass_verts = 0;      // vertices (indices for indexed draws) times instances of those draws
 Frame* F = nullptr;
 std::unordered_map<uint64_t, VkDescriptorSet> g_set_cache;
+uint64_t g_desc_epoch = 1;      // the resolve epoch of [nvn] set_reuse (bind_sets): moves whenever a binding could resolve differently
+enum BumpWhy { kBumpOp, kBumpWrite, kBumpPass, kBumpSubmit, kBumpWhyN };
+uint64_t g_bump_n[kBumpWhyN] = {};   // statistics: epoch moves by cause
+void desc_epoch_bump(BumpWhy why) { ++g_desc_epoch; ++g_bump_n[why]; }
+uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program changes (out_draw_bindings)
+// [nvn] cpuperf_ab = N: submission chunks, set reuse and the skipped draw buffer checks are off in even windows of N presents and on (as
+// configured) in odd ones, marked cpuperf.on / cpuperf.off in the frame trace: paired fps windows of one run (measurement only).
+bool g_cpu_ab_on = true;
+enum class SetReuse { Off, On, Verify };
+SetReuse set_reuse_mode() {
+    static const SetReuse m = [] {
+        const std::string v = nxrt::config_get_str("nvn", "set_reuse", "on");
+        return v == "verify" ? SetReuse::Verify : (v == "off" || v == "0" || v == "false") ? SetReuse::Off : SetReuse::On;
+    }();
+    return m;
+}
 VkPipeline g_bound_pipeline = VK_NULL_HANDLE;
 UploadAlloc g_support;
 UploadAlloc g_draw_support;     // the support buffer the next descriptor sets bind: g_support, or one with render scales (support_for_draw)
@@ -222,13 +241,18 @@ UpdRange* upd_find(uint64_t addr, uint64_t size) {
 
 bool serial_settled(uint64_t serial) { return serial <= completed_serial() || serial <= poll_completed(); }
 
-void upd_note_gpu_write(uint64_t addr, uint64_t size) {
-    if (g_upd.empty() || !size || addr >= g_upd_hi || addr + size <= g_upd_lo) return;
+// True when a range's state changed (it was not yet marked written by this submission).
+bool upd_note_gpu_write(uint64_t addr, uint64_t size) {
+    if (g_upd.empty() || !size || addr >= g_upd_hi || addr + size <= g_upd_lo) return false;
+    bool changed = false;
     for (auto it = g_upd.upper_bound(addr + size - 1); it != g_upd.begin();) {
         --it;
         if (it->second.hi <= addr) break;
-        it->second.gpu_write_serial = F ? F->serial : UINT64_MAX;
+        const uint64_t s = F ? F->serial : UINT64_MAX;
+        changed |= it->second.gpu_write_serial != s;
+        it->second.gpu_write_serial = s;
     }
+    return changed;
 }
 
 // Makes [lo, hi) an update range (merging the ones it overlaps).
@@ -310,10 +334,12 @@ UploadAlloc ubo_snapshot(uint64_t addr, uint64_t n, VkDeviceSize align) {
 }
 
 void gpu_wrote(uint64_t addr, uint64_t size, int use) {
-    upd_note_gpu_write(addr, size);
+    // [nvn] set_reuse: a write changes how bindings resolve only when it makes copied pages stale or marks an update range written
+    if (upd_note_gpu_write(addr, size)) desc_epoch_bump(kBumpWrite);
     note_gw(addr, size);
     capture::note_gpu_write(addr, size);
     if (note_gpu_write(addr, size, use)) {
+        desc_epoch_bump(kBumpWrite);
         g_dirty |= kVb | kDesc;
         g_mirror_stale = true;
     }
@@ -631,6 +657,7 @@ void end_pass(bool to_pass = false) {
     }
     vkCmdEndRendering(F->cb);
     P.open = false;
+    if (g_pass_draws) g_pass_size_draws[(uint64_t{P.extent.width} << 32) | P.extent.height] += g_pass_draws;
     occ_flush_pending();
     if (g_occ_pool && g_occ_want) occ_reset_ahead();
     if (gpass_on()) {
@@ -657,6 +684,61 @@ void end_pass(bool to_pass = false) {
     g_pass_unsafe = false;
     g_bound_pipeline = VK_NULL_HANDLE;
     g_dirty = kAllDirty;
+}
+
+// ---- submission chunks ([nvn] submit_chunk_draws) ------------------------------------------------------------------------------------
+// A frame's main submission (OoT: ~13,000 draws) used to reach the GPU only when all of it was recorded, so recording and GPU execution of
+// it ran one after the other. With chunks, what is recorded so far goes to the GPU (frame_chunk, no wait) whenever enough draws and
+// dispatches have been recorded since the last part, at a point where no render pass is open: between passes (ensure_pass) or between
+// commands outside a pass (run_list). [nvn] submit_chunk_pass_draws additionally ends a long pass for it (the pass then goes on with
+// LOAD). Only command-buffer state is reset afterwards; barriers owed to earlier work stay owed (a barrier also orders against work
+// submitted before it), and the submission's serial still signals at its very end. 0 = off.
+struct ChunkCfg { uint32_t draws = 0, pass_draws = 0; uint64_t ns = 0; };
+const ChunkCfg& chunk_cfg() {
+    static const ChunkCfg c = [] {
+        ChunkCfg k;
+        k.draws = static_cast<uint32_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "submit_chunk_draws", 256), 0, 1 << 20));
+        k.pass_draws = static_cast<uint32_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "submit_chunk_pass_draws", 0), 0, 1 << 20));
+        k.ns = static_cast<uint64_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "submit_chunk_us", 0), 0, 1000000)) * 1000;
+        if (k.draws || k.pass_draws)
+            NXLOG_I("nvn.replay", "submission chunks: every %u draws/dispatches between passes, %u inside a pass, %llu us", k.draws, k.pass_draws,
+                    static_cast<unsigned long long>(k.ns / 1000));
+        return k;
+    }();
+    return c;
+}
+uint32_t g_chunk_work = 0;    // draws and dispatches recorded since the submission began or the last chunk
+uint64_t g_chunk_t0 = 0;      // ft::now_ns() then
+
+bool chunk_due(uint32_t threshold) {
+    if (!threshold || !g_chunk_work || !g_cpu_ab_on) return false;
+    if (g_chunk_work >= threshold) return true;
+    const ChunkCfg& c = chunk_cfg();
+    return c.ns && ft::now_ns() - g_chunk_t0 >= c.ns;
+}
+
+// No pass open: sends the recorded part to the GPU. Skipped while a query is active (it cannot span command buffers) or stream-out runs.
+void chunk_now() {
+    if (!F || P.open || g_occ_active >= 0 || g_cw[0].active >= 0 || g_cw[1].active >= 0 || g_xfb_began) return;
+    if (!frame_chunk(*F)) return;
+    g_bound_pipeline = VK_NULL_HANDLE;   // a new command buffer: nothing bound, no dynamic state
+    g_dirty = kAllDirty;
+    g_topo = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
+    g_restart_valid = false;
+    g_vb_bound_in_cb = false;
+    g_chunk_work = 0;
+    g_chunk_t0 = ft::now_ns();
+}
+
+// Between two commands of a list.
+void chunk_at_op() {
+    const ChunkCfg& c = chunk_cfg();
+    if (!P.open) {
+        if (chunk_due(c.draws)) chunk_now();
+    } else if (chunk_due(c.pass_draws)) {
+        end_pass(true);
+        chunk_now();
+    }
 }
 
 // A pass is about to use `t` as an attachment in `layout`. An earlier pass that ended without a barrier wrote it, and no layout change
@@ -728,6 +810,7 @@ float attach_targets(bool fix) {
 bool ensure_pass(bool depth_ro = false) {
     if (P.open && targets_match() && P.depth_ro == depth_ro) return true;
     end_pass(true);
+    if (chunk_due(chunk_cfg().draws)) chunk_now();
     if (!g_pending.empty()) {
         bool conflict = false;
         for (uint32_t i = 0; i < S.ncolor && !conflict; ++i) conflict = pending_conflict(S.color_tex[i].get(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -825,6 +908,7 @@ bool ensure_pass(bool depth_ro = false) {
     if (g_occ_want) occ_reset_ahead();          // outside the pass still: a slot for the counter's part in it
     vkCmdBeginRendering(F->cb, &ri);
     P.open = true;
+    desc_epoch_bump(kBumpPass);     // attachments, layouts and feedback changed: sets resolve anew
     if (g_occ_want) occ_begin_in_pass();
     counters().passes.fetch_add(1, std::memory_order_relaxed);
     g_bound_pipeline = VK_NULL_HANDLE;
@@ -1845,8 +1929,13 @@ void gmem_before_op(bool compute) {
     }
 }
 
-// The reads of a draw's bound buffers (out_before_op).
+// The reads of a draw's bound buffers (out_before_op). About 80 bindings per draw, each a look-up among the held results under a lock: when
+// no buffer binding and no program changed (g_buf_ver) and nothing moved the resolve epoch or sent results back since the last check (the
+// same conditions as [nvn] set_reuse), the check would find what it found then, so it is skipped ([nvn] set_reuse = off checks every draw).
+uint64_t g_odb_ver = ~0ull, g_odb_epoch = 0, g_odb_skipped = 0;
 void out_draw_bindings() {
+    const bool memo = set_reuse_mode() != SetReuse::Off && g_cpu_ab_on;
+    if (memo && g_odb_ver == g_buf_ver && g_odb_epoch == g_desc_epoch * 0x100000001b3ull + out_bytes_total()) { ++g_odb_skipped; return; }
     for (const GState::Bind& b : S.vtx) out_draw_read(b.addr, b.size, true, kOutDrawBuffer);
     const VkDeviceSize ualign = device().properties().limits.minUniformBufferOffsetAlignment;
     for (int st = 0; st < kStages; ++st) {
@@ -1855,6 +1944,8 @@ void out_draw_bindings() {
         for (const GState::Bind& b : S.ssbo[st]) out_draw_read(b.addr, b.size, true, kOutStorageXfb);   // bound from the copy (build_set)
     }
     for (const GState::Bind& b : S.xfb) out_draw_read(b.addr, b.size, false, kOutStorageXfb);
+    g_odb_ver = g_buf_ver;   // taken after the checks: a result they sent back moved out_bytes_total already
+    g_odb_epoch = g_desc_epoch * 0x100000001b3ull + out_bytes_total();
 }
 
 const uint8_t* cpu_view(uint64_t addr, uint64_t size);   // below
@@ -2292,12 +2383,17 @@ bool compute_c0(const ShaderInfo& s, VkDescriptorBufferInfo& bi) {
     return true;
 }
 
+uint64_t g_sets_built = 0, g_sets_cached = 0;   // statistics: descriptor sets resolved, of them found in this submission's cache
 VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
-    std::vector<VkWriteDescriptorSet> writes;
-    std::vector<VkDescriptorBufferInfo> binfo;
-    std::vector<VkDescriptorImageInfo> iinfo;
-    std::vector<VkBufferView> tinfo;
+    // Scratch arrays kept across calls (render thread only; nothing here calls build_set again): about one set per draw, and allocating
+    // them each time was a tenth of the render thread. Reserved to the binding count first, so the pointers into them stay valid.
+    static std::vector<VkWriteDescriptorSet> writes;
+    static std::vector<VkDescriptorBufferInfo> binfo;
+    static std::vector<VkDescriptorImageInfo> iinfo;
+    static std::vector<VkBufferView> tinfo;
+    writes.clear(); binfo.clear(); iinfo.clear(); tinfo.clear();
     const size_t nb = pl.bindings.size();
+    writes.reserve(nb);
     binfo.reserve(nb);
     iinfo.reserve(nb);
     tinfo.reserve(nb);
@@ -2424,7 +2520,8 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                                 bi.offset = hb.offset;
                                 if (writes) {
                                     gpu_wrote(bind.addr, bi.range, kWriteStorage);
-                                    out_add(bind.addr, bi.range, hb.buffer, hb.offset, br);   // what the draw writes there is held like a dispatch's
+                                    out_add(bind.addr, bi.range, hb.buffer, hb.offset, br);
+                                    desc_epoch_bump(kBumpWrite);   // the held result may have grown: readers resolve anew   // what the draw writes there is held like a dispatch's
                                 }
                                 break;
                             }
@@ -2592,8 +2689,9 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
         }
         writes.push_back(w);
     }
+    ++g_sets_built;
     auto it = g_set_cache.find(key);
-    if (it != g_set_cache.end()) return it->second;
+    if (it != g_set_cache.end()) { ++g_sets_cached; return it->second; }
     VkDescriptorSet ds = F->alloc_set(pl.sets[set]);
     if (!ds) return VK_NULL_HANDLE;
     for (auto& w : writes) w.dstSet = ds;
@@ -2669,10 +2767,120 @@ void support_for_draw(const ProgLayout& pl, bool compute) {
     g_draw_support = u;
 }
 
+// ---- descriptor set reuse ([nvn] set_reuse) ---------------------------------------------------------------------------------------
+// build_set resolves every binding of a set (pool lookups, held results, mirror state, texture views) before it can look the set up in
+// g_set_cache, and OoT binds the same resources again for most draws. Graphics sets that only read get a signature of their raw inputs
+// (the GState words their bindings read, the texture handles, the support buffer); with the same signature and nothing changed since the
+// signature was taken, the set built then is bound again without any resolve. "Nothing changed" is the resolve epoch: it moves with every
+// command other than state binds and draws (copies, dispatches, uniform updates, barriers, ...), every new pass (attachments, layouts,
+// feedback), every GPU write the replay notes, texture state changes (g_tex_state_gen) and compute results going back (out_bytes_total).
+// Sets with bindings the shader writes, the A17 graphics c[0] table, feedback or 3D copies, the scene upscaler and traces always resolve.
+// `verify`: resolve anyway and log a set that differs from the reused one (diagnosis).
+
+// Per program layout: which of its four sets may be reused (bit n = set n), worked out once.
+std::unordered_map<const ProgLayout*, uint8_t> g_reuse_masks;   // cleared at replay shutdown (layouts are freed with the pipelines)
+uint8_t set_reuse_mask(const ProgLayout& pl) {
+    auto it = g_reuse_masks.find(&pl);
+    if (it != g_reuse_masks.end()) return it->second;
+    uint8_t ok = 0xf;
+    for (const BindingDesc& d : pl.bindings) {
+        const DescriptorBinding& b = d.shader->refl.bindings[d.index];
+        bool bad = false;
+        switch (d.type) {
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+                if (b.nvn.source == NvnSource::DriverConstants) bad = d.shader->refl.global_fallback;     // graphics_c0: per draw
+                else if (b.nvn.source == NvnSource::StorageBuffer) bad = b.written || d.shader->refl.global_fallback || !ssbo_readonly_on();
+                else bad = b.nvn.source != NvnSource::SupportBuffer && b.nvn.source != NvnSource::ConstantData && b.nvn.source != NvnSource::UniformBlock;
+                break;
+            case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+                bad = !texture_source(b.nvn.source);
+                break;
+            default: bad = true; break;   // storage images and storage texel buffers are written
+        }
+        if (bad && d.set < 4) ok &= static_cast<uint8_t>(~(1u << d.set));
+    }
+    g_reuse_masks.emplace(&pl, ok);
+    return ok;
+}
+
+// The signature of set `set` of `pl`: everything its bindings read before resolving.
+uint64_t set_signature(const ProgLayout& pl, uint32_t set) {
+    uint64_t key = 0x9e3779b97f4a7c15ull ^ (reinterpret_cast<uint64_t>(pl.layout) * 31 + set);
+    auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+    mix(reinterpret_cast<uint64_t>(&pl));   // two programs may share a pipeline layout but read other state
+    mix(reinterpret_cast<uint64_t>(g_draw_support.buffer)); mix(g_draw_support.offset);
+    mix(reinterpret_cast<uint64_t>(S.tpool.get())); mix(reinterpret_cast<uint64_t>(S.spool.get()));
+    for (const BindingDesc& d : pl.bindings) {
+        if (d.set != set) continue;
+        const DescriptorBinding& b = d.shader->refl.bindings[d.index];
+        mix(d.binding);
+        switch (b.nvn.source) {
+            case NvnSource::UniformBlock:
+                if (b.nvn.index >= 0 && b.nvn.index < 16) {
+                    const GState::Bind& u = S.ubo[d.nvn_stage][b.nvn.index];
+                    mix(u.addr); mix(u.size);
+                    if (const UpdRange* ur = u.addr ? upd_find(u.addr, u.size ? u.size : 65536) : nullptr) mix(ur->gen);   // a record-time update: a new snapshot
+                }
+                break;
+            case NvnSource::StorageBuffer: {
+                const int slot = b.nvn.index >= 0 ? b.nvn.index : storage_slot_for(d.nvn_stage, b.nvn.c0_offset);
+                if (slot >= 0 && slot < 16) { mix(S.ssbo[d.nvn_stage][slot].addr); mix(S.ssbo[d.nvn_stage][slot].size); }
+                break;
+            }
+            case NvnSource::SamplerBinding:
+                if (b.nvn.index >= 0 && b.nvn.index < 64) mix(S.tex[d.nvn_stage][b.nvn.index]);
+                break;
+            case NvnSource::HandleInUniform: mix(read_handle_word(d.nvn_stage, b.nvn.bank, b.nvn.word)); break;
+            case NvnSource::HandleExpr: mix(eval_handle_expr(d, b.nvn.expr)); break;
+            default: break;   // support buffer, constant data, driver constants: fixed (or in the signature above)
+        }
+    }
+    return key;
+}
+
+std::unordered_map<uint64_t, VkDescriptorSet> g_set_memo;   // signature -> set, valid for g_set_memo_epoch
+uint64_t g_set_memo_epoch = 0;
+uint64_t g_sets_reused = 0, g_sets_verify_bad = 0;          // statistics
+
 void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
+    const SetReuse mode = bp == VK_PIPELINE_BIND_POINT_GRAPHICS && g_cpu_ab_on ? set_reuse_mode() : SetReuse::Off;
+    uint8_t reusable = 0;
+    if (mode != SetReuse::Off && g_fb_use.empty() && g_vol3d_use.empty() && !g_su_view && !g_trace &&
+        !nxrt::gfx::tuning().ufs_hash.load(std::memory_order_relaxed) && !extras::temporal_wanted()) {
+        reusable = set_reuse_mask(pl);
+        const uint64_t epoch = g_desc_epoch * 0x100000001b3ull ^ g_tex_state_gen.load(std::memory_order_relaxed) * 0x9e3779b97f4a7c15ull ^ out_bytes_total();
+        if (epoch != g_set_memo_epoch) {
+            g_set_memo.clear();
+            g_set_memo_epoch = epoch;
+        }
+    }
     for (uint32_t set = 0; set < 4; ++set) {
         if (!pl.has_set[set]) continue;
-        VkDescriptorSet ds = build_set(pl, set);
+        VkDescriptorSet ds = VK_NULL_HANDLE;
+        uint64_t sig = 0;
+        if (reusable & (1u << set)) {
+            sig = set_signature(pl, set);
+            auto it = g_set_memo.find(sig);
+            if (it != g_set_memo.end()) {
+                ds = it->second;
+                ++g_sets_reused;
+                if (mode == SetReuse::Verify) {
+                    const VkDescriptorSet fresh = build_set(pl, set);
+                    if (fresh != ds) {
+                        ++g_sets_verify_bad;
+                        if (g_sets_verify_bad < 20 || (g_sets_verify_bad & 1023) == 0)
+                            NXLOG_W(kTag, "set_reuse verify: set %u of vs %s fs %s differs from the reused one (%llu so far)", set,
+                                    S.stage[kVertex] ? S.stage[kVertex]->hash.c_str() : "-", S.stage[kFragment] ? S.stage[kFragment]->hash.c_str() : "-",
+                                    static_cast<unsigned long long>(g_sets_verify_bad));
+                        ds = fresh;
+                    }
+                }
+            }
+        }
+        if (!ds) {
+            ds = build_set(pl, set);
+            if (ds && (reusable & (1u << set))) g_set_memo[sig] = ds;
+        }
         if (ds) vkCmdBindDescriptorSets(F->cb, bp, pl.layout, set, 1, &ds, 0, nullptr);
     }
     for (const PoolBinding& pb : pl.pool) {   // A7: the pool arrays' persistent sets
@@ -3394,6 +3602,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             g_vb_bound_in_cb = true;
         }
     }
+    ++g_chunk_work;
     g_dirty = g_mirror_stale ? (kVb | kDesc) : 0;     // a storage buffer of this draw made copied pages stale: the next draw binds again
     g_mirror_stale = false;
     *topo_out = topo;
@@ -4131,6 +4340,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     }
     shadows_after_dispatch();
     memory_barrier(F->cb);
+    ++g_chunk_work;
     if (g_trace) {
         // [nvn] trace_snap_after = "4c1e8564:796bc6d880+256,796bc82000+64": in a traced frame, after each dispatch of a compute program whose
         // hash starts with the prefix, the given guest ranges as the GPU holds them (the pool buffer behind each address; a held or shadow copy
@@ -4808,26 +5018,52 @@ void do_submit_device_commands(const P_SubmitDeviceCommands& p, int depth) {
     run_list(tmp, depth + 1);
 }
 
+// [nvn] set_reuse: commands after which every binding resolves as before (state binds, draws, counters, debug labels). Anything else
+// (copies, clears, dispatches, uniform updates, barriers, render target changes, ...) moves the resolve epoch. GPU writes of draws move it
+// through gpu_wrote.
+bool op_keeps_sets(Op op) {
+    switch (op) {
+        case Op::Nop: case Op::BindProgram: case Op::BindBuffers: case Op::BindTextures: case Op::BindImages: case Op::BindVertexAttribs:
+        case Op::BindVertexStreams: case Op::BindBlend: case Op::BindColor: case Op::BindChannelMask: case Op::BindDepthStencil: case Op::BindPolygon:
+        case Op::BindMultisample: case Op::SetTexturePool: case Op::SetSamplerPool: case Op::SetViewports: case Op::SetScissors: case Op::SetDepthRanges:
+        case Op::SetDepthBounds: case Op::SetStencil: case Op::SetBlendColor: case Op::SetPointSize: case Op::SetLineWidth: case Op::SetPolygonOffsetClamp:
+        case Op::SetAlphaRef: case Op::SetSampleMask: case Op::SetRasterizerDiscard: case Op::SetDepthClamp: case Op::SetPrimitiveRestart:
+        case Op::SetPatchSize: case Op::SetTessLevels: case Op::SetRenderEnable: case Op::SetCoverageModulationTable: case Op::SetConservativeRaster:
+        case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: case Op::DrawMeshTasks: case Op::ReportCounter: case Op::ResetCounter:
+        case Op::PushDebugGroup: case Op::PopDebugGroup: case Op::Small: case Op::CallCommands:
+        case Op::UpdateUniformBuffer:   // at record time: the snapshot generation is in the signature; recorded as a GPU write: bumped there
+            return true;
+        default:
+            return false;
+    }
+}
+
 void run_list(const CmdList& list, int depth) {
     if (depth > kMaxDepth) { log_once("depth", "CallCommands nesting too deep"); return; }
     counters().lists_replayed.fetch_add(1, std::memory_order_relaxed);
     for (RecordReader r(list); r.next();) {
+        chunk_at_op();
+        if (!op_keeps_sets(r.op())) desc_epoch_bump(kBumpOp);
         mark_dirty(r);
         if (out_lazy()) out_before_op(r);                                                   // compute shadows: results back to the pool first
         else if (out_any() && !compute_out_may_wait(r.op())) flush_compute_out(kOutOther);
         switch (r.op()) {
             case Op::Nop: break;
-            case Op::BindProgram: apply_bind_program(r.payload<P_BindProgram>()); break;
+            case Op::BindProgram: apply_bind_program(r.payload<P_BindProgram>()); ++g_buf_ver; break;
             case Op::BindBuffers: {
                 const auto& p = r.payload<P_BindBuffers>();
                 const NVNbufferRange* rg = reinterpret_cast<const NVNbufferRange*>(r.blob<P_BindBuffers>());
+                // set: a binding that changes moves g_buf_ver (out_draw_bindings skips its checks while it and the resolve epoch stay)
+                auto set = [](GState::Bind& b, uint64_t addr, uint64_t size) {
+                    if (b.addr != addr || b.size != size) { b = {addr, size}; ++g_buf_ver; }
+                };
                 for (uint32_t i = 0; i < p.count; ++i) {
                     const uint32_t k = p.first + i;
-                    if (p.kind == kBufVertex && k < 16) S.vtx[k] = {rg[i].address, rg[i].size};
+                    if (p.kind == kBufVertex && k < 16) set(S.vtx[k], rg[i].address, rg[i].size);
                     // a uniform or storage buffer in a virtual (sparse) pool is bound through the physical memory mapped there (physical_buffer_address)
-                    else if (p.kind == kBufUniform && p.stage < kStages && k < 16) S.ubo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
-                    else if (p.kind == kBufStorage && p.stage < kStages && k < 16) S.ssbo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
-                    else if (p.kind == kBufXfb && k < 4) S.xfb[k] = {rg[i].address, rg[i].size};
+                    else if (p.kind == kBufUniform && p.stage < kStages && k < 16) set(S.ubo[p.stage][k], physical_buffer_address(rg[i].address, rg[i].size), rg[i].size);
+                    else if (p.kind == kBufStorage && p.stage < kStages && k < 16) set(S.ssbo[p.stage][k], physical_buffer_address(rg[i].address, rg[i].size), rg[i].size);
+                    else if (p.kind == kBufXfb && k < 4) set(S.xfb[k], rg[i].address, rg[i].size);
                 }
                 break;
             }
@@ -5019,8 +5255,10 @@ void run_list(const CmdList& list, int depth) {
                 const auto& p = r.payload<P_UpdateUniformBuffer>();
                 const uint8_t* data = r.blob<P_UpdateUniformBuffer>();
                 const uint32_t n = static_cast<uint32_t>(p.size & ~3ull);
-                if (n && !ubo_update_cpu(p.address, p.buffer_size, static_cast<uint64_t>(p.offset), data, n))
+                if (n && !ubo_update_cpu(p.address, p.buffer_size, static_cast<uint64_t>(p.offset), data, n)) {
+                    desc_epoch_bump(kBumpOp);   // recorded as a GPU write
                     do_write_memory(p.address + static_cast<uint64_t>(p.offset), data, n);
+                }
                 else if (n)
                     g_dirty |= kDesc;   // the uniform bindings of the range get the new snapshot
                 break;
@@ -5350,6 +5588,12 @@ void replay_begin_submit(Frame& f) {
         static int last_on = -1;
         bool on = true;
         if (ab > 0) on = ((counters().presents.load() / static_cast<uint64_t>(ab)) & 1) != 0;
+        static const int64_t cab = config_get_int("nvn", "cpuperf_ab", 0);
+        if (cab > 0) {
+            const bool con = ((counters().presents.load() / static_cast<uint64_t>(cab)) & 1) != 0;
+            if (con != g_cpu_ab_on) ft::mark(con ? "cpuperf.on" : "cpuperf.off", static_cast<uint32_t>(counters().presents.load()));
+            g_cpu_ab_on = con;
+        }
         if (static_cast<int>(on) != last_on) {
             last_on = on ? 1 : 0;
             if (ab > 0) ft::mark(on ? "gpuperf.on" : "gpuperf.off", static_cast<uint32_t>(counters().presents.load()));
@@ -5363,6 +5607,9 @@ void replay_begin_submit(Frame& f) {
     S.window_origin = window_origin_mode();
     S.depth_mode = depth_mode();
     g_draw_idx = 0;
+    g_chunk_work = 0;
+    desc_epoch_bump(kBumpSubmit);     // the sets of earlier submissions came from other slots' pools
+    g_chunk_t0 = ft::now_ns();
     P = Pass();
     g_set_cache.clear();
     g_bound_pipeline = VK_NULL_HANDLE;
@@ -5396,6 +5643,23 @@ void replay_begin_submit(Frame& f) {
                     (unsigned long long)(g_dr_fail_bytes[1] >> 10), (unsigned long long)g_dr_fail[2], (unsigned long long)(g_dr_fail_bytes[2] >> 10));
             NXLOG_I(kTag, "occlusion reports: %llu in their pass, %llu with a pass break; %llu queries ended early by a pass break (split)",
                     (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
+            NXLOG_I(kTag, "submissions: %llu, parts sent ahead while recording (submit_chunk_draws): %llu; draw buffer checks skipped %llu; descriptor sets resolved %llu, %llu of them already in the submission's cache; %llu bound again without resolving (set_reuse), %llu differed (verify); resolve epoch moves: commands %llu, GPU writes %llu, passes %llu",
+                    (unsigned long long)counters().submits.load(), (unsigned long long)counters().submit_chunks.load(), (unsigned long long)g_odb_skipped, (unsigned long long)g_sets_built, (unsigned long long)g_sets_cached,
+                    (unsigned long long)g_sets_reused, (unsigned long long)g_sets_verify_bad, (unsigned long long)g_bump_n[kBumpOp],
+                    (unsigned long long)g_bump_n[kBumpWrite], (unsigned long long)g_bump_n[kBumpPass]);
+            {   // the three pass sizes with the most draws
+                std::vector<std::pair<uint64_t, uint64_t>> v(g_pass_size_draws.begin(), g_pass_size_draws.end());
+                std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+                std::string s;
+                for (size_t i = 0; i < v.size() && i < 3; ++i) {
+                    char b[64];
+                    std::snprintf(b, sizeof b, "%s%ux%u (%llu draws)", i ? ", " : "", static_cast<unsigned>(v[i].first >> 32), static_cast<unsigned>(v[i].first & 0xffffffffu),
+                                  static_cast<unsigned long long>(v[i].second));
+                    s += b;
+                }
+                NXLOG_I(kTag, "render size: pass sizes with the most draws since the last line: %s", s.c_str());
+                g_pass_size_draws.clear();
+            }
         }
     }
     g_draw_support = UploadAlloc();
@@ -5511,6 +5775,8 @@ void replay_shutdown() {
     g_mask.shutdown();
     g_mask_ready = false;
     pool_sets_reset();
+    g_reuse_masks.clear();
+    g_set_memo.clear();
     pipeline_shutdown();
     S = GState();
     P = Pass();

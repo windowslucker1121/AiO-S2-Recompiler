@@ -593,10 +593,11 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
     record(f);
     checkpoint(f, "submission end");
     if (g->gpool) gpass_stamp(f, "tail", 0);
-    if (g->qpool) vkCmdWriteTimestamp(s.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->qpool, qi + 1);
-    vkEndCommandBuffer(s.cb);
+    // f.cb, not s.cb: frame_split / frame_chunk may have moved the recording on to another command buffer of the slot
+    if (g->qpool) vkCmdWriteTimestamp(f.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->qpool, qi + 1);
+    vkEndCommandBuffer(f.cb);
     VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
-    cbi.commandBuffer = s.cb;
+    cbi.commandBuffer = f.cb;
     VkSemaphoreSubmitInfo sig = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     sig.semaphore = g->timeline;
     sig.value = serial;
@@ -684,6 +685,51 @@ bool frame_split(Frame& f) {
     vkBeginCommandBuffer(next, &bi);
     f.cb = next;
     g->ctr.submits.fetch_add(1);
+    return r == VK_SUCCESS;
+}
+
+// [nvn] submit_chunk_draws: the part of the submission recorded so far goes to the GPU now, without waiting for it and without a timeline
+// signal, and the recording goes on in a fresh command buffer of the slot (same serial). The GPU then runs a long submission while the rest
+// of it is still being recorded. The serial's signal at the end of the last part covers every earlier part (a signal operation's first
+// synchronization scope is all work submitted before it on the queue). Render thread only; the caller has ended its render pass and its
+// queries and treats everything bound in the old command buffer as unbound.
+bool frame_chunk(Frame& f) {
+    if (!g || !f.slot || f.cb == VK_NULL_HANDLE) return false;
+    NXFT("replay.chunk");
+    Slot& s = *static_cast<Slot*>(f.slot);
+    VkDevice dev = g->dev->device();
+    if (s.split_used == s.split_cbs.size()) {
+        VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        ai.commandPool = s.pool;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ai.commandBufferCount = 1;
+        VkCommandBuffer nb = VK_NULL_HANDLE;
+        if (vkAllocateCommandBuffers(dev, &ai, &nb) != VK_SUCCESS) return false;
+        vk_gauge_command_buffers().add(1);
+        s.split_cbs.push_back(nb);
+    }
+    VkCommandBuffer next = s.split_cbs[s.split_used++];
+    vkEndCommandBuffer(f.cb);
+    VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    cbi.commandBuffer = f.cb;
+    VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    si.commandBufferInfoCount = 1;
+    si.pCommandBufferInfos = &cbi;
+    VkResult r;
+    {
+        nxrt::HitchTimer ht(nxrt::kHpRenderSubmit);
+        std::lock_guard<std::mutex> lk(g->dev->queue_mutex());
+        r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
+    }
+    if (r != VK_SUCCESS) {
+        NXLOG_E(kTag, "submission chunk: vkQueueSubmit2 failed (%d)", static_cast<int>(r));
+        if (r == VK_ERROR_DEVICE_LOST) device_lost("NVN submission chunk");
+    }
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(next, &bi);
+    f.cb = next;
+    g->ctr.submit_chunks.fetch_add(1, std::memory_order_relaxed);
     return r == VK_SUCCESS;
 }
 
