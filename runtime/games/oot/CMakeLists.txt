@@ -22,6 +22,6 @@ add_library(nxrt_game_oot_core STATIC "${_oot}/oot_core.cpp")
 target_link_libraries(nxrt_game_oot_core PUBLIC nxrt_game_oot_data nxrt)
 
 if(TARGET nxrt_gfx)
-    add_library(nxrt_game_oot STATIC "${_oot}/oot_game.cpp")
+    add_library(nxrt_game_oot STATIC "${_oot}/oot_game.cpp" "${_oot}/oot_drs.cpp")
     target_link_libraries(nxrt_game_oot PUBLIC nxrt_game_oot_core nxrt_gfx)
 endif()

@@ -78,6 +78,8 @@ const play::GamePlay& game_play() {
         // No input hook yet: the mouse turns the camera as the right stick (full stick at about 3 rad/s; not measured against the game's
         // own camera speed).
         p.mouse_stick_rad_s = 3.0;
+        p.install = [](uint64_t base, play::GameHost*, const play::Settings&) { drs_install(base); };
+        p.remove = [] { drs_remove(); };
         return p;
     }();
     return t;
