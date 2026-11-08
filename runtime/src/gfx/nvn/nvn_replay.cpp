@@ -849,6 +849,14 @@ float attach_targets(bool fix) {
     return lo;
 }
 
+// [nvn] epoch_keep_dispatch (default on): the held-result version (out_version) is in the set memo's and the draw buffer checks' epoch, so
+// commands that only add or re-arm held results (dispatches, draws writing over held results) need not move the resolve epoch.
+bool epoch_keep_on();
+bool held_version_epoch() {
+    static const bool on = nxrt::config_get_bool("nvn", "epoch_keep_dispatch", true);
+    return on && epoch_keep_on() && ab_on(kAbEpochDispatch);
+}
+
 bool memo_pass_keep() {
     static const bool on = nxrt::config_get_bool("nvn", "memo_pass_keep", true);
     return on && ab_on(kAbMemoPass);
@@ -2735,7 +2743,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                                 if (writes) {
                                     gpu_wrote(bind.addr, bi.range, kWriteStorage);
                                     out_add(bind.addr, bi.range, hb.buffer, hb.offset, br);
-                                    desc_epoch_bump(kBumpWrite);   // the held result may have grown: readers resolve anew   // what the draw writes there is held like a dispatch's
+                                    if (!held_version_epoch()) desc_epoch_bump(kBumpWrite);   // the held result may have grown: readers resolve anew (out_version moved then)   // what the draw writes there is held like a dispatch's
                                 }
                                 break;
                             }
@@ -5287,10 +5295,8 @@ bool op_keeps_sets(Op op) {
     switch (op) {
         case Op::Barrier: case Op::WaitEvent: case Op::SetRenderTargets: case Op::ClearColor: case Op::ClearDepthStencil:
             return epoch_keep_on();
-        case Op::Dispatch: case Op::DispatchIndirect: {   // what a dispatch changes for draws: its GPU writes (gpu_wrote moves the epoch) and the held results (out_version is in the memo's epoch)
-            static const bool on = nxrt::config_get_bool("nvn", "epoch_keep_dispatch", true);
-            return on && epoch_keep_on() && ab_on(kAbEpochDispatch);
-        }
+        case Op::Dispatch: case Op::DispatchIndirect:   // what a dispatch changes for draws: its GPU writes (gpu_wrote moves the epoch) and the held results (out_version is in the memo's epoch)
+            return held_version_epoch();
         default: break;
     }
     switch (op) {
