@@ -39,11 +39,11 @@ const game::Info& data_info() {
             "upscaler_src = depth_rt\n"
             "upscaler_dst = fs:c63c3b8f092e5d4c:tex0\n"
             "upscaler_fallback = 1\n"
-            // The network variants the game picks at internal scales 0.75 (f90d726d, 1920x1080 under the 2560x1440 output: the pinned
-            // default, oot_drs.cpp) and 0.667 (02dcb888) come out striped / blocky in translation (fea98fe7 at 0.333 and 49659bca at
-            // ~0.37 are right): until that is fixed they are a linearly filtered scaled copy of their input composite (tex0, RGB9E5) into
-            // their output (img1). Picture right, without the network's anti-aliasing.
-            "pass_copy = f90d726d76bf9884:tex0:img1,02dcb888b204187a:tex0:img1\n"
+            // The network variants at internal scales 0.75 (f90d726d, the pinned 1920x1080, oot_drs.cpp) and 0.667 (02dcb888) came out
+            // striped / blocky: TLD4/TLD .F16.RN was decoded as a 32-bit gather (A22, fixed in the translator; f90d726d checked in game).
+            // 02dcb888 is not checked on screen yet and its pipeline takes ~270 s to build the first time, which the upscaler fallback
+            // does not cover: it stays a linearly filtered scaled copy of its input composite (tex0) into its output (img1) for now.
+            "pass_copy = 02dcb888b204187a:tex0:img1\n"
             // The real-time frame step (oot_core.cpp apply_step; [time] mode = off gives the console's fixed 1/60 s per frame). The game is
             // made for 30-60 fps; on a PC that renders 15-25 fps in Kokiri Forest the step goes up to 1/10 s (scale 6; walking and the ladder
             // checked at 10 fps). Frames slower than that slow the game down instead of taking larger steps.
