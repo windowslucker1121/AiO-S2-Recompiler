@@ -167,6 +167,17 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   between dispatches (every dispatch already ends with a full memory barrier), and the chain's inputs (the same up to the order of
   atomically appended lists).
 
+## TLD / TLD4 / TXD .F16 (OoT upscaler network, A22)
+
+- TEX, TLD, TLD4 and TXD all carry `.F16.RN` / `.F16.RZ` in bits 79..80 (nvdisasm 13.3 probe: `TLD4.SCR.R.F16.RN.PTP`,
+  `TLD.SCR.F16.RN.LZ`, `TXD.F16.RN`; TMML ignores the bits). The decoder knew the field for TEX only, so TLD4.F16 was translated as an
+  fp32 gather: four components into Rd, Rd+1, Rd2, Rd2+1 instead of two fp16 pairs into Rd and Rd2. That clobbered live registers (in
+  f90d726d the blue gather's Rd2+1 = R34 was the x coordinate of the next gather) and left fp32 bits where the code reads half pairs.
+- With the field decoded the existing F16 path applies: Rd = packHalf2x16(t0, t1), Rd2 = packHalf2x16(t2, t3). For OoT's
+  `TLD4.PTP` with offsets (0,0) (1,0) (0,1) (1,1) the code stores Rd as the row-y pair and Rd2 as the row-y+1 pair of a shared-memory
+  tile (`STS [R8], R12; STS [R8+0x90], R13`), which fits that order. TXD now takes `.F16.RN` the same way. `.F16.RZ` stays unsupported.
+- Affects only blocks from `main` (27 "runtime" compute blocks: OoT's upscaler network variants); no bfsha/vsetb corpus block has it.
+
 ## Cache completeness (S40)
 
 - `scripts/gap_corpus.py <romfs> --cache <spirv dir> --out <dir> [--programs programs.bin] [--all]`: scans the game files the way the
