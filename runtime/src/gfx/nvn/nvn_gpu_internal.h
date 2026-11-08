@@ -192,6 +192,8 @@ bool out_any();                                                    // any thread
 bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff, const BufRef& host, bool in_mirror = true);
 // The same range is out: its place in the copy (*in_mirror, optional: whether that is the pool copy or a shadow).
 bool out_exact(uint64_t addr, VkDeviceSize size, VkBuffer* buf, VkDeviceSize* off, bool* in_mirror = nullptr);
+// Some entry, held or with its copy-back still running (its pages may be guarded), shares a page with [addr, +size).
+bool out_touches(uint64_t addr, uint64_t size);
 // Some held shadow result (out_add with in_mirror false) shares a page with [addr, +size).
 bool out_overlaps_shadow(uint64_t addr, uint64_t size);
 // Some page of [addr, +size) holds a result that is newer in the copy than in the pool.

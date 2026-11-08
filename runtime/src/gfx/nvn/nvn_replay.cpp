@@ -187,7 +187,130 @@ bool gw_settled(uint64_t addr, uint64_t size) {
     return true;
 }
 
+// ---- uniform updates without a pass break ([nvn] ubo_update_cpu) ------------------------------------------------------------------
+// nvnCommandBufferUpdateUniformBuffer is a GPU-ordered write between draws (OoT: ~800 per frame). As vkCmdUpdateBuffer it ends the
+// render pass and needs two full barriers each time. Instead the replay writes the bytes into game memory when it records the update, and
+// every uniform binding of such a buffer ("update range") is bound from a snapshot of its bytes taken when the draw is recorded (upload
+// ring, one per version of the range). Game memory at record time then holds what the GPU would hold at that point in the queue, provided
+// nothing else on the GPU writes the range while earlier work may still read it there. So an update takes this path only when
+//   - no submission in flight may write the range (gpu_write_serial: GPU writes seen since it became an update range; when it became one,
+//     the write ring, gw_settled), and
+//   - no submission in flight reads it from game memory (direct_read_serial: bindings made before its snapshots were possible), and
+//   - no compute result is held over it (out_overlaps).
+// Otherwise the update is recorded as before (and counts as a GPU write of the range).
+struct UpdRange { uint64_t hi = 0; uint64_t gpu_write_serial = 0, direct_read_serial = 0; uint64_t gen = 1; };
+std::map<uint64_t, UpdRange> g_upd;                 // by start address
+uint64_t g_upd_lo = UINT64_MAX, g_upd_hi = 0;      // bounds of all ranges (a quick filter)
+struct UpdSnap { uint64_t addr, size, gen; UploadAlloc u; };
+std::unordered_map<uint64_t, UpdSnap> g_upd_snaps;  // this submission's snapshots by (addr, size)
+uint64_t g_upd_fast = 0, g_upd_slow = 0, g_upd_snapped = 0, g_upd_snap_hits = 0, g_upd_direct = 0;   // statistics
+
+bool ubo_update_cpu_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "ubo_update_cpu", true);
+    return on;
+}
+
+// The update range overlapping [addr, addr + size), or null.
+UpdRange* upd_find(uint64_t addr, uint64_t size) {
+    if (g_upd.empty() || addr >= g_upd_hi || addr + size <= g_upd_lo) return nullptr;
+    auto it = g_upd.upper_bound(addr);
+    if (it != g_upd.end() && it->first < addr + size) return &it->second;
+    if (it == g_upd.begin()) return nullptr;
+    --it;
+    return it->second.hi > addr ? &it->second : nullptr;
+}
+
+bool serial_settled(uint64_t serial) { return serial <= completed_serial() || serial <= poll_completed(); }
+
+void upd_note_gpu_write(uint64_t addr, uint64_t size) {
+    if (g_upd.empty() || !size || addr >= g_upd_hi || addr + size <= g_upd_lo) return;
+    for (auto it = g_upd.upper_bound(addr + size - 1); it != g_upd.begin();) {
+        --it;
+        if (it->second.hi <= addr) break;
+        it->second.gpu_write_serial = F ? F->serial : UINT64_MAX;
+    }
+}
+
+// Makes [lo, hi) an update range (merging the ones it overlaps).
+UpdRange& upd_register(uint64_t lo, uint64_t hi) {
+    UpdRange r;
+    r.hi = hi;
+    r.gpu_write_serial = gw_settled(lo, hi - lo) ? 0 : (F ? F->serial : UINT64_MAX);
+    r.direct_read_serial = F ? F->serial : UINT64_MAX;   // earlier bindings read game memory, and they are not known: as if one were in flight
+    auto it = g_upd.upper_bound(lo);
+    if (it != g_upd.begin()) --it;
+    while (it != g_upd.end() && it->first < hi) {
+        if (it->second.hi > lo) {
+            lo = std::min(lo, it->first);
+            r.hi = std::max(r.hi, it->second.hi);
+            r.gpu_write_serial = std::max(r.gpu_write_serial, it->second.gpu_write_serial);
+            r.direct_read_serial = std::max(r.direct_read_serial, it->second.direct_read_serial);
+            r.gen = std::max(r.gen, it->second.gen) + 1;
+            it = g_upd.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    g_upd_lo = std::min(g_upd_lo, lo);
+    g_upd_hi = std::max(g_upd_hi, r.hi);
+    return g_upd[lo] = r;
+}
+
+bool host_readable(uint64_t addr, uint64_t n);   // below
+
+// A binding other than a uniform block reads [addr, addr + size) from game memory: an update range there takes no record-time update
+// until this submission is done.
+void upd_note_read(uint64_t addr, uint64_t size) {
+    if (g_upd.empty() || !size || addr >= g_upd_hi || addr + size <= g_upd_lo) return;
+    for (auto it = g_upd.upper_bound(addr + size - 1); it != g_upd.begin();) {
+        --it;
+        if (it->second.hi <= addr) break;
+        it->second.direct_read_serial = F ? F->serial : UINT64_MAX;
+    }
+}
+
+// The update at record time. False: record it as a GPU write (do_write_memory).
+bool ubo_update_cpu(uint64_t addr, uint64_t buffer_size, uint64_t offset, const uint8_t* data, uint32_t n) {
+    if (!ubo_update_cpu_on() || !n) return false;
+    const uint64_t lo = addr, hi = addr + std::max<uint64_t>(buffer_size, offset + n);
+    UpdRange* r = upd_find(addr + offset, n);
+    if (!r || r->hi < addr + offset + n) r = &upd_register(lo, hi);
+    if (!serial_settled(r->gpu_write_serial) || !serial_settled(r->direct_read_serial) || out_touches(addr + offset, n) || !host_readable(addr + offset, n)) {
+        ++g_upd_slow;
+        return false;
+    }
+    std::memcpy(host_ptr(addr + offset), data, n);
+    capture::note_gpu_write(addr + offset, n);
+    ++r->gen;
+    ++g_upd_fast;
+    return true;
+}
+
+// A uniform binding [addr, addr + n) (n: the bytes bound) of an update range: the snapshot to bind (null u: bind game memory as before).
+UploadAlloc ubo_snapshot(uint64_t addr, uint64_t n, VkDeviceSize align) {
+    UpdRange* r = upd_find(addr, n);
+    if (!r) return UploadAlloc();
+    if (!serial_settled(r->gpu_write_serial) || out_touches(addr, n) || !host_readable(addr, n)) {
+        r->direct_read_serial = F->serial;
+        ++g_upd_direct;
+        return UploadAlloc();
+    }
+    const uint64_t key = addr ^ (n << 48) ^ (n >> 16);
+    auto it = g_upd_snaps.find(key);
+    if (it != g_upd_snaps.end() && it->second.addr == addr && it->second.size == n && it->second.gen == r->gen) { ++g_upd_snap_hits; return it->second.u; }
+    UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(align, 256));
+    if (!u) {
+        r->direct_read_serial = F->serial;
+        return UploadAlloc();
+    }
+    std::memcpy(u.ptr, host_ptr(addr), n);
+    g_upd_snaps[key] = UpdSnap{addr, n, r->gen, u};
+    ++g_upd_snapped;
+    return u;
+}
+
 void gpu_wrote(uint64_t addr, uint64_t size, int use) {
+    upd_note_gpu_write(addr, size);
     note_gw(addr, size);
     capture::note_gpu_write(addr, size);
     if (note_gpu_write(addr, size, use)) {
@@ -2018,7 +2141,12 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                         const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
                         const float ufs = ufs_scale_for(d, idx);
                         const bool tsr = d.nvn_stage == kVertex && idx == 0 && bind.size >= 272 && extras::temporal_wanted() && S.depth_tex;
-                        if (br.ok && (ufs != 1.0f || tsr)) {
+                        UploadAlloc snap;
+                        if (br.ok && !g_upd.empty() && ufs == 1.0f && !tsr)
+                            snap = ubo_snapshot(bind.addr, std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536}), align);
+                        if (snap) {
+                            bi = {snap.buffer, snap.offset, std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536})};
+                        } else if (br.ok && (ufs != 1.0f || tsr)) {
                             // the game's scale on some floats of this block (nxrt/gfx_tuning.h): bound from a patched copy in the upload ring
                             const VkDeviceSize n = std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536});
                             UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(align, 256));
@@ -2077,6 +2205,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                     if (slot >= 0 && slot < 16 && S.ssbo[d.nvn_stage][slot].addr) {
                         const GState::Bind& bind = S.ssbo[d.nvn_stage][slot];
                         BufRef br = resolve_buffer(bind.addr, bind.size);
+                        upd_note_read(bind.addr, bind.size ? bind.size : br.avail);
                         // The console's storage access is a raw load at the descriptor's address: nothing stops a shader at the bound size.
                         // [nvn] storage_min_range (bytes) widens small bindings to that much of the memory behind them (diagnosis switch).
                         static const VkDeviceSize min_range = static_cast<VkDeviceSize>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "storage_min_range", 0)));
@@ -2108,6 +2237,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                         const BufRef br0 = resolve_buffer(bind.addr, bind.size);
                         const VkDeviceSize range = std::min<VkDeviceSize>(bind.size ? bind.size : br0.avail, br0.avail);
                         const BufRef br = held_or_pool(bind.addr, range, kOutDispatch, true);
+                        upd_note_read(bind.addr, range);
                         bi = {br.buffer, br.offset, range};
                     }
                     break;
@@ -3041,6 +3171,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             }
             const GState::Bind& vb = S.vtx[binding];
             BufRef br = vb.addr ? resolve_read(vb.addr, vb.size, kReadVertex) : BufRef{dummy_buffer(), 0, 65536, false};
+            if (vb.addr) upd_note_read(vb.addr, vb.size ? vb.size : br.avail);
             VkDeviceSize size = vb.size ? std::min<VkDeviceSize>(vb.size, br.avail) : br.avail;
             VkDeviceSize stride = static_cast<VkDeviceSize>(S.stream[binding].stride);
             vkCmdBindVertexBuffers2(F->cb, binding, 1, &br.buffer, &br.offset, &size, &stride);
@@ -3282,6 +3413,7 @@ void do_draw_elements(const P_DrawElements& p) {
         vkCmdDrawIndexed(F->cb, static_cast<uint32_t>(idx.size()), std::max<uint32_t>(1, p.instance_count), 0, p.base_vertex, p.base_instance);
     } else {
         BufRef br = resolve_read(p.index_address, static_cast<uint64_t>(p.count) * isz, kReadIndex);
+        upd_note_read(p.index_address, static_cast<uint64_t>(p.count) * isz);
         vkCmdBindIndexBuffer(F->cb, br.buffer, br.offset, vk_index_type(static_cast<int>(p.type)));
         vkCmdDrawIndexed(F->cb, p.count, std::max<uint32_t>(1, p.instance_count), 0, p.base_vertex, p.base_instance);
     }
@@ -4672,7 +4804,10 @@ void run_list(const CmdList& list, int depth) {
                 const auto& p = r.payload<P_UpdateUniformBuffer>();
                 const uint8_t* data = r.blob<P_UpdateUniformBuffer>();
                 const uint32_t n = static_cast<uint32_t>(p.size & ~3ull);
-                if (n) do_write_memory(p.address + static_cast<uint64_t>(p.offset), data, n);
+                if (n && !ubo_update_cpu(p.address, p.buffer_size, static_cast<uint64_t>(p.offset), data, n))
+                    do_write_memory(p.address + static_cast<uint64_t>(p.offset), data, n);
+                else if (n)
+                    g_dirty |= kDesc;   // the uniform bindings of the range get the new snapshot
                 break;
             }
             case Op::Dispatch: { const auto& p = r.payload<P_Dispatch>(); do_dispatch(p.x, p.y, p.z, 0); break; }
@@ -4988,6 +5123,16 @@ void replay_begin_submit(Frame& f) {
     // one support buffer per submission (Ryujinx SupportBuffer: render scales 1.0, no BGRA remap)
     g_support = f.upload(sizeof(SupportBuffer), 256);
     g_support_scaled.clear();
+    g_upd_snaps.clear();
+    {
+        static uint64_t last_log = 0;
+        if (f.serial - last_log > 600 && (g_upd_fast || g_upd_slow)) {
+            last_log = f.serial;
+            NXLOG_I(kTag, "uniform updates: %llu at record time, %llu on the GPU; %zu update ranges; bindings: %llu snapshots made, %llu reused, %llu from game memory",
+                    (unsigned long long)g_upd_fast, (unsigned long long)g_upd_slow, g_upd.size(), (unsigned long long)g_upd_snapped,
+                    (unsigned long long)g_upd_snap_hits, (unsigned long long)g_upd_direct);
+        }
+    }
     g_draw_support = UploadAlloc();
     if (g_support) {
         SupportBuffer sb = support_buffer_defaults();
