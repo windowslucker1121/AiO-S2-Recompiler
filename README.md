@@ -1,4 +1,4 @@
-# AiO Recompiler
+# AiO S2 Recompiler
 
 An all-in-one, open-source tool set that runs games for the Nintendo Switch 2 console that **you own** natively on Windows. It statically recompiles the
 game's program code from your own dump into PC code, and its runtime and shader translator do the rest. One library app manages every

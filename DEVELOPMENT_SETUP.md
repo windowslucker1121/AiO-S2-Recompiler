@@ -1,4 +1,4 @@
-# Development setup (AiO Recompiler, module oot)
+# Development setup (AiO S2 Recompiler, module oot)
 
 Everything a Windows machine needs to **develop** the port: lift and compile the game code, build the runtime and `oot.exe`, build
 the shader translator, translate and prepare shaders, and run the game for testing. Playing a finished build needs much less (see
@@ -48,7 +48,7 @@ the CUDA toolkit (only `nvdisasm` is used, from the redistributable below), Powe
 
 ```bat
 git clone <this repository>
-cd AiO-Recompiler
+cd AiO-S2-Recompiler
 git checkout oot-nup
 git submodule update --init refs/ryubing
 ```
@@ -249,7 +249,7 @@ folder first (`ninja -C runtime\build\release -t clean`): sccache cache hits lea
 
 ## 10. Moving to another computer
 
-The code comes from GitHub (`git clone https://github.com/windowslucker1121/AiO-Recompiler.git`, default branch `oot-nup`, then
+The code comes from GitHub (`git clone https://github.com/windowslucker1121/AiO-S2-Recompiler.git`, default branch `oot-nup`, then
 `git submodule update --init refs/ryubing`). Only the game must be copied; some generated data is worth copying to save time.
 
 | What | Size | Copy? |
