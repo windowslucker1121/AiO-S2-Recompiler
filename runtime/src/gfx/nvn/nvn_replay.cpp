@@ -21,6 +21,7 @@
 #include <tuple>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "nxrt/config.h"
 #include "nxrt/frame_limiter.h"
@@ -151,7 +152,7 @@ enum BumpWhy { kBumpOp, kBumpWrite, kBumpPass, kBumpSubmit, kBumpWhyN };
 uint64_t g_bump_n[kBumpWhyN] = {};   // statistics: epoch moves by cause
 void desc_epoch_bump(BumpWhy why) { ++g_desc_epoch; ++g_bump_n[why]; }
 uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program changes (out_draw_bindings)
-// [nvn] cpuperf_ab = N: submission chunks, set reuse and the skipped draw buffer checks are off in even windows of N presents and on (as
+// [nvn] cpuperf_ab = N: submission chunks, set reuse, the skipped draw buffer checks and the pass look-ahead are off in even windows of N presents and on (as
 // configured) in odd ones, marked cpuperf.on / cpuperf.off in the frame trace: paired fps windows of one run (measurement only).
 bool g_cpu_ab_on = true;
 enum class SetReuse { Off, On, Verify };
@@ -807,6 +808,7 @@ float attach_targets(bool fix) {
 }
 
 // Starts a pass on the current render targets if none is open for them. False when there is nothing to render to.
+void pass_lookahead();   // below: settles the reads of the coming draws before the pass begins
 bool ensure_pass(bool depth_ro = false) {
     if (P.open && targets_match() && P.depth_ro == depth_ro) return true;
     end_pass(true);
@@ -821,6 +823,7 @@ bool ensure_pass(bool depth_ro = false) {
             g_pending.clear();
         }
     }
+    if (out_any()) pass_lookahead();
     if (gpass_on()) gpass_stamp(*F, "gap", 0);      // copies, dispatches, barriers and layout changes since the previous pass
     g_pass_draws = 0;
     g_pass_verts = 0;
@@ -1948,6 +1951,128 @@ void out_draw_bindings() {
     g_odb_epoch = g_desc_epoch * 0x100000001b3ull + out_bytes_total();
 }
 
+// ---- look-ahead before a pass ([nvn] pass_lookahead) -----------------------------------------------------------------------------
+// A draw that reads buffers over held compute results gets them copied into the pool copy (draw_fill) or back to the pool first
+// (out_draw_read), and both end the open render pass (~10 pass breaks per frame in the first scene). Before a pass begins, the commands
+// that follow in the current list (and the lists it calls) are scanned up to the first one that ends the pass anyway (anything other than
+// state binds, draws, counters and uniform updates: render target changes, dispatches, copies, clears, barriers), with the buffer bindings
+// those commands make tracked on the side, and the reads of their draws are settled now, outside the pass. The draws then find their
+// ranges servable or no longer held and keep the pass open. Each distinct range is checked once per scan.
+const RecordReader* g_rd_cur[kMaxDepth + 2] = {};   // the reader of the command being run, per list depth (run_list)
+int g_rd_depth = -1;
+uint64_t g_la_scans = 0, g_la_settled = 0;            // statistics
+
+bool pass_lookahead_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "pass_lookahead", true);
+    return on;
+}
+
+struct LookSim {
+    GState::Bind vtx[16], ubo[kStages][16], ssbo[kStages][16], xfb[4];
+    bool present[kStages];
+};
+
+void la_read(std::unordered_set<uint64_t>& seen, uint64_t addr, uint64_t size, bool copy_ok, int why) {
+    if (!addr) return;
+    if (!size) size = 65536;
+    const uint64_t key = (addr * 0x9e3779b97f4a7c15ull) ^ size ^ (copy_ok ? 1ull << 63 : 0);
+    if (!seen.insert(key).second) return;
+    if (!out_overlaps(addr, size) || (copy_ok && out_servable(addr, size))) return;
+    out_draw_read(addr, size, copy_ok, why);
+    ++g_la_settled;
+}
+
+bool op_keeps_sets(Op op);   // below
+// False: a command that ends the pass was reached (stop scanning).
+bool la_scan(RecordReader rd, int depth, LookSim& sim, std::unordered_set<uint64_t>& seen, int& budget) {
+    const VkDeviceSize ualign = device().properties().limits.minUniformBufferOffsetAlignment;
+    while (rd.next()) {
+        if (--budget < 0) return false;
+        const Op op = rd.op();
+        switch (op) {
+            case Op::BindProgram: {
+                const auto& p = rd.payload<P_BindProgram>();
+                const uint32_t bits = p.stages | ((p.stages & ((1u << kCompute) - 1)) ? ((1u << kTask) | (1u << kMesh)) : 0u);
+                for (int st = 0; st < kStages; ++st)
+                    if (bits & (1u << st)) sim.present[st] = p.program && p.program->stage[st];
+                break;
+            }
+            case Op::BindBuffers: {
+                const auto& p = rd.payload<P_BindBuffers>();
+                const NVNbufferRange* rg = reinterpret_cast<const NVNbufferRange*>(rd.blob<P_BindBuffers>());
+                for (uint32_t i = 0; i < p.count; ++i) {
+                    const uint32_t k = p.first + i;
+                    if (p.kind == kBufVertex && k < 16) sim.vtx[k] = {rg[i].address, rg[i].size};
+                    else if (p.kind == kBufUniform && p.stage < kStages && k < 16) sim.ubo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
+                    else if (p.kind == kBufStorage && p.stage < kStages && k < 16) sim.ssbo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
+                    else if (p.kind == kBufXfb && k < 4) sim.xfb[k] = {rg[i].address, rg[i].size};
+                }
+                break;
+            }
+            case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: case Op::DrawMeshTasks: {
+                for (const GState::Bind& b : sim.vtx) la_read(seen, b.addr, b.size, true, kOutDrawBuffer);
+                for (int st = 0; st < kStages; ++st) {
+                    if (st == kCompute || !sim.present[st]) continue;
+                    for (const GState::Bind& b : sim.ubo[st]) la_read(seen, b.addr, b.size, ualign && (b.addr % ualign) == 0, kOutDrawBuffer);
+                    for (const GState::Bind& b : sim.ssbo[st]) la_read(seen, b.addr, b.size, true, kOutStorageXfb);
+                }
+                for (const GState::Bind& b : sim.xfb) la_read(seen, b.addr, b.size, false, kOutStorageXfb);
+                if (op == Op::DrawElements) {
+                    const auto& p = rd.payload<P_DrawElements>();
+                    const uint32_t isz = index_size_bytes(static_cast<int>(p.type));
+                    la_read(seen, p.index_address, static_cast<uint64_t>(p.count) * (isz ? isz : 4), true, kOutDrawBuffer);
+                } else if (op == Op::DrawIndirect) {
+                    const auto& p = rd.payload<P_DrawIndirect>();
+                    const bool indexed = p.type != 0xffffffffu;
+                    const uint64_t cmd = indexed ? 20 : 16;
+                    const uint64_t stride = p.stride ? static_cast<uint64_t>(p.stride) : cmd;
+                    const uint64_t n = p.multi && p.count_address ? std::max<uint64_t>(1, p.max_count) : 1;
+                    la_read(seen, p.indirect_address, stride * (n - 1) + cmd, true, kOutIndirect);
+                    if (p.multi && p.count_address) la_read(seen, p.count_address, 4, true, kOutIndirect);
+                } else if (op == Op::DrawMeshTasks) {
+                    const auto& p = rd.payload<P_DrawMesh>();
+                    if (p.kind >= 2) {
+                        const uint64_t rec = p.kind == 3 ? 12 : 8, stride = p.stride ? static_cast<uint64_t>(p.stride) : rec;
+                        const uint64_t n = p.multi ? std::max<uint64_t>(1, p.max_count) : 1;
+                        la_read(seen, p.indirect, stride * (n - 1) + rec, true, kOutIndirect);
+                        if (p.multi && p.count_address) la_read(seen, p.count_address, 4, true, kOutIndirect);
+                    }
+                }
+                break;
+            }
+            case Op::CallCommands: {
+                if (depth >= kMaxDepth) return false;
+                const auto& p = rd.payload<P_CallCommands>();
+                const uint64_t* h = reinterpret_cast<const uint64_t*>(rd.blob<P_CallCommands>());
+                for (uint32_t i = 0; i < p.count; ++i) {
+                    Ref<CmdList> l = handle_lookup(h[i]);
+                    if (l && !la_scan(RecordReader(*l), depth + 1, sim, seen, budget)) return false;
+                }
+                break;
+            }
+            default:
+                if (!op_keeps_sets(op)) return false;
+                break;
+        }
+    }
+    return true;
+}
+
+// ensure_pass, before the pass begins (no pass open).
+void pass_lookahead() {
+    if (!pass_lookahead_on() || g_rd_depth < 0 || !g_rd_cur[g_rd_depth] || !out_lazy() || !out_any() || !g_cpu_ab_on) return;
+    static LookSim sim;
+    std::memcpy(sim.vtx, S.vtx, sizeof sim.vtx);
+    std::memcpy(sim.ubo, S.ubo, sizeof sim.ubo);
+    std::memcpy(sim.ssbo, S.ssbo, sizeof sim.ssbo);
+    std::memcpy(sim.xfb, S.xfb, sizeof sim.xfb);
+    for (int st = 0; st < kStages; ++st) sim.present[st] = S.stage[st] != nullptr;
+    static std::unordered_set<uint64_t> seen;
+    seen.clear();
+    int budget = 4096;
+    ++g_la_scans;
+    la_scan(*g_rd_cur[g_rd_depth], g_rd_depth, sim, seen, budget);
+}
 const uint8_t* cpu_view(uint64_t addr, uint64_t size);   // below
 
 // The bytes from index_address an indexed indirect draw reads: max over its draws of (first index + count) * index size, from the
@@ -5042,8 +5167,11 @@ bool op_keeps_sets(Op op) {
 
 void run_list(const CmdList& list, int depth) {
     if (depth > kMaxDepth) { log_once("depth", "CallCommands nesting too deep"); return; }
+    struct RdRestore { int d; ~RdRestore() { g_rd_depth = d - 1; } } rd_restore{depth};   // pass_lookahead: back to the caller's reader
     counters().lists_replayed.fetch_add(1, std::memory_order_relaxed);
     for (RecordReader r(list); r.next();) {
+        g_rd_cur[depth] = &r;
+        g_rd_depth = depth;
         chunk_at_op();
         if (!op_keeps_sets(r.op())) desc_epoch_bump(kBumpOp);
         mark_dirty(r);
@@ -5645,8 +5773,8 @@ void replay_begin_submit(Frame& f) {
                     (unsigned long long)(g_dr_fail_bytes[1] >> 10), (unsigned long long)g_dr_fail[2], (unsigned long long)(g_dr_fail_bytes[2] >> 10));
             NXLOG_I(kTag, "occlusion reports: %llu in their pass, %llu with a pass break; %llu queries ended early by a pass break (split)",
                     (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
-            NXLOG_I(kTag, "submissions: %llu, parts sent ahead while recording (submit_chunk_draws): %llu; draw buffer checks skipped %llu; descriptor sets resolved %llu, %llu of them already in the submission's cache; %llu bound again without resolving (set_reuse), %llu differed (verify); resolve epoch moves: commands %llu, GPU writes %llu, passes %llu",
-                    (unsigned long long)counters().submits.load(), (unsigned long long)counters().submit_chunks.load(), (unsigned long long)g_odb_skipped, (unsigned long long)g_sets_built, (unsigned long long)g_sets_cached,
+            NXLOG_I(kTag, "submissions: %llu, parts sent ahead while recording (submit_chunk_draws): %llu; draw buffer checks skipped %llu; pass look-aheads %llu settled %llu ranges; descriptor sets resolved %llu, %llu of them already in the submission's cache; %llu bound again without resolving (set_reuse), %llu differed (verify); resolve epoch moves: commands %llu, GPU writes %llu, passes %llu",
+                    (unsigned long long)counters().submits.load(), (unsigned long long)counters().submit_chunks.load(), (unsigned long long)g_odb_skipped, (unsigned long long)g_la_scans, (unsigned long long)g_la_settled, (unsigned long long)g_sets_built, (unsigned long long)g_sets_cached,
                     (unsigned long long)g_sets_reused, (unsigned long long)g_sets_verify_bad, (unsigned long long)g_bump_n[kBumpOp],
                     (unsigned long long)g_bump_n[kBumpWrite], (unsigned long long)g_bump_n[kBumpPass]);
             {   // the three pass sizes with the most draws
