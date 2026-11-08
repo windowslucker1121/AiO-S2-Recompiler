@@ -1581,6 +1581,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // and ignores it, so the input is read as at the pixel centre, which equals centroid without multisampling (Mario Kart
             // World: nearly every fragment shader).
             if (Has(i, "OFFSET") || Has(i, "SAT")) throw Unsup("interpolation mode");
+            if (o[1].Kind == OperandKind.Attr && o[1].IndexIsUReg && o[1].IndexReg >= 0)
+            {
+                // a[URn+imm] (0x526): a user attribute picked at run time, as Ryujinx's indexed Maxwell IPA (InstEmitAttribute.Ipa, op.Idx), with
+                // the immediate added. PASS returns attr/w for a perspective input; the indexed form cannot look up the SPH imap per element, so
+                // every element is taken as perspective, as Ryujinx does (OoT 471bac84: the six face varyings are perspective).
+                if (!Has(i, "PASS")) throw Unsup("indexed attribute interpolation");
+                if (o.Count > 2 && !(o[2].Kind == OperandKind.Reg && o[2].Reg == 255)) throw Unsup("offset register");
+                IrOperand addr = o[1].IndexReg >= 63 ? Const((int)o[1].Offset) : ctx.IAdd(UGpr(o[1].IndexReg), Const((int)o[1].Offset));
+                IrOperand rel = ctx.ISubtract(addr, Const(AttributeConsts.UserAttributeBase));
+                IrOperand vec = ctx.ShiftRightU32(rel, Const(4));
+                IrOperand elem = ctx.BitwiseAnd(ctx.ShiftRightU32(rel, Const(2)), Const(3));
+                IrOperand v = ctx.Load(StorageKind.Input, IoVariable.UserDefined, null, vec, elem);
+                v = ctx.FPMultiply(v, ctx.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(3)));
+                Dst(ctx, o[0], v);
+                return;
+            }
             (int reg, int imm) = AttrAddress(o[1]);
             if (reg != 255) throw Unsup("indexed attribute");
             if (o.Count > 2 && !(o[2].Kind == OperandKind.Reg && o[2].Reg == 255)) throw Unsup("offset register");

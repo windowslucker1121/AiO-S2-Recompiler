@@ -161,6 +161,23 @@ namespace Nx.Shaders.Ampere
                 c.Add(new Operand(OperandKind.Attr, Offset: (long)c.F(64, 8) << 2));
                 if (loc == 2 || c.I(32, 8) != 255) c.Add(c.R(32));
             });
+            // IPA 0x526: IPA with the attribute indexed by a uniform register, a[URn+addr] (URn at 24..29, otherwise as 0x326). Seen in OoT's
+            // light-probe cube filter 471bac84 (IPA.PASS R39, a[UR4+0x84]: one varying per cube face in a loop over the faces) [nvdisasm]
+            Op12(0x526, c =>
+            {
+                c.Op = "IPA"; int freq = c.I(78, 2), loc = c.I(76, 2);
+                c.Mod(freq switch { 0 => "PASS", 1 => "CONSTANT", 2 => "SC", _ => "?f3" });
+                c.Mod(76, 2, null, "CENTROID", "OFFSET", "?l3");
+                c.Mod(c.B(72), "SAT");
+                c.Dst = 1; c.Add(c.R(16));
+                if (!IsPT(c, 81)) { c.Add(c.P(81)); c.Dst++; }
+                int ur = c.I(24, 6);
+                long off = (long)c.F(64, 8) << 2;
+                if (ur == 63) c.Add(new Operand(OperandKind.Attr, Offset: off));
+                else c.Add(new Operand(OperandKind.Attr, Offset: off, IndexReg: ur, IndexIsUReg: true,
+                                       Text: "a[UR" + ur + (off != 0 ? "+0x" + off.ToString("x") : "") + "]"));
+                if (loc == 2 || c.I(32, 8) != 255) c.Add(c.R(32));
+            });
             // ISBERD [NAK] 0x923: ISBERD[.O].<PATCH|PRIM|ATTR>[.SKEW][.U16|.32] Rd, [Ra+off]; the space comes before SKEW and the offset is unsigned [xcheck probe]
             Op12(0x923, c =>
             {
