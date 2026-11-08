@@ -29,6 +29,7 @@
 #include <nxrt/config.h>
 #include <nxrt/gauge.h>
 #include <nxrt/log.h>
+#include "../vk_coopmat_probe.h"
 
 namespace nxrt::nvn::be {
 
@@ -1047,6 +1048,16 @@ bool read_file(const std::string& path, std::string& out) {
     return true;
 }
 
+// The module of `hash` in `dir`: its cooperative-matrix variant <hash>.cm.spv (HMMA on tensor cores, which the harness writes next to
+// <hash>.spv for blocks with HMMA) when this device passed the probe (gfx/vk_coopmat_probe.h), else <hash>.spv.
+bool read_spv(const std::string& dir, const std::string& hash, std::string& out) {
+    if (nxrt::gfx::coopmat_hmma_enabled() && read_file(dir + "/" + hash + ".cm.spv", out) && !out.empty() && out.size() % 4 == 0) {
+        NXLOG_I("nvn", "shader %s: cooperative-matrix variant (%zu bytes)", hash.c_str(), out.size());
+        return true;
+    }
+    return read_file(dir + "/" + hash + ".spv", out);
+}
+
 // Tab-separated column `col` (0-based) of one line; empty if the line has fewer columns.
 std::string column_text(std::string_view line, int col) {
     size_t start = 0;
@@ -1170,7 +1181,7 @@ std::unique_ptr<ShaderCache::Preloaded> ShaderCache::preload_one(const std::stri
         if (by_hash_.count(hash)) return nullptr;   // the game got there first
     }
     std::string bytes;
-    if (!read_file(dir_ + "/" + hash + ".spv", bytes) || bytes.empty() || bytes.size() % 4) return nullptr;
+    if (!read_spv(dir_, hash, bytes) || bytes.empty() || bytes.size() % 4) return nullptr;
     auto p = std::make_unique<Preloaded>();
     p->words.resize(bytes.size() / 4);
     std::memcpy(p->words.data(), bytes.data(), bytes.size());
@@ -1372,7 +1383,7 @@ const ShaderInfo* ShaderCache::load(const std::string& hash, const uint8_t* code
         words = std::move(pre->words);
     } else {
         std::string bytes;
-        if (!read_file(dir_ + "/" + hash + ".spv", bytes) || bytes.empty() || bytes.size() % 4) {
+        if (!read_spv(dir_, hash, bytes) || bytes.empty() || bytes.size() % 4) {
             dump_missing_block(hash, code, control, code_size);
             return miss("no usable " + dir_ + "/" + hash + ".spv");
         }
@@ -1417,7 +1428,7 @@ const ShaderInfo* ShaderCache::load_stub(const std::string& hash) {
         dir = dir_;
     }
     std::string bytes;
-    if (!read_file(dir + "/" + hash + ".spv", bytes) || bytes.empty() || bytes.size() % 4) {
+    if (!read_spv(dir, hash, bytes) || bytes.empty() || bytes.size() % 4) {
         if (!existing) {
             std::lock_guard lk(lock_);
             stubs_.emplace(hash, nullptr);

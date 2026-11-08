@@ -6,18 +6,23 @@ removes their definitions while it still reads them, and the SPIR-V reads variab
 makes such calls: a RED (atomic without result) through a global address becomes "r = call ...; copy r" and the copy is
 dead. Seen in OoT's GPU culling 4c1e8564 (AGENTS.md A17): the RED.E.MAX that writes the work-group count of each indirect
 dispatch record got an undefined address high word and value, so every GPU-culled dispatch and mesh draw got x = 0. Now
-the walk stops at operations with side effects. The Ryujinx code in the context lines is MIT.
+the walk stops at operations with side effects. It also stops at the Ampere front end's cooperative-matrix HMMA
+(ampere-coopmat-instruction.patch) while another of its destination registers is still used: that operation has one
+destination per D register, and a dead copy of one of them took the whole multiply-add out of its sources' use lists,
+so the loads of its A and B registers were removed (OoT's network pass f90d726d lost its weight loads). The Ryujinx code
+in the context lines is MIT.
 --- a/Translation/Optimizations/Optimizer.cs	2026-11-07 12:02:46.270009800 +0100
 +++ b/Translation/Optimizations/Optimizer.cs	2026-11-07 12:02:46.356854300 +0100
-@@ -381,7 +381,10 @@
+@@ -381,7 +381,11 @@
                          continue;
                      }
- 
+
 -                    if (src.UseOps.Remove(node) && src.UseOps.Count == 0)
 +                    // An operation with side effects (a call, an atomic) stays in its block when its result goes unused, so it keeps
 +                    // its sources: going on into it here took it out of their use lists and let them be removed while it still reads
-+                    // them (optimizer-remove-node-side-effects.patch).
-+                    if (src.UseOps.Remove(node) && src.UseOps.Count == 0 && !HasSideEffects(src.AsgOp))
++                    // them (optimizer-remove-node-side-effects.patch). The same for a cooperative-matrix HMMA with another used result.
++                    if (src.UseOps.Remove(node) && src.UseOps.Count == 0 && !HasSideEffects(src.AsgOp) &&
++                        !(src.AsgOp is Operation mma && mma.Inst == Instruction.CooperativeMatrixMulAdd && !DestHasNoUses(mma)))
                      {
                          Debug.Assert(src.AsgOp != null);
                          nodes.Enqueue(src.AsgOp);

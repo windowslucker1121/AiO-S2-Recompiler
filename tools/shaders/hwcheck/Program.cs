@@ -33,6 +33,7 @@ namespace Hwcheck
             string only = Opt(args, "--only", null);
             string corpus = args.Contains("--no-corpus") ? null : Opt(args, "--corpus", null) ?? FindCorpus(bin);
             Directory.CreateDirectory(outDir);
+            if (args.Contains("--coopmat")) return CoopMat.Run(args, bin, outDir);   // cooperative-matrix HMMA order probe (CoopMat.cs)
             var sw = Stopwatch.StartNew();
 
             // ---- test instructions

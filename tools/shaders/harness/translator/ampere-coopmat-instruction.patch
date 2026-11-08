@@ -1,0 +1,13 @@
+Ryujinx shader IR: a new instruction for the Ampere front end's tensor-core path (tools/shaders/ampere/frontend/AmpereCoopMat.cs):
+HMMA as one VK_KHR_cooperative_matrix multiply-add. Sources are the A, B and C registers (32-bit words), the destinations one word
+per D register (a vector result, like TextureSample). The Ryujinx code in the context lines is MIT.
+--- a/IntermediateRepresentation/Instruction.cs
++++ b/IntermediateRepresentation/Instruction.cs
+@@ -125,6 +125,7 @@
+         VoteAll,
+         VoteAllEqual,
+         VoteAny,
++        CooperativeMatrixMulAdd,   // Ampere front end: HMMA as a cooperative-matrix multiply-add (AmpereCoopMat.cs)
+
+         Count,
+

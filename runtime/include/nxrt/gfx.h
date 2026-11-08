@@ -121,6 +121,10 @@ struct DeviceFeatures {
     bool dynamic_rendering_unused_attachments = false;
     bool buffer_device_address = false;   // Vulkan 1.2 bufferDeviceAddress: raw guest pointers in translated shaders (A17, the pool address table)
     bool mesh_shader = false, task_shader = false;   // VK_EXT_mesh_shader (NVN2 task/mesh programs); [gfx] mesh_shader = false leaves it off
+    // VK_KHR_cooperative_matrix with 16x8x16 float16 subgroup matrices (float16 and float32 accumulators), 32-lane subgroups, and the
+    // translator's element order confirmed on this device by a probe dispatch (vk_coopmat_probe.cpp): the shader cache may then use
+    // the cooperative-matrix variant of a block with HMMA (<hash>.cm.spv). [gfx] cooperative_matrix = false leaves it off.
+    bool cooperative_matrix_hmma = false;
     bool transform_feedback = false, transform_feedback_queries = false;   // VK_EXT_transform_feedback (the feedback queries: transformFeedbackQueries)
     bool fragment_shading_rate = false;   // VK_KHR_fragment_shading_rate with pipelineFragmentShadingRate (NVN2 shading rate image, nvn_small.h)
     bool conservative_raster_dynamic = false;   // VK_EXT_conservative_rasterization + the extended-dynamic-state-3 mode / overestimation size (NVN2 conservative raster)

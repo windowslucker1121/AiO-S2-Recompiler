@@ -95,6 +95,30 @@ Infinities and NaN must match exactly under every rule. Signed zeros must also m
   - HSET2.BF with a constant-bank source: the register form loses .BF;
   - ptxas's own LDG/STG (memory-descriptor form, `desc[UR4]`): our decoder reads the descriptor as an address part. The game corpus does not use this form.
 
+## Cooperative-matrix HMMA (`--coopmat`)
+
+```powershell
+dotnet tools\shaders\build\bin\Release\net10.0\hwcheck.dll --coopmat [--out <dir>] [--warps 64] [--header runtime\src\gfx\vk_coopmat_probe_spv.h]
+```
+
+Checks the HMMA path of `ampere/frontend/AmpereCoopMat.cs` (one `OpCooperativeMatrixMulAddKHR` per HMMA, matrices built from each
+lane's fragment registers) on the local GPU, through Vulkan only (no CUDA toolkit): `CoopMat.cs`.
+
+- Lists the VK_KHR_cooperative_matrix properties and the subgroup size; the path needs 16x8x16 float16 subgroup matrices with float16
+  and float32 accumulators and 32-lane subgroups.
+- **Element-order probe.** Vulkan leaves the order of an invocation's matrix components to the implementation. HMMA.16816.F16 and .F32
+  are translated with the identity order and run on random fp16 inputs; every candidate order (A by register with half swaps, B and
+  C/D by element) predicts that run's output from the CPU reference of the PTX fragment layout, and the ones that match within the
+  HMMA tolerance are the device's order. None means the device does not give each lane its fragment's elements (the path cannot work).
+- Then the translator's own order is checked against the CPU reference and the scalar emulation.
+- `--header` writes the F16 module with the translator's order, bit-exact test inputs (small integers) and expected outputs as the
+  runtime's start-up probe (`runtime/src/gfx/vk_coopmat_probe.cpp`). Run it again after changing the translator's HMMA path.
+
+Found on an RTX 4080 (driver 610.88, 2026-11-08): component index i holds PTX element `A=0,1,4,5,2,3,6,7` (A registers 1 and 2
+swapped), B and C/D in fragment order, for both accumulators; 16 orders match, all equivalent (a consistent swap of k positions in A
+and B). The translator's order then agrees with the CPU reference within the HMMA tolerance (F16: up to 160 ulp on near-cancelling
+sums, the tensor core's own rounding; F32: bit-identical to the scalar emulation).
+
 ## Findings (2026-11-04, RTX 3080, driver 617.42)
 
 - **fp32 denormals without .FTZ.** The 3080's Vulkan driver reports `shaderDenormPreserveFloat32 = false` (and `shaderDenormFlushToZeroFloat32 = false`), so DenormPreserve cannot be used. The front end emulates the IEEE result of FADD, FMUL, FFMA, FMNMX, FSETP and FSET without .FTZ: a fast path, and an fp64 slow path when an input is denormal or the result is tiny (`AmpereEmit.Denorm.cs`).

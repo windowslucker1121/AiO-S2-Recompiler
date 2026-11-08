@@ -1,10 +1,19 @@
 Ryujinx SPIR-V back end, task/mesh hooks (tools/shaders/ampere/frontend/AmpereMesh.cs): a return of main first emits the
 hardware end of a task or mesh program (EmitMeshTasksEXT / SetMeshOutputsEXT and the output copies), and a shared memory access
-to the task payload region uses the TaskPayloadWorkgroupEXT storage class. The Ryujinx code in the context lines is MIT.
+to the task payload region uses the TaskPayloadWorkgroupEXT storage class. Also the Ampere front end's cooperative-matrix
+instruction (HMMA, tools/shaders/ampere/frontend/AmpereCoopMat.cs). The Ryujinx code in the context lines is MIT.
 
 --- a/CodeGen/Spirv/Instructions.cs
 +++ b/CodeGen/Spirv/Instructions.cs
-@@ -1049,7 +1049,7 @@
+@@ -143,6 +143,7 @@
+             Add(Instruction.VoteAll,                  GenerateVoteAll);
+             Add(Instruction.VoteAllEqual,             GenerateVoteAllEqual);
+             Add(Instruction.VoteAny,                  GenerateVoteAny);
++            Add(Instruction.CooperativeMatrixMulAdd,  AmpereCoopMat.GenerateMulAdd);   // HMMA (ampere/frontend/AmpereCoopMat.cs)
+ #pragma warning restore IDE0055
+         }
+
+@@ -1049,7 +1050,7 @@
              {
                  context.ReturnValue(context.Get(context.CurrentFunction.ReturnType, operation.GetSource(0)));
              }
@@ -13,7 +22,7 @@ to the task payload region uses the TaskPayloadWorkgroupEXT storage class. The R
              {
                  context.Return();
              }
-@@ -1659,14 +1659,19 @@
+@@ -1659,14 +1660,19 @@
          {
              SpvInstruction pointer = GetStoragePointer(context, operation, out AggregateType varType);
  
@@ -35,7 +44,7 @@ to the task payload region uses the TaskPayloadWorkgroupEXT storage class. The R
                  return new OperationResult(varType, result);
              }
          }
-@@ -1674,6 +1679,11 @@
+@@ -1674,6 +1680,11 @@
          private static SpvInstruction GetStoragePointer(CodeGenContext context, AstOperation operation, out AggregateType varType)
          {
              StorageKind storageKind = operation.StorageKind;
@@ -47,7 +56,7 @@ to the task payload region uses the TaskPayloadWorkgroupEXT storage class. The R
  
              StorageClass storageClass;
              SpvInstruction baseObj;
-@@ -1721,7 +1731,7 @@
+@@ -1721,7 +1732,7 @@
                      }
                      else
                      {

@@ -176,31 +176,45 @@ namespace SpirvHarness
 
             Result r;
             byte[] spv = null;
-            Task<(Result, byte[])> t = Task.Run(() =>
+            byte[] spvCm = null;
+            Task<(Result, byte[], byte[])> t = Task.Run(() =>
             {
-                Result x = Translate(code, ctrl, out byte[] s, false, glslc);
-                return (x, s);
+                Result x = TranslateVariants(code, ctrl, out byte[] s, out byte[] cm, false, glslc);
+                return (x, s, cm);
             });
-            if (t.Wait(Timeout)) (r, spv) = t.Result;
+            if (t.Wait(Timeout)) (r, spv, spvCm) = t.Result;
             else r = new Result { Status = "timeout", Error = $"no result after {Timeout.TotalSeconds} s" };
             r.Hash = req.Hash;
             r.Group = ce?.Group ?? "runtime";
             r.Stages = ce?.Occurrences ?? 1;
             string row = FormatRow(r);
-            if (spv != null) PutSpv(cache, req.Hash, spv);
+            if (spv != null) PutSpv(cache, req.Hash, spv, spvCm);
             AppendRow(Path.Combine(cache, "results.tsv"), row);
             say("R\t" + row);
         }
 
-        static void PutSpv(string cache, string hash, byte[] spv)
+        static void PutSpv(string cache, string hash, byte[] spv, byte[] spvCm = null)
+        {
+            // the cooperative-matrix variant first (AmpereCoopMat.cs): a stale one must not outlive the words it was made with
+            string cmDst = Path.Combine(cache, hash + ".cm.spv");
+            if (spvCm != null) PutFile(cache, cmDst, spvCm);
+            else
+            {
+                try { if (File.Exists(cmDst)) File.Delete(cmDst); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            PutFile(cache, Path.Combine(cache, hash + ".spv"), spv);
+        }
+
+        static void PutFile(string cache, string dst, byte[] bytes)
         {
             // A request comes only for a block without a results.tsv row, so a .spv already there is stale (its row was removed to have
             // the block translated again, or it is from another translator build) and is replaced: keeping it left a new row next to the
             // old words, and the runtime rejected the pair ("resources record does not match the SPIR-V": five of OoT's culling-chain
             // compute shaders never ran, run game_1). The other writer writes the same words, so the last replace wins harmlessly.
-            string dst = Path.Combine(cache, hash + ".spv");
-            string tmp = Path.Combine(cache, $"{hash}.spv.{Environment.ProcessId}.tmp");
-            File.WriteAllBytes(tmp, spv);
+            string tmp = $"{dst}.{Environment.ProcessId}.tmp";
+            File.WriteAllBytes(tmp, bytes);
             try { File.Move(tmp, dst, true); }
             catch (IOException) { File.Delete(tmp); }                   // open in a reader right now: the old file stays for this run
             catch (UnauthorizedAccessException) { File.Delete(tmp); }

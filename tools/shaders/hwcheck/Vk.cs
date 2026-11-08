@@ -55,6 +55,8 @@ namespace Hwcheck
         [DllImport(Dll)] static extern int vkQueueSubmit(IntPtr q, uint n, void* submits, ulong fence);
         [DllImport(Dll)] static extern int vkQueueWaitIdle(IntPtr q);
         [DllImport(Dll)] static extern int vkDeviceWaitIdle(IntPtr dev);
+        [DllImport(Dll)] static extern IntPtr vkGetInstanceProcAddr(IntPtr inst, string name);
+        [DllImport(Dll)] static extern void vkGetPhysicalDeviceProperties2(IntPtr pd, byte* props);
 
         IntPtr _inst, _pd, _dev, _queue, _cb;
         ulong _ssbo, _ssboMem, _ubo, _uboMem, _set0Layout, _set1Layout, _pipeLayout, _pool, _cmdPool;
@@ -70,7 +72,14 @@ namespace Hwcheck
         static void U64(byte* p, int off, ulong v) => *(ulong*)(p + off) = v;
         static void Ptr(byte* p, int off, void* v) => *(void**)(p + off) = v;
 
-        public VkRunner(int bytes)
+        /// VK_KHR_cooperative_matrix properties (M, N, K, A, B, C, result type, saturating, scope) when made with coopMat.
+        public readonly System.Collections.Generic.List<(uint m, uint n, uint k, uint a, uint b, uint c, uint r, uint sat, uint scope)> CoopMatProps = new();
+        public uint SubgroupSize { get; private set; }
+
+        public VkRunner(int bytes) : this(bytes, false) { }
+
+        /// coopMat: also enables VK_KHR_cooperative_matrix and reads its properties (CoopMat.cs).
+        public VkRunner(int bytes, bool coopMat)
         {
             _bytes = bytes;
             byte* app = Z(48);
@@ -107,6 +116,8 @@ namespace Hwcheck
             U32(f11, 0, 49); Ptr(f11, 8, f12);
             U32(f12, 0, 51); Ptr(f12, 8, f13);
             U32(f13, 0, 53);
+            byte* fcm = Z(32);
+            if (coopMat) { U32(fcm, 0, 1000506000); Ptr(f13, 8, fcm); }   // VkPhysicalDeviceCooperativeMatrixFeaturesKHR
             vkGetPhysicalDeviceFeatures2(_pd, f2);
 
             float prio = 1;
@@ -114,6 +125,33 @@ namespace Hwcheck
             U32(qci, 0, 2); U32(qci, 20, family); U32(qci, 24, 1); Ptr(qci, 32, &prio);
             byte* dci = Z(72);
             U32(dci, 0, 3); Ptr(dci, 8, f2); U32(dci, 20, 1); Ptr(dci, 24, qci);
+            if (coopMat)
+            {
+                if (*(uint*)(fcm + 16) == 0) throw new Exception("cooperativeMatrix feature not supported");
+                byte* extName = Z(64);
+                byte[] en = Encoding.ASCII.GetBytes("VK_KHR_cooperative_matrix");
+                for (int i = 0; i < en.Length; i++) extName[i] = en[i];
+                byte** extNames = (byte**)Z(8);
+                extNames[0] = extName;
+                U32(dci, 48, 1); Ptr(dci, 56, extNames);
+                var getProps = (delegate* unmanaged<IntPtr, uint*, byte*, int>)vkGetInstanceProcAddr(_inst, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
+                if (getProps == null) throw new Exception("no vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
+                uint pn = 0;
+                getProps(_pd, &pn, null);
+                byte* pp = Z((int)pn * 56 + 8);
+                for (uint i = 0; i < pn; i++) U32(pp + i * 56, 0, 1000506001);
+                getProps(_pd, &pn, pp);
+                for (uint i = 0; i < pn; i++)
+                {
+                    uint* q = (uint*)(pp + i * 56 + 16);
+                    CoopMatProps.Add((q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8]));
+                }
+                byte* sp = Z(64), p2 = Z(1024);
+                U32(sp, 0, 1000094000);   // VkPhysicalDeviceSubgroupProperties
+                U32(p2, 0, 1000059001); Ptr(p2, 8, sp);
+                vkGetPhysicalDeviceProperties2(_pd, p2);
+                SubgroupSize = *(uint*)(sp + 16);
+            }
             Check(vkCreateDevice(_pd, dci, null, out _dev), "vkCreateDevice");
             vkGetDeviceQueue(_dev, family, 0, out _queue);
 
