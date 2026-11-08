@@ -8,6 +8,8 @@
 // handles never dropped by count, deferred bind arrays read at record time.
 #include <atomic>
 #include <algorithm>
+#include <filesystem>
+#include "nxrt/instance.h"
 #include <cstdio>
 #include <chrono>
 #include <cstdlib>
@@ -3554,6 +3556,8 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     }
     if (indirect && g_trace && ind.ok) {   // a traced frame: the arguments as the GPU dispatches them (snapd_<n>_<cs>.bin)
         static int nd = 0;
+        static uint64_t nd_present = ~0ull;   // numbered per frame, so trace_snap_per_frame folders of several frames compare by name
+        if (counters().presents.load() != nd_present) { nd_present = counters().presents.load(); nd = 0; }
         const int ri = snapshot_record_buffer(ind.buffer, ind.offset, 12, *F);
         char nm[96];
         std::snprintf(nm, sizeof nm, "snapd_%03d_%s.bin", nd++, cs->hash.substr(0, 8).c_str());
@@ -4780,9 +4784,18 @@ void trace_dump_targets() {
     // The snapshot copies are in the frame's submissions, which the GPU may still be running at present time: reading their buffers
     // before it finished gave zeros for the frame's later draws (the colour-pass mesh records "read 0" on replays, 2026-11-07).
     if (!g_trace_snaps.empty()) vkDeviceWaitIdle(device().device());
+    // [nvn] trace_snap_per_frame = 1: each traced frame's snapshots go to their own folder snap_f<present>/ (a trace_frame range then keeps
+    // every frame's files instead of overwriting them: frame-to-frame comparisons, A18)
+    static const bool per_frame = config_get_bool("nvn", "trace_snap_per_frame", false);
+    std::string prefix;
+    if (per_frame && !g_trace_snaps.empty()) {
+        prefix = "snap_f" + std::to_string(counters().presents.load()) + "/";
+        std::error_code ec;
+        std::filesystem::create_directories(nxrt::instance_file(prefix), ec);
+    }
     for (const TraceSnap& sn : g_trace_snaps) {
         std::string stats;
-        const bool ok = snapshot_write(sn.index, sn.name, &stats);
+        const bool ok = snapshot_write(sn.index, prefix + sn.name, &stats);
         NXLOG_I("nvn.trace", "snapshot after draw %d: %s -> %s: %s", sn.draw, sn.desc.c_str(), ok ? sn.name.c_str() : "(not written)", ok ? stats.c_str() : "");
     }
     g_trace_snaps.clear();

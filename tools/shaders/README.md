@@ -132,6 +132,36 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   (one compute block branches on an undefined value and is not checked). The fix changes the SPIR-V of 14,692 blocks (the 8 more
   fail before it after 100-107 walks); 17,094 corpus blocks contain a BRX/BRXU or CALL.REL.NOINC.
 
+## Pool arrays: texture handles computed per pixel (OoT A7)
+
+- A bindless sample whose handle neither the bindless-handle patch nor Ryujinx's `TryConvertBindless` can tie to something fixed per
+  draw (OoT: 4,336 fragment shaders sample their clustered-light shadow maps with `TEX.SCR.B.DC`, the handle read per light from a
+  storage buffer inside the light loop) used to be dropped (it read 0). `StaticGpuAccessor.QueryHostSupportsSeparateSampler` now
+  answers true, so Ryujinx's `GenerateBindlessAccess` turns it into an index into a sampled-image array (texture id = handle & 0xfffff,
+  65,536 entries) and one into a sampler array (sampler id = handle >> 20, 4,096 entries), with `NonUniform` decorations. Blocks whose
+  handle resolves per draw are untouched: `TryConvertBindless` runs first.
+- Each array gets an extra descriptor set (`CreateExtraSet`): set 4 + 3 x stage slot + n, binding 0 (fragment: set 7 = the textures,
+  set 8 = the samplers). The resource list names them `tex<type>[c0:1073741824x<length>]=s<set>b0` (`texNone` = the sampler array).
+  The runtime binds its persistent pool sets there (`runtime/src/gfx/nvn/nvn_pool_sets.cpp`, `pool_set_sync` in `nvn_replay.cpp`).
+- Off: `NXRT_HARNESS_POOL_BINDLESS=0` or `--no-pool-bindless` (the sample is dropped as before).
+
+## Warp-aggregated atomics as per-lane atomics (OoT A18)
+
+- NVN compute code counts with warp-aggregated atomics: `VOTE[U].ANY|ALL Rd, PT` (the active mask), leader = FLO of it, one ATOMG/RED
+  by the leader with POPC(mask) or REDUX.SUM, SHFL.IDX of the result from the leader, rank = POPC(mask & lanemask_lt). On the console
+  BSSY/BSYNC/WARPSYNC keep the warp's lanes together there; the translated structured code has no such guarantee on a PC GPU, and lanes
+  apart at the ballot, the add and the shuffle lost or doubled counts. OoT's GPU culling (4c1e8564 and the compute chain after it, all
+  from `main`) counted differently every frame: its mesh draw records summed to 520-1,160 items per frame on replays of one captured
+  frame, and grass, bushes and leaves flickered.
+- In compute programs `VOTE Rd, PT` is now the lane's own bit and `REDUX` the lane's own value (`AmpereEmit.cs`): every lane is a warp of
+  one, its own leader with its own add and shuffle, which is right under any active mask. The records then sum to ~94,700 items per
+  frame (+-0.5% from loop to loop). Mesh and task programs keep the real ballot (they use the active mask for output compaction: with the
+  own bit 45 mesh blocks drew streaks of garbage triangles). Off: `NXRT_HARNESS_VOTE_SELF=0`.
+- Ruled out on the way (replays of capture `20261107-230737-nb3-alias_kid`, 8 traced loops each): the pool mirror, the storage
+  shadows and held compute results (`pool_mirror = off`, `compute_shadows = 0`, `compute_out_lazy = 0`), volatile device-pointer
+  accesses, maximal reconvergence (VK_KHR_shader_maximal_reconvergence on every module with subgroup operations), and memory the replay
+  does not reset (`[capture] reset_full`).
+
 ## Cache completeness (S40)
 
 - `scripts/gap_corpus.py <romfs> --cache <spirv dir> --out <dir> [--programs programs.bin] [--all]`: scans the game files the way the

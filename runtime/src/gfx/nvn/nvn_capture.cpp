@@ -1384,11 +1384,17 @@ int run_replay(const std::string& folder) {
                     NXLOG_I(kTag, "the frame writes %zu ranges of pool memory (%.1f MiB): put back before every loop", writes.size(), total / 1048576.0);
             }
         }
+        // [capture] reset_full = 1 (diagnosis, A18): every loop puts back all captured memory, not only the ranges seen written (a
+        // determinism check: a frame that still differs from loop to loop is not deterministic on the GPU)
+        static const bool reset_full = config_get_bool("capture", "reset_full", false);
         if (reset && loop >= 1) {
             gpu::finish();
             if (FILE* f = _wfopen((dir / "memory.bin").c_str(), L"rb")) {
                 std::vector<uint8_t> buf;
-                for (auto& r : writes) restore_memory(f, L, r.first, r.second, buf);
+                if (reset_full)
+                    for (const auto& r : L.rngs) restore_memory(f, L, r.a, r.a + r.n, buf);
+                else
+                    for (auto& r : writes) restore_memory(f, L, r.first, r.second, buf);
                 std::fclose(f);
             }
             restore_images(dir, L, false);

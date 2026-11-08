@@ -2328,13 +2328,26 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Dst(ctx, o[0], valid);
         }
 
+        internal static bool VoteSelf = System.Environment.GetEnvironmentVariable("NXRT_HARNESS_VOTE_SELF") != "0";
+
         static void EmitVoteAmpere(EmitterContext ctx, SassInst i)
         {
             // VOTE[U].ANY|ALL|EQ [Rd,] Pd, Ppred
             IReadOnlyList<Op> o = i.Operands;
             VoteMode mode = Has(i, "ANY") ? VoteMode.Any : Has(i, "ALL") ? VoteMode.All : Has(i, "EQ") ? VoteMode.Eq : throw Unsup();
             IrOperand pred = Src(ctx, o[^1]);
-            if (o.Count == 3) Dst(ctx, o[0], EmitBallot(ctx, pred));
+            // A18: VOTE[U].ANY/ALL Rd, PT (Rd = the warp's active mask) as the lane's own bit. NVN code uses it for warp-aggregated atomics (leader =
+            // FLO(mask), count = POPC(mask), one ATOMG by the leader, SHFL.IDX of the result, rank = POPC(mask & lanemask_lt)); the console
+            // runs that with the warp's lanes together (BSSY/BSYNC/WARPSYNC), the translated structured code gives no such guarantee on a PC
+            // GPU, and lanes apart at the ballot, the add or the shuffle lost or doubled counts: OoT's GPU culling counted differently every
+            // frame (foliage flicker). With the own bit every lane is its own leader, adds its own count and reads its own result, which is
+            // right under any active mask (also for loops over the active lanes). NXRT_HARNESS_VOTE_SELF=0: the real ballot.
+            // Compute only: mesh and task programs use the active mask for other things (45 mesh and 2 task blocks of OoT changed with it, and
+            // their output drew streaks of garbage triangles).
+            if (o.Count == 3 && VoteSelf && ctx.TranslatorContext.Definitions.Stage == ShaderStage.Compute && IsPredKind(o[^1]) && o[^1].Reg == 7 &&
+                !o[^1].Not)   // Rd = ballot(PT) in every mode (VOTE.ALL Rd, PT, PT too)
+                Dst(ctx, o[0], ctx.ShiftLeft(Const(1), LaneIdAmpere(ctx)));
+            else if (o.Count == 3) Dst(ctx, o[0], EmitBallot(ctx, pred));
             Op pd = o[^2];
             if (!(IsPredKind(pd) && pd.Reg == 7)) Dst(ctx, pd, EmitVote(ctx, mode, pred));
         }
@@ -2348,6 +2361,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // lane (32 IDX shuffles) and keeps the active ones (ballot), so it is right under any active mask.
             IReadOnlyList<Op> o = i.Operands;
             IrOperand v = Src(ctx, o[1]);
+            if (VoteSelf && ctx.TranslatorContext.Definitions.Stage == ShaderStage.Compute)
+            {
+                // A18: with VOTE Rd, PT as the lane's own bit every lane is a warp of one, so the reduction over the active lanes is the
+                // lane's own value (OoT's culling: leader = FLO(VOTEU.ALL), REDUX.SUM, RED.ADD by the leader; summed over the warp, every
+                // lane would add the warp's total)
+                Dst(ctx, o[0], v);
+                return;
+            }
             IrOperand mask = EmitBallot(ctx, Const(IrConsts.True));
             bool s = Has(i, "S32");
             Func<IrOperand, IrOperand, IrOperand> f =
