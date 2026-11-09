@@ -1271,6 +1271,67 @@ NXTEST(texprep_background_upload) {
     teardown(r);
 }
 
+// ---- parked images of shared storage (tex_park, tex_release_shared) ------------------------------------------------------------
+// Two texture objects over the same storage share one image. The game finalizes both before the GPU is done with the frame: the image must
+// still be parked (it was not when each finalize saw the other's deferred reference), and a third object over that storage takes it back
+// without an upload.
+NXTEST(parked_image_of_shared_storage) {
+    Rig r;
+    if (!bring_up(r)) {
+        CHECK(false);
+        return;
+    }
+    {
+        namespace be = nxrt::nvn::be;
+        const TextureBuilderInfo b = info(NVN_TEXTURE_TARGET_2D, 64, 64, 1, 1, NVN_FORMAT_RGBA8);
+        Tex a;
+        CHECK(make_tex(a, b));
+        fill_random(a.lin, 31);
+        tile_into_storage(a);
+        auto twin = [&](uint32_t id) {
+            Ref<Texture> t(new Texture());
+            const Texture& s = *a.t;
+            t->b = s.b; t->fmt = s.fmt; t->mem = s.mem; t->storage_size = s.storage_size; t->block_linear = s.block_linear;
+            t->block_height_gobs = s.block_height_gobs; t->levels = s.levels; t->layers = s.layers; t->id = id;
+            return t;
+        };
+        Ref<Texture> bt = twin(g_next_id++);
+        be::texture_registry_add(a.t.get());
+        be::texture_registry_add(bt.get());
+        gpu::run_frame_sync([&](Frame& f) {
+            gpu::tex_ensure_current(a.t.get(), f);
+            gpu::tex_ensure_current(bt.get(), f);          // shares a's image (the same storage and layout)
+            gpu::tex_mark_gpu_written(a.t.get());          // as a render target the GPU drew
+        });
+        CHECK(gpu::tex_image(a.t.get()) == gpu::tex_image(bt.get()));
+        uint64_t parked0 = 0, taken0 = 0, stale0 = 0, exp0 = 0;
+        gpu::park_stats(&parked0, &taken0, &stale0, &exp0);
+        for (Texture* t : {a.t.get(), bt.get()}) {        // finalized together (nvnTextureFinalize)
+            t->destroyed.store(true);
+            gpu::release_texture_gpu(t);
+            be::texture_registry_remove(t);
+        }
+        gpu::finish();
+        uint64_t parked1 = 0, taken1 = 0, stale1 = 0, exp1 = 0;
+        gpu::park_stats(&parked1, &taken1, &stale1, &exp1);
+        CHECK_EQ(parked1 - parked0, 1ull);
+        Ref<Texture> ct = twin(g_next_id++);
+        be::texture_registry_add(ct.get());
+        ct->cpu_dirty.store(true);
+        const uint64_t up0 = gpu::counters().texture_uploads.load();
+        gpu::run_frame_sync([&](Frame& f) { gpu::tex_ensure_current(ct.get(), f); });
+        uint64_t parked2 = 0, taken2 = 0, stale2 = 0, exp2 = 0;
+        gpu::park_stats(&parked2, &taken2, &stale2, &exp2);
+        CHECK_EQ(taken2 - taken1, 1ull);
+        CHECK_EQ(gpu::counters().texture_uploads.load() - up0, 0ull);   // the image holds what the GPU wrote: no upload of the storage
+        ct->destroyed.store(true);
+        gpu::release_texture_gpu(ct.get());
+        be::texture_registry_remove(ct.get());
+        gpu::finish();
+    }
+    teardown(r);
+}
+
 // ---- sparse texture helpers used by the background preparation (nvn_texture_registry.cpp) ----------------------------------------------
 // gather copies the mapped tiles (unmapped bytes are zero), direct hands out a pointer when the range is one piece of one physical pool, and
 // the hash follows both the bytes and where they sit.
