@@ -332,6 +332,15 @@ void Frame::defer(std::function<void()> fn) {
     g_gauge_deferred.add(1);
 }
 
+VkDescriptorPool keep_dpool_new() { return new_dpool(); }
+void keep_dpool_release(VkDescriptorPool p) {
+    if (!p) return;
+    defer_destroy([p] {
+        vkDestroyDescriptorPool(g->dev->device(), p, nullptr);
+        vk_gauge_descriptor_pools().sub(1);
+    });
+}
+
 VkDescriptorSet Frame::alloc_set(VkDescriptorSetLayout layout) {
     Slot& s = *static_cast<Slot*>(slot);
     for (int attempt = 0; attempt < 2; ++attempt) {

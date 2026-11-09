@@ -8,6 +8,7 @@
 // handles never dropped by count, deferred bind arrays read at record time.
 #include <atomic>
 #include <algorithm>
+#include <bit>
 #include <source_location>
 #include <filesystem>
 #include "nxrt/instance.h"
@@ -39,9 +40,11 @@
 #include "nvn_capture.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_arch_exp.h"
+#include "nvn_cmdq.h"
 #include "nvn_tess_gen.h"
 #include "nxrt/lowlat.h"
 #include "nxrt/gaps.h"
+#include "nxrt/write_watch.h"
 #include "extras/hdr_nvn.h"
 #include "extras/fsr1_spatial.h"
 #include "extras/spatial_upscaler.h"
@@ -223,14 +226,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288 };
+enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216 };
 uint32_t ab_mask() {
     static const uint32_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}};
         uint32_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -859,7 +862,7 @@ bool chunk_due(uint32_t threshold, AbFeat feat = kAbChunks) {
     if (!threshold || !g_chunk_work || !ab_on(feat)) return false;
     if (g_chunk_work >= threshold) return true;
     const ChunkCfg& c = chunk_cfg();
-    return c.ns && ft::now_ns() - g_chunk_t0 >= c.ns;
+    return c.ns && ab_on(kAbChunkTime) && ft::now_ns() - g_chunk_t0 >= c.ns;   // cpuperf_ab_what chunk_time: the time limit only in the on windows
 }
 
 // No pass open: sends the recorded part to the GPU. Skipped while a query is active (it cannot span command buffers) or stream-out runs.
@@ -1633,9 +1636,18 @@ uint64_t pool_entry_sig(const Texture* t, uint64_t stamp, const ViewRequest& q) 
 uint64_t g_psync_kept = 0, g_psync_asked = 0;   // statistics
 
 // The set of this pool array, its entries brought up to date with the bound pool (once per present, or when images were created since).
+struct PsMemo { const PoolBinding* pb = nullptr; const void* owner = nullptr; PoolSet* st = nullptr; };
+PsMemo g_ps_memo[64];
 PoolSet* pool_set_sync(const PoolBinding& pb) {
     const void* owner = pb.sampler ? static_cast<const void*>(S.spool.get()) : static_cast<const void*>(S.tpool.get());
-    PoolSet& st = g_pool_sets[PoolSetKey{owner, static_cast<int>(pb.view), pb.depth && !pb.sampler, pb.sampler}];
+    // the map entry of (binding, pool): remembered per binding (the key's other fields come from the binding; map nodes do not move)
+    PsMemo& pm = g_ps_memo[(reinterpret_cast<uintptr_t>(&pb) >> 4) & 63];
+    if (pm.pb != &pb || pm.owner != owner || !pm.st) {
+        pm.pb = &pb;
+        pm.owner = owner;
+        pm.st = &g_pool_sets[PoolSetKey{owner, static_cast<int>(pb.view), pb.depth && !pb.sampler, pb.sampler}];
+    }
+    PoolSet& st = *pm.st;
     if (st.failed) return nullptr;
     if (!st.set && !pool_set_create(pb, st)) return nullptr;
     const uint64_t key = counters().presents.load(std::memory_order_relaxed) * 0x9e3779b97f4a7c15ull ^ counters().textures_created.load(std::memory_order_relaxed);
@@ -1765,6 +1777,7 @@ PoolSet* pool_set_sync(const PoolBinding& pb) {
 }
 
 void pool_sets_reset() {
+    for (PsMemo& m : g_ps_memo) m = PsMemo{};
     for (auto& [k, st] : g_pool_sets)
         if (st.dpool) vkDestroyDescriptorPool(vkdev(), st.dpool, nullptr);   // frees the set
     g_pool_sets.clear();
@@ -2196,19 +2209,101 @@ void gmem_before_op(bool compute) {
 // no buffer binding and no program changed (g_buf_ver) and nothing moved the resolve epoch or sent results back since the last check (the
 // same conditions as [nvn] set_reuse), the check would find what it found then, so it is skipped ([nvn] set_reuse = off checks every draw).
 uint64_t g_odb_ver = ~0ull, g_odb_epoch = 0, g_odb_skipped = 0;
+// [nvn] odb_incremental (default on): a binding whose last check found no held result over it cannot find one while the held results have
+// not grown (out_grow_version: other changes only take results out). So between two growths only the bindings that changed since the last
+// check (g_odb_dirty: BindBuffers, a new program or stage) and the ones that did overlap then (g_odb_hot) are checked again. A full check
+// at every growth and at the start of each submission.
+enum : int { kOdbVtx = 0, kOdbUbo = 1, kOdbSsbo = 2, kOdbXfb = 3 };
+uint16_t g_odb_dirty[4][kStages] = {};       // [kind][stage] bit per slot (vertex and xfb: stage 0)
+bool g_odb_all_dirty = true;
+uint64_t g_odb_grow = ~0ull;
+struct OdbHot { const GState::Bind* b; bool copy_ok; int why; };
+std::vector<OdbHot> g_odb_hot;
+uint64_t g_odb_full = 0, g_odb_inc = 0, g_odb_inc_checked = 0, g_odb_verify_bad = 0;   // statistics
+bool odb_incremental_on() {
+    static const bool on = [] { const std::string v = nxrt::config_get_str("nvn", "odb_incremental", "on"); return v != "off" && v != "0" && v != "false"; }();
+    return on && ab_on(kAbOdbInc);
+}
+void odb_mark(int kind, int stage, uint32_t slot) { if (stage < kStages && slot < 16) g_odb_dirty[kind][stage] |= static_cast<uint16_t>(1u << slot); }
 void out_draw_bindings() {
     const bool memo = set_reuse_mode() != SetReuse::Off && ab_on(kAbOdb);
     if (memo && g_odb_ver == g_buf_ver && g_odb_epoch == (g_desc_epoch * 0x100000001b3ull + out_bytes_total()) * 31 + out_version()) { ++g_odb_skipped; return; }
-    for (const GState::Bind& b : S.vtx) out_draw_read(b.addr, b.size, true, kOutDrawBuffer);
-    const VkDeviceSize ualign = device().properties().limits.minUniformBufferOffsetAlignment;
+    const uint64_t grow = out_grow_version();
+    if (odb_incremental_on() && !g_odb_all_dirty && grow == g_odb_grow) {
+        ++g_odb_inc;
+        const VkDeviceSize ualign = device().properties().limits.minUniformBufferOffsetAlignment;
+        static std::vector<OdbHot> hot;
+        hot.clear();
+        auto check = [&](const GState::Bind& b, bool copy_ok, int why) {
+            ++g_odb_inc_checked;
+            if (out_draw_read(b.addr, b.size, copy_ok, why)) hot.push_back({&b, copy_ok, why});
+        };
+        // the bindings that overlapped at the last check (and are not checked below as changed)
+        for (const OdbHot& h : g_odb_hot) {
+            const GState::Bind* b = h.b;
+            int kind, st; uint32_t slot;
+            if (b >= S.vtx && b < S.vtx + 16) { kind = kOdbVtx; st = 0; slot = static_cast<uint32_t>(b - S.vtx); }
+            else if (b >= &S.xfb[0] && b < &S.xfb[0] + 4) { kind = kOdbXfb; st = 0; slot = static_cast<uint32_t>(b - &S.xfb[0]); }
+            else if (b >= &S.ubo[0][0] && b < &S.ubo[0][0] + kStages * 16) { kind = kOdbUbo; st = static_cast<int>((b - &S.ubo[0][0]) / 16); slot = static_cast<uint32_t>((b - &S.ubo[0][0]) % 16); }
+            else { kind = kOdbSsbo; st = static_cast<int>((b - &S.ssbo[0][0]) / 16); slot = static_cast<uint32_t>((b - &S.ssbo[0][0]) % 16); }
+            if (g_odb_dirty[kind][st] & (1u << slot)) continue;
+            if (kind != kOdbVtx && kind != kOdbXfb && (st == kCompute || !S.stage[st])) continue;
+            check(*b, h.copy_ok, h.why);
+        }
+        for (uint32_t m = g_odb_dirty[kOdbVtx][0]; m; m &= m - 1) check(S.vtx[std::countr_zero(m)], true, kOutDrawBuffer);
+        for (int st = 0; st < kStages; ++st) {
+            if (st == kCompute || !S.stage[st]) continue;
+            for (uint32_t m = g_odb_dirty[kOdbUbo][st]; m; m &= m - 1) {
+                const GState::Bind& b = S.ubo[st][std::countr_zero(m)];
+                check(b, ualign && (b.addr % ualign) == 0, kOutDrawBuffer);
+            }
+            for (uint32_t m = g_odb_dirty[kOdbSsbo][st]; m; m &= m - 1) check(S.ssbo[st][std::countr_zero(m)], true, kOutStorageXfb);
+        }
+        for (uint32_t m = g_odb_dirty[kOdbXfb][0]; m; m &= m - 1) check(S.xfb[std::countr_zero(m)], false, kOutStorageXfb);
+        static const bool verify = nxrt::config_get_str("nvn", "odb_incremental", "on") == "verify";
+        if (verify) {   // every binding not checked now must have no held result over it (a pure query; logged when it fails)
+            auto skipped = [&](const GState::Bind& b) {
+                if (!b.addr) return;
+                for (const OdbHot& h : hot) if (h.b == &b) return;
+                if (out_overlaps(b.addr, b.size ? b.size : 65536)) {
+                    ++g_odb_verify_bad;
+                    if (g_odb_verify_bad < 20) NXLOG_W(kTag, "odb_incremental verify: binding %llx+%llx has a held result but was not checked", (unsigned long long)b.addr, (unsigned long long)b.size);
+                }
+            };
+            for (const GState::Bind& b : S.vtx) skipped(b);
+            for (int st = 0; st < kStages; ++st) {
+                if (st == kCompute || !S.stage[st]) continue;
+                for (const GState::Bind& b : S.ubo[st]) skipped(b);
+                for (const GState::Bind& b : S.ssbo[st]) skipped(b);
+            }
+            for (const GState::Bind& b : S.xfb) skipped(b);
+        }
+        g_odb_hot.swap(hot);
+        std::memset(g_odb_dirty, 0, sizeof g_odb_dirty);
+        g_odb_grow = out_grow_version();   // the checks may have sent results back (no growth), never added any
+        g_odb_ver = g_buf_ver;
+        g_odb_epoch = (g_desc_epoch * 0x100000001b3ull + out_bytes_total()) * 31 + out_version();
+        return;
+    }
+    ++g_odb_full;
+    g_odb_hot.clear();
+    const VkDeviceSize ualign0 = device().properties().limits.minUniformBufferOffsetAlignment;
+    // out_draw_read is true for a binding over a held result (and for those only): checked again at every draw until the next full check
+    for (const GState::Bind& b : S.vtx) if (out_draw_read(b.addr, b.size, true, kOutDrawBuffer)) g_odb_hot.push_back({&b, true, kOutDrawBuffer});
     for (int st = 0; st < kStages; ++st) {
         if (st == kCompute || !S.stage[st]) continue;
-        for (const GState::Bind& b : S.ubo[st]) out_draw_read(b.addr, b.size, ualign && (b.addr % ualign) == 0, kOutDrawBuffer);
-        for (const GState::Bind& b : S.ssbo[st]) out_draw_read(b.addr, b.size, true, kOutStorageXfb);   // bound from the copy (build_set)
+        for (const GState::Bind& b : S.ubo[st]) {
+            const bool ok = ualign0 && (b.addr % ualign0) == 0;
+            if (out_draw_read(b.addr, b.size, ok, kOutDrawBuffer)) g_odb_hot.push_back({&b, ok, kOutDrawBuffer});
+        }
+        for (const GState::Bind& b : S.ssbo[st]) if (out_draw_read(b.addr, b.size, true, kOutStorageXfb)) g_odb_hot.push_back({&b, true, kOutStorageXfb});
     }
-    for (const GState::Bind& b : S.xfb) out_draw_read(b.addr, b.size, false, kOutStorageXfb);
-    g_odb_ver = g_buf_ver;   // taken after the checks: a result they sent back moved out_bytes_total already
-    g_odb_epoch = (g_desc_epoch * 0x100000001b3ull + out_bytes_total()) * 31 + out_version();
+    for (const GState::Bind& b : S.xfb) if (out_draw_read(b.addr, b.size, false, kOutStorageXfb)) g_odb_hot.push_back({&b, false, kOutStorageXfb});
+    std::memset(g_odb_dirty, 0, sizeof g_odb_dirty);
+    g_odb_all_dirty = false;
+    g_odb_grow = grow;
+    g_odb_ver = g_buf_ver;
+    g_odb_epoch = (g_desc_epoch * 0x100000001b3ull + out_bytes_total()) * 31 + out_version();   // after the checks: a result they sent back moved out_bytes_total already
 }
 
 // ---- look-ahead before a pass ([nvn] pass_lookahead) -----------------------------------------------------------------------------
@@ -2774,6 +2869,54 @@ bool compute_c0(const ShaderInfo& s, VkDescriptorBufferInfo& bi) {
 }
 
 uint64_t g_sets_built = 0, g_sets_cached = 0;   // statistics: descriptor sets resolved, of them found in this submission's cache
+// ---- [nvn] set_keep: what a kept set's bindings depended on (recorded by build_set, checked by keep_valid below) ----------------------
+struct KDep {
+    uint8_t kind = 0;          // 0 nothing to check, 1 uniform block (the copy-or-pool decision), 2 storage range (no held result), 3 texture, 4 storage image
+    bool texel = false;        // kind 3: a texel buffer: its range is checked like kind 2 too
+    bool writes = false;       // kind 2: the shader may write it: a found set notes the GPU write as build_set does (gpu_wrote)
+    ReadDep rd;
+    uint64_t addr = 0, range = 0, note = 0;   // kinds 2 and 3 (texel): the range bound (held-result check) and the bytes upd_note_read is told
+    const BindingDesc* d = nullptr;           // kind 3
+    const void* pool = nullptr;               // kinds 2 and 3 (texel): the pool the address resolved in (kind 1: rd.pool)
+    Texture* tex = nullptr;
+    uint32_t tex_id = 0;
+    uint64_t stamp = 0, vh = 0, sh = 0;       // view stamp of the image, hashes of the view info and the sampler info
+    uint8_t has_view = 0, has_sampler = 0;
+};
+struct BVal { uint64_t binding, a, b, c; };   // set_reuse = verify: what build_set wrote for each binding (keep verify names the one that differs)
+std::vector<BVal> g_bvals;
+bool g_bvals_on = false;
+std::unordered_map<VkDescriptorSet, std::vector<BVal>> g_ds_bvals;   // set_reuse = verify: what each set of the submission was built with
+struct KeepRec {
+    std::vector<KDep> deps;
+    const char* bad = nullptr;  // why the set cannot be kept (null: it can)
+    uint64_t content = 0;       // the content key build_set computed
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+};
+KeepRec* g_krec = nullptr;      // build_set records into it while bind_sets builds a set it may keep
+uint64_t g_last_set_key = 0;    // the content key of the last set build_set resolved
+std::unordered_map<VkDescriptorSet, uint64_t> g_set_content;   // set_reuse = verify: the content key of each kept set
+VkDescriptorSet keep_alloc(VkDescriptorSetLayout layout);   // below: a set of the persistent pools
+uint64_t bytes_hash(const void* p, size_t n) {
+    uint64_t h = 1469598103934665603ull;
+    const uint8_t* b = static_cast<const uint8_t*>(p);
+    for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 1099511628211ull;
+    return h;
+}
+// The support buffer of sets without render scales: the defaults, in a buffer of its own that outlives submissions (a kept set binds it; the
+// per-submission g_support in the upload ring held the same bytes).
+gfx::Buffer g_support_keep;
+VkBuffer support_keep_buffer() {
+    if (!g_support_keep.buffer) {
+        if (device().create_buffer(sizeof(SupportBuffer), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, gfx::MemoryUse::Upload, &g_support_keep,
+                                   "nvn support buffer") != VK_SUCCESS)
+            return VK_NULL_HANDLE;
+        const SupportBuffer sb = support_buffer_defaults();
+        std::memcpy(g_support_keep.mapped, &sb, sizeof sb);
+    }
+    return g_support_keep.buffer;
+}
+
 VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
     // Scratch arrays kept across calls (render thread only; nothing here calls build_set again): about one set per draw, and allocating
     // them each time was a tenth of the render thread. Reserved to the binding count first, so the pointers into them stay valid.
@@ -2789,6 +2932,8 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
     tinfo.reserve(nb);
     uint64_t key = 1469598103934665603ull + set;
     auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+    g_bvals_on = set_reuse_mode() == SetReuse::Verify;
+    g_bvals.clear();
     mix(reinterpret_cast<uint64_t>(pl.layout));
     for (const BindingDesc& d : pl.bindings) {
         if (d.set != set) continue;
@@ -2797,12 +2942,22 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
         w.dstBinding = d.binding;
         w.descriptorCount = 1;
         w.descriptorType = d.type;
+        KDep* kd = nullptr;
+        if (g_krec) { g_krec->deps.emplace_back(); kd = &g_krec->deps.back(); }
+        auto kbad = [&](const char* why) { if (g_krec && !g_krec->bad) g_krec->bad = why; };
         if (d.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
             VkDescriptorBufferInfo bi = {dummy_buffer(), 0, 65536};
             switch (b.nvn.source) {
                 case NvnSource::SupportBuffer:
-                    bi = g_draw_support ? VkDescriptorBufferInfo{g_draw_support.buffer, g_draw_support.offset, sizeof(SupportBuffer)}
-                                        : VkDescriptorBufferInfo{g_support.buffer, g_support.offset, sizeof(SupportBuffer)};
+                    if (g_draw_support) {
+                        bi = VkDescriptorBufferInfo{g_draw_support.buffer, g_draw_support.offset, sizeof(SupportBuffer)};
+                        kbad("support buffer with render scales");
+                    } else if (VkBuffer kb = support_keep_buffer()) {
+                        bi = VkDescriptorBufferInfo{kb, 0, sizeof(SupportBuffer)};
+                    } else {
+                        bi = VkDescriptorBufferInfo{g_support.buffer, g_support.offset, sizeof(SupportBuffer)};
+                        kbad("support buffer");
+                    }
                     break;
                 case NvnSource::DriverConstants: {
                     if (d.nvn_stage == kCompute && compute_c0(*d.shader, bi)) break;   // a compute table with push constants: built for this dispatch
@@ -2826,7 +2981,15 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             const VkDeviceSize ua = device().properties().limits.minUniformBufferOffsetAlignment;
                             out_draw_read(bind.addr, bind.size ? bind.size : 65536, ua && (bind.addr % ua) == 0, kOutDrawBuffer);   // resolve_read serves the copy
                         }
-                        BufRef br = resolve_read(bind.addr, bind.size, kReadUniform);
+                        BufRef br = resolve_read_dep(bind.addr, bind.size, kReadUniform, kd ? &kd->rd : nullptr);
+                        if (kd) {
+                            kd->kind = 1;
+                            kd->addr = bind.addr;
+                            kd->range = bind.size ? bind.size : 65536;
+                            if (!kd->rd.keep) kbad("uniform block without a copy chunk");
+                            if (upd_find(bind.addr, bind.size ? bind.size : 65536)) kbad("uniform block in an update range");
+                            if (!br.ok) kbad("uniform block outside a pool");   // a pool registered later may cover it
+                        }
                         const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
                         const float ufs = ufs_scale_for(d, idx);
                         const bool tsr = d.nvn_stage == kVertex && idx == 0 && bind.size >= 272 && extras::temporal_wanted() && S.depth_tex;
@@ -2856,6 +3019,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             bi = {br.buffer, br.offset, std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536})};
                         } else if (br.ok) {
                             // unaligned binding: copy into the upload ring
+                            kbad("unaligned uniform block");
                             const VkDeviceSize n = std::min<VkDeviceSize>(bind.size ? bind.size : 65536, 65536);
                             ++g_ubo_unaligned_n; g_ubo_unaligned_bytes += n;
                             UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(align, 256));
@@ -2903,8 +3067,19 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                         // [nvn] storage_min_range (bytes) widens small bindings to that much of the memory behind them (diagnosis switch).
                         static const VkDeviceSize min_range = static_cast<VkDeviceSize>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "storage_min_range", 0)));
                         bi = {br.buffer, br.offset, std::min<VkDeviceSize>(std::max<VkDeviceSize>(bind.size ? bind.size : br.avail, min_range), br.avail)};
+                        if (kd) {
+                            kd->kind = 2;
+                            kd->addr = bind.addr;
+                            kd->range = bi.range;
+                            kd->note = bind.size ? bind.size : br.avail;
+                            kd->pool = pool_lookup(bind.addr).pool;
+                            kd->writes = writes;
+                            if (g_shadowing) kbad("storage buffer of a shadowed dispatch");
+                            if (!br.ok) kbad("storage buffer outside a pool");   // a pool registered later may cover it
+                        }
                         if (!g_shadowing && br.ok && out_lazy() && out_overlaps_window(bind.addr, bi.range)) {   // a draw over a held compute result: the copy
                             const BufRef hb = held_or_pool(bind.addr, bi.range, kOutStorageXfb, false);
+                            kbad("storage buffer over a held result");
                             if (hb.buffer != br.buffer) {
                                 bi.buffer = hb.buffer;
                                 bi.offset = hb.offset;
@@ -2939,6 +3114,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                     break;
                 }
                 default:
+                    kbad("buffer of an unknown source");
                     note_unsupported("shader buffer binding of an unknown NVN source");
                     if (first_time_key("unknown-buffer " + d.shader->hash + " " + b.name))
                         NXLOG_W(kTag, "shader %s binding %s (set %u binding %u, %s, c0 offset 0x%x, sb slot %d): unknown NVN source, the 64 KiB dummy buffer is bound",
@@ -2949,9 +3125,21 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
             binfo.push_back(bi);
             w.pBufferInfo = &binfo.back();
             mix(reinterpret_cast<uint64_t>(bi.buffer)); mix(bi.offset); mix(bi.range);
+            if (g_bvals_on) g_bvals.push_back({d.binding, reinterpret_cast<uint64_t>(bi.buffer), bi.offset, bi.range});
         } else if (d.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
             VkDescriptorImageInfo ii = {dummy_sampler(), dummy_view(view_type_for(b), b.image.depth), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
             TexResolved r = resolve_texture(d);
+            if (kd) {
+                kd->kind = 3;
+                kd->d = &d;
+                kd->tex = r.tex;
+                kd->tex_id = r.tex ? r.tex->id : 0;
+                kd->has_view = r.has_view;
+                kd->has_sampler = r.has_sampler;
+                kd->vh = r.has_view ? bytes_hash(&r.view, sizeof r.view) : 0;
+                kd->sh = r.has_sampler ? bytes_hash(&r.smp, sizeof r.smp) : 0;
+                if (!g_fb_use.empty() || !g_vol3d_use.empty() || g_su_tex) kbad("feedback, 3D copy or upscaled scene");
+            }
             if (r.tex) {
                 const auto fb = g_fb_use.find(r.tex);
                 if (fb != g_fb_use.end()) r.tex = fb->second;      // a feedback draw samples the copy made before it
@@ -3001,15 +3189,29 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             r.has_view && r.view.has_layers ? r.view.min_layer : -1, r.has_view && r.view.has_layers ? r.view.num_layers : -1);
                 }
             }
+            if (kd) {
+                kd->stamp = tex_view_stamp(r.tex);   // after the view: tex_gpu above may have made the image
+                if (feedback) kbad("colour feedback");
+                if (!null_fmt.empty()) kbad("debug_null_format");
+            }
             iinfo.push_back(ii);
             w.pImageInfo = &iinfo.back();
             mix(reinterpret_cast<uint64_t>(ii.imageView));
             mix(reinterpret_cast<uint64_t>(ii.sampler));
             mix(static_cast<uint64_t>(ii.imageLayout));
+            if (g_bvals_on) g_bvals.push_back({d.binding, reinterpret_cast<uint64_t>(ii.imageView), reinterpret_cast<uint64_t>(ii.sampler), static_cast<uint64_t>(ii.imageLayout)});
         } else if (d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
             const VkFormat shader_fmt = image_format_vk(b.image.format);
             VkDescriptorImageInfo ii = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL};
             TexResolved r = resolve_image(d);
+            if (kd) {
+                kd->kind = 4;
+                kd->d = &d;
+                kd->tex = r.tex;
+                kd->tex_id = r.tex ? r.tex->id : 0;
+                kd->has_view = r.has_view;
+                kd->vh = r.has_view ? bytes_hash(&r.view, sizeof r.view) : 0;
+            }
             if (r.tex && tex_gpu(r.tex) && tex_has_storage(r.tex)) {
                 ViewRequest q = make_request(b, r);
                 q.swizzle = {};
@@ -3025,6 +3227,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                 log_once("storage-image-dummy", "a storage image binding has no usable texture: a dummy storage image is bound");
                 ii.imageView = dummy_storage_view(view_type_for(b), shader_fmt);
             }
+            if (kd) kd->stamp = tex_view_stamp(r.tex);   // after the view
             iinfo.push_back(ii);
             w.pImageInfo = &iinfo.back();
             mix(reinterpret_cast<uint64_t>(ii.imageView));
@@ -3056,6 +3259,21 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                 if (mv) v = mv;
                 else log_once("out-texel", "a draw reads a compute result held in the pool copy as a texel buffer the copy cannot serve: it reads the pool");
             }
+            if (kd) {
+                if (storage || g_shadowing) kbad("storage texel buffer");
+                if (v && !g_shadowing && out_lazy() && out_overlaps(addr, bytes)) kbad("texel buffer over a held result");
+                kd->kind = 3;
+                kd->texel = true;
+                kd->d = &d;
+                kd->tex = r.tex;
+                kd->tex_id = r.tex ? r.tex->id : 0;
+                kd->has_view = r.has_view;
+                kd->vh = r.has_view ? bytes_hash(&r.view, sizeof r.view) : 0;
+                kd->stamp = tex_view_stamp(r.tex);
+                kd->addr = addr;
+                kd->range = bytes;
+                kd->pool = addr ? pool_lookup(addr).pool : nullptr;
+            }
             if (v && storage) { g_gw_site = 6; gpu_wrote(addr, bytes, kWriteStorage); g_gw_site = 0; }   // an image buffer may be written by the shader
             if (!v) {
                 if (r.tex && first_time_key("texel-buffer " + d.shader->hash + " " + b.name + " " + std::to_string(r.tex->id)))
@@ -3063,6 +3281,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             r.tex->id, r.tex->fmt ? r.tex->fmt->name : "?", r.tex->b.target, r.tex->b.width, r.tex->b.height, r.tex->b.depth,
                             static_cast<unsigned long long>(r.tex->storage_size), static_cast<void*>(r.tex->mem), d.shader->hash.c_str(), b.name.c_str(),
                             b.nvn.index, d.set, d.binding);
+                kbad("texel buffer without a view");
                 log_once("texel-buffer-dummy", "a texel buffer binding has no usable buffer texture: a dummy buffer view is bound");
                 v = dummy_buffer_view(shader_fmt, storage);
             }
@@ -3074,18 +3293,33 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
             w.pTexelBufferView = &tinfo.back();
             mix(reinterpret_cast<uint64_t>(v));
         } else {
+            kbad("descriptor of an unhandled type");
             note_unsupported("descriptor of an unhandled type (the binding stays unwritten)");
             continue;
         }
         writes.push_back(w);
     }
     ++g_sets_built;
+    g_last_set_key = key;
+    if (g_krec && !g_krec->bad) {   // a set to keep: from the persistent pools, never one of the submission's
+        g_krec->content = key;
+        VkDescriptorSet ds = keep_alloc(pl.sets[set]);
+        if (ds) {
+            for (auto& w : writes) w.dstSet = ds;
+            vkUpdateDescriptorSets(vkdev(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+            g_krec->ds = ds;
+            if (set_reuse_mode() == SetReuse::Verify) g_set_content[ds] = key;
+            return ds;
+        }
+        g_krec->bad = "persistent pool full";
+    }
     if (VkDescriptorSet* hit = g_set_cache.find(key)) { ++g_sets_cached; return *hit; }
     VkDescriptorSet ds = F->alloc_set(pl.sets[set]);
     if (!ds) return VK_NULL_HANDLE;
     for (auto& w : writes) w.dstSet = ds;
     vkUpdateDescriptorSets(vkdev(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     g_set_cache.put(key, ds);
+    if (g_bvals_on) g_ds_bvals[ds] = g_bvals;
     return ds;
 }
 
@@ -3194,8 +3428,76 @@ uint8_t set_reuse_mask(const ProgLayout& pl) {
     return ok;
 }
 
+// [nvn] set_keep_diag (diagnosis): variants of the signature with one kind of input left out (bit 0 uniform block addresses, 1 storage
+// addresses, 2 texture handles, 3 the pools and targets), so the misses of the kept-set table can be put down to the input that changed.
+uint64_t g_sig_var[4] = {};
+bool g_sig_var_on = false;
+uint64_t g_keep_sig = 0;   // set_signature: the kept-set table's key of the same set
+// [nvn] set_keep: the sets that may be kept although the memo may not reuse them (bit n = set n): storage buffers the shader writes and storage
+// images (a kept set found valid notes the writes again, keep_valid). Not: the per-draw graphics c[0] of pointer shaders, storage texel buffers.
+std::unordered_map<const ProgLayout*, uint8_t> g_keep_masks;
+uint8_t set_keep_mask(const ProgLayout& pl) {
+    auto it = g_keep_masks.find(&pl);
+    if (it != g_keep_masks.end()) return it->second;
+    uint8_t ok = 0xf;
+    for (const BindingDesc& d : pl.bindings) {
+        const DescriptorBinding& b = d.shader->refl.bindings[d.index];
+        bool bad = false;
+        switch (d.type) {
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+                if (b.nvn.source == NvnSource::DriverConstants) bad = d.shader->refl.global_fallback;
+                else bad = b.nvn.source != NvnSource::SupportBuffer && b.nvn.source != NvnSource::ConstantData && b.nvn.source != NvnSource::UniformBlock &&
+                           b.nvn.source != NvnSource::StorageBuffer;
+                break;
+            case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+                bad = !texture_source(b.nvn.source);
+                break;
+            case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                bad = b.nvn.source != NvnSource::ImageBinding && b.nvn.source != NvnSource::HandleInUniform;
+                break;
+            default: bad = true; break;
+        }
+        if (bad && d.set < 4) ok &= static_cast<uint8_t>(~(1u << d.set));
+    }
+    g_keep_masks.emplace(&pl, ok);
+    return ok;
+}
+
 // The signature of set `set` of `pl`: everything its bindings read before resolving.
 uint64_t set_signature(const ProgLayout& pl, uint32_t set) {
+    if (g_sig_var_on) {
+        for (int v = 0; v < 4; ++v) {
+            uint64_t k = 0x9e3779b97f4a7c15ull ^ (reinterpret_cast<uint64_t>(pl.layout) * 31 + set) ^ static_cast<uint64_t>(v + 1) * 0x51ed27ull;
+            auto mx = [&](uint64_t x) { k = (k ^ x) * 1099511628211ull; };
+            mx(reinterpret_cast<uint64_t>(&pl));
+            if (v != 3) {
+                mx(reinterpret_cast<uint64_t>(S.tpool.get())); mx(reinterpret_cast<uint64_t>(S.spool.get()));
+                mx(S.ncolor);
+                for (uint32_t i = 0; i < S.ncolor && i < 8; ++i) mx(reinterpret_cast<uint64_t>(S.color_tex[i].get()));
+                mx(reinterpret_cast<uint64_t>(S.depth_tex.get()));
+            }
+            for (const BindingDesc& d : pl.bindings) {
+                if (d.set != set) continue;
+                const DescriptorBinding& b = d.shader->refl.bindings[d.index];
+                mx(d.binding);
+                switch (b.nvn.source) {
+                    case NvnSource::UniformBlock:
+                        if (b.nvn.index >= 0 && b.nvn.index < 16) { const GState::Bind& u = S.ubo[d.nvn_stage][b.nvn.index]; if (v != 0) mx(u.addr); mx(u.size); }
+                        break;
+                    case NvnSource::StorageBuffer: {
+                        const int slot = b.nvn.index >= 0 ? b.nvn.index : storage_slot_for(d.nvn_stage, b.nvn.c0_offset);
+                        if (slot >= 0 && slot < 16) { if (v != 1) mx(S.ssbo[d.nvn_stage][slot].addr); mx(S.ssbo[d.nvn_stage][slot].size); }
+                        break;
+                    }
+                    case NvnSource::SamplerBinding: if (v != 2 && b.nvn.index >= 0 && b.nvn.index < 64) mx(S.tex[d.nvn_stage][b.nvn.index]); break;
+                    case NvnSource::HandleInUniform: if (v != 2) mx(read_handle_word(d.nvn_stage, b.nvn.bank, b.nvn.word)); break;
+                    case NvnSource::HandleExpr: if (v != 2) mx(eval_handle_expr(d, b.nvn.expr)); break;
+                    default: break;
+                }
+            }
+            g_sig_var[v] = k;
+        }
+    }
     uint64_t key = 0x9e3779b97f4a7c15ull ^ (reinterpret_cast<uint64_t>(pl.layout) * 31 + set);
     auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
     mix(reinterpret_cast<uint64_t>(&pl));   // two programs may share a pipeline layout but read other state
@@ -3206,31 +3508,41 @@ uint64_t set_signature(const ProgLayout& pl, uint32_t set) {
         for (uint32_t i = 0; i < S.ncolor && i < 8; ++i) mix(reinterpret_cast<uint64_t>(S.color_tex[i].get()));
         mix(reinterpret_cast<uint64_t>(S.depth_tex.get()));
     }
+    // The bindings' raw inputs (bk) apart from the update-range generations (ug): the kept-set table ([nvn] set_keep) is keyed by the
+    // program and bk alone (g_keep_sig). Pools, targets and update ranges are checked when a kept set is found (keep_valid).
+    uint64_t bk = 0xcbf29ce484222325ull, ug = 0;
+    auto mixb = [&](uint64_t v) { bk = (bk ^ v) * 1099511628211ull; };
     for (const BindingDesc& d : pl.bindings) {
         if (d.set != set) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        mix(d.binding);
+        mixb(d.binding);
         switch (b.nvn.source) {
             case NvnSource::UniformBlock:
                 if (b.nvn.index >= 0 && b.nvn.index < 16) {
                     const GState::Bind& u = S.ubo[d.nvn_stage][b.nvn.index];
-                    mix(u.addr); mix(u.size);
-                    if (const UpdRange* ur = u.addr ? upd_find(u.addr, u.size ? u.size : 65536) : nullptr) mix(ur->gen);   // a record-time update: a new snapshot
+                    mixb(u.addr); mixb(u.size);
+                    if (const UpdRange* ur = u.addr ? upd_find(u.addr, u.size ? u.size : 65536) : nullptr) ug = (ug ^ ur->gen ^ d.binding) * 1099511628211ull + 1;   // a record-time update: a new snapshot
                 }
                 break;
             case NvnSource::StorageBuffer: {
                 const int slot = b.nvn.index >= 0 ? b.nvn.index : storage_slot_for(d.nvn_stage, b.nvn.c0_offset);
-                if (slot >= 0 && slot < 16) { mix(S.ssbo[d.nvn_stage][slot].addr); mix(S.ssbo[d.nvn_stage][slot].size); }
+                if (slot >= 0 && slot < 16) { mixb(S.ssbo[d.nvn_stage][slot].addr); mixb(S.ssbo[d.nvn_stage][slot].size); }
                 break;
             }
             case NvnSource::SamplerBinding:
-                if (b.nvn.index >= 0 && b.nvn.index < 64) mix(S.tex[d.nvn_stage][b.nvn.index]);
+                if (b.nvn.index >= 0 && b.nvn.index < 64) mixb(S.tex[d.nvn_stage][b.nvn.index]);
                 break;
-            case NvnSource::HandleInUniform: mix(read_handle_word(d.nvn_stage, b.nvn.bank, b.nvn.word)); break;
-            case NvnSource::HandleExpr: mix(eval_handle_expr(d, b.nvn.expr)); break;
+            case NvnSource::ImageBinding:   // storage images (kept sets only: the memo never reuses them)
+                if (b.nvn.index >= 0 && b.nvn.index < 16) mixb(S.img[d.nvn_stage][b.nvn.index]);
+                break;
+            case NvnSource::HandleInUniform: mixb(read_handle_word(d.nvn_stage, b.nvn.bank, b.nvn.word)); break;
+            case NvnSource::HandleExpr: mixb(eval_handle_expr(d, b.nvn.expr)); break;
             default: break;   // support buffer, constant data, driver constants: fixed (or in the signature above)
         }
     }
+    mix(bk);
+    mix(ug);
+    g_keep_sig = ((0x9e3779b97f4a7c15ull ^ (reinterpret_cast<uint64_t>(pl.layout) * 31 + set)) * 1099511628211ull ^ reinterpret_cast<uint64_t>(&pl)) * 1099511628211ull ^ bk;
     return key;
 }
 
@@ -3238,6 +3550,267 @@ SetMap g_set_memo;   // signature -> set, valid for g_set_memo_epoch
 uint64_t g_set_memo_epoch = 0;
 uint64_t g_sets_reused = 0, g_sets_verify_bad = 0;          // statistics
 uint64_t g_memo_clr[3] = {}, g_memo_last[3] = {};            // statistics: memo clears by the resolve epoch, texture state, results sent back
+
+// ---- persistent, validated descriptor sets ([nvn] set_keep) ---------------------------------------------------------------------------
+// The set memo above lives for one resolve epoch, and the epoch moves ~120 times per frame in Kokiri (compute storage writes, results sent
+// back, texture image events, commands), so ~80% of OoT's read-only sets were resolved again every time, although ~70% of its draws come from
+// command lists recorded once and submitted every frame with the same raw inputs. A kept set lives across submissions in persistent pools,
+// keyed by the same signature, together with what each of its bindings depended on when it was resolved (KDep). Instead of being dropped
+// when anything changes, it is checked when it is found: the pools still those (pool registry generation), each uniform block's copy-or-pool
+// decision the same (read_dep_check: the copy's page state, without the pool look-up), no held compute result over its storage and texel
+// ranges (only asked when the held results may have grown), each texture the same object with the same image views (tex_view_stamp) and
+// the same view and sampler. Sets with anything per submission (upload-ring snapshots, held copies, scaled support buffers, update ranges)
+// are not kept. An entry that keeps failing its check is no longer kept (it was rebuilt every frame). Entries unused for kKeepAge presents
+// are dropped; when the pools hold kKeepMaxPools pools, everything is dropped and the pools are released once the GPU is done with them
+// (a new era). `set_reuse = verify` also resolves every kept set found valid and compares the content keys.
+struct KeepEntry {
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    const ProgLayout* pl = nullptr;
+    uint32_t set = 0;
+    uint64_t pool_gen = 0, grow = 0, content = 0;
+    uint64_t reg_gen = 0;       // pool registry generation at the last check: a pool registered since may now hold the bound addresses
+    uint32_t last_used = 0, last_fail = 0;
+    uint16_t fails = 0;
+    uint64_t smp_tune = 0;      // anisotropy and LOD bias of the samplers when it was built (sampler_for)
+    bool dead = false;          // failed too often, or could not be kept: built per submission until retry_at
+    uint32_t retry_at = 0;
+    std::vector<KDep> deps;
+    std::vector<BVal> bvals;    // set_reuse = verify only
+};
+constexpr uint32_t kKeepAge = 600;          // presents without a use before an entry is dropped
+constexpr size_t kKeepMaxPools = 6;          // 16k sets each
+constexpr uint16_t kKeepMaxFails = 6;
+std::unordered_map<uint64_t, KeepEntry> g_keep;
+std::vector<VkDescriptorPool> g_keep_pools;
+bool g_keep_full = false;
+uint64_t smp_tune_now() {
+    const float bias = nxrt::gfx::tuning().lod_bias.load(std::memory_order_relaxed);
+    uint32_t b = 0;
+    std::memcpy(&b, &bias, 4);
+    return static_cast<uint64_t>(static_cast<uint32_t>(nxrt::gfx::tuning().anisotropy.load(std::memory_order_relaxed))) << 32 ^ b;
+}
+uint64_t g_keep_sets_era = 0, g_keep_eras = 0, g_keep_sweep_at = 0;
+uint64_t g_keep_hit = 0, g_keep_new = 0, g_keep_rebuilt = 0, g_keep_dead_n = 0, g_keep_bad_n = 0, g_keep_verify_bad = 0, g_keep_evicted = 0;
+uint64_t g_keep_fail[5] = {};                // pool generation, uniform decision, held result, texture, layout
+std::unordered_map<std::string, uint64_t> g_keep_bad_why;   // statistics: why sets were not kept
+uint64_t g_var_new = 0, g_var_none = 0, g_var_hit[4] = {};   // set_keep_diag
+uint64_t g_keep_first = 0;   // statistics: signatures seen for the first time (not kept yet)
+uint64_t g_set_paths[4] = {};   // statistics: sets built outside the memo and the kept sets: compute, reuse off for the draw, a set that may not be reused, other
+
+bool set_keep_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "set_keep", true);
+    return on && ab_on(kAbSetKeep) && out_lazy() && memo_pass_keep();
+}
+
+// [nvn] set_keep_writes (default off): sets with storage buffers the shader writes, or storage images, are kept too (cpuperf_ab_what keep_writes).
+// Off: no gain in Kokiri (paired, replay -0.1 ms): most such sets bind per-frame storage addresses and never repeat.
+bool keep_writes_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "set_keep_writes", false);
+    return on && ab_on(kAbKeepWrites);
+}
+
+void keep_reset(bool release) {
+    g_keep.clear();
+    g_set_content.clear();
+    if (release) for (VkDescriptorPool p : g_keep_pools) keep_dpool_release(p);
+    g_keep_pools.clear();
+    g_keep_sets_era = 0;
+}
+
+VkDescriptorSet keep_alloc(VkDescriptorSetLayout layout) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (g_keep_pools.empty()) {
+            const VkDescriptorPool p = keep_dpool_new();
+            if (!p) return VK_NULL_HANDLE;
+            g_keep_pools.push_back(p);
+        }
+        VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = g_keep_pools.back();
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &layout;
+        VkDescriptorSet s = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(vkdev(), &ai, &s) == VK_SUCCESS) { ++g_keep_sets_era; return s; }
+        if (g_keep_pools.size() >= kKeepMaxPools) { g_keep_full = true; return VK_NULL_HANDLE; }   // full: the next submission starts a new era (keep_begin_submit)
+        const VkDescriptorPool p = keep_dpool_new();
+        if (!p) return VK_NULL_HANDLE;
+        g_keep_pools.push_back(p);
+    }
+    return VK_NULL_HANDLE;
+}
+
+// Once per submission: a new era when the pools are full, the sweep of old entries every few hundred presents.
+void keep_begin_submit() {
+    static const bool diag = nxrt::config_get_bool("nvn", "set_keep_diag", false);
+    g_sig_var_on = diag;
+    const uint64_t now = counters().presents.load(std::memory_order_relaxed);
+    if (g_keep_full) {
+        g_keep_full = false;
+        ++g_keep_eras;
+        keep_reset(true);
+        NXLOG_I(kTag, "set_keep: persistent descriptor pools full: new era %llu (entries dropped, pools released after the GPU)", static_cast<unsigned long long>(g_keep_eras));
+    }
+    if (now >= g_keep_sweep_at) {
+        g_keep_sweep_at = now + 300;
+        for (auto it = g_keep.begin(); it != g_keep.end();) {
+            if (now > it->second.last_used + kKeepAge) { it = g_keep.erase(it); ++g_keep_evicted; }
+            else ++it;
+        }
+    }
+}
+
+// The check of a kept set (see above). 0: valid; else 1 + the kind of failure (g_keep_fail).
+int keep_valid(KeepEntry& e) {
+    if (e.pool_gen != pool_unregister_generation()) return 1;
+    if (e.smp_tune != smp_tune_now()) return 5;
+    if (const uint64_t rg = pool_registry_generation(); rg != e.reg_gen) {   // a pool registered over an address (aliasing pools): resolved elsewhere now
+        for (const KDep& k : e.deps) {
+            const void* p = k.kind == 1 ? k.rd.pool : (k.kind == 2 || (k.kind == 3 && k.texel)) ? k.pool : nullptr;
+            const uint64_t a = k.addr;
+            if ((k.kind == 1 || k.kind == 2 || (k.kind == 3 && k.texel)) && a && pool_lookup(a).pool != p) return 1;
+        }
+        e.reg_gen = rg;
+    }
+    const uint64_t grow = out_grow_version();
+    const bool ask_held = grow != e.grow;
+    for (const KDep& k : e.deps) {
+        switch (k.kind) {
+            case 1:
+                if (!g_upd.empty() && upd_find(k.addr, k.range)) return 2;   // an update range now: bound from snapshots
+                if (!read_dep_check(k.rd, kReadUniform)) return 2;
+                break;
+            case 2:
+                if (ask_held && out_overlaps_window(k.addr, k.range)) return 3;
+                upd_note_read(k.addr, k.note);
+                break;
+            case 3: {
+                const TexResolved r = resolve_texture(*k.d);
+                if (r.tex != k.tex || (r.tex && r.tex->id != k.tex_id) || r.has_view != (k.has_view != 0)) return 4;
+                if (r.has_view && bytes_hash(&r.view, sizeof r.view) != k.vh) return 4;
+                if (!k.texel && (r.has_sampler != (k.has_sampler != 0) || (r.has_sampler && bytes_hash(&r.smp, sizeof r.smp) != k.sh))) return 4;
+                if (tex_view_stamp(r.tex) != k.stamp) return 4;
+                if (!k.texel && is_color_feedback(r.tex)) return 4;   // an attachment of the targets now (the key leaves the targets out)
+                if (k.texel && k.addr && ask_held && out_overlaps(k.addr, k.range)) return 3;
+                break;
+            }
+            case 4: {
+                const TexResolved r = resolve_image(*k.d);
+                if (r.tex != k.tex || (r.tex && r.tex->id != k.tex_id) || r.has_view != (k.has_view != 0)) return 4;
+                if (r.has_view && bytes_hash(&r.view, sizeof r.view) != k.vh) return 4;
+                if (tex_view_stamp(r.tex) != k.stamp) return 4;
+                break;
+            }
+            default: break;
+        }
+    }
+    for (const KDep& k : e.deps)   // what build_set does for a storage binding the shader may write: the GPU writes the range
+        if (k.kind == 2 && k.writes) { g_gw_site = 4; gpu_wrote(k.addr, k.range, kWriteStorage); g_gw_site = 0; }
+    e.grow = grow;
+    return 0;
+}
+
+// A kept set for set `set` of `pl` with signature `sig`, checked; or one built now (kept when it can be). Null: build it the usual way.
+VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_t sig, SetReuse mode) {
+    const uint32_t now = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
+    auto it = g_keep.find(sig);
+    if (g_sig_var_on) {   // set_keep_diag: which left-out input would have found an entry made in an earlier present
+        static std::unordered_map<uint64_t, uint32_t> seen[4];
+        static uint32_t cleared = 0;
+        if (now - cleared > 600) { for (auto& m : seen) m.clear(); cleared = now; }
+        if (it == g_keep.end()) {
+            ++g_var_new;
+            bool any = false;
+            for (int v = 0; v < 4; ++v) {
+                auto f = seen[v].find(g_sig_var[v]);
+                if (f != seen[v].end() && f->second < now) { ++g_var_hit[v]; any = true; }
+            }
+            if (!any) ++g_var_none;
+        }
+        for (int v = 0; v < 4; ++v) seen[v][g_sig_var[v]] = now;
+    }
+    if (it != g_keep.end() && (it->second.pl != &pl || it->second.set != set)) it = g_keep.end();   // a signature collision: not this set
+    if (it != g_keep.end()) {
+        KeepEntry& e = it->second;
+        if (e.dead && now < e.retry_at) { e.last_used = now; return VK_NULL_HANDLE; }
+        if (e.dead) { g_keep.erase(it); it = g_keep.end(); }   // time to try again
+    }
+    if (it != g_keep.end()) {
+        KeepEntry& e = it->second;
+        const int why = keep_valid(e);
+        if (why == 0) {
+            e.last_used = now;
+            ++g_keep_hit;
+            if (mode == SetReuse::Verify) {
+                const VkDescriptorSet fresh = build_set(pl, set);
+                if (fresh && g_last_set_key != e.content) {
+                    ++g_keep_verify_bad;
+                    if (g_keep_verify_bad < 20 || (g_keep_verify_bad & 1023) == 0) {
+                        NXLOG_W(kTag, "set_keep verify: set %u of vs %s fs %s resolves differently from the kept one (%llu so far)", set,
+                                S.stage[kVertex] ? S.stage[kVertex]->hash.c_str() : "-", S.stage[kFragment] ? S.stage[kFragment]->hash.c_str() : "-",
+                                static_cast<unsigned long long>(g_keep_verify_bad));
+                        for (size_t i = 0; i < g_bvals.size() && i < e.bvals.size(); ++i) {
+                            const BVal& x = e.bvals[i];
+                            const BVal& y = g_bvals[i];
+                            if (x.a == y.a && x.b == y.b && x.c == y.c) continue;
+                            const KDep* k = i < e.deps.size() ? &e.deps[i] : nullptr;
+                            NXLOG_W(kTag, "  binding %llu: kept %llx %llx %llx, now %llx %llx %llx; dep kind %d state %d addr %llx range %llx tex %u", (unsigned long long)x.binding,
+                                    (unsigned long long)x.a, (unsigned long long)x.b, (unsigned long long)x.c, (unsigned long long)y.a, (unsigned long long)y.b, (unsigned long long)y.c,
+                                    k ? k->kind : -1, k ? k->rd.state : -1, (unsigned long long)(k ? k->addr : 0), (unsigned long long)(k ? k->range : 0), k ? k->tex_id : 0u);
+                        }
+                    }
+                    return fresh;
+                }
+            }
+            return e.ds;
+        }
+        ++g_keep_fail[(why - 1) % 5];
+        if (now - e.last_fail > 300) e.fails = 0;   // failures far apart (an area change, a new pool): not a set that fails every frame
+        e.last_fail = now;
+        if (++e.fails > kKeepMaxFails) { e.dead = true; e.retry_at = now + 600; e.deps.clear(); e.deps.shrink_to_fit(); ++g_keep_dead_n; e.last_used = now; return VK_NULL_HANDLE; }
+    }
+    if (it == g_keep.end()) {   // kept from its second sighting in a later present on: a set made for one frame only is never kept
+        static FlatMap64<uint32_t> seen;
+        static uint32_t cleared = 0;
+        if (now - cleared > 600) { seen.clear(); cleared = now; }
+        uint32_t* s = seen.find(sig);
+        if (!s || *s == now) {
+            if (!s) seen.put(sig, now);
+            ++g_keep_first;
+            return VK_NULL_HANDLE;
+        }
+    }
+    KeepRec rec;
+    g_krec = &rec;
+    VkDescriptorSet ds = build_set(pl, set);
+    g_krec = nullptr;
+    if (rec.bad || !rec.ds) {
+        ++g_keep_bad_n;
+        if (rec.bad) ++g_keep_bad_why[rec.bad];
+        if (rec.bad && !g_keep_full) {   // not recorded again: this signature is built per submission while it is in use
+            KeepEntry& d = it != g_keep.end() ? it->second : g_keep[sig];
+            d.pl = &pl;
+            d.set = set;
+            d.dead = true;
+            d.retry_at = now + 120;
+            d.deps.clear();
+            d.last_used = now;
+        }
+        return ds;
+    }
+    KeepEntry& e = it != g_keep.end() ? it->second : g_keep[sig];
+    if (it != g_keep.end()) ++g_keep_rebuilt; else ++g_keep_new;
+    e.ds = rec.ds;
+    e.pl = &pl;
+    e.set = set;
+    e.pool_gen = pool_unregister_generation();
+    e.smp_tune = smp_tune_now();
+    e.reg_gen = pool_registry_generation();
+    e.grow = out_grow_version();
+    e.content = rec.content;
+    e.last_used = now;
+    e.deps = std::move(rec.deps);
+    if (mode == SetReuse::Verify) e.bvals = g_bvals;
+    return ds;
+}
 
 // [nvn] bind_skip (default on): a graphics descriptor set already bound at its index with the same pipeline layout, in the same command buffer and
 // pass, is not bound again (the persistent pool-array sets were bound for every draw). Cleared when a pass begins.
@@ -3264,11 +3837,16 @@ void bind_graphics_set(const ProgLayout& pl, VkPipelineBindPoint bp, uint32_t se
 void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
     const SetReuse mode = bp == VK_PIPELINE_BIND_POINT_GRAPHICS && ab_on(kAbSetReuse) ? set_reuse_mode() : SetReuse::Off;
     uint8_t reusable = 0;
-    if (mode != SetReuse::Off && g_fb_use.empty() && g_vol3d_use.empty() && !g_su_view && !g_trace &&
-        !nxrt::gfx::tuning().ufs_hash.load(std::memory_order_relaxed) && !extras::temporal_wanted()) {
+    const bool reusable_ok = mode != SetReuse::Off && g_fb_use.empty() && g_vol3d_use.empty() && !g_su_view && !g_trace &&
+                             !nxrt::gfx::tuning().ufs_hash.load(std::memory_order_relaxed) && !extras::temporal_wanted();
+    if (reusable_ok) {
         reusable = set_reuse_mask(pl);
         const uint64_t tg = memo_pass_keep() ? g_tex_image_gen.load(std::memory_order_relaxed) ^ 0x5bd1e995ull : g_tex_state_gen.load(std::memory_order_relaxed), ob = out_bytes_total();
-        const uint64_t epoch = g_desc_epoch * 0x100000001b3ull ^ tg * 0x9e3779b97f4a7c15ull ^ ob ^ out_version() * 0xc2b2ae3d27d4eb4full;
+        // the pool registry: a pool registered over bound addresses (aliasing pools) resolves them elsewhere (set_reuse = verify found such stale hits)
+        // and the CPU's write faults on tracked pages: a page of a pool copy the CPU wrote is no longer served by the copy, so a uniform block
+        // there resolves to the pool now (set_reuse = verify found memo hits still bound to the copy after such a write)
+        const uint64_t epoch = ((g_desc_epoch * 0x100000001b3ull ^ tg * 0x9e3779b97f4a7c15ull ^ ob ^ out_version() * 0xc2b2ae3d27d4eb4full) * 31 + pool_registry_generation()) * 31 +
+                               mem::ww::faults();
         if (epoch != g_set_memo_epoch) {
             if (!g_set_memo.empty()) {   // statistics: what cleared a memo that held sets
                 if (g_desc_epoch != g_memo_last[0]) ++g_memo_clr[0];
@@ -3280,6 +3858,8 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
             g_set_memo_epoch = epoch;
         }
     }
+    // sets the memo may not reuse but set_keep may keep (storage writes): the same conditions as the memo's, graphics only
+    const uint8_t keep_only = (mode != SetReuse::Off && reusable_ok && set_keep_on() && keep_writes_on()) ? static_cast<uint8_t>(set_keep_mask(pl) & ~reusable) : 0;
     for (uint32_t set = 0; set < 4; ++set) {
         if (!pl.has_set[set]) continue;
         VkDescriptorSet ds = VK_NULL_HANDLE;
@@ -3291,18 +3871,42 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
                 ++g_sets_reused;
                 if (mode == SetReuse::Verify) {
                     const VkDescriptorSet fresh = build_set(pl, set);
-                    if (fresh != ds) {
+                    const auto kc = g_set_content.find(ds);   // a kept set is another handle with the same content: compare the content keys
+                    if (kc != g_set_content.end() ? (fresh && kc->second != g_last_set_key) : fresh != ds) {
                         ++g_sets_verify_bad;
                         if (g_sets_verify_bad < 20 || (g_sets_verify_bad & 1023) == 0)
                             NXLOG_W(kTag, "set_reuse verify: set %u of vs %s fs %s differs from the reused one (%llu so far)", set,
                                     S.stage[kVertex] ? S.stage[kVertex]->hash.c_str() : "-", S.stage[kFragment] ? S.stage[kFragment]->hash.c_str() : "-",
                                     static_cast<unsigned long long>(g_sets_verify_bad));
+                        if (g_sets_verify_bad < 20) {   // which binding: what the reused set was built with against what resolves now
+                            const auto ob = g_ds_bvals.find(ds);
+                            if (ob != g_ds_bvals.end())
+                                for (size_t i = 0; i < g_bvals.size() && i < ob->second.size(); ++i) {
+                                    const BVal& x = ob->second[i];
+                                    const BVal& y = g_bvals[i];
+                                    if (x.a == y.a && x.b == y.b && x.c == y.c) continue;
+                                    NXLOG_W(kTag, "  binding %llu: reused %llx %llx %llx, now %llx %llx %llx", (unsigned long long)x.binding, (unsigned long long)x.a,
+                                            (unsigned long long)x.b, (unsigned long long)x.c, (unsigned long long)y.a, (unsigned long long)y.b, (unsigned long long)y.c);
+                                }
+                        }
                         ds = fresh;
                     }
                 }
             }
         }
+        if (!ds && (reusable & (1u << set)) && set_keep_on()) {
+            // not put in the memo: a kept set is checked at every use (its checks see changes the memo's epoch does not: with kept sets in the
+            // memo, set_reuse = verify found a burst of stale memo hits right after the area load in Kokiri)
+            ds = keep_lookup_or_build(pl, set, g_keep_sig, mode);
+        } else if (!ds && keep_only & (1u << set)) {   // writes storage: kept and checked, never in the memo (its writes are noted per draw)
+            set_signature(pl, set);
+            ds = keep_lookup_or_build(pl, set, g_keep_sig ^ 0x6b6565702d77ull, mode);
+        }
         if (!ds) {
+            if (bp != VK_PIPELINE_BIND_POINT_GRAPHICS) ++g_set_paths[0];
+            else if (mode == SetReuse::Off || !reusable) ++g_set_paths[1];
+            else if (!(reusable & (1u << set)) && !(keep_only & (1u << set))) ++g_set_paths[2];
+            else ++g_set_paths[3];
             ds = build_set(pl, set);
             if (ds && (reusable & (1u << set))) g_set_memo.put(sig, ds);
         }
@@ -5189,6 +5793,7 @@ void do_downsample(const P_Downsample& p) {
 // otherwise (or when that cannot run) the colour rectangle is scaled into the output rectangle with the bilinear filter, which is a copy when the
 // two have the same size.
 void do_evaluate_dlss(const P_EvaluateDlss& p) {
+    cmdq::drain();   // the DLSS evaluation records through its own loader: everything queued before it first
     Texture *in = p.color.tex, *out = p.output.tex;
     if (!in || !out || in == out) { log_once("dlss-args", "EvaluateDlss without an input colour or an output texture (or both the same): skipped"); return; }
     if (!tex_gpu(in) || !tex_gpu(out)) return;
@@ -5427,6 +6032,7 @@ bool split_for_read(uint64_t addr, uint64_t size) {
     P = Pass();
     g_pending.clear();                             // everything before the split has completed: no barrier is owed for it
     g_set_cache.clear();
+    g_ds_bvals.clear();
     g_bound_pipeline = VK_NULL_HANDLE;
     g_dirty = kAllDirty;
     g_pl = nullptr;
@@ -5592,7 +6198,7 @@ void run_list(const CmdList& list, int depth) {
         else if (out_any() && !compute_out_may_wait(r.op())) flush_compute_out(kOutOther);
         switch (r.op()) {
             case Op::Nop: break;
-            case Op::BindProgram: apply_bind_program(r.payload<P_BindProgram>()); ++g_buf_ver; break;
+            case Op::BindProgram: apply_bind_program(r.payload<P_BindProgram>()); ++g_buf_ver; g_odb_all_dirty = true; break;
             case Op::BindBuffers: {
                 const auto& p = r.payload<P_BindBuffers>();
                 const NVNbufferRange* rg = reinterpret_cast<const NVNbufferRange*>(r.blob<P_BindBuffers>());
@@ -5602,11 +6208,15 @@ void run_list(const CmdList& list, int depth) {
                 };
                 for (uint32_t i = 0; i < p.count; ++i) {
                     const uint32_t k = p.first + i;
+                    const uint64_t v_before = g_buf_ver;
                     if (p.kind == kBufVertex && k < 16) set(S.vtx[k], rg[i].address, rg[i].size);
                     // a uniform or storage buffer in a virtual (sparse) pool is bound through the physical memory mapped there (physical_buffer_address)
                     else if (p.kind == kBufUniform && p.stage < kStages && k < 16) set(S.ubo[p.stage][k], physical_buffer_address(rg[i].address, rg[i].size), rg[i].size);
                     else if (p.kind == kBufStorage && p.stage < kStages && k < 16) set(S.ssbo[p.stage][k], physical_buffer_address(rg[i].address, rg[i].size), rg[i].size);
                     else if (p.kind == kBufXfb && k < 4) set(S.xfb[k], rg[i].address, rg[i].size);
+                    if (g_buf_ver != v_before)   // odb_incremental: this slot is checked again at the next draw
+                        odb_mark(p.kind == kBufVertex ? kOdbVtx : p.kind == kBufUniform ? kOdbUbo : p.kind == kBufStorage ? kOdbSsbo : kOdbXfb,
+                                 (p.kind == kBufUniform || p.kind == kBufStorage) ? static_cast<int>(p.stage) : 0, k);
                 }
                 break;
             }
@@ -6088,6 +6698,7 @@ void replay_begin_submit(Frame& f) {
     gpl_note_presents(counters().presents.load(std::memory_order_relaxed));   // [nvn] gpl_async defers draws only while frames are flowing
     note_frame_for_pacing();
     F = &f;
+    cmdq::begin_submission(ab_on(kAbCmdThread));   // [nvn] cmd_thread: a recorder thread makes the vkCmd* calls (nvn_cmdq.cpp)
     tex_poll_cpu_writes();
     if (extras::LowLatency* ll = extras::lowlat()) ll->submit_begin();     // RENDERSUBMIT_START of the frame (S14)
     if (g_trace_frame == -2) {
@@ -6160,9 +6771,12 @@ void replay_begin_submit(Frame& f) {
     g_draw_idx = 0;
     g_chunk_work = 0;
     desc_epoch_bump(kBumpSubmit);     // the sets of earlier submissions came from other slots' pools
+    keep_begin_submit();
+    g_odb_all_dirty = true;   // odb_incremental: a full check first in every submission
     g_chunk_t0 = ft::now_ns();
     P = Pass();
     g_set_cache.clear();
+    g_ds_bvals.clear();
     g_bound_pipeline = VK_NULL_HANDLE;
     g_dirty = kAllDirty;
     g_pl = nullptr;
@@ -6210,6 +6824,37 @@ void replay_begin_submit(Frame& f) {
             NXLOG_I(kTag, "game barriers: %llu, %llu in an open pass: %llu kept the pass (barrier_keep_pass, bits seen %x), %llu ended it after storage or stream-out writes (bits of all %x)",
                     (unsigned long long)g_bar_n, (unsigned long long)g_bar_in_pass, (unsigned long long)g_bar_kept, g_bar_bits_kept, (unsigned long long)g_bar_unsafe, g_bar_bits_all);
             NXLOG_I(kTag, "graphics descriptor set binds: %llu made, %llu skipped as already bound (bind_skip)", (unsigned long long)g_bs_bound, (unsigned long long)g_bs_skipped);
+            {
+                std::string why;
+                std::vector<std::pair<uint64_t, std::string>> v;
+                for (const auto& [k, n] : g_keep_bad_why) v.emplace_back(n, k);
+                std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                for (size_t i = 0; i < v.size() && i < 6; ++i) why += (i ? ", " : "") + v[i].second + " " + std::to_string(v[i].first);
+                size_t dead = 0;
+                for (const auto& [k, e] : g_keep) dead += e.dead ? 1 : 0;
+                NXLOG_I(kTag, "kept descriptor sets (set_keep): %llu found valid, %llu first sightings, %llu new, %llu rebuilt after a failed check (pool generation %llu, uniform decision %llu, held result %llu, "
+                        "texture %llu, sampler tuning %llu), %llu stopped after failing often, %llu not keepable (%s), %llu differed (verify); %zu entries (%zu not kept), "
+                        "%llu sets in %zu pools this era, %llu eras, %llu dropped by age",
+                        (unsigned long long)g_keep_hit, (unsigned long long)g_keep_first, (unsigned long long)g_keep_new, (unsigned long long)g_keep_rebuilt, (unsigned long long)g_keep_fail[0],
+                        (unsigned long long)g_keep_fail[1], (unsigned long long)g_keep_fail[2], (unsigned long long)g_keep_fail[3], (unsigned long long)g_keep_fail[4],
+                        (unsigned long long)g_keep_dead_n, (unsigned long long)g_keep_bad_n, why.c_str(), (unsigned long long)g_keep_verify_bad, g_keep.size(), dead,
+                        (unsigned long long)g_keep_sets_era, g_keep_pools.size(), (unsigned long long)g_keep_eras, (unsigned long long)g_keep_evicted);
+                NXLOG_I(kTag, "sets built outside the memo and set_keep: compute %llu, reuse off for the draw %llu, a set with written storage or a per-draw c[0] %llu, reusable (first sightings, not keepable) %llu",
+                        (unsigned long long)g_set_paths[0], (unsigned long long)g_set_paths[1], (unsigned long long)g_set_paths[2], (unsigned long long)g_set_paths[3]);
+                if (cmdq::enabled()) {
+                    uint64_t pk = 0, dr = 0, di = 0, sp = 0;
+                    cmdq::stats(&pk, &dr, &di, &sp);
+                    NXLOG_I(kTag, "cmd_thread: %llu calls queued, %llu drains (%llu spins), %llu calls made directly after a drain (%s)", (unsigned long long)pk, (unsigned long long)dr,
+                            (unsigned long long)sp, (unsigned long long)di, cmdq::direct_top().c_str());
+                }
+                NXLOG_I(kTag, "draw buffer checks (odb_incremental): %llu full, %llu incremental with %llu bindings checked, %llu missed (verify)", (unsigned long long)g_odb_full,
+                        (unsigned long long)g_odb_inc, (unsigned long long)g_odb_inc_checked, (unsigned long long)g_odb_verify_bad);
+                if (g_sig_var_on)
+                    NXLOG_I(kTag, "set_keep_diag: %llu signatures not in the table; seen in an earlier present without uniform addresses %llu, without storage addresses %llu, "
+                            "without texture handles %llu, without pools and targets %llu; none of these %llu; pool registry generation %llu", (unsigned long long)g_var_new, (unsigned long long)g_var_hit[0],
+                            (unsigned long long)g_var_hit[1], (unsigned long long)g_var_hit[2], (unsigned long long)g_var_hit[3], (unsigned long long)g_var_none,
+                            (unsigned long long)pool_registry_generation());
+            }
             NXLOG_I(kTag, "pool array texture entries: %llu kept (pool_sync_cache), %llu asked for their view", (unsigned long long)g_psync_kept, (unsigned long long)g_psync_asked);
 
             NXLOG_I(kTag, "resolve epoch moves by GPU write site: other %llu, gmem bound storage %llu, gmem pointer windows %llu, draws over held results %llu, graphics storage %llu, compute storage %llu, storage texel %llu",
@@ -6337,6 +6982,7 @@ void replay_end_submit(Frame& f) {
 }
 
 void replay_shutdown() {
+    cmdq::shutdown();
     if (g_xfb_counter) device().destroy_buffer(g_xfb_counter);
     g_xfb_counter = gfx::Buffer();
     g_xfb_began = g_xfb_active = g_xfb_have_counter = false;
@@ -6363,10 +7009,18 @@ void replay_shutdown() {
     g_mask.shutdown();
     g_mask_ready = false;
     pool_sets_reset();
+    for (VkDescriptorPool p : g_keep_pools) vkDestroyDescriptorPool(vkdev(), p, nullptr);   // the device is idle here
+    g_keep_pools.clear();
+    keep_reset(false);
+    g_keep_full = false;
+    if (g_support_keep.buffer) device().destroy_buffer(g_support_keep);
+    g_support_keep = gfx::Buffer();
     g_reuse_masks.clear();
+    g_keep_masks.clear();
     g_set_memo.clear();
     pipeline_shutdown();
     S = GState();
+    g_odb_all_dirty = true;
     ++g_resolve_gen;
     P = Pass();
     g_pending.clear();
@@ -6413,6 +7067,7 @@ bool replay_state_restore(const std::vector<uint8_t>& pod, const ReplayStateRefs
     n.depth_tex = Ref<Texture>::share(static_cast<Texture*>(refs.depth));
     for (int i = 0; i < kStages; ++i) n.stage[i] = refs.stage[i];
     S = n;
+    g_odb_all_dirty = true;
     ++g_resolve_gen;
     // the raw copy's Refs in n are released by n's destructor: they hold the references taken just above, S took its own
     g_dirty = kAllDirty;
