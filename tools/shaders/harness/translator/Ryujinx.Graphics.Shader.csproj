@@ -46,11 +46,11 @@
     <!-- Goto elimination: a break/continue enclosed by a later do-while keeps its loop (OoT A8 endless loops); see the patch header. -->
     <ShaderPatch Include="structured-goto-loop-exits.patch" File="StructuredIr/GotoElimination.cs" />
     <!-- Structurizer check hooks (NXRT_HARNESS_CFG_CHECK, off by default): StructuredCfgCheck.cs. -->
-    <ShaderPatch Include="structured-program-cfg-check.patch" File="StructuredIr/StructuredProgram.cs" Then="structured-coopmat-vector-dest.patch" />
+    <ShaderPatch Include="structured-program-cfg-check.patch" File="StructuredIr/StructuredProgram.cs" Then="structured-coopmat-vector-dest.patch" Then2="structured-program-cfg-structurizer.patch" />
     <!-- HMMA on VK_KHR_cooperative_matrix (ampere/frontend/AmpereCoopMat.cs): a new IR instruction and its types. -->
     <ShaderPatch Include="ampere-coopmat-instruction.patch" File="IntermediateRepresentation/Instruction.cs" />
     <ShaderPatch Include="ampere-coopmat-instruction-info.patch" File="StructuredIr/InstructionInfo.cs" />
-    <ShaderPatch Include="structured-context-node-blocks.patch" File="StructuredIr/StructuredProgramContext.cs" />
+    <ShaderPatch Include="structured-context-node-blocks.patch" File="StructuredIr/StructuredProgramContext.cs" Then="structured-context-cfg-structurizer.patch" />
     <!-- Task/mesh programs (AmpereMesh.cs): end-of-program epilogue at the return of main, task payload pointers.
          Then: float Clamp/Min/Max as NClamp/NMin/NMax (FMNMX / .SAT NaN semantics); same file, applied after it. -->
     <ShaderPatch Include="ampere-mesh-instructions.patch" File="CodeGen/Spirv/Instructions.cs" Then="spirv-nan.patch" />
@@ -58,11 +58,13 @@
     <ShaderPatch Include="optimizer-remove-node-side-effects.patch" File="Translation/Optimizations/Optimizer.cs" />
     <!-- Shared small-integer stores: the CAS loop keeps the word an integer (see the patch header; OoT mesh programs). -->
     <ShaderPatch Include="shared-small-int-cas-integer.patch" File="Translation/HelperFunctionManager.cs" />
+    <!-- Block order for the structurizer: non-loop edges forward, loops contiguous (BlockOrder.cs; OoT register pressure). -->
+    <ShaderPatch Include="cfg-block-order.patch" File="Translation/ControlFlowGraph.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Include="$(ShaderSrc)**/*.cs"
-             Exclude="$(ShaderSrc)bin/**;$(ShaderSrc)obj/**;$(ShaderSrc)CodeGen/Spirv/SpirvGenerator.cs;$(ShaderSrc)Instructions/InstEmitFloatArithmetic.cs;$(ShaderSrc)IntermediateRepresentation/IoVariable.cs;$(ShaderSrc)CodeGen/Spirv/IoMap.cs;$(ShaderSrc)CodeGen/Glsl/Instructions/IoMap.cs;$(ShaderSrc)CodeGen/Spirv/Declarations.cs;$(ShaderSrc)Instructions/InstEmit.cs;$(ShaderSrc)Decoders/RegisterConsts.cs;$(ShaderSrc)StructuredIr/AstOptimizer.cs;$(ShaderSrc)Translation/Optimizations/GlobalToStorage.cs;$(ShaderSrc)Translation/Optimizations/BindlessElimination.cs;$(ShaderSrc)StructuredIr/GotoElimination.cs;$(ShaderSrc)StructuredIr/StructuredProgram.cs;$(ShaderSrc)StructuredIr/StructuredProgramContext.cs;$(ShaderSrc)CodeGen/Spirv/Instructions.cs;$(ShaderSrc)Translation/Optimizations/Optimizer.cs;$(ShaderSrc)Translation/HelperFunctionManager.cs;$(ShaderSrc)IntermediateRepresentation/Instruction.cs;$(ShaderSrc)StructuredIr/InstructionInfo.cs" />
+             Exclude="$(ShaderSrc)bin/**;$(ShaderSrc)obj/**;$(ShaderSrc)CodeGen/Spirv/SpirvGenerator.cs;$(ShaderSrc)Instructions/InstEmitFloatArithmetic.cs;$(ShaderSrc)IntermediateRepresentation/IoVariable.cs;$(ShaderSrc)CodeGen/Spirv/IoMap.cs;$(ShaderSrc)CodeGen/Glsl/Instructions/IoMap.cs;$(ShaderSrc)CodeGen/Spirv/Declarations.cs;$(ShaderSrc)Instructions/InstEmit.cs;$(ShaderSrc)Decoders/RegisterConsts.cs;$(ShaderSrc)StructuredIr/AstOptimizer.cs;$(ShaderSrc)Translation/Optimizations/GlobalToStorage.cs;$(ShaderSrc)Translation/Optimizations/BindlessElimination.cs;$(ShaderSrc)StructuredIr/GotoElimination.cs;$(ShaderSrc)StructuredIr/StructuredProgram.cs;$(ShaderSrc)StructuredIr/StructuredProgramContext.cs;$(ShaderSrc)CodeGen/Spirv/Instructions.cs;$(ShaderSrc)Translation/Optimizations/Optimizer.cs;$(ShaderSrc)Translation/HelperFunctionManager.cs;$(ShaderSrc)IntermediateRepresentation/Instruction.cs;$(ShaderSrc)StructuredIr/InstructionInfo.cs;$(ShaderSrc)Translation/ControlFlowGraph.cs" />
     <Compile Include="$(PatchedDir)CodeGen/Spirv/SpirvGenerator.cs" />
     <Compile Include="$(PatchedDir)Instructions/InstEmitFloatArithmetic.cs" />
     <Compile Include="$(PatchedDir)IntermediateRepresentation/IoVariable.cs" />
@@ -82,6 +84,10 @@
     <Compile Include="$(PatchedDir)Translation/HelperFunctionManager.cs" />
     <Compile Include="$(PatchedDir)IntermediateRepresentation/Instruction.cs" />
     <Compile Include="$(PatchedDir)StructuredIr/InstructionInfo.cs" />
+    <Compile Include="$(PatchedDir)Translation/ControlFlowGraph.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)BlockOrder.cs" />
+    <!-- Structurizer for reducible graphs (Ramsey's "Beyond Relooper"; NXRT_HARNESS_STRUCTURIZER=ryujinx for the old one). -->
+    <Compile Include="$(MSBuildThisFileDirectory)CfgStructurizer*.cs" />
     <!-- Structurizer check (NXRT_HARNESS_CFG_CHECK): random walks through the structured code against the block graph. -->
     <Compile Include="$(MSBuildThisFileDirectory)StructuredCfgCheck.cs" />
     <!-- Ampere front end: SassInst -> Ryujinx IR (partial InstEmit and translator internals, hence in this assembly). -->
@@ -91,7 +97,7 @@
   </ItemGroup>
 
   <Target Name="ApplyShaderPatches" BeforeTargets="BeforeBuild;CoreCompile"
-          Inputs="@(ShaderPatch);@(ShaderPatch->'%(Then)');@(ShaderPatch->'$(ShaderSrc)%(File)')"
+          Inputs="@(ShaderPatch);@(ShaderPatch->'%(Then)');@(ShaderPatch->'%(Then2)');@(ShaderPatch->'$(ShaderSrc)%(File)')"
           Outputs="@(ShaderPatch->'$(PatchedDir)%(File)')">
     <MakeDir Directories="@(ShaderPatch->'$(PatchedDir)%(File)'->'%(RootDir)%(Directory)')" />
     <Exec Condition="'$(OS)' != 'Windows_NT'"
@@ -99,6 +105,9 @@
     <!-- `Then`: a second patch of the same file, applied to the first one's output. -->
     <Exec Condition="'$(OS)' != 'Windows_NT' And '%(ShaderPatch.Then)' != ''"
           Command="patch --quiet --forward &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(MSBuildThisFileDirectory)%(ShaderPatch.Then)&quot;" />
+    <!-- `Then2`: a third one. -->
+    <Exec Condition="'$(OS)' != 'Windows_NT' And '%(ShaderPatch.Then2)' != ''"
+          Command="patch --quiet --forward &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(MSBuildThisFileDirectory)%(ShaderPatch.Then2)&quot;" />
     <!-- Windows has no `patch`: tools/maxwell/apply_patch.py does the same (unified diff, exact hunks, -o).
          Python: the repo's venv if present, else `python` on PATH (override with -p:PatchPython=...). -->
     <PropertyGroup Condition="'$(OS)' == 'Windows_NT' And '$(PatchPython)' == ''">
@@ -107,8 +116,10 @@
     </PropertyGroup>
     <Exec Condition="'$(OS)' == 'Windows_NT' And '%(ShaderPatch.Then)' == ''"
           Command="&quot;$(PatchPython)&quot; &quot;$(MSBuildThisFileDirectory)../../scripts/apply_patch.py&quot; --quiet --forward -o &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(ShaderSrc)%(ShaderPatch.File)&quot; &quot;%(ShaderPatch.FullPath)&quot;" />
-    <Exec Condition="'$(OS)' == 'Windows_NT' And '%(ShaderPatch.Then)' != ''"
+    <Exec Condition="'$(OS)' == 'Windows_NT' And '%(ShaderPatch.Then)' != '' And '%(ShaderPatch.Then2)' == ''"
           Command="&quot;$(PatchPython)&quot; &quot;$(MSBuildThisFileDirectory)../../scripts/apply_patch.py&quot; --quiet --forward -o &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(ShaderSrc)%(ShaderPatch.File)&quot; &quot;%(ShaderPatch.FullPath)&quot; &quot;$(MSBuildThisFileDirectory)%(ShaderPatch.Then)&quot;" />
+    <Exec Condition="'$(OS)' == 'Windows_NT' And '%(ShaderPatch.Then2)' != ''"
+          Command="&quot;$(PatchPython)&quot; &quot;$(MSBuildThisFileDirectory)../../scripts/apply_patch.py&quot; --quiet --forward -o &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(ShaderSrc)%(ShaderPatch.File)&quot; &quot;%(ShaderPatch.FullPath)&quot; &quot;$(MSBuildThisFileDirectory)%(ShaderPatch.Then)&quot; &quot;$(MSBuildThisFileDirectory)%(ShaderPatch.Then2)&quot;" />
   </Target>
 
 </Project>
