@@ -127,6 +127,18 @@ class Fn:
             return 'goto L_%x;' % target
         return '{ %s return; }' % self.env.call(target)
 
+    def is_data_word(self, addr):
+        """True when the word at addr is not an instruction (op0 0..3, see lift), so no execution falls into it. The SDK's
+        deliberate UDF #0xdefe (Halt / DebugBreak after a noreturn call) stays a trap."""
+        word = getattr(self.env, 'word', None)
+        if word is None:
+            return False
+        try:
+            w = word(addr)
+        except Exception:                                # outside the image (cover lifts every word at one fake pc)
+            return False
+        return w is not None and bits(w, 28, 25) <= 3 and w not in (0, 0xe7ffdefe)
+
     def lift(self, w, pc):
         op0 = bits(w, 28, 25)
         if op0 in (8, 9):
@@ -202,6 +214,11 @@ class Fn:
         if bits(w, 30, 26) == 5:
             target = pc + sext(bits(w, 25, 0), 26) * 4
             if bits(w, 31, 31):
+                # `bl .+8; .word d`: hand-written code (rtld of SDK 20+ modules, e.g. Super Mario Bros. Wonder NS2 Edition)
+                # reads a PC-relative word through x30 and returns to its own caller, never to the data word. As a call, the
+                # lifted code would come back and run that word (an undefined-instruction trap), so it is a tail call.
+                if target == pc + 8 and self.is_data_word(pc + 4):
+                    return 'c->x[30] = 0x%xULL; { %s return; }' % (pc + 4, self.env.call(target))
                 return 'c->x[30] = 0x%xULL; %s' % (pc + 4, self.env.call(target))
             return self.jump(target)
         if bits(w, 31, 24) == 0x54:
