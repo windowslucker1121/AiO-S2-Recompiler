@@ -891,7 +891,7 @@ uint64_t submit(const std::vector<Ref<CmdList>>& lists) {
     NXFT("submit");
     bool recorded = false;
     const bool snap = capture::on_submit(lists, &recorded);   // the first submission of a frame being captured: the GPU state it starts from
-    return queue_submit([lists, snap, recorded](Frame& f) {
+    const uint64_t serial = queue_submit([lists, snap, recorded](Frame& f) {
         if (recorded) capture::frame_submit_begin(snap);
         if (snap) capture::state_taken(replay_state_snapshot());
         replay_begin_submit(f);
@@ -899,6 +899,8 @@ uint64_t submit(const std::vector<Ref<CmdList>>& lists) {
         replay_end_submit(f);
         if (recorded) capture::frame_submit_end();
     }, !async_submit(), false);
+    if (async_submit() && !on_render_thread()) texlook_submit(lists, serial);   // textures the coming draws use: prepared in the background meanwhile
+    return serial;
 }
 
 uint64_t flush() { return g ? g->reserved.load() : g_idle_serial.load(); }
@@ -1036,6 +1038,7 @@ void release_texture_gpu(Texture* t) {
             TexGpu* img = x->gpu;
             x->gpu = nullptr;
             g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
+            if (tex_release_shared(img)) return;          // other objects still share the image: the last one parks it
             if (!tex_park(*x, img)) destroy_texture_gpu(img);
         });
         g_gauge_render_queue.add(1);

@@ -142,22 +142,27 @@ void schedule_locked(Texture* t) {
     if (e.st == Entry::Queued) return;                // the job reads the generation when it starts
     if (e.st == Entry::Running) { e.again = true; return; }
     if (e.st == Entry::Waiting) { leave_waiting_locked(t); e.st = Entry::Idle; }
-    if (e.st == Entry::Done) drop_result(e);          // its content is older than the new write
+    if (e.st == Entry::Done) { drop_result(e); e.st = Entry::Idle; }   // its content is older than the new write (Idle: not a victim of the loop below)
     uint64_t est = std::min<uint64_t>(t->storage_size, 1ull << 30);
     // [gfx] astc_quality = uncompressed: a job holds the texture as RGBA8, 4 bytes a texel against 16 per ASTC block
     if (t->fmt && t->fmt->astc && !S().caps.astc && astc_quality() == AstcQuality::Uncompressed) est = std::min<uint64_t>(est * t->fmt->block_w * t->fmt->block_h / 4, 1ull << 30);
+    // ASTC held as BC7: 16 bytes per 4x4 block instead of per ASTC block (an 8x8 texture's result is 4 times its storage: OoT's two 56 MB
+    // ASTC 8x8 textures are 226 MB each, which the old estimate let in and the budget then evicted again)
+    else if (t->fmt && t->fmt->astc && !S().caps.astc) est = std::min<uint64_t>(est * t->fmt->block_w * t->fmt->block_h / 16, 1ull << 30);
     // Over budget: the oldest finished results go first (they belong to textures not used yet); those are prepared on the render thread if needed.
     while (s.held_bytes + est > s.budget) {
         auto victim = s.map.end();
         for (auto it = s.map.begin(); it != s.map.end(); ++it)
             if (it->second.st == Entry::Done && (victim == s.map.end() || it->second.seq < victim->second.seq)) victim = it;
         if (victim == s.map.end()) break;
+        victim->first->prep_sched.store(0, std::memory_order_relaxed);   // its next naming (look-ahead, bind) may queue a job again
         drop_result(victim->second);
         s.map.erase(victim);
         s.st.evicted++;
     }
     if (s.held_bytes + est > s.budget) {
         s.st.skipped_budget++;
+        t->prep_sched.store(0, std::memory_order_relaxed);
         e.keep = Ref<Texture>();
         s.map.erase(t);
         return;
@@ -351,14 +356,17 @@ void init_once() {
             NXLOG_I(kTag, "background texture preparation is off");
             return;
         }
-        s.budget = static_cast<uint64_t>(std::max<int64_t>(16, config_get_int("nvn", "tex_prep_mb", 512))) << 20;
+        // 1024: an area load registers several hundred MB of big textures (prepared early) and a camera cut names ~300 more at once (tex_lookahead)
+        s.budget = static_cast<uint64_t>(std::max<int64_t>(16, config_get_int("nvn", "tex_prep_mb", 1024))) << 20;
         s.min_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "tex_prep_min_kb", 8))) << 10;
         s.early_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "tex_prep_early_kb", 1024))) << 10;
         s.stage_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "tex_prep_stage_kb", 1024))) << 10;
         s.verify = config_get_bool("nvn", "tex_prep_verify", false);
         const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
         int n = static_cast<int>(config_get_int("nvn", "tex_prep_threads", 0));
-        if (n <= 0) n = static_cast<int>(std::clamp<unsigned>(hw / 3, 2, 8));
+        // hw / 2: a job is mostly the BC7 cache file's read (I/O latency, ~2 ms), and a camera cut names ~300 at once (tex_lookahead);
+        // the threads sleep between bursts
+        if (n <= 0) n = static_cast<int>(std::clamp<unsigned>(hw / 2, 2, 12));
         for (int i = 0; i < n; ++i) std::thread(worker_main).detach();
         g_enabled.store(1);
         g_tex_prep_on.store(true);
@@ -373,7 +381,8 @@ bool eligible(const Texture* t) {
     if (!t || t->destroyed.load() || !t->fmt || t->is_display || (!t->mem && !t->vpool)) return false;
     if (!(t->fmt->astc || t->fmt->bc)) return false;
     if (t->b.samples > 1 || t->fmt->aspect != kAspectColor) return false;
-    if (t->storage_size < S().min_bytes || t->storage_size > (256ull << 20)) return false;
+    // ASTC: every size. Its cost is the BC7 cache entry's file read (~1.5-3 ms even for a 4 KB texture), not the bytes.
+    if ((t->storage_size < S().min_bytes && !t->fmt->astc) || t->storage_size > (256ull << 20)) return false;
     return true;
 }
 
