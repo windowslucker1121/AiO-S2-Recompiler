@@ -412,7 +412,7 @@ void texture_pool_register(const NVNtexturePool* pool, int id, const NVNtexture*
     e.tex = Ref<Texture>::share(t);
     e.view = info;
     e.has_view = view != nullptr;
-    if (!e.used) g_texture_handles.add(1);
+    if (!e.used) { g_texture_handles.add(1); tp->used_ids.push_back(static_cast<uint32_t>(id)); }
     e.used = true;
     be::tx_mark("tx.reg", t);
     be::g_tex_scan_epoch.fetch_add(1, std::memory_order_relaxed);   // a new texture sits behind this id now

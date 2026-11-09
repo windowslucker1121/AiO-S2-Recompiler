@@ -149,6 +149,19 @@ bool texture_read_virtual(const Texture& t, uint64_t at, uint64_t len, uint8_t* 
     return p >= at + len;
 }
 
+void texture_read_virtual_words(const Texture& t, const uint64_t* at, size_t n, uint64_t* out) {
+    for (size_t i = 0; i < n; ++i) out[i] = 0;
+    std::vector<VSeg> segs;
+    if (!virtual_segments(t, segs)) return;
+    for (size_t i = 0; i < n; ++i) {
+        uint8_t* dst = reinterpret_cast<uint8_t*>(&out[i]);
+        for (const VSeg& s : segs) {   // later maps win, as in texture_read_virtual
+            const uint64_t a = std::max(at[i], s.at), b = std::min(at[i] + 8, s.at + s.len);
+            if (a < b) std::memcpy(dst + (a - at[i]), s.ptr + (a - s.at), static_cast<size_t>(b - a));
+        }
+    }
+}
+
 void texture_virtual_tile_ptrs(const Texture& t, std::vector<const uint8_t*>& out) {
     constexpr uint64_t kTile = 0x10000;
     out.assign(static_cast<size_t>((t.storage_size + kTile - 1) / kTile), nullptr);

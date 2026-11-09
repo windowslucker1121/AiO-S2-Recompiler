@@ -205,6 +205,8 @@ bool out_overlaps_shadow(uint64_t addr, uint64_t size);
 bool out_overlaps(uint64_t addr, uint64_t size);
 uint64_t out_version();
 bool ab_tex_park_on();   // false in an off window of [nvn] cpuperf_ab with tex_park
+bool ab_overlap_grow_on();   // false in an off window of [nvn] cpuperf_ab with overlap_grow
+bool ab_index_inc_on();      // false in an off window of [nvn] cpuperf_ab with index_inc
 void park_stats(uint64_t* parked, uint64_t* taken, uint64_t* stale, uint64_t* expired);   // [nvn] tex_park (nvn_gpu_texture.cpp)   // moves whenever the set of held results changes (an entry added, pending again, or taken out)
 // out_overlaps for a pointer window (gmem_before_op): render thread; "no overlap" answers are remembered until the held results change.
 bool out_overlaps_window(uint64_t page, uint64_t size);
@@ -286,6 +288,8 @@ uint32_t tex_layers(Texture* t);
 bool tex_is_depth(Texture* t);
 // Sampled image view for a binding (cached). Null when impossible (the caller binds the dummy view).
 VkImageView tex_sampled_view(Texture* t, const ViewRequest& req);
+// A stamp of t's image and its views (0: no image yet): equal stamps give the same view for the same request (pool array entry cache)
+uint64_t tex_view_stamp(const Texture* t);
 // Single-level, single-layer (or all layers when layer_count > 1) view for use as an attachment.
 VkImageView tex_attachment_view(Texture* t, uint32_t level, uint32_t layer, uint32_t layer_count, VkFormat view_format);
 // The format colour attachments of this texture are rendered through (integer 32-bit formats as their float alias).

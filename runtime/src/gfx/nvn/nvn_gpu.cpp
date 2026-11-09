@@ -148,8 +148,10 @@ void retire() {
     }
 }
 
+thread_local const void* t_render_of = nullptr;   // the back end whose render thread this is (on_render_thread)
 void render_loop() {
     g->tid = std::this_thread::get_id();
+    t_render_of = g;
     log_set_thread_name("nvn-render");
     diag_register_thread("nvn-render", nullptr);   // so the freeze watchdog and the stall sampler can see its stack
     nxrt::hitch_set_render_thread();
@@ -356,7 +358,11 @@ VkDescriptorSet Frame::alloc_set(VkDescriptorSetLayout layout) {
 }
 
 // ---- general helpers ---------------------------------------------------------------------------------------------------
-bool on_render_thread() { return g && std::this_thread::get_id() == g->tid; }
+bool on_render_thread() {
+    // a constant-initialized thread-local set by the render loop (std::this_thread::get_id is a system call; the held-result queries ask
+    // millions of times per second)
+    return g && t_render_of == g;
+}
 gfx::Device& device() { return *g->dev; }
 VkDevice vkdev() { return g->dev->device(); }
 Counters& counters() { return g->ctr; }
