@@ -750,6 +750,37 @@ compute out 0.35 (copies ~2 ms of it), #6 25.6 ms = draws 12.4, gaps 8.2, passes
   frame at 1080, most from target changes and layout changes), `delta copy-backs`, `pool copy-ins` (pages copied in from the pool that
   the copy had just sent back: the "never re-upload the GPU's own writes" check).
 
+**Session 2026-11-09 (GPU at 1080, Kokiri outside: what the GPU time is).** Runs alone, `load_state("kokiri_outside")`, 1920x1080, paired
+`cpuperf_ab = 300` windows from 100 s on. New measurement tools (commit 5fe5720): per-submission timestamps at every submission-chunk boundary
+give `gpu.starve` (the GPU idle waiting for the render thread's next part) and `gpu.busy` (the span without it) in the frame trace; the 10 s
+lines `full barriers by site` and `dispatches: ... right after another`; `[nvn] skip_gpt = 1 | 2` (measurement only, an AB feature: leave out
+draws whose vertex/task/mesh stage walks the page table, or run them with an empty scissor = no fragments); `skip_fs_file` also takes
+`v:<prefix>` and `gpt`. Scratch scripts (`ab.py` pairing, `ftan.py` trace summary) were in the worktree's `work\`.
+- **The frame is GPU-bound and the big submission is not starved:** main submission busy 21.5-21.9 ms, starve 0.4-1.6 ms per frame (the
+  chunks reach the GPU in time); all submissions ~29-30 ms of `gpu.exec` per ~29 ms frame (34 fps in that run).
+- **The pointer (gpt) draws are a third of it: `skip_gpt = 1` cuts main-submission busy 21.6 -> 14.7 ms and gives 32.0 -> 38.0 fps (11 of 12
+  pairs, median +7.6 fps; after the R4 merge).** With `skip_gpt = 2` (pre-raster runs, no fragments) busy is unchanged (21.9 -> 21.6): **the
+  ~6.9 ms are the vertex/mesh stages themselves**, not the foliage fragment shading. Their executables (E5, replay of drs1080): mesh
+  fbb731e2 / 40953571 ... 255 registers with spills, 1.26-1.28 MB of binary (the inlined page-table resolve per 32-bit word), while the
+  paired fragment shaders are 235-255 registers but ~53 KB. E3 found the walk itself cheap and the slot search ~20%; so the size of the code
+  (one resolve per word, a 52-76x growth) is the prime suspect: **next step is item 4 (pointer tables as plain storage bindings) or at least
+  one resolve per LDG.64/128 instead of per word**, translated into a private cache and measured with `skip_gpt` as the ceiling.
+- Barriers: ~800 full barriers per frame (Kokiri: post-dispatch 117, shadow copy-in pair 2x90, pass ends 90, game barriers 74, occlusion
+  report flushes 3x45, mesh-indirect record copies 2x33, deferred writes 2x25, ...). 61% of the ~117 dispatches per frame follow another
+  with no game barrier between. Tried and dropped (paired windows, all at once: fps median +0.35, GPU busy -0.25 ms, noise): an owed
+  post-dispatch barrier paid before the next non-dispatch command (`dispatch_chain`: 470k chained, but most dispatches then emit the shadow
+  copy-in barrier right away: 77% of dispatches copy something in first), transfer-scoped barriers around the occlusion-report and
+  deferred-write updates (`xfer_scope`), binding read-only compute ranges in the pool instead of filling the copy (`fill_ro_host`: only 5% of
+  the ~106 fills per frame are read-only; the rest are written bindings). Removed again. On this driver a drain between small passes /
+  dispatches costs little; the work itself is the cost.
+- Copy-ins (item 1): 230 MB/s in Kokiri (~6 MB per frame, mostly 1 MiB pools of flags 0x24 that the CPU rewrites every frame: copied for
+  compute fills, valid 0 KiB); 15% are pages the copy had just sent back. At PCIe speed that is ~0.04 ms per frame for the re-uploads,
+  and the bit is set before the copy-back runs (CPU writes in between are missed), so the skip was not built.
+- `fs_contract` (dropping NoContraction from fragment modules so the driver may fuse): registers unchanged (mean 110.6 -> 110.9 over
+  254 fragment executables, 957527e8 stays 235), code -2%: dropped without a game run.
+- Picture: in-game screenshot at 1080 after the coordinator restored the A22 network blocks: clean (no 8-px stripes or dark blocks).
+- Pitfall: `powershell -File script.ps1 -Settings '{"a":1}'` loses the JSON quotes (settings silently not applied); pass a file.
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
