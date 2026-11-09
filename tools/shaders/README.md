@@ -226,6 +226,40 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   local GPU with no game (descriptor layouts from the modules' decorations; vertex/mesh without a fragment stage) and prints the
   driver's statistics per executable (registers, binary size, local memory) and the compile time.
 
+## Pointer accesses: vector loads (F1, 2026-11-10)
+
+- The front end splits LDG.64 / LDG.128 into 32-bit loads (the IR is scalar), so through the fast path each word made its own page-cache
+  test and its own 4-byte load: OoT's gpt mesh blocks read 61-66 light-probe records per lane with LDG.128 (scattered over memory), i.e.
+  four load instructions where the SASS has one.
+- Now the words of a vector load carry a tag (`AmpereGlobal.NoteVectorWord`, an extra constant argument of the fast helper call that the
+  helper ignores; `FastArguments` = 2). At word 0 the back end (`TryGenerateHelperCall`) loads the whole `uvec2` / `uvec4` through the
+  cached span (`Aligned` 8 / 16; an aligned LDG.64/.128 never crosses a 4 KiB page); on a miss the helper walks as before and the vector is
+  loaded through the span its walk returned. The other words take their lane; only when a bound slot answered word 0 (no span) do they
+  call the helper themselves. `NXRT_HARNESS_GMEM_VECTOR=0`: the old per-word form.
+- Measured: pipestat fbb731e2 165 -> 145 KB, 5332b131 136 -> 116 KB, 6ec65625 204 -> 184 KB (registers stay 255); in game (Kokiri
+  outside, 1920x1080 uncapped, same exe, alone, warm): **36.6 -> 40.4 fps** (results in AGENTS.md "Session 2026-11-10 (F1)"). Village
+  capture replay: the same picture as the old cache (SSIM 1.000000, max difference 2, as two shots of one cache).
+
+## Register pressure of the gpt pre-raster stages: what it is, and what did not pay (F1, 2026-11-10)
+
+- Most hot gpt blocks use ~253 registers in their original SASS too (40953571 R252, 5332b131 R247, a5bfd19f / b8b873e5 / a873d795 /
+  e41230f8 / 8fb97d28 R252): 255 there is the shader, not the translation. Only fbb731e2 and 6ec65625 (SASS R125, NVN register count 128 in
+  the control section +0x4c) are inflated.
+- Cause 1: `AstOptimizer` folds every single-use value into its use, however far away (constant-buffer loads, texture results, whole
+  arithmetic trees): the inputs then live until the attribute stores at the end. `structured-propagation-distance.patch`,
+  `NXRT_HARNESS_PROPAGATE=near:K` (fold only into one of the next K statements of the same block; `none` = DebugMode's form; default
+  `all` = Ryujinx's): fbb731e2 255 + 288 B spills -> 174 registers, no spills; 6ec65625 255 + 176 B -> 174-204; fragment sample (n=60)
+  mean 81.3 -> 72.4 registers (32 better / 4 worse), vertex n=60 unchanged; near:4 = near:16 = none. **No fps in game** (Kokiri outside:
+  36.2 / 36.6 vs 36.9; with vector loads 40.2 vs 40.4), so it stays an experiment.
+- Cause 2: with the page-cache branches removed (straight-line loads, `GMEM_IDENTITY` + `FAST=0`), NVIDIA's compiler hoists every load
+  and goes back to 255 even without propagation: the per-word diamonds were limiting it.
+- `NXRT_HARNESS_MESH_DIRECT=1` (`AmpereMesh.cs`): mesh attributes written straight into the mesh outputs instead of the 13 KB
+  shared-memory ISBE copy that the end of the program copied out (the address form `[Ra + k * 128]` is proven from Ra's definition,
+  `LineZeroForm`, so the line is static; other forms decoded inline with a switch; the counts are declared at the start with the maximum
+  primitives, the unused ones get degenerate indices). Shared memory 13 KB -> 0.4 KB, mesh sample registers as before (n=60 mean 116 ->
+  115). **Slower in game** (36.1 / 36.3 vs 36.9 fps; probably the degenerate primitives up to the maximum): off.
+- Not tried: spirv-opt (no Vulkan SDK here), specialization constants for the page-table shifts (the walk runs only on a miss).
+
 ## TLD / TLD4 / TXD .F16 (OoT upscaler network, A22)
 
 - TEX, TLD, TLD4 and TXD all carry `.F16.RN` / `.F16.RZ` in bits 79..80 (nvdisasm 13.3 probe: `TLD4.SCR.R.F16.RN.PTP`,

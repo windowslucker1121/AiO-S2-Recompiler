@@ -18,7 +18,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             ResourceManager rm = ctx.ResourceManager;
             if (prog.Mesh.IsTask) AmpereMesh.PayloadId(rm);
-            else { AmpereMesh.AttrId(rm); AmpereMesh.MapId(rm); }
+            else { if (!AmpereMesh.Direct) AmpereMesh.AttrId(rm); AmpereMesh.MapId(rm); }
             ctx.Barrier();
             ctx.Return();
         }
@@ -64,6 +64,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (attr)
             {
                 if (!w32) throw Unsup("mesh ISBEWR.ATTR narrower than 32 bits");
+                if (AmpereMesh.Direct)
+                {
+                    // Straight into the mesh outputs (AmpereMesh.TryGenerateOutStore). The compiler addresses an attribute as [Ra + k * 128]
+                    // with Ra = the byte address of line 0 of the vertex: then the line is k, known here, and the back end only checks Ra's
+                    // form at run time. Any other address is decoded at run time.
+                    int lineBytes = prog.Mesh.Lines.Count * 128;
+                    bool plainReg = mem.Reg >= 0 && mem.Reg < 255 && mem.IndexReg < 0 && !HasSuffix(mem, ".X4") && !HasSuffix(mem, ".X8") &&
+                                    !HasSuffix(mem, ".X16") && !HasSuffix(mem, ".64");
+                    bool noReg = (mem.Reg < 0 || mem.Reg >= 255) && mem.IndexReg < 0;
+                    long imm = mem.Offset;
+                    if ((plainReg || noReg) && imm >= 0 && imm % 128 == 0 && imm < lineBytes)
+                        ctx.Store(StorageKind.SharedMemory, AmpereMesh.OutId(rm, (int)(imm / 128)), plainReg ? Gpr(mem.Reg) : Const(0), value);
+                    else
+                        ctx.Store(StorageKind.SharedMemory, AmpereMesh.OutDynId(rm), MemAddress(ctx, mem), value);
+                    return;
+                }
                 ctx.Store(StorageKind.SharedMemory, AmpereMesh.AttrId(rm), WordIndex(ctx, mem, prog.Mesh.AttrWords), value);
                 return;
             }

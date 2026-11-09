@@ -1755,13 +1755,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // every element's address before the first load writes a register (LDG.E.64 R0, [R0.64] reads R0 for both words)
             var addr = new (IrOperand lo, IrOperand hi)[count];
             for (int n = 0; n < count; n++) addr[n] = GlobalAddress(ctx, i, mem, n * 4);
+            // the words of a vector load are tagged: through the pointer fallback's fast path they load as one vector (AmpereGlobal.cs)
+            int group = load && count > 1 && data.Reg + count <= 255 ? AmpereGlobal.NewVectorGroup() : 0;
             for (int n = 0; n < count; n++)
             {
                 (IrOperand a, IrOperand hi) = addr[n];
                 if (load)
                 {
                     if (data.Reg + n >= 255) break;
-                    ctx.Copy(Gpr(data.Reg + n), ctx.Load(kind, a, hi));
+                    IrOperand word = ctx.Load(kind, a, hi);
+                    if (group != 0) AmpereGlobal.NoteVectorWord(word.AsgOp as Operation, group, count, n);
+                    ctx.Copy(Gpr(data.Reg + n), word);
                 }
                 else
                 {

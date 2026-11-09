@@ -47,10 +47,15 @@ instruction (HMMA, tools/shaders/ampere/frontend/AmpereCoopMat.cs). The Ryujinx 
              {
                  context.Return();
              }
-@@ -1659,14 +1672,19 @@
+@@ -1659,14 +1672,24 @@
          {
              SpvInstruction pointer = GetStoragePointer(context, operation, out AggregateType varType);
  
++            if (isStore && AmpereMesh.TryGenerateOutStore(context, operation))   // mesh: an attribute straight into the outputs (AmpereMesh.cs)
++            {
++                return OperationResult.Invalid;
++            }
++
 +            bool device = operation.StorageKind == StorageKind.GlobalMemory;   // PhysicalStorageBuffer accesses need an alignment (AmpereGlobal.cs)
 +
              if (isStore)

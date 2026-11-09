@@ -39,7 +39,7 @@
     <!-- Ampere front end (D4): SSA room for the uniform registers UR/UP, kept as extra Flag registers. -->
     <ShaderPatch Include="ampere-uniform-registers.patch" File="Decoders/RegisterConsts.cs" />
     <!-- Call arguments stay locals (SPIR-V GenerateCall); then: ballots/votes/shuffles are not folded into other blocks (OoT A18). See the patch headers. -->
-    <ShaderPatch Include="spirv-call-args.patch" File="StructuredIr/AstOptimizer.cs" Then="structured-subgroup-propagation.patch" />
+    <ShaderPatch Include="spirv-call-args.patch" File="StructuredIr/AstOptimizer.cs" Then="structured-subgroup-propagation.patch" Then2="structured-propagation-distance.patch" />
     <ShaderPatch Include="spirv-g2s-c0-base.patch" File="Translation/Optimizations/GlobalToStorage.cs" />
     <!-- Ampere front end: bindless handles the draw determines (NVN2 material tables); see the patch header. -->
     <ShaderPatch Include="ampere-bindless-handle-expr.patch" File="Translation/Optimizations/BindlessElimination.cs" />
