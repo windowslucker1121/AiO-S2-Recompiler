@@ -167,6 +167,33 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   between dispatches (every dispatch already ends with a full memory barrier), and the chain's inputs (the same up to the order of
   atomically appended lists).
 
+## Pointer accesses: out-of-line helpers, inline fast path (A17 follow-up, 2026-11-09)
+
+- Ryujinx's `GlobalToStorage` makes one helper function per access kind and calls it for every 32-bit word; NVIDIA's compiler inlined
+  every call, so a pointer shader (`gpt`) carried the bound-slot search and the page walk once per word: OoT's fern mesh `fbb731e2`
+  253 calls, 1.26 MB of driver code, 20 s to build; the heavier gpt mesh blocks 2.5 MB and 45-82 s.
+- Now (`ampere/frontend/AmpereGlobal.cs`, hooks in `spirv-g2s-c0-base.patch`, `ampere-mesh-instructions.patch`, `spirv-else-if.patch`):
+  the fallback helpers are `DontInline` (the 610.88 driver honours it), take their in arguments by value (Ryujinx's pointer arguments put
+  every call site's temporaries into local memory once the call stays a call) and a plain 32-bit load gets an inline fast path: the
+  page cache (5 words, now main's own, so it stays in registers) is checked at the call site, and with no bound slot marked (c[0]
+  `SlotMaskC0` word 0) and the address in the cached span, the word is loaded right there through the cached device address; only a
+  miss calls the helper, which returns {value, the span its walk ended in} as a struct. The bound-slot search visits only the marked
+  slots (FindLSB loop) instead of all 16.
+- Measured (RTX 4080, driver 610.88, `pipestat`), code / build time before -> after: fern mesh fbb731e2 1.26 MB / 20 s -> 169 KB / 1.4 s;
+  vertex 5332b131 1.22 MB / 16 s -> 140 KB / 1.0 s; mesh 596bf624 2.57 MB / 82 s -> 351 KB / 3.0 s (the other 2.5 MB mesh blocks
+  99908ab2, acf920b7, a5bfd19f, a873d795, b8b873e5 took 46-68 s before). Registers stay at 255: the original SASS of 5332b131 / 40953571
+  already uses R247 / R252, and with the lookup removed altogether (`IDENTITY`) they are still 255. In game (Kokiri outside, 1920x1080,
+  100-300 s, alone, same exe; two pairs): 35.0 vs 34.7 fps and 33.6 vs 34.3 (one slow window while new pipelines built in the
+  background), steady windows +0.4: **fps unchanged**; the gain is the pipeline build time (on-demand builds, the shader preparation).
+  Cost: the SPIR-V of the 3,425 gpt blocks grows from 742 MB to 1.85 GB (the per-word call sites). Dead end: helpers out of line with
+  Ryujinx's pointer arguments and no fast path halved the fps (16.6 vs 32.7: every word a call, its temporaries in local memory).
+- Switches (for measuring): `NXRT_HARNESS_GMEM_NOINLINE=0` (helpers inlined again), `NXRT_HARNESS_GMEM_FAST=0` (no fast path),
+  `NXRT_HARNESS_GMEM_SCAN_ALL=1` (the 16-slot search). Measurement only, wrong results: `NXRT_HARNESS_GMEM_IDENTITY=1` (guest address
+  used as device address), `NXRT_HARNESS_GMEM_NO_SLOTS=1`, `NXRT_HARNESS_GMEM_FIRSTSLOT=1`.
+- `pipestat/` (`build.cmd`, then `pipestat.exe [--frag fs.spv] a.spv [task.spv+mesh.spv] ...`): compiles modules into pipelines on the
+  local GPU with no game (descriptor layouts from the modules' decorations; vertex/mesh without a fragment stage) and prints the
+  driver's statistics per executable (registers, binary size, local memory) and the compile time.
+
 ## TLD / TLD4 / TXD .F16 (OoT upscaler network, A22)
 
 - TEX, TLD, TLD4 and TXD all carry `.F16.RN` / `.F16.RZ` in bits 79..80 (nvdisasm 13.3 probe: `TLD4.SCR.R.F16.RN.PTP`,
