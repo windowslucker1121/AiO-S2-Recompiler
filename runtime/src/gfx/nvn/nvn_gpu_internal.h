@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <source_location>
 #include <string>
 #include <vector>
 
@@ -114,7 +115,11 @@ void device_lost(const char* where);
 void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImageLayout to, VkImageAspectFlags aspect,
                    uint32_t base_level, uint32_t level_count, uint32_t base_layer, uint32_t layer_count);
 // All commands before, all commands after, all memory (used after passes, dispatches, copies and fills).
-void memory_barrier(VkCommandBuffer cb);
+void memory_barrier(VkCommandBuffer cb, std::source_location loc = std::source_location::current());
+// Full memory barriers by call site since the start, most first ("file:line count ...", the 10 s statistics line).
+std::string memory_barrier_sites(size_t top);
+// Full memory barriers recorded by the calling thread so far (a later count equal to an earlier one: none in between).
+uint64_t memory_barriers_here();
 uint64_t thread_cpu_us();     // CPU time of the calling thread in microseconds (measurement: [nvn] cpuperf_ab)
 // [nvn] pass_barriers = tracked (S38): image_barrier derives its stage and access masks from the two layouts instead of all commands and
 // all memory. Set by the replay for each submission; any thread may record image barriers, so it is an atomic.

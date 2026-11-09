@@ -40,6 +40,7 @@ namespace {
 constexpr const char* kTag = "nvn.gpu";
 constexpr uint32_t kSlots = 36;                  // about three frames of submissions (the game submits ~11 times a frame): with fewer, recording waits on
                                                  // the GPU for a submission of a recent frame and the CPU cannot get frames ahead
+constexpr uint32_t kCkMax = 64;        // frame trace: chunk boundary timestamps per submission (two per boundary)
 constexpr uint32_t kGpMax = 32768;     // GPU pass profiler: timestamps per submission (the first scene's main submission needs ~3,000; ~16,000 with [prof] gpu_draws)
 constexpr VkDeviceSize kUploadBytes = 8ull << 20;   // per slot; larger uploads get their own staging buffer
 
@@ -65,6 +66,7 @@ struct Slot {
     uint64_t sets_live = 0;               // descriptor sets allocated from this slot's pools since the last reset (vk.descriptor_sets)
     uint32_t gp_n = 0;                    // GPU pass profiler: timestamps written by the submission
     std::vector<std::pair<std::string, uint32_t>> gp_labels;   // label and argument of each interval (stamp i closes interval i)
+    uint32_t ck_n = 0;                    // frame trace: chunk boundary timestamps written (end of a part, start of the next; cpool)
 };
 
 struct Deferred {
@@ -92,6 +94,7 @@ struct Gpu {
     int presents_pending = 0;
     Slot slots[kSlots];
     VkQueryPool qpool = VK_NULL_HANDLE;   // frame trace: two timestamps per slot
+    VkQueryPool cpool = VK_NULL_HANDLE;   // frame trace: kCkMax timestamps per slot at submission chunk boundaries (GPU idle between parts)
     VkQueryPool gpool = VK_NULL_HANDLE;   // GPU pass profiler ([prof] gpu_passes): kGpMax timestamps per slot
     uint32_t next_slot = 0;
     Counters ctr;
@@ -245,6 +248,22 @@ Slot& acquire_slot() {
             static const uint16_t z = ft::zone_id("gpu.exec");
             const double ns = static_cast<double>(ts[1] - ts[0]) * g->dev->properties().limits.timestampPeriod;
             ft::event(z, s.cpu_t0, s.cpu_t0 + static_cast<uint64_t>(ns), static_cast<uint32_t>(s.serial));
+            // The span above runs from the first part's start to the last part's end: with submission chunks it includes the time the GPU
+            // waited for the render thread to send the next part. gpu.starve: the sum of those waits (a part that started before the one
+            // before it ended counts 0); gpu.busy: the span without them.
+            uint64_t ck[kCkMax];
+            if (g->cpool && s.ck_n >= 2 &&
+                vkGetQueryPoolResults(g->dev->device(), g->cpool, static_cast<uint32_t>(&s - g->slots) * kCkMax, s.ck_n, sizeof(uint64_t) * s.ck_n, ck,
+                                      sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+                const double period = g->dev->properties().limits.timestampPeriod;
+                uint64_t gap = 0;
+                for (uint32_t i = 0; i + 1 < s.ck_n; i += 2)
+                    if (ck[i + 1] > ck[i]) gap += ck[i + 1] - ck[i];
+                const uint64_t gap_ns = static_cast<uint64_t>(static_cast<double>(gap) * period);
+                static const uint16_t zs = ft::zone_id("gpu.starve"), zb = ft::zone_id("gpu.busy");
+                ft::event(zs, s.cpu_t0, s.cpu_t0 + gap_ns, static_cast<uint32_t>(s.serial));
+                ft::event(zb, s.cpu_t0, s.cpu_t0 + (static_cast<uint64_t>(ns) > gap_ns ? static_cast<uint64_t>(ns) - gap_ns : 0), s.ck_n / 2);
+            }
         }
     }
     if (s.gp_n >= 2 && g->gpool) {      // GPU pass profiler: one event per interval between two timestamps, named gp:<label>, arg = draws
@@ -564,8 +583,45 @@ void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImag
     vkCmdPipelineBarrier2(cb, &di);
 }
 
-void memory_barrier(VkCommandBuffer cb) {
+// Full barriers by call site (diagnosis: which of our barriers drain the GPU most often). Open addressing over (file pointer, line); any
+// thread; a full table only stops counting new sites.
+namespace {
+std::atomic<uint64_t> g_bar_site_key[512];
+std::atomic<uint64_t> g_bar_site_n[512];
+void bar_site_count(const std::source_location& loc) {
+    const uint64_t key = (reinterpret_cast<uintptr_t>(loc.file_name()) & 0xffffffffffffull) | (uint64_t{loc.line() & 0xffff} << 48);
+    uint64_t h = (key * 0x9e3779b97f4a7c15ull) >> 55;
+    for (int i = 0; i < 16; ++i, h = (h + 1) & 511) {
+        uint64_t k = g_bar_site_key[h].load(std::memory_order_relaxed);
+        if (k == 0 && g_bar_site_key[h].compare_exchange_strong(k, key, std::memory_order_relaxed)) k = key;
+        if (k == key) { g_bar_site_n[h].fetch_add(1, std::memory_order_relaxed); return; }
+    }
+}
+}  // namespace
 
+std::string memory_barrier_sites(size_t top) {
+    std::vector<std::pair<uint64_t, uint64_t>> v;
+    for (size_t i = 0; i < 512; ++i)
+        if (const uint64_t k = g_bar_site_key[i].load(std::memory_order_relaxed)) v.emplace_back(g_bar_site_n[i].load(std::memory_order_relaxed), k);
+    std::sort(v.rbegin(), v.rend());
+    std::string s;
+    for (size_t i = 0; i < v.size() && i < top; ++i) {
+        const char* f = reinterpret_cast<const char*>(v[i].second & 0xffffffffffffull);
+        const char* b = f;
+        for (const char* p = f; *p; ++p) if (*p == '/' || *p == '\\') b = p + 1;
+        char t[96];
+        std::snprintf(t, sizeof t, " %s:%llu %llu", b, (unsigned long long)(v[i].second >> 48), (unsigned long long)v[i].first);
+        s += t;
+    }
+    return s;
+}
+
+thread_local uint64_t t_barriers = 0;
+uint64_t memory_barriers_here() { return t_barriers; }
+
+void memory_barrier(VkCommandBuffer cb, std::source_location loc) {
+    ++t_barriers;
+    bar_site_count(loc);
     g_gauge_barriers_mem.add(1);
     VkMemoryBarrier2 b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -614,6 +670,8 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         vkCmdResetQueryPool(s.cb, g->qpool, qi, 2);
         vkCmdWriteTimestamp(s.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g->qpool, qi);
         s.timed = true;
+        s.ck_n = 0;
+        if (g->cpool) vkCmdResetQueryPool(s.cb, g->cpool, static_cast<uint32_t>(&s - g->slots) * kCkMax, kCkMax);
         s.cpu_t0 = ft::now_ns();
     }
     checkpoint(f, "submission start");
@@ -736,6 +794,9 @@ bool frame_chunk(Frame& f) {
         s.split_cbs.push_back(nb);
     }
     VkCommandBuffer next = s.split_cbs[s.split_used++];
+    const bool ck = g->cpool && s.timed && s.ck_n + 2 <= kCkMax;   // frame trace: when this part ends and the next begins on the GPU
+    const uint32_t ck_base = static_cast<uint32_t>(&s - g->slots) * kCkMax;
+    if (ck) vkCmdWriteTimestamp(f.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->cpool, ck_base + s.ck_n++);
     vkEndCommandBuffer(f.cb);
     VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
     cbi.commandBuffer = f.cb;
@@ -755,6 +816,7 @@ bool frame_chunk(Frame& f) {
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(next, &bi);
+    if (ck) vkCmdWriteTimestamp(next, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g->cpool, ck_base + s.ck_n++);
     f.cb = next;
     g->ctr.submit_chunks.fetch_add(1, std::memory_order_relaxed);
     return r == VK_SUCCESS;
@@ -1050,6 +1112,9 @@ bool bring_up(gfx::Device& dev, gfx::Renderer* rend, FrameLimiter* limiter, bool
         qi.queryCount = kSlots * 2;
         if (vkCreateQueryPool(dev.device(), &qi, nullptr, &gp->qpool) != VK_SUCCESS) gp->qpool = VK_NULL_HANDLE;
         else vk_gauge_query_pools().add(1);
+        qi.queryCount = kSlots * kCkMax;
+        if (vkCreateQueryPool(dev.device(), &qi, nullptr, &gp->cpool) != VK_SUCCESS) gp->cpool = VK_NULL_HANDLE;
+        else vk_gauge_query_pools().add(1);
     }
     if (ft::on() && config_get_bool("prof", "gpu_passes", false)) {
         VkQueryPoolCreateInfo qi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
@@ -1157,6 +1222,7 @@ void tear_down() {
         }
     }
     if (gp->qpool) { vkDestroyQueryPool(d.device(), gp->qpool, nullptr); vk_gauge_query_pools().sub(1); }
+    if (gp->cpool) { vkDestroyQueryPool(d.device(), gp->cpool, nullptr); vk_gauge_query_pools().sub(1); }
     if (gp->gpool) { vkDestroyQueryPool(d.device(), gp->gpool, nullptr); vk_gauge_query_pools().sub(1); }
     if (gp->timeline) { vkDestroySemaphore(d.device(), gp->timeline, nullptr); vk_gauge_semaphores().sub(1); }
     g = nullptr;
