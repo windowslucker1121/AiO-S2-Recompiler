@@ -663,6 +663,41 @@ resolve_in_pool / pool_lookup ~14% of the render thread together), the epoch mov
 bind the written range is the remaining lever for set reuse), compute shadows (shadow_of ~2.5%), handle_lookup (2.4%, a contended counter
 and the handle map under a mutex), the driver's own share.
 
+**Session 2026-11-09 (GPU time at 1920x1080).** Measured first scene, alone, zone trace (`gpu.exec` per submission; note the per-submission
+values overlap, the union is ~1-3 ms lower) and stamped runs (`gpu_passes` + `gpu_draws`, only for proportions). Start (5e1e7c7): first scene
+39.2 fps, gpu.exec 25.1 ms per frame, render replay 19.0 ms: the GPU was the limit there. Stamped breakdown (ms per frame, stamps inflate):
+draws 9.6, gaps 5.0, compute 2.0, end-of-submission copy-backs 1.5, mid-frame copy-backs 1.5, write memory 0.5. Per submission (`work`
+scratch `persub.py`: gp stamps grouped by the submission they ran in): #3 (culling/HiZ, the one the game's main thread waits on) 7.9 ms,
+#6 (the big frame) 24.5 ms; in Kokiri outside #3 5.4 ms = draws 1.4, shadow in 1.15, HiZ a17259b2 0.7, tail 0.55, culling root 0.37,
+compute out 0.35 (copies ~2 ms of it), #6 25.6 ms = draws 12.4, gaps 8.2, passes 2.9, compute out 1.1.
+- **The FMUL.RZ shaders (D1-S's fp32 sequence) are the biggest GPU win measured: first scene 39.2-40.1 -> 44.9 / 45.6 fps, gpu.exec
+  24.5-25.1 -> 21.5-21.8 ms** (two runs with only the 61 hottest changed blocks of the first scene re-translated into a private cache;
+  pictures right). Those 61 blocks + 31 more for Kokiri outside are byte-identical to `work\shaders\d1s\full2`: merging full2 (needs the
+  pipelines rebuilt / a preparation) is the step; the 92 hot blocks alone (their .spv and results.tsv rows) are in the git-ignored
+  `work\gpu_merge_fmul_hot` of the main checkout. Pitfall: the per-submission `gpu.exec` values overlap; sum them for trends, take the union
+  for the GPU's busy time.
+- `[nvn] write_defer` (kept, default on): memory writes inside an open pass wait for its end (34 per frame ended a 1080 pass each).
+  Paired: 1% low +2.95 fps (16 of 19), fps median +0.55, GPU -0.25 ms.
+- `[nvn] out_delta` (kept, default on): copy-backs of held results compare the copy with a snapshot taken before the result's first
+  dispatch (VRAM copy) and write only changed 16-byte units to the pool (compute shader `nvn_delta_shader.inc`, generated with
+  Spv.Generator; push descriptors). The CPU's own writes to those pools (the counter resets in the first page of the culling buffers) survive
+  wherever the GPU did not write. Paired windows (first scene, `cpuperf_ab_what = out_delta`, 20 pairs): fps median +2.05 (15 of 20),
+  median frame -1.94 ms, GPU -1.06 ms (15 of 20); whole copy-backs 1.46 -> 0.38 GB/s, 11 GB per 10 s compared in video memory. The
+  first version kept a snapshot equal to the pool by page tracking (marks for CPU writes, arms, GPU pool writes): the marks
+  (pointer-shader windows, direct storage writes) forced most pages whole and it was neutral; dropped for the snapshot-before-dispatch form.
+- Next measured lead: the pool copy refills (pool -> copy) are ~300 MB/s of PCIe reads in the first scene (`pool copy-ins` /
+  `pool mirrors ... copied` lines), ~16% of them pages the copy had just sent back and nobody changed since (re-uploads of the GPU's own
+  writes: could be armed without a copy); the other 84% are the bigger target (which pools: the `pool mirrors` top list).
+- Kokiri outside per submission (stamped): #3 5.4 ms (draws 1.4, shadow in 1.15 with 34931785's 0.35 ms, HiZ a17259b2 0.7, tail 0.55,
+  culling root 0.37), #6 25.6 ms (draws 12.4: fern mesh 957527e8 1.0, 45ab0a1f 0.87 over 371 draws, 40478981 / 4097c13f 0.72 each).
+  The FMUL blocks of Kokiri's hot draws (31 more) are re-translated in the private cache but were not measured in game (lock queue).
+- Dropped (measured neutral or worse): `mirror_fresh_pending` (count pages newer in the copy and pending as current: -7 fps, GPU +6 ms:
+  the culling counters went wrong), pre-copying the {count, 1, 1} records of mesh indirect draws before their pass (no more pass break
+  per mesh draw, ~33 per frame: GPU -0.02 ms, fps +-0).
+- Diagnostics: the 10 s line `passes ended by` (replay source lines that end passes, with the draws in those passes: ~140 pass ends per
+  frame at 1080, most from target changes and layout changes), `delta copy-backs`, `pool copy-ins` (pages copied in from the pool that
+  the copy had just sent back: the "never re-upload the GPU's own writes" check).
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
