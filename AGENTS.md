@@ -676,6 +676,35 @@ thread), it needs a harness mode where bound and uniform handles are read by the
 full re-translation (all pipelines rebuild: measure on replays first); with `VK_KHR_unified_image_layouts` available, the per-draw layout
 checks of prepare_textures can go too. Bet 2 in its planned form (GPU address = device address) is not possible on this driver (E2b).
 
+**Game side (G-1, 2026-11-09): what main waits for, local NZCV, vector NEON fast path.** G = main thread from the end of one nvnSyncWait to
+the start of the next. Measured with `[prof] trace` plus the new `[prof] trace_svc_min_us` (svc events down to 10 us) and `kwake` events
+(every kernel wake-up: waker's `wake_thread` to the woken thread running); scratch analysis scripts were in the worktree's `work\` (gside2.py:
+worker concurrency during main's waits). Findings, first scene, 854x480: main waits ~10.3 ms per frame in **WaitForAddress at main+0x60188**
+(the job system's "wait for job group" in f_710005fe60, ~19 waits per frame, 0.9 ms each); the wake-ups are fast (p50 7.6 us, p90 11 us for
+main and for the workers, ~40 per frame for main, ~500 for the workers: 0.3 ms per frame of main's G), so it is not wake latency or a lock of
+ours. During main's waits on average ~3.4 of the 6 job workers (guest-146..151; guest-141..145 a further ~0.4) run lifted code: the job graph
+has limited width and its critical path is worker compute, so **lifted-code speed is the lever**. (guest-94..99 and 106..111 look busy in
+such an analysis only because their waits never end inside the trace: the sampler shows them 100% asleep.) Worker busy profile (sampler):
+72% lifted main code, `RtlSleepConditionVariableSRW` spin 3.5%, `dispatch_call` 2.3%, `fp_nan_result32` 1.1% (NaN lanes in the game's
+vector math), the HLE thunk call counter (`fetch_add` on a shared line) 1.0%, `import_resolve` 0.8%.
+Tried in the kernel and dropped/kept off: issuing `WakeConditionVariable` after the kernel lock is released (paired windows: G 14.85 off /
+15.21 on, wake latency unchanged; removed); spinning main 200 us before it sleeps (`[sched] wake_spin_us`, default 0: main's wake latency
+7.3 -> 0.2 us, G -0.4 ms in one paired run at 480, but at 1920x1080 with both lifted-code changes G 12.12 off / 12.37 on and no fps gain: left off by default).
+Kept: (1) **function-local NZCV** (`GameConfig.local_flags`, `program.localize_flags`, `NxFlags` overloads in cxx.h; `NX_LOCAL_FLAGS=0`
+for a lift without): a lifted function keeps the flags in a local and writes them to the Ctx only before tail branches out of the function,
+the fall-through into the next one, inline/midhook sites and SVCs, never at BL/BLR or RET (AAPCS64: undefined there); it loads them at entry.
+Before, every flag-setting instruction stored N/Z/C/V because the function might return. Static code: hot job-system functions -26..-38%
+instructions (f_710005fe60 11,811 -> 7,364), NEON-heavy ones -2..-6%; oot.exe 443 -> 393 MB. e2e compares NZCV at the program's return
+only with `NX_LOCAL_FLAGS=0` (the flags are dead there); e2e 30/30, hooks PASS, difftest 566,331 identical, runtime tests 173/173.
+(2) **vector fast path in `v_f3v`** (neon.h): single-precision FADD/FSUB/FMUL/FDIV/FMLA compute all lanes as one host vector op and test
+once for a NaN lane; only then the exact per-lane path runs (difftest identical; a first version broke the one-lane by-element forms
+`fmul s, s, v.s[i]`, which the difftest caught). Measured (first scene, 160 s windows from 60 s after the scene starts, alone, base =
+main checkout's v3 /O2 libraries with the same runtime): at 854x480 G p50 base 14.70 / 14.73 ms, local flags 13.74 / 13.26, both changes
+12.79 (fps ~40 in all: render/GPU bound). **At the pinned 1920x1080** (after the A22 merge, two pairs): G p50 base 13.52 / 13.44 ms (p90 15.33 / 15.25), both changes 12.41 / 12.10 (p90 13.98 / 13.70): **-1.2 ms, -9%**; fps 35.9 / 35.7 base vs 35.7 / 34.8 (GPU / render-thread bound: main now waits longer in nvnSyncWait, 14 -> 15-16 ms per frame). So G is no longer what limits the frame; it caps near 80 fps now. The HLE thunk call counter is a plain increment instead of a locked add (`dispatch.cpp`).
+Next on the game side: per-site caches for indirect calls / imports resolved at lift time (dispatch_call + import_resolve ~3% of worker
+time), x9-x15 / v16-v31 as dead at calls and returns (same idea as the flags; riskier with hand-written SDK assembly), PGO of the lifted
+code; the HLE call counter could become per-thread.
+
 **Render resolution pinned (WP7, 2026-11-08, `runtime/games/oot/oot_drs.cpp`, no lifted rebuild).** The game's dynamic resolution: renderer
 R = `[[main+0x4e30498] + 0x228]` (found by a pointer search from main's data at run time), its controller C = `[R + 0xb48]` (per-frame step
 main+0x805aa0, called from main+0x31d3ee0): a list of 10 levels (end node C+400, first C+408; node: scale float at -8, level u32 at -4, next

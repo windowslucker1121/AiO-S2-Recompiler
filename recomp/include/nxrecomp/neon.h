@@ -90,6 +90,31 @@ NX_HELPER void v_f3v(V128 *d, const V128 *pn, const V128 *pm, int op, int dbl, i
         *d = r;
         return;
     }
+#if defined(__clang__)
+    /* Single-precision ADD / SUB / MUL / DIV / MLA: all lanes at once with host vector arithmetic, then one test for a NaN lane.
+     * Only when a lane is NaN does the exact per-lane path below run (the host result of a lane is the per-lane result whenever it
+     * is not a NaN, fpexact.h). With n < 4 (two lanes, or one for the scalar by-element forms) the unused lanes are computed too and dropped. */
+    if (!dbl && (op == F_ADD || op == F_SUB || op == F_MUL || op == F_DIV || op == F_MLA)) {
+        typedef float nx_f4 __attribute__((vector_size(16)));
+        typedef int nx_i4 __attribute__((vector_size(16)));
+        nx_f4 va, vb, vc, t;
+        memcpy(&va, &a, 16); memcpy(&vb, &b, 16); memcpy(&vc, &acc, 16);
+        if (op == F_ADD) t = va + vb;
+        else if (op == F_SUB) t = va - vb;
+        else if (op == F_MUL) t = va * vb;
+        else if (op == F_DIV) t = va / vb;
+        else t = __builtin_elementwise_fma(va, vb, vc);
+        nx_i4 nan = (nx_i4)(t != t);
+        nx_i4 lanes = {-1, n > 1 ? -1 : 0, n > 2 ? -1 : 0, n > 2 ? -1 : 0};
+        if (!__builtin_reduce_or(nan & lanes)) {
+            memcpy(&r, &t, 16);
+            if (n == 1) { r.w[1] = 0; r.d[1] = 0; }
+            else if (n == 2) r.d[1] = 0;
+            *d = r;
+            return;
+        }
+    }
+#endif
     for (int i = 0; i < n; i++) {
         int is_mask = 0;
         if (dbl) {

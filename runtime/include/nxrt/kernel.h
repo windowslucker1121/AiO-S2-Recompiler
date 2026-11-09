@@ -109,6 +109,8 @@ struct KThread : KObject {
     uint32_t wait_result = 0;
     uint64_t wait_mutex = 0, wait_key = 0, wait_addr = 0;
     uint32_t wait_tag = 0;
+    uint64_t wake_ns = 0;               // frame-trace clock when wake_thread ran (0: trace off), for the "kwake" latency event
+    uint32_t waker_tid = 0;             // host thread id of the thread that woke it
     void* cv_storage[1] = {nullptr};    // CONDITION_VARIABLE is pointer sized: this thread's own wake-up (kernel_sync.cpp)
     std::weak_ptr<KThread> self;
     ~KThread() override;                // closes host_handle

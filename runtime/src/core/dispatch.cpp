@@ -322,7 +322,9 @@ void dispatch_call(::Ctx* c, uint64_t addr) {
     }
     if (hle_is_thunk(addr)) {
         Thunk& t = *g_thunks[thunk_index(addr)];
-        t.calls.fetch_add(1, std::memory_order_relaxed);
+        // A plain increment, not a locked add: game threads call the same NVN thunks all the time, and the locked add on the shared
+        // line was 1% of the worker threads' busy time. The count is diagnostics; a race may lose an increment.
+        t.calls.store(t.calls.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         const char* saved = t_hle_name;
         t_hle_name = t.name.c_str();
         // [hle] trace: the line is written after the handler ran, so it carries the result (x0) next to the arguments

@@ -17,6 +17,7 @@ import bisect
 import collections
 import multiprocessing
 import os
+import re
 import struct
 import sys
 import time
@@ -321,6 +322,38 @@ class Env:
 # ---------------------------------------------------------------------------------------------------- one function
 TAILS = ('return;', 'goto', '{ jt', '{ f_', '{ h_', '{ call_indirect', 'switch (', '{ nx_')
 
+# ---- function-local NZCV (GameConfig.local_flags) ----
+# The statements of one instruction refer to the flags as c->N .. c->V and through the flag helpers called with c (adds64(c, ..),
+# cond(c, ..), nx::fcmp<T>(c, ..)). In a function with local flags they refer to the local `nf` instead (cxx.h has the NxFlags
+# overloads), and the flags go back to the context only where code outside the function may read them: before a branch to
+# another function (a tail call: B / B.cond / BR out of the function, the jump table's default, the fall-through into the next
+# function), before a site callout (inline site, midhook) and an SVC, which may read or change them (loaded back afterwards).
+# Calls (BL / BLR) and returns write nothing: the procedure call standard leaves NZCV undefined there. The function loads the
+# context's flags at its start, so a function entered by such a tail branch sees the flags its predecessor left.
+_FLAG_FIELD = re.compile(r'\bc->([NZCV])\b')
+_FLAG_HELPER = re.compile(r'\b((?:nx::)?(?:adds32|adds64|logic32|logic64|subs32|subs64|set_nzcv|get_nzcv|cond|fcmp)(?:<[^<>()]*>)?)\(c(?=[,)])')
+_TAIL_EXIT = re.compile(r'((?:\bf_[0-9a-f]+|\bh_\w+)\(c\);|\bcall_indirect\(c, [^;]*\);)( return;)')
+_SITE_INLINE = re.compile(r'(nx_site_inline\(c, 0x[0-9a-f]+ULL\);)')
+_SITE_MID = re.compile(r'(if \(nx_site_midhook\(c, 0x[0-9a-f]+ULL\)\) return;)')
+_SVC = re.compile(r'(guest_svc\(c, 0x[0-9a-f]+\);)')
+
+
+def local_flags_on(env):
+    if os.environ.get('NX_LOCAL_FLAGS', '') == '0':
+        return False
+    return bool(getattr(env.cfg, 'local_flags', False))
+
+
+def localize_flags(stmt):
+    """One lifted statement with the flags in the local `nf` (see above)."""
+    s = _FLAG_FIELD.sub(r'nf.\1', stmt)
+    s = _FLAG_HELPER.sub(r'\1(&nf', s)
+    s = _TAIL_EXIT.sub(r'nxf_store(nf, c); \1\2', s)
+    s = _SITE_INLINE.sub(r'nxf_store(nf, c); \1 nxf_load(nf, c);', s)
+    s = _SITE_MID.sub(r'nxf_store(nf, c); \1 nxf_load(nf, c);', s)
+    s = _SVC.sub(r'nxf_store(nf, c); \1 nxf_load(nf, c);', s)
+    return s
+
 
 def lift_function(env, entry):
     """-> (text, instruction count, [(pc, word, reason)], [(pad, entry)])."""
@@ -363,10 +396,16 @@ def lift_function(env, entry):
         cold = 'NX_OPTNONE '
     elif entry in env.sites['noinline'] or entry in env.sites['entryhook'] or entry in env.sites['midhook']:
         cold = '__attribute__((noinline)) '
+    lf = local_flags_on(env)
+    last = lines[-1][1]                              # the instruction as lifted (the tail test below reads it)
+    if lf:
+        lines = [(pc, localize_flags(stmt)) for pc, stmt in lines]
     out = ['%svoid %s_%x(Ctx *__restrict c%s) {' % (cold, 'u' if two else 'f', entry, ', uint64_t rp' if two else ''),
            '  c->fn = 0x%xULL;' % entry]
     if entry in env.sites['entryhook']:
         out.append('  if (nx_hook_entry(c, 0x%xULL)) return;' % entry)
+    if lf:
+        out.append('  NxFlags nf; nxf_load(nf, c);')
     if fn.has_br_fallback:
         out.append('  uint64_t jt = 0;')
     if pads:
@@ -378,11 +417,10 @@ def lift_function(env, entry):
         needed = {pc for pc, _ in lines}
     for pc, stmt in lines:
         out.append(('L_%x: %s' % (pc, stmt)) if pc in needed else '  ' + stmt)
-    last = lines[-1][1]
     ends_open = not last.startswith(TAILS)
     listed = env.ends
     if ends_open and end < env.text_hi and end in listed:
-        out.append('  f_%x(c); return;' % end)           # falls through into the next listed function
+        out.append('  %sf_%x(c); return;' % ('nxf_store(nf, c); ' if lf else '', end))   # falls through into the next listed function
         env.wanted.setdefault(end, None)
     elif ends_open:
         out.append('  guest_trap("fell off the end of a function", 0x%xULL); return;' % end)
@@ -391,7 +429,7 @@ def lift_function(env, entry):
     if fn.has_br_fallback:
         out.append('L_dispatch: switch (jt) {')
         out.extend('  case 0x%xULL: goto L_%x;' % (pc, pc) for pc, _ in lines)
-        out.append('  default: call_indirect(c, jt); return; }')
+        out.append('  default: %scall_indirect(c, jt); return; }' % ('nxf_store(nf, c); ' if lf else ''))
     out.append('}')
     if two:
         out.append('void f_%x(Ctx *__restrict c) { %s }' % (entry, 'nx_catch_call(c, u_%x);' % entry if entry in env.catchers else 'u_%x(c, 0);' % entry))

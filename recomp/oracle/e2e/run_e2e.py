@@ -57,7 +57,9 @@ def compare(uc, regs, mem):
     for i in range(32):
         if int(uc['v'][i], 16) != int(regs['v%d' % i], 16):
             diffs.append('v%d uc=%s x64=%s' % (i, uc['v'][i], regs['v%d' % i]))
-    if uc['nzcv'] != int(regs['nzcv'], 16):
+    # With function-local flags (GameConfig.local_flags, the default) the lifted entry function does not write NZCV back when it
+    # returns: the procedure call standard leaves the flags undefined there. Every branch inside the program still depends on them.
+    if os.environ.get('NX_LOCAL_FLAGS', '') == '0' and uc['nzcv'] != int(regs['nzcv'], 16):
         diffs.append('nzcv uc=%x x64=%s' % (uc['nzcv'], regs['nzcv']))
     for name, h in uc['mem'].items():
         if h != mem.get(name):
