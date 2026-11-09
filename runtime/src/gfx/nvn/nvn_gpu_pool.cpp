@@ -75,6 +75,7 @@ struct PoolGpu {
     std::deque<PoolChunk> spans;      // imports of ranges longer than the overlap that cross a stride boundary (deque: stable addresses)
     gpu::Mirror* mirror = nullptr;  // device-local copy of the pages draws read (S38, [nvn] pool_mirror); render thread
     bool mirror_tried = false;
+    bool ptr_all = false;             // import_pools_for_pointers tried every chunk already (render thread)
 };
 
 MemoryPool::~MemoryPool() {
@@ -539,15 +540,18 @@ void import_pools_for_pointers() {
     for (const Ref<MemoryPool>& r : pools) {
         MemoryPool* mp = r.get();
         if (!mp || mp->is_virtual || !mp->base || !mp->size) continue;
+        if (mp->gpu && mp->gpu->ptr_all) continue;   // every chunk tried in an earlier call: nothing new in this pool
         MemoryPool* pool = nullptr;
         PoolGpu* pg = nullptr;
         resolve_in_pool(reinterpret_cast<uint64_t>(mp->base), 1, &pool, &pg, nullptr);   // the pool's import (or chunk table) and its first chunk
-        if (!pg || pg->failed || pg->chunks.size() < 2) continue;
+        if (pg && (pg->failed || pg->chunks.size() < 2)) { pg->ptr_all = true; continue; }
+        if (!pg) continue;
         for (uint64_t k = 0; k < pg->chunks.size(); ++k) {
             const bool had = pg->chunks[static_cast<size_t>(k)].tried;
             const PoolChunk* c = pool_chunk(pg, k);
             if (!had && c && c->buffer) { ++chunks; bytes += c->size; }
         }
+        pg->ptr_all = true;
     }
     if (chunks)
         NXLOG_I(kTag, "pointer shaders: %llu more pool chunks imported (%llu MiB) so the page table maps every pool: %.1f ms", static_cast<unsigned long long>(chunks),

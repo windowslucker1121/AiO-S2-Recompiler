@@ -16,6 +16,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/log.h"
 #include "nvn_gpu_internal.h"
+#include "nvn_cmdq.h"
 #include "nvn_arch_exp.h"
 
 namespace nxrt::nvn::be::gpu {
@@ -60,6 +61,7 @@ bool shot_wanted(int64_t n) {
 }  // namespace
 
 void present_on_render_thread(Window* w, int index) {
+    cmdq::begin_submission(false);   // [nvn] cmd_thread: the present path (overlay, upscalers, other loaders) calls the driver directly
     NXFT("present");
     nxrt::HitchTimer ht_present(nxrt::kHpRenderPresent);
     CaptureEnd capture_end;

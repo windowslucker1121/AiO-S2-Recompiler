@@ -664,7 +664,7 @@ bind the written range is the remaining lever for set reuse), compute shadows (s
 and the handle map under a mutex), the driver's own share.
 
 **Session 2026-11-09 (S1: persistent validated descriptor sets, incremental draw buffer checks).** Structural instead of another epoch
-scope (D in R3 needed all four clear sources at once): (1) **`[nvn] set_keep`** (default on, `cpuperf_ab_what` `set_keep`): read-only graphics
+scope (D in R3 needed all four clear sources at once): (1) **`[nvn] set_keep`** (default off for now, see below; `cpuperf_ab_what` `set_keep`): read-only graphics
 sets live across submissions in their own descriptor pools (`keep_dpool_new`, up to 6 x 16k sets per "era"; a full era is dropped and its
 pools released after the GPU; entries unused 600 presents are dropped), keyed by the program and the bindings' raw inputs only
 (`g_keep_sig`). Each entry records per binding what it depended on (`KDep`): uniform blocks the pool-copy-or-pool decision
@@ -689,6 +689,30 @@ render thread behind the previous frame's big (24-28 ms) submission and on the G
 intervals, an upper bound of GPU work; the sum of gpu.exec double counts overlapping submissions) is ~27.7 ms of the 32.7 ms frame. With the
 replay shorter, Kokiri at 1080 is now gated by GPU execution plus main's ~13 ms. Scratch analysis scripts (worktree `work/scripts`, not
 committed): per-window frame/replay/GPU-in-flight from ftrace (`ftrace_ab.py`), the submission that ends main's wait (`critpath.py`).
+**Kokiri's frame chain in detail** (GPU timestamps per submission, `gpu.exec`): 6 submissions per frame: #1 0.65 ms recording, #3 2.5 ms
+recording / 7.5 ms GPU span, #6 25.7 ms recording / 24.8 ms GPU span, the rest empty. Main waits on #3's fence: wait ~20.7 ms = the render
+thread's backlog on the previous frame's #6 (~13.2) + #1-#3 recording (~2.4) + #3's GPU work after its recording (~4.7); main then runs
+~12-13 ms. The render thread's cycle (#6 + small ones + present) is ~30 ms and it waits for main's submits after present in about half the
+frames (mean 2.7 ms): the frame is the tighter of two nearly equal loops. Submission-side levers checked: time-based chunks (`[nvn]
+submit_chunk_us = 1500`, paired via the new `cpuperf_ab_what` name `chunk_time`): replay +1.2 ms, 0/17 pairs better, dropped; a second queue
+or reordering #3 ahead of the previous #6: unsafe (#3 is culling/HiZ-type work reading what #6 wrote; queue order is the only sync); the
+fence is at #3's end already. What shortens the chain: #6's replay (the backlog), #3's GPU work, main's 13 ms. Also tried: keeping sets with
+storage writes or storage images (`[nvn] set_keep_writes`, replays their `gpu_wrote` on a hit; verify clean): neutral in Kokiri (replay
+-0.1 ms), most such sets bind per-frame storage addresses; default off. Small always-on cuts: pool_set_sync remembers its map node per
+binding, `import_pools_for_pointers` skips pools whose chunks were all tried (`PoolGpu::ptr_all`); a statistics line `sets built outside the
+memo and set_keep` (compute ~210, written storage / per-draw c[0] ~650, first sightings ~370 per frame in Kokiri).
+Later the same session: with kept sets also put into the epoch memo, `set_reuse = verify` showed a burst of 9-13 stale memo hits right
+after the area load (none with set_keep off); kept sets now never enter the memo (checked at every use; Kokiri paired: replay -3.3 ms, frame
+-1.2 ms, +0.7 fps, 14/16). One kept set in 5.5 M still differed once in verify (TerrainGround prepass, vs 88800016, set 0): **set_keep is
+default off until that is explained** (verify mode now logs the differing binding, kept vs fresh values and the dependency). Dropped: a cache of
+"servable by the copy" answers for bindings over held results (-0.55 ms replay, but verify found 2 wrong answers in 3.9 M).
+**Recorder thread (`[nvn] cmd_thread`, nvn_cmdq.cpp, default off):** the render thread no longer makes its vkCmd* calls; hooks on the volk
+pointers copy each call (and its arrays: descriptor sets, vertex buffers, push data, viewports, barriers, rendering info, copies, labels)
+into a 16 MiB single-producer ring and the `nvn-recorder` thread makes the driver calls in order. Anything not copied, and every call on a
+command buffer, pool or queue as a whole, waits for the ring to empty first; the present path runs direct. Descriptor set updates stay
+immediate (before the recorder records the bind, as Vulkan requires). Kokiri 1080 paired: render replay 30.4 -> 25.4 ms per frame (-5.1 ms,
+15/17), but frame 33.0 -> 32.4 ms (+0.55 fps): Kokiri is now GPU-throughput bound (per frame #6 ~24.8 + #3 ~7.5 ms of GPU span ~ the frame).
+ctest gfx groups pass with it on (the whole gfx exe in one process crashes in gfx_nvn_scene_* with or without it: run groups separately).
 
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
