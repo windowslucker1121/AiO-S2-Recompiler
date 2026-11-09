@@ -545,6 +545,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         }
         /// The function control of a helper: DontInline for the fallback helpers (NoInline).
         internal static FunctionControlMask FunctionControl(StructuredFunction function) =>
+            Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_FORCEINLINE") == "1" ? FunctionControlMask.Inline :
             NoInline && function.Name != null && (function.Name.EndsWith(HelperSuffix, StringComparison.Ordinal) || function.Name.EndsWith(FastSuffix, StringComparison.Ordinal))
                 ? FunctionControlMask.DontInline : FunctionControlMask.MaskNone;
 

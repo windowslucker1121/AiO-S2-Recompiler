@@ -799,6 +799,39 @@ the page cache in memory shared with the helper was fps-neutral. Pitfall: the re
 exe of bf5366b runs at ~8 s per loop and its gp:d stamps stop after the first loop: use game runs for gpt timings. Private caches for
 such tests: `tools/shaders/scripts/private_cache.py` (hard links of the shared cache, changed files written as new files).
 
+**Session 2026-11-09 (shader register pressure: structurizer).** Cause of the 2-3x registers of the hot fragment shaders (957527e8 235
+vs 94 in the SASS, 4097c13f / a6d374cb / dcfaa938 / 0f3f9223 / 73e29464 capped at 168 with spills): **Ryujinx's goto elimination**, not
+the SASS or the IR. The IR block graph of 957527e8 is reducible with one real loop (the light loop); its BRX switch's cases leave to a
+common merge from different depths, and GotoElimination ("Taming Control Flow" moves, the else trick) wrapped them in five nested
+`do { } while (flag)` loops inside the light loop. Ruled out first: the loop cap (`NXRT_HARNESS_LOOP_CAP=0`: 240), block order (the IR is
+already in a forward order; `BlockOrder.cs` kept as a guard, no-op for OoT). Fix: `tools/shaders/harness/translator/CfgStructurizer*.cs`
+(tools/shaders/README.md "Structurizer for reducible graphs"): Ramsey's "Beyond Relooper" for every reducible function of the translated
+program (fun0..N); the translator's own helpers (gmem page walk, shared atomics, shuffles) stay on Ryujinx's path (with the new one the gmem
+helpers grew ~1% and the gmem HiZ/culling compute shaders a17259b2 / 39a1f760 / a68b51f9 / 5d8324bd / d89e74b6 ran ~30% slower in game:
+a17259b2 2.0 -> 2.6 ms; back to 2.0 with the helpers excluded). `NXRT_HARNESS_STRUCTURIZER=ryujinx` = old path, `=all` = helpers too.
+Corpus with `NXRT_HARNESS_CFG_CHECK=100`: 0 exceptions, 46,995 ok (the 7 old GotoElimination NullReferenceExceptions translate now);
+41,894 blocks change (results of the private cache, list in the merge folder below). pipestat (fs paired with any vertex module):
+957527e8 235 -> 96 registers (SASS 94), 4097c13f 168+spills -> 80 (75), a6d374cb 168+272 B spills -> 117 (97), 2972adf5 244 -> 96, 1e03316b
+246 -> 96, 2bfc04a1 255 -> 117 (112), ddcf096b / dcfaa938 / 0f3f9223 168+spills -> 96, 73e29464 168 -> 124, binaries -25..-35%; mesh
+f3054ac2 94 -> 63, culling 4c1e8564 128 -> 48. Random corpus samples (pipestat): fragment n=200 mean 136 -> 93 registers (median 168 -> 96,
+133 better, 2 worse), vertex n=120 59.5 -> 59.7, mesh n=60 139 -> 129, compute n=60 unchanged. **Unchanged: the gpt pre-raster stages**
+(fbb731e2 / 6ec65625 mesh 255 vs SASS 126, 5332b131 255 vs 248): measured with every gmem switch (IDENTITY + NO_SLOTS + helpers forced
+inline with the new `NXRT_HARNESS_GMEM_FORCEINLINE=1`: still 255, no spills, 78 KB): it is the loaded data's live ranges under NVIDIA's
+mesh compiler (without the fallback, loads read 0: 88), not the lookup, the calls or the structure.
+**In game (1920x1080, uncapped, alone, same exe, old shared cache vs the private cache, warm pipelines):** first scene 60-260 s 49.9 vs
+49.1 fps, gpu.busy 12.75 -> 12.24 ms per frame, gpu.exec 19.28 -> 19.02; the frame is not GPU-bound (render replay ~13.7 ms, main's
+nvnSyncWait ~8 ms of an 18.6 ms frame). Kokiri outside: 35.7 fps both (render replay 24.6 of 28 ms); per-draw stamps (`gpu_draws`): all
+draws 13.35 -> 13.03 ms per frame, but the hot draws are bound by their gpt mesh/vertex stage, not by the fragment shader (4097c13f /
+6ec65625 1.21 -> 1.18, 40478981 (a 16-register fs) / f3054ac2 1.21 -> 1.18, 957527e8 / fbb731e2 0.74 -> 0.73), compute unchanged. So
+**no fps today**; the register cut is GPU headroom for when the render thread gets faster. Picture: village capture replay old vs new
+SSIM 0.9999999980 (culled foliage and crowns identical), Kokiri screenshot at 1080 normal. Measured with game runs of the private cache
+`work\priv\cache1` of the worktree (deleted). **To merge:** the changed blocks (corpus + "runtime" rows from `work\shaders\oot\missing`
+and `work\ai_run\oot\a18dump\dump`, translated today with this branch's harness) are in the main checkout's git-ignored
+`work\struct_merge_v1`: `merge_results.py work\struct_merge_v1 work\shaders\oot\spirv` (merge_results now replaces files instead of
+writing through hard links); only if no shared-cache row changed since 2026-11-09 18:40 (else re-translate instead: build the harness,
+`retranslate_subset.py` with all corpus hashes, then the runtime blocks with `private_cache.py --dumps` style single-mode translation).
+Then the pipelines of ~42k blocks rebuild on demand (fragment pipelines ~1.4 s each) until a preparation runs.
+
 **Session 2026-11-09 (frame time: hitches, 1% lows, pacing, uncapped).** Pinned 1920x1080, cap 60, warm runs (one warm-up per scene
 first), alone, `load_state` + `memory.limit_gb 24`; windows: first scene 55-275 s, Link's house 45-190 s, Kokiri outside 55-210 s.
 **Tool:** `[diag] frame_csv` (gauge.cpp) writes every presented frame (interval, every hitch-log counter's growth, every hitch phase's ms;

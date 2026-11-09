@@ -72,6 +72,15 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 return false;
             }
 
+            // Only the translated program's own functions (fun0 = main, funN = its subroutines). The helpers the translator generates
+            // (GlobalToStorage's pointer-access helpers, shared-memory atomics, shuffles) were written and measured against Ryujinx's
+            // structurizer: the gmem page walk came out ~1% larger and its compute users (HiZ a17259b2 & co.) ~30% slower in game
+            // with this one, and NVIDIA's compiler once crashed on another form of that walk. NXRT_HARNESS_STRUCTURIZER=all: these too.
+            if (!context.CurrentFunction.Name.StartsWith("fun") && Environment.GetEnvironmentVariable("NXRT_HARNESS_STRUCTURIZER") != "all")
+            {
+                return false;
+            }
+
             Graph g = Analyse(blocks);
 
             if (g == null)

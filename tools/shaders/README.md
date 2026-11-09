@@ -146,8 +146,16 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   to a merge node from the end of an if/else chain needs nothing; from further inside it sets a flag that guards the statements up to
   the merge (`if (!flag)`), and across a loop it breaks (`flag = true; break;`, `if (flag) break;`). Loops are `do { ...; break; }
   while (true)` or `do { } while (c)` when the body ends with its only continue. `if (c) { ...; return/discard/break/continue; }` takes
-  the else part after it, not in an else block. Flags nobody reads are removed. Irreducible graphs keep Ryujinx's path.
-  Off: `NXRT_HARNESS_STRUCTURIZER=ryujinx`; `=log` prints fallbacks. `NXRT_HARNESS_STRUCT_FLAT_ELSE=0` keeps else blocks.
+  the else part after it, not in an else block. Flags nobody reads are removed. Irreducible graphs keep Ryujinx's path, and so do the
+  translator's own helper functions (only fun0..N use the new one): with it the gmem page-walk helpers grew ~1% and the gmem compute
+  shaders that call them (OoT's HiZ a17259b2 & co.) ran ~30% slower in game.
+  Off: `NXRT_HARNESS_STRUCTURIZER=ryujinx`; `=all` also the helpers; `=log` prints fallbacks. `NXRT_HARNESS_STRUCT_FLAT_ELSE=0` keeps
+  else blocks (without the flat form small fragment shaders came out 1-8 registers above the old path).
+- Measured with `pipestat` on random corpus samples (old cache vs new, RTX 4080, 610.88): fragment n=200 registers mean 136.4 -> 93.1,
+  median 168 -> 96, binary 51.3 -> 39.4 KB, 133 better / 2 worse; vertex n=120 59.5 -> 59.7 (9 worse / 6 better by a few registers);
+  mesh n=60 139 -> 129; compute n=60 unchanged. Hot material fragment shaders 168-255 -> 80-124 (their SASS: 75-112). The gpt mesh/vertex
+  stages stay at 255 (also with `NXRT_HARNESS_GMEM_IDENTITY=1`, `NO_SLOTS=1` and the new `NXRT_HARNESS_GMEM_FORCEINLINE=1`, helpers
+  inlined: measurement only).
 - Only real loops are loops now, so the vertex/fragment loop cap (`NXRT_HARNESS_LOOP_CAP`) counts real back edges only. Ballots and
   votes stay where the IR has them (`structured-subgroup-propagation.patch` works on the AST afterwards as before).
 - Checked: the OoT corpus with `NXRT_HARNESS_CFG_CHECK=100` (47,202 blocks, 56,594 functions): 0 exceptions (the 7
