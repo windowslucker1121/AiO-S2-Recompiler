@@ -769,9 +769,26 @@ struct Mirror {
     std::unique_ptr<std::atomic<uint64_t>[]> gpu_new, cpu_read;
     // pages mirror_fill copied in this submission without tracking them (hot): current in the copy until the submission ends (render thread)
     std::unique_ptr<std::atomic<uint64_t>[]> fresh;
+    // pages whose pool content is a copy-back of the copy (pool == copy there) and that neither the CPU nor a GPU write changed since
+    std::unique_ptr<std::atomic<uint64_t>[]> back;
     bool any_fresh = false;
     std::vector<gfx::Buffer> snap_chunks;   // out_delta (below): the snapshots of results before their dispatch, per chunk of the copy
 };
+
+// Bits [first, last] of Mirror::back (any thread).
+void back_put(Mirror& m, uint64_t first, uint64_t last, bool on) {
+    if (!m.back || last < first) return;
+    last = std::min(last, m.npages - 1);
+    for (uint64_t p = first; p <= last;) {
+        const uint64_t lo = p & 63, hi = std::min<uint64_t>(63, lo + (last - p));
+        const uint64_t mask = (hi - lo == 63) ? ~uint64_t{0} : (((uint64_t{1} << (hi - lo + 1)) - 1) << lo);
+        if (on) m.back[static_cast<size_t>(p >> 6)].fetch_or(mask, std::memory_order_acq_rel);
+        else m.back[static_cast<size_t>(p >> 6)].fetch_and(~mask, std::memory_order_acq_rel);
+        p += hi - lo + 1;
+    }
+}
+bool back_get(const Mirror& m, uint64_t p) { return m.back && ((m.back[static_cast<size_t>(p >> 6)].load(std::memory_order_acquire) >> (p & 63)) & 1); }
+std::atomic<uint64_t> g_st_back_pages{0}, g_st_copyin_pages{0};   // copy-ins (pool -> copy) of pages the copy already holds (back) / all
 
 namespace {
 
@@ -930,10 +947,12 @@ Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
     m->gpu_new.reset(new std::atomic<uint64_t>[words]);
     m->cpu_read.reset(new std::atomic<uint64_t>[words]);
     m->fresh.reset(new std::atomic<uint64_t>[words]);
+    m->back.reset(new std::atomic<uint64_t>[words]);
     for (size_t i = 0; i < words; ++i) {
         m->gpu_new[i].store(0, std::memory_order_relaxed);
         m->cpu_read[i].store(0, std::memory_order_relaxed);
         m->fresh[i].store(0, std::memory_order_relaxed);
+        m->back[i].store(0, std::memory_order_relaxed);
     }
     out_register(m.get());
     NXLOG_I(kTag, "pool %p: device-local copy (%llu KiB in %zu chunks made on demand, pool flags 0x%x, %s)", static_cast<void*>(pg->base),
@@ -952,6 +971,7 @@ void absorb_writes(Mirror& m, uint32_t now) {
     m.st_written += static_cast<int64_t>(g_written_tmp.size());
     for (uint64_t p : g_written_tmp) {
         const size_t i = static_cast<size_t>(p);
+        back_put(m, p, p, false);
         bit_put(m.want, p, false);
         if (m.copied_at[i] == 0) continue;                     // never copied: nothing was wasted
         const bool soon = hot_used_on() && now - m.copied_at[i] <= kHotWindow;   // rewritten right after its copy: per-frame data
@@ -986,6 +1006,8 @@ void log_summary(uint32_t now) {
             valid += page_valid(*m, p) ? 1 : 0;
             hot += m->hot_until[static_cast<size_t>(p)] > now ? 1 : 0;
         }
+    NXLOG_I(kTag, "pool copy-ins: %llu pages, %llu of them copied back from the copy before and unchanged since (re-uploads of the GPU's own writes)",
+            (unsigned long long)g_st_copyin_pages.load(), (unsigned long long)g_st_back_pages.load());
     NXLOG_I(kTag, "pool mirrors: %zu, %llu MiB, valid %llu MiB, hot %llu KiB; binds to mirrors %lld, to pools %lld; copied %lld MiB; write faults %llu",
             g_mirrors.size(), static_cast<unsigned long long>(g_mirror_bytes >> 20), static_cast<unsigned long long>(valid * kPageBytes >> 20),
             static_cast<unsigned long long>(hot * kPageBytes >> 10), static_cast<long long>(g_st_dev_binds.load()), static_cast<long long>(g_st_host_binds.load()),
@@ -1239,6 +1261,8 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
         }
         if (copy) {
             copies.push_back(VkBufferCopy{p * kPageBytes - src_base, p * kPageBytes - base, (q - p) * kPageBytes});
+            for (uint64_t i = p; i < q; ++i) g_st_back_pages.fetch_add(back_get(m, i) ? 1 : 0, std::memory_order_relaxed);
+            g_st_copyin_pages.fetch_add(q - p, std::memory_order_relaxed);
             m.st_copied += static_cast<int64_t>(q - p);
             g_st_copied.fetch_add(static_cast<int64_t>((q - p) * kPageBytes), std::memory_order_relaxed);
             if (bytes) *bytes += (q - p) * kPageBytes;
@@ -1283,6 +1307,7 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
     const uint64_t first = off / kPageBytes, last = std::min<uint64_t>((off + size - 1) / kPageBytes, m.npages - 1);
     g_wr_calls[use % 6]++;
     g_wr_pages[use % 6] += static_cast<int64_t>(last - first + 1);
+    back_put(m, first, last, false);
     bool stale = mem::ww::any_valid(m.ww, first, last - first + 1);
     mem::ww::invalidate(m.ww, first, last - first + 1);
     if (m.any_fresh) {             // the pool there is written: what fill copied is old now
@@ -1338,6 +1363,8 @@ void mirror_begin_submit(Frame& f, bool on) {
                 bit_put(m.used, i, false);
             }
             if (armed) {
+                for (uint64_t i = p; i < q; ++i) g_st_back_pages.fetch_add(back_get(m, i) ? 1 : 0, std::memory_order_relaxed);
+                g_st_copyin_pages.fetch_add(q - p, std::memory_order_relaxed);
                 const uint64_t base = (p / chunk_pages) * kChunkBytes;
                 g_copy_tmp.push_back(VkBufferCopy{p * kPageBytes, p * kPageBytes - base, (q - p) * kPageBytes});
                 budget -= (q - p) * kPageBytes;
@@ -1888,6 +1915,7 @@ uint64_t record_copies(VkCommandBuffer cb, const std::vector<size_t>& idx) {
     bool dispatched = false;
     for (size_t i : idx) {
         const OutEntry& e = g_out[i];
+        if (e.m) back_put(*e.m, e.first, e.last, true);   // the pool holds what the copy holds there once the copy-back has run
         if (record_delta(cb, e, &bytes, &dispatched)) continue;
         if (e.m) g_dl_plain.fetch_add(e.size, std::memory_order_relaxed);
         if (e.partial && e.m) {                 // only the pages still newer in the copy
