@@ -17,6 +17,7 @@
 #include <shared_mutex>
 #include <unordered_map>
 
+#include "nxrt/config.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 #include "nvn_cmd.h"
@@ -61,6 +62,7 @@ void drop_locked(uint64_t handle, const char* why = "?", uint64_t by = 0, uint64
         auto r = g_regions.find(it->second.start);
         if (r != g_regions.end() && r->second == handle) g_regions.erase(r);
     }
+    if (it->second.list) it->second.list->dropped.store(true, std::memory_order_release);   // per-thread caches of handle_lookup
     g_handles.erase(it);   // the list lives on if a replay or another list still holds it
 }
 
@@ -121,7 +123,32 @@ uint64_t handle_register(Ref<CmdList> list) {
     return h;
 }
 
+std::atomic<bool> g_cache_on{true};
+void handle_cache_enable(bool on) { g_cache_on.store(on, std::memory_order_relaxed); }
+
+namespace {
+Ref<CmdList> handle_lookup_table(uint64_t handle);
+}
+
+// The render thread and the texture look-ahead look up thousands of handles per frame, each under g_mu shared (contended by the game
+// thread's registrations): a direct-mapped cache per thread. A cached list is the handle's list for as long as it is not dropped.
 Ref<CmdList> handle_lookup(uint64_t handle) {
+    static const bool cfg = config_get_bool("nvn", "handle_cache", true);
+    if (!cfg || !g_cache_on.load(std::memory_order_relaxed)) return handle_lookup_table(handle);
+    struct Slot { uint64_t h = 0; Ref<CmdList> l; };
+    thread_local Slot cache[1024];
+    Slot& s = cache[(handle >> 3) & 1023];
+    if (s.h == handle && s.l && !s.l->dropped.load(std::memory_order_acquire)) {
+        s.l->calls.fetch_add(1, std::memory_order_relaxed);
+        return s.l;
+    }
+    Ref<CmdList> l = handle_lookup_table(handle);
+    if (l) { s.h = handle; s.l = l; }
+    return l;
+}
+
+namespace {
+Ref<CmdList> handle_lookup_table(uint64_t handle) {
     std::shared_lock<std::shared_mutex> lk(g_mu);
     auto it = g_handles.find(handle);
     if (it == g_handles.end()) {
@@ -140,9 +167,10 @@ Ref<CmdList> handle_lookup(uint64_t handle) {
         }
         return {};
     }
-    it->second.list->calls.fetch_add(1);
+    it->second.list->calls.fetch_add(1, std::memory_order_relaxed);
     return it->second.list;
 }
+}  // namespace
 
 void handle_release(uint64_t handle) {
     g_finalized.fetch_add(1, std::memory_order_relaxed);

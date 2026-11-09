@@ -41,6 +41,7 @@ struct LayoutKey {
 // Shader modules and layouts are also made by the prewarm workers (nvn_prewarm.cpp), so they have locks; the pipeline buckets below stay
 // render thread only.
 std::mutex g_layout_mu;
+std::atomic<uint64_t> g_layout_gen{1};   // moves when g_layouts is cleared (prog_layout's per-thread memo)
 std::recursive_mutex g_module_mu;   // every module cache below; the variant makers call shader_module
 std::map<LayoutKey, ProgLayout> g_layouts;
 // Descriptor set layouts and the pipeline layout built from them, shared by every program whose descriptors are the same (S24): two programs with
@@ -279,10 +280,19 @@ std::string pipeline_cache_path() {
 }
 
 bool GraphicsKey::operator==(const GraphicsKey& o) const { return std::memcmp(this, &o, sizeof *this) == 0; }
+// Eight bytes per step (asked at every draw that changes the pipeline state; byte by byte it was 2% of the render thread). In-memory only
+// (g_gfx's buckets).
 uint64_t GraphicsKey::hash() const {
     const uint8_t* p = reinterpret_cast<const uint8_t*>(this);
     uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < sizeof *this; ++i) h = (h ^ p[i]) * 1099511628211ull;
+    size_t i = 0;
+    for (; i + 8 <= sizeof *this; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, p + i, 8);
+        h = (h ^ w) * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 32;
+    }
+    for (; i < sizeof *this; ++i) h = (h ^ p[i]) * 1099511628211ull;
     return h;
 }
 
@@ -508,9 +518,26 @@ static VkShaderModule producer_module(const ShaderInfo* producer, const ShaderIn
     return m;
 }
 
+static const ProgLayout* prog_layout_locked(const LayoutKey& key);
 const ProgLayout* prog_layout(const ShaderInfo* const stages[kProgStages]) {
     LayoutKey key;
     for (int i = 0; i < kProgStages; ++i) key.s[i] = stages[i];
+    // a per-thread memo in front of the map and its lock (the render thread asks at nearly every draw; layouts live until g_layouts is
+    // cleared, which moves g_layout_gen)
+    struct Memo { LayoutKey k{}; const ProgLayout* p = nullptr; uint64_t gen = 0; };
+    thread_local Memo memo[32];
+    uint64_t hk = 0;
+    for (int i = 0; i < kProgStages; ++i) hk = (hk ^ reinterpret_cast<uintptr_t>(stages[i])) * 0x9E3779B97F4A7C15ull;
+    Memo& mm = memo[(hk >> 40) & 31];
+    const uint64_t gen = g_layout_gen.load(std::memory_order_acquire);
+    if (mm.p && mm.gen == gen && std::memcmp(mm.k.s, key.s, sizeof key.s) == 0) return mm.p;
+    const ProgLayout* found = prog_layout_locked(key);
+    if (found) { mm.k = key; mm.p = found; mm.gen = gen; }
+    return found;
+}
+
+static const ProgLayout* prog_layout_locked(const LayoutKey& key) {
+    const ShaderInfo* const* stages = key.s;
     std::lock_guard<std::mutex> lk(g_layout_mu);
     auto it = g_layouts.find(key);
     if (it != g_layouts.end()) return &it->second;
@@ -1213,6 +1240,7 @@ void pipeline_shutdown() {
     g_compute.clear();
     g_compute_keys.sub(g_compute_keys.get());
     g_layouts.clear();
+    g_layout_gen.fetch_add(1, std::memory_order_acq_rel);
     for (auto& [k, l] : g_shared_layouts) {          // the handles in g_layouts were copies of these
         if (l.layout) vkDestroyPipelineLayout(d, l.layout, nullptr);
         for (VkDescriptorSetLayout s : l.sets)

@@ -95,6 +95,7 @@ bool frame_chunk(Frame& f);
 void defer_destroy(std::function<void()> fn);
 // Descriptor pools that outlive submissions ([nvn] set_keep): made like the slots' pools; released once every submission so far has completed.
 VkDescriptorPool keep_dpool_new();
+void alloc_batch_enable(bool on);   // [nvn] alloc_batch under cpuperf_ab (alloc_batch): Frame::alloc_set allocates sets eight at a time
 void keep_dpool_release(VkDescriptorPool p);
 uint64_t completed_serial();      // cached timeline value; call poll_completed() for a fresh read
 uint64_t poll_completed();

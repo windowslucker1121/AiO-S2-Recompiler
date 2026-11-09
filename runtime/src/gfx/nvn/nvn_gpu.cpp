@@ -67,6 +67,9 @@ struct Slot {
     uint32_t gp_n = 0;                    // GPU pass profiler: timestamps written by the submission
     std::vector<std::pair<std::string, uint32_t>> gp_labels;   // label and argument of each interval (stamp i closes interval i)
     uint32_t ck_n = 0;                    // frame trace: chunk boundary timestamps written (end of a part, start of the next; cpool)
+    // [nvn] alloc_batch: sets allocated ahead per layout (direct-mapped by the layout handle; a collision leaves the spare ones unused)
+    struct Spare { VkDescriptorSetLayout layout = VK_NULL_HANDLE; uint32_t n = 0; VkDescriptorSet sets[7] = {}; };
+    Spare spare[128];
 };
 
 struct Deferred {
@@ -289,6 +292,7 @@ Slot& acquire_slot() {
     vkResetCommandPool(g->dev->device(), s.pool, 0);
     s.split_used = 0;
     for (VkDescriptorPool p : s.dpools) vkResetDescriptorPool(g->dev->device(), p, 0);
+    for (Slot::Spare& sp : s.spare) sp.n = 0;   // freed with their pools
     vk_gauge_descriptor_sets().sub(static_cast<int64_t>(s.sets_live));   // the reset freed them
     s.sets_live = 0;
     s.dpool_cur = 0;
@@ -360,8 +364,41 @@ void keep_dpool_release(VkDescriptorPool p) {
     });
 }
 
+// [nvn] alloc_batch (default on; cpuperf_ab_what alloc_batch): descriptor sets are allocated eight at a time per layout and handed out one
+// by one (one driver call instead of eight; ~1,000 sets per frame are allocated in Kokiri outside).
+std::atomic<bool> g_alloc_batch_ab{true};
+void alloc_batch_enable(bool on) { g_alloc_batch_ab.store(on, std::memory_order_relaxed); }
 VkDescriptorSet Frame::alloc_set(VkDescriptorSetLayout layout) {
     Slot& s = *static_cast<Slot*>(slot);
+    static const bool batch_cfg = config_get_bool("nvn", "alloc_batch", true);
+    if (batch_cfg && g_alloc_batch_ab.load(std::memory_order_relaxed)) {
+        Slot::Spare& sp = s.spare[(reinterpret_cast<uintptr_t>(layout) >> 4) & 127];
+        if (sp.layout == layout && sp.n) return sp.sets[--sp.n];
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            if (s.dpool_cur >= s.dpools.size()) {
+                VkDescriptorPool p = new_dpool();
+                if (!p) return VK_NULL_HANDLE;
+                s.dpools.push_back(p);
+            }
+            VkDescriptorSetLayout layouts[8];
+            for (VkDescriptorSetLayout& l : layouts) l = layout;
+            VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            ai.descriptorPool = s.dpools[s.dpool_cur];
+            ai.descriptorSetCount = 8;
+            ai.pSetLayouts = layouts;
+            VkDescriptorSet sets[8] = {};
+            if (vkAllocateDescriptorSets(g->dev->device(), &ai, sets) == VK_SUCCESS) {
+                g->ctr.descriptor_sets.fetch_add(8, std::memory_order_relaxed);
+                s.sets_live += 8;
+                vk_gauge_descriptor_sets().add(8);
+                sp.layout = layout;
+                sp.n = 7;
+                for (int i = 0; i < 7; ++i) sp.sets[i] = sets[i + 1];
+                return sets[0];
+            }
+            ++s.dpool_cur;   // exhausted (or too fragmented for eight): the next pool; the single allocation below takes what is left
+        }
+    }
     for (int attempt = 0; attempt < 2; ++attempt) {
         if (s.dpool_cur >= s.dpools.size()) {
             VkDescriptorPool p = new_dpool();

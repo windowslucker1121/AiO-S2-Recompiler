@@ -231,14 +231,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54 };
 uint64_t ab_mask() {
     static const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -602,7 +602,7 @@ uint64_t g_prims_generated = 0, g_prims_xfb = 0;
 // them by address. kReportUnknown marks an address the GPU writes later (samples passed): a condition on it renders, as before. An
 // address the replay never wrote (the game's own memory) is read from the pool.
 constexpr uint64_t kReportUnknown = ~0ull;
-std::unordered_map<uint64_t, uint64_t> g_reports;
+FlatMap64<uint64_t> g_reports;   // open addressing: reports at ever new addresses made std::unordered_map rehash (1.3% of the render thread)
 nxrt::GaugeCounter g_gauge_pipeline_binds("nvn.cnt.pipeline_binds");   // graphics pipeline binds (cumulative)
 VkQueryPool g_xq_pool = VK_NULL_HANDLE;     // transform feedback stream queries (counters 13 and 14)
 bool g_trace = false;
@@ -1655,6 +1655,15 @@ struct PoolSet {
     size_t cand_pos = 0;
     uint64_t synced = ~0ull;
     bool failed = false;
+    // [nvn] pool_sync_fast: per entry, the texture state its kept signature was checked against (fast_key: view generation, swizzle and
+    // depth mode), and the ids registered since the last walk (whose view info may differ)
+    std::vector<uint64_t> fkey;
+    std::vector<uint8_t> fdirty;
+    std::vector<uint32_t> fdirty_ids;
+    const void* fast_pool = nullptr;
+    const void* fast_b = nullptr;
+    uint64_t fast_epoch = ~0ull;
+    size_t fast_pos = 0;
     // prepare_textures found every live texture current and in its sampled layout at this g_tex_state_gen (and this sync): nothing to check
     uint64_t clean_gen = ~0ull, clean_synced = ~0ull, clean_pass = ~0ull;   // clean_pass: the pass and attachments it was checked for
 };
@@ -1726,7 +1735,20 @@ uint64_t pool_entry_sig(const Texture* t, uint64_t stamp, const ViewRequest& q) 
     mix(static_cast<uint64_t>(q.swizzle.r) | (static_cast<uint64_t>(q.swizzle.g) << 16) | (static_cast<uint64_t>(q.swizzle.b) << 32) | (static_cast<uint64_t>(q.swizzle.a) << 48));
     return h | 1;   // never 0
 }
-uint64_t g_psync_kept = 0, g_psync_asked = 0, g_psync_walks = 0, g_psync_walked = 0, g_psync_noimg = 0;   // statistics
+uint64_t g_psync_kept = 0, g_psync_asked = 0, g_psync_walks = 0, g_psync_walked = 0, g_psync_noimg = 0, g_psync_fast = 0;   // statistics
+// [nvn] pool_sync_fast (default on; cpuperf_ab_what pool_fast): an entry kept at the last walk whose id was not registered again since (the
+// pool's registration log) and whose texture has the same view generation, swizzle and depth mode is kept without building its view
+// request and signature again (the same binding asks; another binding or pool walks the usual way).
+bool pool_fast_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "pool_sync_fast", true);
+    return on && ab_on(kAbPoolFast);
+}
+inline uint64_t pool_fast_key(const Texture* t, uint64_t stamp) {
+    const uint64_t sw = static_cast<uint64_t>(t->b.swizzle[0] & 0xff) | static_cast<uint64_t>(t->b.swizzle[1] & 0xff) << 8 |
+                        static_cast<uint64_t>(t->b.swizzle[2] & 0xff) << 16 | static_cast<uint64_t>(t->b.swizzle[3] & 0xff) << 24 |
+                        static_cast<uint64_t>(t->b.depth_stencil_mode & 0xff) << 32;
+    return (stamp * 0x9E3779B97F4A7C15ull ^ sw) | 1;
+}
 
 // The set of this pool array, its entries brought up to date with the bound pool (once per present, or when images were created since).
 struct PsMemo { const PoolBinding* pb = nullptr; const void* owner = nullptr; PoolSet* st = nullptr; };
@@ -1802,6 +1824,19 @@ PoolSet* pool_set_sync(const PoolBinding& pb) {
             st.cand_pool = nullptr;   // walked in full: the list is made again when it is used next
         }
         const uint32_t nwalk = by_cand ? static_cast<uint32_t>(st.cand.size()) : cache ? static_cast<uint32_t>(S.tpool->used_ids.size()) : n;
+        const bool fast_cfg = cache && pool_fast_on();
+        bool fast = false;
+        if (fast_cfg) {
+            TexturePool& tp = *S.tpool;
+            if (st.fkey.size() != st.written.size()) { st.fkey.assign(st.written.size(), 0); st.fdirty.assign(st.written.size(), 0); st.fdirty_ids.clear(); st.fast_pool = nullptr; }
+            if (st.fast_pool == &tp && st.fast_epoch == tp.reg_log_epoch && st.fast_b == &b && st.fast_pos <= tp.reg_log.size()) {
+                fast = true;
+                for (size_t k = st.fast_pos; k < tp.reg_log.size(); ++k) {
+                    const uint32_t id = tp.reg_log[k];
+                    if (id < st.fdirty.size() && !st.fdirty[id]) { st.fdirty[id] = 1; st.fdirty_ids.push_back(id); }
+                }
+            }
+        }
         ++g_psync_walks;
         g_psync_walked += nwalk;
         static std::vector<uint32_t> prune;   // positions in st.cand of entries that left the list
@@ -1813,11 +1848,18 @@ PoolSet* pool_set_sync(const PoolBinding& pb) {
             Texture* t = (e.used && e.tex) ? e.tex.get() : nullptr;
             if (cache && t && st.written[i] && st.tex[i].get() == t && st.esig[i]) {
                 if (const uint64_t stamp = tex_view_stamp(t)) {
+                    const uint64_t fk = fast_cfg ? pool_fast_key(t, stamp) : 0;
+                    if (fast && !st.fdirty[i] && st.fkey[i] == fk) { st.live.push_back(i); ++g_psync_kept; ++g_psync_fast; continue; }
                     TexResolved r;
                     r.tex = t;
                     r.view = e.view;
                     r.has_view = e.has_view;
-                    if (pool_entry_sig(t, stamp, make_request(b, r)) == st.esig[i]) { st.live.push_back(i); ++g_psync_kept; continue; }
+                    if (pool_entry_sig(t, stamp, make_request(b, r)) == st.esig[i]) {
+                        if (fast_cfg) st.fkey[i] = fk;
+                        st.live.push_back(i);
+                        ++g_psync_kept;
+                        continue;
+                    }
                 }
             }
             st.esig[i] = 0;
@@ -1843,13 +1885,26 @@ PoolSet* pool_set_sync(const PoolBinding& pb) {
             if (v) {
                 st.live.push_back(i);
                 if (cache && t == e.tex.get())
-                    if (const uint64_t stamp = tex_view_stamp(t)) st.esig[i] = pool_entry_sig(t, stamp, q);
+                    if (const uint64_t stamp = tex_view_stamp(t)) {
+                        st.esig[i] = pool_entry_sig(t, stamp, q);
+                        if (fast_cfg) st.fkey[i] = pool_fast_key(t, stamp);
+                    }
             }
             const uint64_t h = reinterpret_cast<uint64_t>(v);
             if (by_cand && !depth_entry && !v) prune.push_back(w);   // no depth texture here any more: written as the stand-in, off the list
             if (h == st.written[i]) continue;
             put(i, v ? VkDescriptorImageInfo{VK_NULL_HANDLE, v, tex_sampled_layout(t)}
                      : VkDescriptorImageInfo{VK_NULL_HANDLE, dummy_view(pb.view, pb.depth), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, h);
+        }
+        if (fast_cfg) {   // the next walk starts from here: registrations after this point mark their ids
+            for (uint32_t id : st.fdirty_ids) st.fdirty[id] = 0;
+            st.fdirty_ids.clear();
+            st.fast_pool = S.tpool.get();
+            st.fast_epoch = S.tpool->reg_log_epoch;
+            st.fast_pos = S.tpool->reg_log.size();
+            st.fast_b = &b;
+        } else {
+            st.fast_pool = nullptr;
         }
         if (!prune.empty()) {   // positions ascending: compact the list in one pass
             size_t k = 0, pi = 0;
@@ -2407,6 +2462,18 @@ uint64_t g_odb_full = 0, g_odb_inc = 0, g_odb_inc_checked = 0, g_odb_verify_bad 
 bool odb_incremental_on() {
     static const bool on = [] { const std::string v = nxrt::config_get_str("nvn", "odb_incremental", "on"); return v != "off" && v != "0" && v != "false"; }();
     return on && ab_on(kAbOdbInc);
+}
+// [nvn] odb_program (default on; cpuperf_ab_what odb_prog): a new program makes the next draw check only the uniform and storage bindings of
+// the stages that were not active before (their bindings were not checked while inactive); the others' answers still hold (bindings, not
+// programs, overlap held results). Before, every program change made the next check a full one over all ~80 bindings: ~600 per frame.
+bool odb_program_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "odb_program", true);
+    return on && ab_on(kAbOdbProg);
+}
+void odb_program_changed(uint32_t had) {
+    if (!odb_program_on()) { g_odb_all_dirty = true; return; }
+    for (int st = 0; st < kStages; ++st)
+        if (S.stage[st] && !(had & (1u << st))) g_odb_dirty[kOdbUbo][st] = g_odb_dirty[kOdbSsbo][st] = 0xffff;
 }
 void odb_mark(int kind, int stage, uint32_t slot) { if (stage < kStages && slot < 16) g_odb_dirty[kind][stage] |= static_cast<uint16_t>(1u << slot); }
 void out_draw_bindings() {
@@ -3223,10 +3290,24 @@ KeepRec* g_krec = nullptr;      // build_set records into it while bind_sets bui
 uint64_t g_last_set_key = 0;    // the content key of the last set build_set resolved
 std::unordered_map<VkDescriptorSet, uint64_t> g_set_content;   // set_reuse = verify: the content key of each kept set
 VkDescriptorSet keep_alloc(VkDescriptorSetLayout layout);   // below: a set of the persistent pools
+// Eight bytes per step (the kept sets' view and sampler checks hash ~20 such structs per set; byte by byte this was most of the time of
+// keep_lookup_or_build). In-memory keys only.
 uint64_t bytes_hash(const void* p, size_t n) {
-    uint64_t h = 1469598103934665603ull;
+    uint64_t h = 1469598103934665603ull ^ n;
     const uint8_t* b = static_cast<const uint8_t*>(p);
-    for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 1099511628211ull;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, b + i, 8);
+        h = (h ^ w) * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 32;
+    }
+    if (i < n) {
+        uint64_t w = 0;
+        std::memcpy(&w, b + i, n - i);
+        h = (h ^ w) * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 32;
+    }
     return h;
 }
 // The support buffer of sets without render scales: the defaults, in a buffer of its own that outlives submissions (a kept set binds it; the
@@ -5909,15 +5990,14 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
 void note_report(uint64_t address, uint64_t counter) {
     if (!address) return;
     if (g_reports.size() > 65536) g_reports.clear();   // bounded: a forgotten address reads from memory again
-    g_reports[address] = counter;
+    g_reports.put(address, counter);
 }
 
 // The counter word at a report address; false when it is not known before the GPU runs.
 bool report_counter(uint64_t address, uint64_t* out) {
-    auto it = g_reports.find(address);
-    if (it != g_reports.end()) {
-        if (it->second == kReportUnknown) return false;
-        *out = it->second;
+    if (const uint64_t* v = g_reports.find(address)) {
+        if (*v == kReportUnknown) return false;
+        *out = *v;
         return true;
     }
     const PoolHit hit = pool_lookup(address);
@@ -6615,7 +6695,14 @@ void run_list(const CmdList& list, int depth) {
         else if (out_any() && !compute_out_may_wait(r.op())) flush_compute_out(kOutOther);
         switch (r.op()) {
             case Op::Nop: break;
-            case Op::BindProgram: apply_bind_program(r.payload<P_BindProgram>()); ++g_buf_ver; g_odb_all_dirty = true; break;
+            case Op::BindProgram: {
+                uint32_t had = 0;
+                for (int st = 0; st < kStages; ++st) had |= S.stage[st] ? 1u << st : 0u;
+                apply_bind_program(r.payload<P_BindProgram>());
+                ++g_buf_ver;
+                odb_program_changed(had);
+                break;
+            }
             case Op::BindBuffers: {
                 const auto& p = r.payload<P_BindBuffers>();
                 const NVNbufferRange* rg = reinterpret_cast<const NVNbufferRange*>(r.blob<P_BindBuffers>());
@@ -6851,7 +6938,7 @@ void run_list(const CmdList& list, int depth) {
                     g_occ_result_slot = g_occ_any_slot = -1;
                     g_occ_parts_drawn = 0;
                     if (p.address) {
-                        g_reports[p.address] = kReportUnknown;   // the query result lands on the GPU
+                        g_reports.put(p.address, kReportUnknown);   // the query result lands on the GPU
                         gpu_wrote(p.address, sizeof rep, kWriteUpdate);
                         g_occ_pend.push_back({p.address, rep.timestamp, split ? -1 : slot, split ? kOccSplitCount : 0});
                         if (!P.open && !occ_defer_on()) occ_flush_pending();
@@ -6869,7 +6956,7 @@ void run_list(const CmdList& list, int depth) {
                     }
                     if (p.address) {
                         rep.counter = 0;
-                        g_reports[p.address] = kReportUnknown;   // the query result lands on the GPU
+                        g_reports.put(p.address, kReportUnknown);   // the query result lands on the GPU
                         do_write_memory(p.address, &rep, sizeof rep);
                         BufRef b = resolve_buffer(p.address, sizeof rep);
                         if (b.ok && g_occ_last >= 0) {
@@ -6889,7 +6976,7 @@ void run_list(const CmdList& list, int depth) {
                         cw.active = -1;
                         if (p.address) {
                             rep.counter = 0;
-                            g_reports[p.address] = kReportUnknown;   // the result lands on the GPU
+                            g_reports.put(p.address, kReportUnknown);   // the result lands on the GPU
                             do_write_memory(p.address, &rep, sizeof rep);
                             BufRef b = resolve_buffer(p.address, sizeof rep);
                             if (b.ok) {
@@ -7378,6 +7465,8 @@ void replay_begin_submit(Frame& f) {
             g_cpu_ab_on = con;
             cmdq::set_copies(ab_on(kAbCmdCopies));
             cmdq::set_desc(ab_on(kAbCmdDesc));
+            handle_cache_enable(ab_on(kAbHandleCache));
+            alloc_batch_enable(ab_on(kAbAllocBatch));
         }
         if (static_cast<int>(on) != last_on) {
             last_on = on ? 1 : 0;
@@ -7498,8 +7587,8 @@ void replay_begin_submit(Frame& f) {
                             (unsigned long long)g_var_hit[1], (unsigned long long)g_var_hit[2], (unsigned long long)g_var_hit[3], (unsigned long long)g_var_none,
                             (unsigned long long)pool_registry_generation());
             }
-            NXLOG_I(kTag, "pool array texture entries: %llu kept (pool_sync_cache), %llu asked for their view; %llu walks over %llu entries, %llu without an image",
-                        (unsigned long long)g_psync_kept, (unsigned long long)g_psync_asked, (unsigned long long)g_psync_walks, (unsigned long long)g_psync_walked, (unsigned long long)g_psync_noimg);
+            NXLOG_I(kTag, "pool array texture entries: %llu kept (pool_sync_cache; %llu of them by pool_sync_fast), %llu asked for their view; %llu walks over %llu entries, %llu without an image",
+                        (unsigned long long)g_psync_kept, (unsigned long long)g_psync_fast, (unsigned long long)g_psync_asked, (unsigned long long)g_psync_walks, (unsigned long long)g_psync_walked, (unsigned long long)g_psync_noimg);
 
             NXLOG_I(kTag, "resolve epoch moves by GPU write site: other %llu, gmem bound storage %llu, gmem pointer windows %llu, draws over held results %llu, graphics storage %llu, compute storage %llu, storage texel %llu",
                     (unsigned long long)g_bump_site[0], (unsigned long long)g_bump_site[1], (unsigned long long)g_bump_site[2], (unsigned long long)g_bump_site[3],
