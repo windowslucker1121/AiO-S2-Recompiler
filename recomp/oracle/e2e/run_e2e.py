@@ -49,7 +49,12 @@ def read_x64(prefix, img):
 
 def compare(uc, regs, mem):
     diffs = []
+    # With function-local scratch registers (GameConfig.scratch_locals, the default; needs local_flags) x9..x17 are not written back
+    # at a return either: temporaries of the procedure call standard, dead there. Every use inside the program still sees them.
+    scratch_dead = os.environ.get('NX_SCRATCH_LOCALS', '') != '0' and os.environ.get('NX_LOCAL_FLAGS', '') != '0'
     for i in range(31):
+        if scratch_dead and 9 <= i <= 17:
+            continue
         if uc['x'][i] != int(regs['x%d' % i], 16):
             diffs.append('x%d uc=%x x64=%s' % (i, uc['x'][i], regs['x%d' % i]))
     if uc['sp'] != int(regs['sp'], 16):

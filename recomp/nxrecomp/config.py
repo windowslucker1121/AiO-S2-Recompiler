@@ -52,6 +52,11 @@ class GameConfig:
     # directly; misses go through the runtime as before. NX_INLINE_CACHES=0 turns it off for a lift.
     inline_caches = True
 
+    # x9..x17 as function-local variables (program.localize_scratch, needs local_flags): written to the context only at tail
+    # branches, sites and SVCs, not at calls or returns (temporaries of the procedure call standard). NX_SCRATCH_LOCALS=0 turns
+    # it off for a lift.
+    scratch_locals = True
+
     # host function names to treat as noreturn-like terminators (none by default)
     noreturn_imports = ()
 

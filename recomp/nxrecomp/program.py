@@ -361,9 +361,126 @@ def inline_caches_on(env):
     return bool(getattr(env.cfg, 'inline_caches', True))
 
 
+# ---- function-local scratch registers (GameConfig.scratch_locals) ----
+# x9..x17 are temporaries of the AArch64 procedure call standard: a callee may change them, so no caller keeps a value in them
+# across a call, and no callee takes an argument or returns a result in them. A lifted function keeps them in locals (x9_ ..
+# x17_), loaded at entry, and writes them to the context only where the flags go back too (localize_flags: tail branches out of
+# the function, the fall-through into the next one, sites and SVCs, which read them back afterwards) -- not at BL / BLR and not
+# at RET. After a call the locals still hold the caller's values: code that relies on a callee preserving them (outline atomics,
+# TLS descriptor resolvers) sees them preserved; only a hand-written callee that passes values in x9..x17 across a call or
+# return would break. Needs local_flags (it uses the same exit markers).
+_SCRATCH = tuple(range(9, 18))
+_SCRATCH_REF = re.compile(r'c->x\[(9|1[0-7])\]')
+
+
+def scratch_locals_on(env):
+    if os.environ.get('NX_SCRATCH_LOCALS', '') == '0':
+        return False
+    return bool(getattr(env.cfg, 'scratch_locals', False)) and local_flags_on(env)
+
+
+# The safe rule for code that does not follow the call standard (hand-written SDK assembly): before the lift, every function's
+# scratch registers are analysed (scratch_liveness, a backward liveness over its statements; calls neither read nor write them).
+#  - a function that may read one after a call before writing it (it expects a callee's result there, or the analysis cannot tell,
+#    e.g. code after a call that does not return) keeps them in the context (scratch_optout);
+#  - a function that may read one at its entry before writing it (it takes an input there), and every import stub, is a callee that
+#    gets the caller's locals written to the context before the BL (scratch_store); so does every BLR and host override call,
+#    whose callee is unknown.
+_SL_LABEL = re.compile(r'^L_([0-9a-f]+): ')
+_SL_GOTO = re.compile(r'goto L_([0-9a-f]+);')
+_SL_REF = re.compile(r'c->x\[(9|1[0-7])\](\s*=(?!=))?')
+_SL_CALL = re.compile(r'c->x\[30\] = 0x[0-9a-f]+ULL; ')
+_SL_TAIL = re.compile(r'^\{?\s*(f_[0-9a-f]+\(c\)|h_\w+\(c\)|call_indirect\(c, [^;]*\)); return; \}?$')
+_SL_HEAD = ('c->fn = ', 'NxFlags nf;', 'uint64_t jt = 0;', 'if (rp) switch', 'case 0x', 'default:', 'if (nx_hook_entry')
+
+
+def scratch_liveness(text):
+    """-> (scratch registers live at the entry, scratch registers live right after some call) of one lifted function (raw text)."""
+    stm, lab = [], {}
+    for line in text.split('\n')[1:]:
+        if line.startswith('L_dispatch') or line.startswith('}'):
+            break
+        l = line.strip()
+        if not l or l.startswith(_SL_HEAD):
+            continue
+        m = _SL_LABEL.match(l)
+        if m:
+            lab[m.group(1)] = len(stm)
+            l = l[m.end():]
+        stm.append(l)
+    n = len(stm)
+    use, dfn, succ, call = [], [], [], []
+    for i, s in enumerate(stm):
+        u, d = set(), set()
+        for m in _SL_REF.finditer(s):
+            r = int(m.group(1))
+            if m.group(2):
+                d.add(r)
+            elif r not in d:
+                u.add(r)
+        use.append(u)
+        dfn.append(d)
+        if 'goto L_dispatch' in s:                      # an unresolved BR: any instruction may follow
+            tg = list(range(n))
+        else:
+            tg = [lab[t] for t in _SL_GOTO.findall(s) if t in lab]
+        cond = s.startswith('if (')
+        stop = not cond and (s.startswith('goto ') or s.startswith('switch (') or s == 'return;' or s.startswith('guest_trap(')
+                             or bool(_SL_TAIL.match(s.replace('nxf_store(nf, c); ', ''))) or 'goto L_dispatch' in s)
+        succ.append(tg + ([] if stop or i + 1 >= n else [i + 1]))
+        call.append(bool(_SL_CALL.search(s)) and not cond)
+    live = [set() for _ in range(n)]
+    changed = True
+    while changed:
+        changed = False
+        for i in range(n - 1, -1, -1):
+            out = set()
+            for j in succ[i]:
+                out |= live[j]
+            li = use[i] | (out - dfn[i])
+            if li != live[i]:
+                live[i] = li
+                changed = True
+    after = set()
+    for i in range(n):
+        if call[i] and i + 1 < n:
+            after |= live[i + 1]
+    return (live[0] if n else set()), after
+
+
+_SL_BL = re.compile(r'(c->x\[30\] = 0x[0-9a-f]+ULL; )(f_([0-9a-f]+)\(c\);|h_\w+\(c\);|call_indirect\(c, )')
+
+
+def localize_scratch(text, env=None, entry=None):
+    if env is not None and getattr(env, 'scratch_known', False) and entry in env.scratch_optout:
+        return text
+    used = sorted({int(m) for m in _SCRATCH_REF.findall(text)})
+    if not used or 'NxFlags nf; nxf_load(nf, c);' not in text:
+        return text
+    store = ' '.join('c->x[%d] = x%d_;' % (r, r) for r in used) + ' '
+    if env is not None and getattr(env, 'scratch_known', False):
+        risky = env.scratch_store
+
+        def bl(m):
+            t = m.group(3)
+            if t is not None and int(t, 16) not in risky:
+                return m.group(0)
+            return m.group(1) + '@@SLSTORE@@' + m.group(2)
+        text = _SL_BL.sub(bl, text)
+    text = _SCRATCH_REF.sub(r'x\1_', text)
+    text = text.replace('@@SLSTORE@@', store)
+    load = ' ' + ' '.join('x%d_ = c->x[%d];' % (r, r) for r in used)
+    text = text.replace('nxf_store(nf, c); ', 'nxf_store(nf, c); ' + store)
+    text = text.replace('nxf_load(nf, c);', 'nxf_load(nf, c);' + load)
+    decl = 'uint64_t ' + ', '.join('x%d_' % r for r in used) + '; '
+    return text.replace('  NxFlags nf; nxf_load(nf, c);', '  ' + decl + 'NxFlags nf; nxf_load(nf, c);', 1)
+
+
 def lift_function(env, entry):
     """-> (text, instruction count, [(pc, word, reason)], [(pad, entry)])."""
     text, n, bad, pads = _lift_function(env, entry)
+    if scratch_locals_on(env):
+        text = localize_scratch(text, env, entry)
     if inline_caches_on(env):                    # ctx.h NX_ICALL / NX_IIMPORT: a cache of its own per call site and import stub
         text = text.replace('call_indirect(c, ', 'NX_ICALL(c, ').replace('host_import(c, ', 'NX_IIMPORT(c, ')
     return text, n, bad, pads
@@ -467,6 +584,9 @@ def make_env(spec):
     env.tailbr = set(spec.get('tailbr', ()))
     env.pads = spec['pads']
     env.catchers = set(spec['catchers'])
+    env.scratch_optout = set(spec.get('scratch_optout', ()))
+    env.scratch_store = set(spec.get('scratch_store', ()))
+    env.scratch_known = bool(spec.get('scratch_known'))
     env.full = True
     return env
 
@@ -510,6 +630,21 @@ def _worker_scan(entries):
         total += n
         bad += len(b)
     return total, bad, list(env.wanted)
+
+
+def _worker_scratch(entries):
+    """Scratch-register liveness of the given functions (see scratch_liveness): (entry, live at entry?, live after a call?, stub?)."""
+    env = _worker_env
+    env.wanted = collections.OrderedDict()
+    out = []
+    for a in entries:
+        t, n, _, _ = _lift_function(env, a)
+        if n == 0:                                    # an import / alias stub: its callee is unknown here
+            out.append((a, False, False, True))
+            continue
+        ein, aft = scratch_liveness(t)
+        out.append((a, bool(ein), bool(aft), False))
+    return out
 
 
 def _worker_text(entries):
@@ -603,6 +738,24 @@ def lift_module(spec, outdir, jobs=8, shards=0, bucket=0xC000, log=print):
         # workers must know the new entries too (their extents are by the next start): rebuild the spec
         if len(all_funcs) != len(starts):
             spec['ends'] = {a: env.ends.get(a, env.extent(a)) for a in all_funcs}
+            if pool:
+                pool.close()
+                pool = multiprocessing.Pool(jobs, _worker_init, (spec,))
+                mapper = pool.imap_unordered
+            else:
+                _worker_init(spec)
+        if scratch_locals_on(env):
+            optout, store = set(), set()
+            parts = [all_funcs[i:i + 400] for i in range(0, len(all_funcs), 400)]
+            for part in mapper(_worker_scratch, parts):
+                for a, ein, aft, stub in part:
+                    if aft:
+                        optout.add(a)
+                    if ein or stub:
+                        store.add(a)
+            spec['scratch_optout'], spec['scratch_store'], spec['scratch_known'] = sorted(optout), sorted(store), True
+            log('scratch registers: %d functions keep them in the context, %d callees get them stored before a call  (%.1fs)'
+                % (len(optout), len(store), time.time() - t0))
             if pool:
                 pool.close()
                 pool = multiprocessing.Pool(jobs, _worker_init, (spec,))

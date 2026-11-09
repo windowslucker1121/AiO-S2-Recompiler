@@ -722,6 +722,31 @@ Measured with `ab` in one run (first scene, 1920x1080, 30-230 s, alone): **G p50
 (window medians 12.81 / 11.64); fps 40.9 / 40.6 (GPU / render-thread bound). The off windows still run the inline check, so the gain over
 a library without caches is a little smaller. Tried and dropped: kernel waits sleeping in WaitOnAddress on the wake flag instead of
 SleepConditionVariableSRW (no user-mode spin): paired windows G p50 11.29 (cv) vs 11.70 (WaitOnAddress): worse, removed.
+**FRSQRTE and PGO (G3, same day).** An instrumented build (`NX_PGO=generate`) showed `recip_sqrt_estimate` (fpexact.h) with ~4% of all
+executed basic blocks: it ran the Arm pseudocode's loop (up to ~500 iterations per lane). It is now closed form (double square root, then
+an exact integer correction; identical for all 384 inputs, difftest identical). **PGO of the lifted code** works and is opt-in (never a
+default: profiles are generated from the game's code, stay in the git-ignored `work\pgo`, and players build without one): build the
+instrumented libraries into their own folder (`set NX_BUILD=work\build\oot_pgogen`, `set NX_CMAKE_ARGS=-DNX_PGO=generate`,
+`build_game.cmd oot`; ~35 min), link an exe against them with `-DGAME_LIB_DIR=<that folder>` and `-DGAME_LLVM_PROFILE_LIB=<llvm>\lib\clang\23\
+lib\windows\clang_rt.profile-x86_64.lib` (game-build CMake), run it with env `LLVM_PROFILE_FILE=<dir>\name-%p.profraw` and `[prof]
+llvm_profile_at_s = 45` (counters written every 45 s; the game is killed, never exits cleanly), merge with `llvm-profdata merge -o
+oot.profdata *.profraw`, then build with `-DNX_PGO_USE=<oot.profdata>` (a lifter change after the profile only leaves the changed functions
+unprofiled). The instrumented game runs at roughly half speed; 200 s of the first scene + 150 s of `kokiri_outside` gave 336 + 224 MB of
+raw profile, a 61 MB merged one.
+**Scratch registers as locals (G3).** x9..x17 (temporaries of the AArch64 procedure call standard) live in function locals like the
+flags (`GameConfig.scratch_locals`, `program.localize_scratch`, `NX_SCRATCH_LOCALS=0` for a lift without; needs `local_flags`): loaded at
+entry, written to the Ctx only at the flags' exit markers (tail branches, fall-through, sites, SVCs), not at BL/BLR/RET; after a call the
+locals keep the caller's values (preserving callees such as outline atomics and TLS descriptor resolvers stay right). **Safe rule for code
+outside the call standard** (hand-written SDK assembly): before the lift every function gets a backward liveness over its statements
+(`scratch_liveness`, `_worker_scratch`; ~110 s more for main): a function in which a scratch register may be read after a call before it is
+written keeps them in the Ctx (`scratch_optout`: main 193, sdk 54 functions, mostly code after noreturn calls); a function that may read one
+at entry (inputs outside the standard: e.g. sdk's crypto bignum and audio Vec* assembly) and every import/alias stub gets the caller's
+locals stored before the BL (`scratch_store`: main 1,344, sdk 10,148, nearly all stubs), and so does every BLR and host-override call
+(callee unknown). Only a callee that *returns* a value in x9..x17 through an indirect call or an import would still break (none known).
+The e2e oracle skips x9..x17 at the program's return like NZCV (dead there). IC + FRSQRTE + scratch locals (no PGO): G p50 10.22 ms
+(same batch: base 12.11, IC 11.53, IC + FRSQRTE + PGO 9.92). Measured (first scene, 1920x1080, 30-200 s, one run each, alone): **G p50 base 12.72 ms, inline caches
+11.67, inline caches + FRSQRTE + PGO 9.91 (-22% against base)**, p90 14.69 / 13.32 / 11.42; fps 37.9 / 39.8 / 40.3 (GPU / render-thread
+bound).
 
 **Render resolution pinned (WP7, 2026-11-08, `runtime/games/oot/oot_drs.cpp`, no lifted rebuild).** The game's dynamic resolution: renderer
 R = `[[main+0x4e30498] + 0x228]` (found by a pointer search from main's data at run time), its controller C = `[R + 0xb48]` (per-frame step
