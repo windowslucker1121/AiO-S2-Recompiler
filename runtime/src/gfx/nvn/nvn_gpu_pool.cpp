@@ -1077,10 +1077,35 @@ VkBuffer mirror_src(Mirror& m, uint64_t page, uint64_t* base) {
     return c->buffer;
 }
 
-BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) {
+BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) { return resolve_read_dep(gpu_address, size, use, nullptr); }
+
+bool read_dep_check(const ReadDep& d, int use) {
+    if (d.mirror_on != g_mirror_on) return false;
+    if (d.state == 0) { g_use_skip[use % 3]++; return true; }
+    Mirror& m = *d.m;
+    const bool serve = range_valid(m, d.first, d.last - d.first + 1) || (out_lazy() && new_servable(m, d.first, d.last));
+    if (serve != (d.state == 1)) return false;
+    if (serve) {
+        bits_put(m.used, d.first, d.last, true);
+        g_st_dev_binds.fetch_add(1, std::memory_order_relaxed);
+        g_use_dev[use % 3]++;
+    } else {
+        g_use_host[use % 3]++;
+        bits_put(m.want, d.first, d.last, true);
+        m.any_want = true;
+        g_st_host_binds.fetch_add(1, std::memory_order_relaxed);
+    }
+    return true;
+}
+
+BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* dep) {
     MemoryPool* mp = nullptr;
     PoolGpu* pg = nullptr;
     uint64_t poff = 0;
+    ReadDep scratch;
+    ReadDep& d = dep ? *dep : scratch;
+    d = ReadDep();
+    d.mirror_on = g_mirror_on;
     BufRef out = resolve_in_pool(gpu_address, size, &mp, &pg, &poff);
     if (!g_mirror_on) return out;
     if (!out.ok || !pg || !size) { g_use_skip[use % 3]++; g_skip_why[0]++; return out; }
@@ -1091,8 +1116,12 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) {
     const uint64_t chunk_pages = kChunkBytes / kPageBytes;
     if (first / chunk_pages != last / chunk_pages) { g_use_skip[use % 3]++; g_skip_why[3]++; return out; }
     const VkBuffer cb = mirror_chunk(*m, first);
-    if (!cb) { g_use_skip[use % 3]++; g_skip_why[4]++; return out; }
+    if (!cb) { g_use_skip[use % 3]++; g_skip_why[4]++; d.keep = false; return out; }
+    d.m = m;
+    d.first = first;
+    d.last = last;
     if (range_valid(*m, first, last - first + 1) || (out_lazy() && new_servable(*m, first, last))) {
+        d.state = 1;
         out.buffer = cb;
         out.offset = poff - (first / chunk_pages) * kChunkBytes;
         out.avail = std::min<uint64_t>(kChunkBytes, m->pool_bytes - (first / chunk_pages) * kChunkBytes) - out.offset;
@@ -1101,6 +1130,7 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) {
         g_use_dev[use % 3]++;
         return out;
     }
+    d.state = 2;
     g_use_host[use % 3]++;
     bits_put(m->want, first, last, true);
     m->any_want = true;
@@ -1811,6 +1841,7 @@ bool out_lazy() {
 
 bool out_any() { return g_out_n.load(std::memory_order_acquire) != 0; }
 uint64_t out_version() { return g_out_ver.load(std::memory_order_acquire); }
+uint64_t out_grow_version() { return g_out_grow.load(std::memory_order_acquire); }
 
 uint64_t out_bytes_total() {
     return g_ob_end.load(std::memory_order_relaxed) + g_ob_gpu.load(std::memory_order_relaxed) + g_ob_fault.load(std::memory_order_relaxed) +

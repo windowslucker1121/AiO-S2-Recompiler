@@ -663,6 +663,33 @@ resolve_in_pool / pool_lookup ~14% of the render thread together), the epoch mov
 bind the written range is the remaining lever for set reuse), compute shadows (shadow_of ~2.5%), handle_lookup (2.4%, a contended counter
 and the handle map under a mutex), the driver's own share.
 
+**Session 2026-11-09 (S1: persistent validated descriptor sets, incremental draw buffer checks).** Structural instead of another epoch
+scope (D in R3 needed all four clear sources at once): (1) **`[nvn] set_keep`** (default on, `cpuperf_ab_what` `set_keep`): read-only graphics
+sets live across submissions in their own descriptor pools (`keep_dpool_new`, up to 6 x 16k sets per "era"; a full era is dropped and its
+pools released after the GPU; entries unused 600 presents are dropped), keyed by the program and the bindings' raw inputs only
+(`g_keep_sig`). Each entry records per binding what it depended on (`KDep`): uniform blocks the pool-copy-or-pool decision
+(`resolve_read_dep` / `read_dep_check` in nvn_gpu_pool.cpp: the copy's page state, without pool_lookup) and no update range; read-only storage
+and texel ranges no held result (asked only when `out_grow_version` moved); textures the same object (pointer + id), view stamp
+(`tex_view_stamp`), view and sampler hashes, not a colour attachment now; plus the pool *unregister* generation (`pool_unregister_generation`,
+new) and the sampler tuning. A found entry is checked instead of resolved; a signature is kept from its second sighting in a later present
+on. Not kept: anything per submission (upload-ring snapshots, held copies, scaled support buffers, update ranges, dummy bindings outside a
+pool); the support buffer is now one persistent buffer (`support_keep_buffer`, the same defaults). Finding: OoT makes **new render-target
+objects every frame**, so with the pools and targets in the key (as in the memo) 80% of signatures were new every frame (`[nvn]
+set_keep_diag` counts which left-out input would have matched); without them ~81% of the table's lookups hit. (2) **`[nvn]
+odb_incremental`** (default on, `odb_inc`): out_draw_bindings checks only the bindings changed since its last check (`g_odb_dirty`, set by
+BindBuffers; a program change or a new submission checks all) and the ones that overlapped then (`g_odb_hot`), as long as the held results
+have not grown (`out_grow_version`); ~72% of the checks are incremental with ~4 bindings instead of ~80. Verification: `set_reuse = verify`
+compares the content key of every kept set found valid with a fresh resolve (and the memo's kept sets by content key): 0 differed in
+Kokiri; `odb_incremental = verify` asks every unchecked binding for a held result: 0 missed. Also `handle_lookup` takes a shared lock.
+**Paired windows at 1920x1080 (both on vs off, alone):** Kokiri outside replay 33.1 -> 29.3 ms per frame (17/18), frame 33.8 -> 32.7 ms, +1.05
+fps (15/18); Link's house replay -1.3 ms (25/27), +0.8 fps (24/27, median frame -0.1: not render bound); first scene replay 21.9 -> 18.6 ms
+(18/19), median frame -1.1 ms, +1.6 fps (12/19). set_keep alone in Kokiri: replay -1.8 ms, +0.4 fps. **Why the frame moves less than the
+replay (Kokiri, frame trace):** main submits, then waits ~21 ms in nvnSyncWait for the frame's 3rd (small) submission, which queues on the
+render thread behind the previous frame's big (24-28 ms) submission and on the GPU behind its work; GPU in flight (the union of `gpu.exec`
+intervals, an upper bound of GPU work; the sum of gpu.exec double counts overlapping submissions) is ~27.7 ms of the 32.7 ms frame. With the
+replay shorter, Kokiri at 1080 is now gated by GPU execution plus main's ~13 ms. Scratch analysis scripts (worktree `work/scripts`, not
+committed): per-window frame/replay/GPU-in-flight from ftrace (`ftrace_ab.py`), the submission that ends main's wait (`critpath.py`).
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
