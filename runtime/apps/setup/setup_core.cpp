@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <sstream>
 
 #include "setup_games.h"
@@ -285,7 +286,9 @@ GameId game_id_of(const std::wstring& game) {
 
 std::string translator_stamp(const std::wstring& exe) {
     if (exe.empty() || !file_exists(exe)) return {};
-    // FNV-1a over (name, size, write time) of every file in the translator's folder: a new release replaces its exe or its DLLs
+    // FNV-1a over (name, contents) of every exe/DLL in the translator's folder: a release with a changed translator differs, an
+    // unchanged one copied over the old files (new write times) does not, so its translations stay. The contents (~80 MB) are read
+    // once per process for one set of (name, size, write time).
     uint64_t h = 1469598103934665603ull;
     auto mix = [&](const void* p, size_t n) {
         const unsigned char* b = static_cast<const unsigned char*>(p);
@@ -308,9 +311,25 @@ std::string translator_stamp(const std::wstring& exe) {
         mix(&d.nFileSizeLow, 4); mix(&d.nFileSizeHigh, 4);
         mix(&d.ftLastWriteTime, sizeof d.ftLastWriteTime);
     }
+    static std::mutex mu;
+    static std::map<uint64_t, std::string> memo;              // (name, size, write time) fingerprint -> content stamp
+    std::lock_guard<std::mutex> lock(mu);
+    if (auto it = memo.find(h); it != memo.end()) return it->second;
+    const uint64_t dates = h;
+    h = 1469598103934665603ull;
+    std::vector<char> buf(1 << 20);
+    for (auto& [n, d] : files) {
+        mix(n.data(), n.size() * sizeof(wchar_t));
+        std::ifstream in(join(parent_of(exe), n), std::ios::binary);
+        if (!in) return {};
+        while (in) {
+            in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+            mix(buf.data(), static_cast<size_t>(in.gcount()));
+        }
+    }
     char b[24];
-    std::snprintf(b, sizeof b, "%016llx", static_cast<unsigned long long>(h));
-    return b;
+    std::snprintf(b, sizeof b, "c%016llx", static_cast<unsigned long long>(h));
+    return memo[dates] = b;
 }
 
 std::string nup_stamp(const std::wstring& nup) {
