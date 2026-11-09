@@ -226,14 +226,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216 };
+enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432 };
 uint32_t ab_mask() {
     static const uint32_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}};
         uint32_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -4340,7 +4340,9 @@ void note_pending_skip(bool dispatch) {
 void upscaler_note_draw(const ShaderInfo* fs);
 
 // `mesh`: a DrawMeshTasks draw (task/mesh program, no vertex input): the mesh stage takes the vertex stage's place below.
+bool g_skip_gpt_raster = false;
 bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* topo_out, bool mesh = false) {
+    g_skip_gpt_raster = false;
     if (g_gfx_pending) { note_pending_skip(false); return false; }
     static bool last_mesh = false;
     if (mesh != last_mesh) { g_dirty |= kPipe | kDesc | kVb; last_mesh = mesh; }
@@ -4353,6 +4355,25 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (!S.render_enable) return false;
     ++g_draw_idx;
     if (S.stage[kFragment] && skip_fs_draw(S.stage[kFragment]->hash)) return false;
+    // [nvn] skip_gpt (measurement only: the picture loses those draws): draws whose pre-raster stage walks the page table are left out; as a
+    // cpuperf_ab_what feature it gives paired windows of their GPU cost
+    static const int64_t skip_gpt = nxrt::config_get_int("nvn", "skip_gpt", 0);   // 1: left out, 2: no fragments (pre-raster cost only)
+    if (skip_gpt && ab_on(kAbSkipGpt))
+        for (int st : {static_cast<int>(kVertex), static_cast<int>(kTask), static_cast<int>(kMesh)})
+            if (S.stage[st] && S.stage[st]->refl.global_pt) {
+                if (skip_gpt == 1) return false;
+                g_skip_gpt_raster = true;
+            }
+    if (!g_skip_fs.empty()) {   // skip_fs_file words "v:<prefix>" (vertex, task or mesh shader) and "gpt" (a pre-raster stage walks the page table)
+        for (const std::string& p : g_skip_fs) {
+            const bool gpt = p == "gpt";
+            if (!gpt && p.compare(0, 2, "v:") != 0) continue;
+            for (int st : {static_cast<int>(kVertex), static_cast<int>(kTask), static_cast<int>(kMesh)}) {
+                const ShaderInfo* s = S.stage[st];
+                if (s && (gpt ? s->refl.global_pt : s->hash.compare(0, p.size() - 2, p, 2, std::string::npos) == 0)) return false;
+            }
+        }
+    }
     gmem_before_op(false);   // A17: held results back, ranges its pointers name written
     upscaler_note_draw(S.stage[kFragment]);   // [nvn] upscaler_dst = fs:...: where the replaced upscaler writes
     {   // [nvn] trace_fs_draws = PREFIX (NXRT_NVN_TRACE_FS_DRAWS): trace the draws with this fragment shader where they happen, in any frame, at
@@ -4634,6 +4655,15 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     ++g_chunk_work;
     g_dirty = g_mirror_stale ? (kVb | kDesc) : 0;     // a storage buffer of this draw made copied pages stale: the next draw binds again
     g_mirror_stale = false;
+    if (g_skip_gpt_raster) {   // [nvn] skip_gpt = 2: the pre-raster stage runs, no fragment (an empty scissor); the next draw sets them again
+        g_skip_gpt_raster = false;
+        const VkRect2D none = {{0, 0}, {0, 0}};
+        VkRect2D sc[16];
+        const uint32_t n = S.nvp ? S.nvp : 1;
+        for (uint32_t i = 0; i < n; ++i) sc[i] = none;
+        vkCmdSetScissorWithCount(F->cb, n, sc);
+        g_dirty |= kDynVp;
+    }
     *topo_out = topo;
     if (checkpoints_on()) {   // [gfx] device_diagnostics: which draw the GPU was at when the device was lost
         char t[128];
@@ -5299,7 +5329,17 @@ bool pass_copy_dispatch(const std::string& hash) {
     return false;
 }
 
+// Statistics: dispatches recorded right after another one with no barrier between them but the one after every dispatch (the game
+// ordered nothing between them; memory_barriers_here() after the last dispatch).
+uint64_t g_disp_end_mark = ~0ull;
+uint64_t g_disp_n = 0, g_disp_after = 0, g_disp_after_ind = 0;
+
 void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
+    ++g_disp_n;
+    if (!P.open && memory_barriers_here() == g_disp_end_mark) {   // nothing barriered since the last dispatch's own barrier: the game ordered nothing between them
+        ++g_disp_after;
+        if (indirect) ++g_disp_after_ind;
+    }
     const ShaderInfo* cs = S.stage[kCompute];
     TRACE("dispatch %u %u %u indirect %llx cs %s%s%s", x, y, z, static_cast<unsigned long long>(indirect), cs ? cs->hash.c_str() : "-",
           !cs && !g_cs_missing.empty() ? " missing " : "", !cs ? g_cs_missing.c_str() : "");
@@ -5432,6 +5472,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     shadows_after_dispatch();
     out_presnap_end();
     memory_barrier(F->cb);
+    g_disp_end_mark = memory_barriers_here();
     ++g_chunk_work;
     if (g_trace) {
         // [nvn] trace_snap_after = "4c1e8564:796bc6d880+256,796bc82000+64": in a traced frame, after each dispatch of a compute program whose
@@ -6823,6 +6864,11 @@ void replay_begin_submit(Frame& f) {
                     (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
             NXLOG_I(kTag, "game barriers: %llu, %llu in an open pass: %llu kept the pass (barrier_keep_pass, bits seen %x), %llu ended it after storage or stream-out writes (bits of all %x)",
                     (unsigned long long)g_bar_n, (unsigned long long)g_bar_in_pass, (unsigned long long)g_bar_kept, g_bar_bits_kept, (unsigned long long)g_bar_unsafe, g_bar_bits_all);
+            {
+                NXLOG_I(kTag, "dispatches: %llu, %llu right after another with no barrier between but ours (%llu indirect)", (unsigned long long)g_disp_n,
+                        (unsigned long long)g_disp_after, (unsigned long long)g_disp_after_ind);
+                NXLOG_I(kTag, "full barriers by site:%s", memory_barrier_sites(16).c_str());
+            }
             NXLOG_I(kTag, "graphics descriptor set binds: %llu made, %llu skipped as already bound (bind_skip)", (unsigned long long)g_bs_bound, (unsigned long long)g_bs_skipped);
             {
                 std::string why;
