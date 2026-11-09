@@ -2487,6 +2487,12 @@ void out_fetch(uint64_t addr, uint64_t size, bool by_fault, int access, uint64_t
         const PoolHit ph = pool_lookup(addr);
         archexp::note_guard_fault(addr, access, ph.pool ? ph.pool->flags : 0);
     }
+    nxrt::HitchTimer ht_fetch(nxrt::kHpOutFetch);   // the hitch line / [diag] frame_csv: time in fetches (by guard faults separately)
+    struct FaultTimer {
+        bool on;
+        uint64_t t0;
+        ~FaultTimer() { if (on) nxrt::hitch_phase_add(nxrt::kHpOutFetchFault, nxrt::hitch_ticks() - t0); }
+    } ht_fault{by_fault, nxrt::hitch_ticks()};
     const uint64_t lo = addr & ~(kPageBytes - 1), hi = (addr + size + kPageBytes - 1) & ~(kPageBytes - 1);
     const int src = access >= 0 && access < 4 ? access : (on_render_thread() ? kFsRender : kFsInvalidate);
     if (src == kFsInvalidate && out_invalidate_by_guard()) {

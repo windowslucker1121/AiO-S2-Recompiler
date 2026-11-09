@@ -950,6 +950,11 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
             return e.second;
         }
     prewarm_init();
+    struct MissTimer {   // the hitch line / [diag] frame_csv: a pipeline the render thread did not have (links, waits for parts compiled ahead, builds)
+        uint64_t t0 = nxrt::hitch_on_render_thread() ? nxrt::hitch_ticks() : 0;
+        ~MissTimer() { if (t0) nxrt::hitch_phase_add(nxrt::kHpRenderPipeMiss, nxrt::hitch_ticks() - t0); }
+    } miss_timer;
+    NXFT_MIN("pipe.miss", 200000);
     VkPipeline pipe = VK_NULL_HANDLE;
     std::shared_ptr<PipeUpgrade> later;          // the key file's whole pipeline, still being built: it replaces the linked one
     // compiled ahead on a worker; one being compiled is linked from its parts meanwhile when they are built (else waited for)
@@ -976,7 +981,9 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
         g_mesh_builds.emplace_back(key, std::move(b));
         return VK_NULL_HANDLE;
     }
-    if (prewarm_take(key, &pipe, [&] { return gpl_ready(key, layout); }, &later)) {
+    bool taken = false;
+    { NXFT_MIN("pipe.prewarm_take", 200000); taken = prewarm_take(key, &pipe, [&] { return gpl_ready(key, layout); }, &later); }
+    if (taken) {
         ++g_pipeline_count;
         g_gfx_keys.add(1);
         bucket.push_back({key, pipe, VK_NULL_HANDLE, nullptr});
@@ -984,9 +991,9 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     }
     std::shared_ptr<PipeUpgrade> up;
     bool pending = false;
-    pipe = gpl_link(key, layout, later ? nullptr : &up, &pending); // linked from shader parts compiled ahead (null: not eligible or a part failed)
+    { NXFT_MIN("pipe.gpl_link", 200000); pipe = gpl_link(key, layout, later ? nullptr : &up, &pending); } // linked from shader parts compiled ahead (null: not eligible or a part failed)
     if (later) up = later;
-    prewarm_record(key);                         // every key a draw asked for: the next run builds it from boot
+    { NXFT_MIN("pipe.record", 200000); prewarm_record(key); }   // every key a draw asked for: the next run builds it from boot
     if (pending && !later) return VK_NULL_HANDLE;   // its parts are compiling in the background: the draw is skipped, the next one asks again
     g_gfx_keys.add(1);                           // every path below adds one entry to the bucket
     if (pipe) {
@@ -1022,7 +1029,7 @@ VkPipeline create_compute(const ShaderInfo* cs, VkShaderModule m, VkPipelineLayo
     const uint64_t tp0 = nxrt::hitch_ticks();
     const auto t0 = std::chrono::steady_clock::now();
     const VkResult cr = vkCreateComputePipelines(vkdev(), g_cache, 1, &ci, nullptr, &pipe);
-    if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - tp0);
+    nxrt::hitch_phase_add(nxrt::hitch_on_render_thread() ? nxrt::kHpRenderPipeline : nxrt::kHpPipelineBg, nxrt::hitch_ticks() - tp0);
     const double ms = ms_from(t0);
     if (ms >= 250.0)
         NXLOG_W(kTag, "compute pipeline %s took %.0f ms to create (%zu bytes of SPIR-V)", cs->hash.c_str(), ms, cs->spirv.size() * 4);

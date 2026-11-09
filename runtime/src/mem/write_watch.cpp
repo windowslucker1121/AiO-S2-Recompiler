@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "nxrt/config.h"
+#include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
@@ -51,15 +52,23 @@ struct Region {
     std::unique_ptr<std::atomic<uint16_t>[]> releasing;   // per page: releasers that saw it armed and have not finished its VirtualProtect (release_page)
 };
 
+// The hitch line / [diag] frame_csv: shared acquisitions that had to wait (kHpWwSharedWait: faults and os writes behind an exclusive holder) and
+// the time exclusive holders keep the lock (kHpWwExclHold: arming, guarding, unguarding).
 struct SharedLock {
-    explicit SharedLock(Region* r) : r_(r) { AcquireSRWLockShared(&r_->lock); }
+    explicit SharedLock(Region* r) : r_(r) {
+        if (TryAcquireSRWLockShared(&r_->lock)) return;
+        const uint64_t t0 = nxrt::hitch_ticks();
+        AcquireSRWLockShared(&r_->lock);
+        nxrt::hitch_phase_add(nxrt::kHpWwSharedWait, nxrt::hitch_ticks() - t0);
+    }
     ~SharedLock() { ReleaseSRWLockShared(&r_->lock); }
     Region* r_;
 };
 struct ExclusiveLock {
-    explicit ExclusiveLock(Region* r) : r_(r) { AcquireSRWLockExclusive(&r_->lock); }
-    ~ExclusiveLock() { ReleaseSRWLockExclusive(&r_->lock); }
+    explicit ExclusiveLock(Region* r) : r_(r) { AcquireSRWLockExclusive(&r_->lock); t0_ = nxrt::hitch_ticks(); }
+    ~ExclusiveLock() { nxrt::hitch_phase_add(nxrt::kHpWwExclHold, nxrt::hitch_ticks() - t0_); ReleaseSRWLockExclusive(&r_->lock); }
     Region* r_;
+    uint64_t t0_ = 0;
 };
 
 namespace {
@@ -166,6 +175,7 @@ bool release_page(Region* r, uint64_t page) {
     if (old & b) {
         bool ok = true;
         DWORD was = 0;
+        NXFT_MIN("ww.release.protect", 200000);   // [prof] trace: a release that waited (the process's address space lock)
         if (!VirtualProtect(reinterpret_cast<void*>(addr), kPage, PAGE_READWRITE, &was)) {
             ok = false;
         } else if ((was & 0xff) == PAGE_NOACCESS && test(r->guard.get(), page)) {
@@ -193,8 +203,20 @@ bool release_page(Region* r, uint64_t page) {
     // such release has finished and its effect is visible in the protection we read next.
     // The wait has no round limit: a releaser that is counted in will finish (it only has its VirtualProtect left), but it may be descheduled
     // for a long time on a busy machine, and giving up early would pass a fault on that is ours (seen as an unhandled access violation).
+    // While a release is counted in, the wait does not look at the protection ([mem] ww_quiet_wait, default on): VirtualQuery in a pool's
+    // section view takes ~2.4 ms under the process's address space lock, which the releaser's VirtualProtect needs exclusive. With the
+    // game's job workers and main thread writing one page at once (Kokiri outside), their queries starved the release: 20-60 ms per fault
+    // and 100-150 ms frames. The protection is read once the count is zero (the release's effect is visible then).
+    static const bool quiet = nxrt::config_get_bool("mem", "ww_quiet_wait", true);
     for (int i = 0;; ++i) {
         const uint16_t busy = rel.load(std::memory_order_seq_cst);
+        if (quiet && busy != 0) {
+            g_waits.fetch_add(1, std::memory_order_relaxed);
+            if (i < 200) YieldProcessor();
+            else if (i < 2000) Sleep(0);
+            else Sleep(1);
+            continue;
+        }
         const DWORD pr = page_protect(addr) & 0xff;
         if (pr == PAGE_READWRITE || pr == PAGE_EXECUTE_READWRITE) return true;
         if (pr != PAGE_READONLY || busy == 0) return false;
@@ -269,9 +291,11 @@ LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
     if (g_live.load(std::memory_order_acquire) == 0) return EXCEPTION_CONTINUE_SEARCH;
     const uint64_t addr = static_cast<uint64_t>(rec->ExceptionInformation[1]);
     nxrt::HitchTimer ht(nxrt::kHpFaults);      // the hitch line: time in this handler (a wait for arm's exclusive lock included)
+    NXFT_MIN("ww.fault", 200000);
     // A guarded page (read or write): the owner makes it current first (outside every lock: it may wait for the GPU). A write then faults
     // again on the read-only page and is tracked as usual.
     if (guarded_at(addr)) {
+        nxrt::HitchTimer htg(nxrt::kHpFaultGuard);
         g_guard_faults.fetch_add(1, std::memory_order_relaxed);
         const uint64_t pc = ep->ContextRecord ? static_cast<uint64_t>(ep->ContextRecord->Rip) : 0;
         if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(addr & ~(kPage - 1), kind == 1 ? kAccessWrite : kAccessRead, pc);
@@ -363,6 +387,7 @@ struct Gauges {
     Gauges() {
         nxrt::gauge_register("mem.ww.faults", [] { return static_cast<int64_t>(g_faults.load(std::memory_order_relaxed)); });
         nxrt::gauge_register("mem.ww.regions", [] { return static_cast<int64_t>(g_live.load(std::memory_order_relaxed)); });
+        nxrt::hitch_add_csv_counter("ww_release_waits", [] { return g_waits.load(std::memory_order_relaxed); });   // rounds faults waited for another releaser
     }
     ~Gauges() {
         nxrt::gauge_unregister("mem.ww.faults");
@@ -468,6 +493,7 @@ bool others_quiet(const Region* self, uint64_t a, uint64_t n) {
 bool arm(Region* r, uint64_t first, uint64_t count) {
     if (!r || !count || first >= r->npages || count > r->npages - first) return false;
     nxrt::HitchTimer ht(nxrt::kHpWwArm);
+    NXFT_MIN("ww.arm", 100000);
     const uint64_t a = r->base + first * kPage, n = count * kPage;
     // Whether the guest left every page committed read-write, from memory.cpp's page table when the range is in the heap view (read before
     // the region lock: memory.cpp takes region locks while it holds its own). One VirtualQuery inside a pool's section view costs ~2.4 ms (it
@@ -530,6 +556,7 @@ void set_guard_handler(GuardHandler fn) { g_guard_fn.store(fn, std::memory_order
 
 bool guard(Region* r, uint64_t first, uint64_t count) {
     if (!r || !count || first >= r->npages || count > r->npages - first) return false;
+    NXFT_MIN("ww.guard", 100000);
     ExclusiveLock lk(r);
     if (!all_set(r->prot.get(), first, count) || any_set(r->ban.get(), first, count)) return false;
     const uint64_t a = r->base + first * kPage, n = count * kPage;
@@ -548,6 +575,7 @@ void unguard(Region* r, uint64_t first, uint64_t count) {
     if (!r || first >= r->npages) return;
     count = std::min(count, r->npages - first);
     if (!count || !any_set(r->guard.get(), first, count)) return;
+    NXFT_MIN("ww.unguard", 100000);
     ExclusiveLock lk(r);
     unguard_locked(r, first, count);
 }

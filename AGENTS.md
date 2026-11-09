@@ -750,6 +750,61 @@ compute out 0.35 (copies ~2 ms of it), #6 25.6 ms = draws 12.4, gaps 8.2, passes
   frame at 1080, most from target changes and layout changes), `delta copy-backs`, `pool copy-ins` (pages copied in from the pool that
   the copy had just sent back: the "never re-upload the GPU's own writes" check).
 
+**Session 2026-11-09 (frame time: hitches, 1% lows, pacing, uncapped).** Pinned 1920x1080, cap 60, warm runs (one warm-up per scene
+first), alone, `load_state` + `memory.limit_gb 24`; windows: first scene 55-275 s, Link's house 45-190 s, Kokiri outside 55-210 s.
+**Tool:** `[diag] frame_csv` (gauge.cpp) writes every presented frame (interval, every hitch-log counter's growth, every hitch phase's ms;
+CSV-only counters draws / submits / textures created / process CPU / write-watch release waits). New phases: held-result fetches (and by
+guard faults), background pipeline builds, render-thread pipeline misses (`r_pipe_miss`: links, prewarm waits, key records), texture image
+creation, guarded-page faults, write-watch lock waits / exclusive holds, any-thread IPC. New trace zones: `ww.fault`, `ww.release.protect`,
+`ww.arm`, `ww.guard`, `ww.unguard`, `pipe.miss`, `pipe.prewarm_take`, `pipe.gpl_link`, `pipe.record`, `present.pace`. Classification:
+scratch scripts (worktree `work/scratch`, not committed: per slow frame, the component with the most excess over its median; the render
+thread is idle + replay(parts) + present, an idle excess is split by the presenting game thread's IPC / waits / faults).
+**Baseline (bf5366b):** first scene 46.7 fps, median 20.1 ms, 1% low 22.8, 161 frames over 2x the median, worst 373 ms; Link's house 59.2
+/ 16.4 ms / 1% low 30.7 / 95 / 54 ms; Kokiri outside 32.3-33.6 / 28-29 ms / 1% low 14.7-17.6 / 74-103 / 134-157 ms.
+**Hitch causes (share of the excess time of frames over 2x the median, baseline):**
+- Kokiri outside: **85% one stall**: the game's main thread and its job workers write one armed page at once; every waiting fault called
+  VirtualQuery (2.4 ms in a pool's section view, under the address space lock) in a loop while the releaser's VirtualProtect needed that
+  lock exclusive: 20-60 ms per fault, 100-150 ms frames (write faults 54%, the game waiting for its stuck workers 31%). Texture uploads
+  5-9%, replay 6-15%. Ours; the preparation does not touch it.
+- Link's house: tex_park misses: the game re-creates its post-process targets (~16 images) after more than 8 presents, so every 10-30 s
+  ~17 MB was uploaded and new sets built (texture upload 31%, replay 59% in the same frames: 194 of the 332 frames of 28-40 ms); game-side
+  job bursts 4.5%; pipelines 4%. Ours. Also: at the 60 cap presents came 10-24 ms apart (interval stdev 4.2 ms, 2,900 of 10,300 under
+  15 ms): the limiter paces the game at its frame boundary, the replay time varies.
+- First scene (with all instrumentation, 135 frames, 3% of the time): texture uploads 25% and texture image creation 13% (camera cuts:
+  ~250-340 new textures in a frame, 0.4-1.2 s; each new image opened its BC7 cache entry to read the format, ~4 ms, then read and untiled
+  it on the render thread), render-thread pipeline misses 22% (shots at ~225-250 s: 76-112 new pipeline keys per frame, 0.2-0.36 s
+  frames: **not the driver**: `prewarm_record` appended each new key to `pipeline_keys.bin` with two file opens, ~6 ms each, under the
+  prewarm lock), replay CPU 35% (new textures' descriptor sets, tex_park misses), game 3%.
+- **What the shader preparation removes:** little at this point. After the warm-up run the render thread built almost no pipelines
+  (`r_pipeline` < 1% of hitch time); the pipeline-miss frames were the key-file writes above (ours; a player's own run records each key
+  once, so it would also fade by itself on the second play). Background builds (`pipeline_bg`) compete for CPU in the first minute after
+  a new shot only. Everything else measured is ours and stays.
+**Kept (each measured):**
+1. `[mem] ww_quiet_wait` (write_watch.cpp): a fault waiting for another releaser of its page spins on the release count, reads the
+   protection once it is zero. Kokiri, same build on/off: 1% low 11.6 -> 23.9 fps, frames over 2x the median 143 -> 0, worst 155 -> 52 ms,
+   mean 33.7 -> 35.4 fps.
+2. `[nvn] tex_park_presents` / `tex_park_max` 8 / 64 -> 240 / 128: Link's house 1% low 31.2 -> 39.3, over 2x 75 -> 15, uploads 417 -> 63
+   KB per frame; first scene neutral (46.9 / 46.8 fps). Remaining misses are images an alias still held when the old texture went (log
+   `tex_park: tN ... not parked: ... refs 2-3`) or textures made before the old one was finalized.
+3. `[nvn] bc7_format_index` (nvn_texdata.cpp, `<bc7_cache>/formats2.idx`): new texture images 4.0 -> 0.17 ms each in the slow frames.
+4. `[display] present_pace` (nvn_present.cpp): a present waits until 0.95 of the cap's period after the previous one. Link's house, paired
+   runs: interval stdev 2.84 -> 1.73 ms, intervals under 15 ms 2,306 -> 0, over 20 ms 960 -> 479, fps 60.0 both, ~1 ms added latency.
+5. Prewarm key records written by the saver thread every 2 s (nvn_prewarm.cpp `append_records`): first scene, render-thread pipeline-miss time in the 220-255 s shots 1,432 -> 6 ms, worst frame there 411 -> 135 ms.
+6. Movie cap (play.cpp, `timestep::movie_showing`): while the game takes decoded pictures the limiter never runs above `[display]
+   console_fps`, whatever `fps_limit` says (checked on the title with `fps_limit = 0`: 60 while the movie plays, uncapped in its gaps).
+**Tried and dropped:** `tex_prep_early_kb = 64` (prepare textures at pool registration: no gain, process CPU 76 -> 163 ms per frame); handing
+a draw's textures to the background preparation together (camera cut 869 vs 1024 ms over 50 ms in one pair, 1% low 24.0 vs 24.6: noise);
+a persistent mesh-build thread pool (the suspected thread spawns were the key-file writes).
+**After (all kept, cap 60):** Link's house 60.0 fps, 1% low 40.1, 7-8 frames over 2x the median, worst 37 ms; Kokiri outside 35.4, 1% low
+23.9, 0 over 2x, worst 52 ms; first scene 45.8 fps (median 21.2 ms: GPU-bound, this run's GPU waits were ~1 ms longer), 1% low 26.3, 59 over 2x (baseline 161), worst 188 ms (baseline 373), camera cut at ~120 s 0.7 s over 50 ms in all (baseline ~1.0-2.9 s). Left: first scene's camera cuts (texture data read + untiled on the render thread,
+~3 ms per new texture, 0.25-1.2 s per cut; parallel preparation across draws would need a look-ahead over the coming draws' textures), the
+remaining tex_park misses, Link's house's game-side job bursts.
+**Uncapped (`[display] fps_limit = 0`, same build):** first scene 49.0 fps (GPU: main waits 11 ms per frame in nvnSyncWait, render thread
+idle 6.7 ms), Link's house 62.7 (median 15.4 ms; GPU ~15 ms, render replay 11.8 ms), Kokiri outside 35.3 (GPU). The cap only binds in the
+house, and there uncapped is less even (1% low 33.4 vs 40.1, 75 vs 8 frames over 2x the median). **Keep 60** until the GPU work allows
+well over 60; the movie cap now makes `cap_at_display_rate = true` safe for OoT when that time comes. Above 60 the real-time step was seen
+at 63 fps in game and 80-105 fps on the title (no anomaly seen; 120+ fps could not be reached in game on this GPU).
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
