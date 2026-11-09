@@ -93,6 +93,8 @@ void pool_register(MemoryPool* p) {
 }
 
 uint64_t pool_registry_generation() { return g_pool_gen.load(std::memory_order_relaxed); }
+std::atomic<uint64_t> g_pool_unreg_gen{0};
+uint64_t pool_unregister_generation() { return g_pool_unreg_gen.load(std::memory_order_acquire); }
 
 void pool_unregister(MemoryPool* p) {
     std::unique_lock<std::shared_mutex> lk(g_pool_mu);
@@ -100,6 +102,7 @@ void pool_unregister(MemoryPool* p) {
     if (it != g_pools.end() && it->second == p) g_pools.erase(it);
     publish_snapshot();
     g_pool_gen.fetch_add(1, std::memory_order_relaxed);
+    g_pool_unreg_gen.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void pool_collect(std::vector<Ref<MemoryPool>>& out) {

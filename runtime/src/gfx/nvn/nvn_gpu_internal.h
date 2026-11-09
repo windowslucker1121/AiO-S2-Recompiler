@@ -93,6 +93,9 @@ bool frame_chunk(Frame& f);
 
 // Destruction: fn runs once every submission made so far (and the one being recorded) has completed.
 void defer_destroy(std::function<void()> fn);
+// Descriptor pools that outlive submissions ([nvn] set_keep): made like the slots' pools; released once every submission so far has completed.
+VkDescriptorPool keep_dpool_new();
+void keep_dpool_release(VkDescriptorPool p);
 uint64_t completed_serial();      // cached timeline value; call poll_completed() for a fresh read
 uint64_t poll_completed();
 uint64_t current_serial();        // the serial of the submission being recorded (or the last one)
@@ -169,6 +172,15 @@ bool mirror_enabled();
 enum ReadUse { kReadVertex = 0, kReadIndex = 1, kReadUniform = 2 };
 enum WriteUse { kWriteStorage = 0, kWriteXfb = 1, kWriteImageCopy = 2, kWriteUpdate = 3, kWriteFill = 4, kWriteCopy = 5 };
 BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use);
+// [nvn] set_keep (nvn_replay.cpp): what resolve_read decided for a range, so a kept descriptor set can check the decision again later without
+// the pool look-up. state 0: the pool, and the range can never be served by a copy (no copy, over 64 MiB, two chunks, outside a pool);
+// 1: the copy; 2: the pool, but the copy could serve it once its pages are current. keep false: the decision depends on something the check
+// cannot see (no copy chunk yet): the set is not kept.
+struct Mirror;
+struct ReadDep { Mirror* m = nullptr; const void* pool = nullptr; uint64_t first = 0, last = 0; uint8_t state = 0; bool mirror_on = false; bool keep = true; };
+BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* dep);
+// True when resolve_read would decide the same now (and then does what it would do besides: marks the pages used or wanted).
+bool read_dep_check(const ReadDep& dep, int use);
 // The device-local copy of [gpu_address, +size) for the compute shadows (nvn_replay.cpp): its chunk and offset (buf null: no copy for it, or the
 // range spans two chunks), and whether the copy holds the pool's bytes right now. Call it before note_gpu_write invalidates the range.
 struct MirrorSpan { VkBuffer buf = VK_NULL_HANDLE; VkDeviceSize offset = 0; bool valid = false; VkDeviceSize avail = 0; };   // avail: bytes to the chunk's end
@@ -209,6 +221,7 @@ bool out_overlaps_shadow(uint64_t addr, uint64_t size);
 // Some page of [addr, +size) holds a result that is newer in the copy than in the pool.
 bool out_overlaps(uint64_t addr, uint64_t size);
 uint64_t out_version();
+uint64_t out_grow_version();   // moves only when held results may cover more pages ([nvn] overlap_grow)
 bool ab_tex_park_on();   // false in an off window of [nvn] cpuperf_ab with tex_park
 bool ab_overlap_grow_on();   // false in an off window of [nvn] cpuperf_ab with overlap_grow
 bool ab_index_inc_on();      // false in an off window of [nvn] cpuperf_ab with index_inc
