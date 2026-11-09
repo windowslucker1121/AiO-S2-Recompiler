@@ -5,6 +5,11 @@
 // "bc7_cache" in the current directory, "" disables the cache).
 #include "nvn_texdata.h"
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -12,7 +17,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include <nxrt/config.h>
 #include <nxrt/diag.h>
@@ -129,6 +137,8 @@ std::string cache_path_in(const std::string& dir, uint64_t hash) {
     return (std::filesystem::path(dir) / std::string(name, 2) / (std::string(name) + ".bc7")).string();
 }
 
+void fmt_index_add(const std::string& path, uint64_t key, uint32_t f);   // below
+
 // Writes the header and data of `out` under `key`. Atomic: the file is written under a temporary name and renamed, so a reader
 // never sees a partial file and concurrent writers of the same key both leave a complete file. A failure leaves no file.
 bool cache_write(const std::string& path, uint64_t key, const PreparedTexture& out) {
@@ -176,6 +186,7 @@ bool cache_write(const std::string& path, uint64_t key, const PreparedTexture& o
         fs::remove(tmp, ignore);
         return false;
     }
+    fmt_index_add(path, key, static_cast<uint32_t>(out.format));
     return true;
 }
 
@@ -384,17 +395,103 @@ uint64_t cache_key_of(uint64_t storage_size, const uint8_t* mem, const TexLayout
     return hash_seeded(mem, static_cast<size_t>(storage_size), meta_hash);
 }
 
+// The formats of cache entries by key, remembered in memory and in <cache>/formats2.idx ([nvn] bc7_format_index, default on). Opening
+// an entry to read its header cost ~4 ms on the render thread for every new texture image (the file open, with the virus scanner): a
+// camera cut in the intro made ~250 images in one frame (0.6-1 s). A known key needs only the entry's attributes (one call, no open):
+// a record holds the entry's size and last write time, and an entry rewritten since (another format, a tool's entry) is read again.
+// Records are 32 bytes (key, format, size, write time, check word), appended by every run; a record that does not check is ignored.
+// Several processes may append to the same file.
+struct FmtRec { uint32_t format; uint64_t size, mtime; };
+struct FormatIndex {
+    std::mutex mu;
+    std::string dir;                           // cache folder the index belongs to (loaded for this one)
+    std::unordered_map<uint64_t, FmtRec> m;
+    FILE* app = nullptr;
+};
+FormatIndex& fmt_index() {
+    static FormatIndex* s = new FormatIndex;
+    return *s;
+}
+uint32_t fmt_index_check(uint64_t key, const FmtRec& r) {
+    uint64_t h = key * 0x9e3779b97f4a7c15ull ^ (static_cast<uint64_t>(r.format) << 7) ^ r.size * 0xff51afd7ed558ccdull ^ r.mtime;
+    h ^= h >> 29;
+    return static_cast<uint32_t>(h) ^ 0x5A17F0E1u;
+}
+bool fmt_index_on() {
+    static const bool on = config_get_bool("nvn", "bc7_format_index", true);
+    return on;
+}
+// Size and last write time of a file; false when it is not a regular file.
+bool file_stamp(const std::string& path, uint64_t& size, uint64_t& mtime) {
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    if (!GetFileAttributesExW(std::filesystem::path(path).c_str(), GetFileExInfoStandard, &a)) return false;
+    if (a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return false;
+    size = (static_cast<uint64_t>(a.nFileSizeHigh) << 32) | a.nFileSizeLow;
+    mtime = (static_cast<uint64_t>(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
+    return true;
+}
+// Loads the index of a cache folder once (lock held).
+void fmt_index_load_locked(FormatIndex& ix, const std::filesystem::path& dir) {
+    const std::string d = dir.string();
+    if (ix.dir == d) return;
+    if (ix.app) { std::fclose(ix.app); ix.app = nullptr; }
+    ix.m.clear();
+    ix.dir = d;
+    const std::filesystem::path file = dir / "formats2.idx";
+    if (FILE* f = _wfopen(file.c_str(), L"rb")) {
+        uint8_t rec[32];
+        while (std::fread(rec, 1, sizeof rec, f) == sizeof rec) {
+            const uint64_t k = get64(rec);
+            const FmtRec r{get32(rec + 8), get64(rec + 12), get64(rec + 20)};
+            if (get32(rec + 28) == fmt_index_check(k, r)) ix.m[k] = r;
+        }
+        std::fclose(f);
+    }
+    std::error_code ec;
+    if (std::filesystem::is_directory(dir, ec)) ix.app = _wfopen(file.c_str(), L"ab");
+    NXLOG_D(kTag, "cache format index %s: %zu entries", file.string().c_str(), ix.m.size());
+}
+// Remembers the format of the entry at path (its current size and write time).
+void fmt_index_add(const std::string& path, uint64_t key, uint32_t f) {
+    if (!fmt_index_on() || path.empty()) return;
+    FmtRec r{f, 0, 0};
+    if (!file_stamp(path, r.size, r.mtime)) return;
+    FormatIndex& ix = fmt_index();
+    std::lock_guard<std::mutex> lk(ix.mu);
+    fmt_index_load_locked(ix, std::filesystem::path(path).parent_path().parent_path());
+    auto [it, fresh] = ix.m.emplace(key, r);
+    if (!fresh && it->second.format == r.format && it->second.size == r.size && it->second.mtime == r.mtime) return;
+    it->second = r;
+    if (!ix.app) return;
+    std::vector<uint8_t> rec;
+    put64(rec, key);
+    put32(rec, r.format);
+    put64(rec, r.size);
+    put64(rec, r.mtime);
+    put32(rec, fmt_index_check(key, r));
+    std::fwrite(rec.data(), 1, rec.size(), ix.app);
+    std::fflush(ix.app);
+}
+
 // The VkFormat a cache file declares (magic, version and key checked), VK_FORMAT_UNDEFINED when there is no valid file.
 VkFormat cache_peek_format(const std::string& path, uint64_t key) {
-    std::error_code ec;
-    if (!std::filesystem::is_regular_file(path, ec)) return VK_FORMAT_UNDEFINED;
+    uint64_t size = 0, mtime = 0;
+    if (!file_stamp(path, size, mtime)) return VK_FORMAT_UNDEFINED;
+    if (fmt_index_on()) {
+        FormatIndex& ix = fmt_index();
+        std::lock_guard<std::mutex> lk(ix.mu);
+        fmt_index_load_locked(ix, std::filesystem::path(path).parent_path().parent_path());
+        if (auto it = ix.m.find(key); it != ix.m.end() && it->second.size == size && it->second.mtime == mtime)
+            return static_cast<VkFormat>(it->second.format);
+    }
     std::ifstream f(path, std::ios::binary);
     uint8_t head[kCacheHeadBytes];
     if (!f || !f.read(reinterpret_cast<char*>(head), sizeof head)) return VK_FORMAT_UNDEFINED;
     if (std::memcmp(head, kCacheMagic, 4) != 0 || get32(head + 4) != kCacheVersion || get64(head + 8) != key) return VK_FORMAT_UNDEFINED;
-    return static_cast<VkFormat>(get32(head + 16));
+    const uint32_t fm = get32(head + 16);
+    fmt_index_add(path, key, fm);
+    return static_cast<VkFormat>(fm);
 }
-
 }  // namespace
 namespace {
 

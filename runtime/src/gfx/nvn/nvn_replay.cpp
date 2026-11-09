@@ -6909,7 +6909,9 @@ void replay_begin_submit(Frame& f) {
             {
                 uint64_t pk = 0, tk = 0, st = 0, ex = 0;
                 park_stats(&pk, &tk, &st, &ex);
-                NXLOG_I(kTag, "parked texture images (tex_park): %llu parked, %llu taken back (%llu of them stale: uploaded again), %llu expired", (unsigned long long)pk, (unsigned long long)tk, (unsigned long long)st, (unsigned long long)ex);
+                uint64_t ms = 0, mse = 0, msb = 0;
+                park_miss_stats(&ms, &mse, &msb);
+                NXLOG_I(kTag, "parked texture images (tex_park): %llu parked, %llu taken back (%llu of them stale: uploaded again), %llu expired; new images of pool textures with none parked %llu (%llu of them with a key that expired lately, %llu of 1 MiB or more)", (unsigned long long)pk, (unsigned long long)tk, (unsigned long long)st, (unsigned long long)ex, (unsigned long long)ms, (unsigned long long)mse, (unsigned long long)msb);
             }
             NXLOG_I(kTag, "submissions: %llu, parts sent ahead while recording (submit_chunk_draws): %llu; draw buffer checks skipped %llu; pass look-aheads %llu settled %llu ranges; descriptor sets resolved %llu, %llu of them already in the submission's cache; %llu bound again without resolving (set_reuse), %llu differed (verify); resolve epoch moves: commands %llu, GPU writes %llu, passes %llu; set memo cleared by the epoch %llu, texture state %llu, results sent back %llu",
                     (unsigned long long)counters().submits.load(), (unsigned long long)counters().submit_chunks.load(), (unsigned long long)g_odb_skipped, (unsigned long long)g_la_scans, (unsigned long long)g_la_settled, (unsigned long long)g_sets_built, (unsigned long long)g_sets_cached,

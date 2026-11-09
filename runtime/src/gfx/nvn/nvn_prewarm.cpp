@@ -80,6 +80,7 @@ std::unordered_map<uint64_t, std::vector<std::shared_ptr<Job>>> g_jobs;   // by 
 std::vector<std::thread> g_workers;
 std::thread g_saver;
 PrewarmStats g_stats;
+std::vector<Rec> g_rec_out;   // records not yet in the key file (written by the saver thread; under g_mu)
 
 uint64_t parse_hash(const std::string& hex) {
     uint64_t v = 0;
@@ -175,7 +176,10 @@ void load_file() {
     g_stats.loaded = g_recs.size();
 }
 
-void append_record(const Rec& r) {
+// Appends records to the key file (one open for all of them). Called without g_mu: by the saver thread every 2 s and at shutdown. Writing each
+// record at its draw cost the render thread ~6 ms (two file opens): the intro's camera cuts recorded ~100 keys in a frame (0.2-0.35 s frames).
+void append_records(const std::vector<Rec>& rs) {
+    if (rs.empty()) return;
     bool fresh = false;
     {
         std::ifstream t(g_path, std::ios::binary | std::ios::ate);
@@ -189,7 +193,7 @@ void append_record(const Rec& r) {
         f.write(reinterpret_cast<const char*>(&size), 4);
         f.write(reinterpret_cast<const char*>(&pad), 4);
     }
-    f.write(reinterpret_cast<const char*>(&r), sizeof r);
+    f.write(reinterpret_cast<const char*>(rs.data()), static_cast<std::streamsize>(rs.size() * sizeof(Rec)));
 }
 
 void worker_main() {
@@ -274,6 +278,13 @@ void saver_main() {
                     static_cast<unsigned long long>(g_stats.taken), static_cast<unsigned long long>(g_stats.waited), g_stats.wait_ms,
                     static_cast<unsigned long long>(g_stats.linked_meanwhile), static_cast<unsigned long long>(g_stats.claimed));
         }
+        if (!g_rec_out.empty()) {                  // new keys go to the file here, not at their draw
+            std::vector<Rec> out;
+            out.swap(g_rec_out);
+            lk.unlock();
+            append_records(out);
+            lk.lock();
+        }
         gpl_progress_log();
         if (std::chrono::steady_clock::now() >= next_summary) {
             next_summary += std::chrono::seconds(30);
@@ -338,7 +349,7 @@ void prewarm_record(const GraphicsKey& key) {
     g_recs.push_back(r);
     g_rec_jobs.push_back(nullptr);                              // built or linked at its draw this session
     ++g_stats.recorded;
-    append_record(r);
+    g_rec_out.push_back(r);                                    // the saver thread writes it (append_records)
 }
 
 size_t prewarm_program(const ShaderInfo* const stages[6]) {
@@ -442,6 +453,14 @@ void prewarm_shutdown() {
     g_cv.notify_all();
     for (auto& t : workers) t.join();
     if (saver.joinable()) saver.join();
+    {   // records the saver has not written yet
+        std::vector<Rec> out;
+        {
+            std::lock_guard<std::mutex> lk(g_mu);
+            out.swap(g_rec_out);
+        }
+        append_records(out);
+    }
     std::lock_guard<std::mutex> lk(g_mu);
     for (auto& [h, vec] : g_jobs)
         for (auto& j : vec)

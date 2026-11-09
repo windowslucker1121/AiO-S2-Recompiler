@@ -174,12 +174,14 @@ std::atomic<void (*)()> g_busy_hook{nullptr};
 struct GameSvcTimer {
     uint64_t t0;
     uint32_t number;
-    explicit GameSvcTimer(uint32_t n) : t0(hitch_on_game_present_thread() ? hitch_ticks() : 0), number(n) {}
+    uint64_t ta;   // any thread: IPC time ([diag] frame_csv: file reads and service calls of the game's workers)
+    explicit GameSvcTimer(uint32_t n) : t0(hitch_on_game_present_thread() ? hitch_ticks() : 0), number(n), ta(!t0 && n >= 0x21 && n <= 0x23 ? hitch_ticks() : 0) {}
     ~GameSvcTimer() {
+        if (ta) hitch_phase_add(kHpAnyIpc, hitch_ticks() - ta);
         if (!t0) return;
         const uint64_t d = hitch_ticks() - t0;
         hitch_phase_add(kHpGameSvc, d);
-        if (number >= 0x21 && number <= 0x23) hitch_phase_add(kHpGameIpc, d);   // SendSyncRequest(WithUserBuffer), SendAsyncRequestWithUserBuffer
+        if (number >= 0x21 && number <= 0x23) { hitch_phase_add(kHpGameIpc, d); hitch_phase_add(kHpAnyIpc, d); }   // SendSyncRequest(WithUserBuffer), SendAsyncRequestWithUserBuffer
         else if (number == 0x0B || number == 0x18 || number == 0x1A || number == 0x1C || number == 0x34) hitch_phase_add(kHpGameWait, d);
     }
     GameSvcTimer(const GameSvcTimer&) = delete;

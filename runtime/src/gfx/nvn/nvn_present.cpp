@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // nvnQueuePresentTexture: the window texture is drawn into the Renderer's frame (swapchain or headless image) and presented.
 // The shell's FrameLimiter, when given, paces the frame (begin_frame before the image is acquired).
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <emmintrin.h>
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -58,6 +68,26 @@ bool shot_wanted(int64_t n) {
         if (n >= s.from && n <= s.to && (n - s.from) % s.step == 0) return true;
     return false;
 }
+// Sleeps on a high-resolution timer, then spins the last 0.3 ms (the present pacing wait).
+void wait_until_ns(uint64_t due) {
+    thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    for (;;) {
+        const uint64_t now = FrameLimiter::now_ns();
+        if (now >= due) return;
+        if (due - now > 400000 && timer) {
+            LARGE_INTEGER t;
+            t.QuadPart = -static_cast<LONGLONG>((due - now - 300000) / 100);
+            if (SetWaitableTimerEx(timer, &t, 0, nullptr, nullptr, nullptr, 0)) { WaitForSingleObject(timer, 50); continue; }
+        }
+        _mm_pause();
+    }
+}
+
+bool present_pace_on() {
+    static const bool on = nxrt::config_get_bool("display", "present_pace", true);
+    return on;
+}
+
 }  // namespace
 
 void present_on_render_thread(Window* w, int index) {
@@ -81,6 +111,24 @@ void present_on_render_thread(Window* w, int index) {
         // the pre-frame hook (present mode changes) always runs here; the wait runs here only when no frame boundary has paced this present (S18)
         { NXFT("present.hook"); lim->run_pre_frame_hook(); }
         if (!(extras::pace_in_main() && extras::pace_boundary_consume())) { NXFT("limiter"); nxrt::HitchTimer ht(nxrt::kHpRenderLimiter); lim->begin_frame_nohook(); }
+        else if (present_pace_on()) {
+            // [display] present_pace: the game's main thread is paced at the frame boundary, but how long its frame takes to replay varies,
+            // so presents came 10-24 ms apart at a steady 60 (Link's house: stdev 4.2 ms): uneven motion with an even game step. A present
+            // never follows the previous one sooner than [display] present_pace_min (0.95) of the cap's period: the short intervals, the
+            // other half of every long one, go. Relative to the last present (no grid), so a late frame adds no lasting delay.
+            static const double frac = std::clamp(nxrt::config_get_double("display", "present_pace_min", 0.95), 0.5, 1.0);
+            static uint64_t last = 0;
+            const double fps = lim->target_fps();
+            if (fps > 0 && last && !frame_limiter_unpaced()) {
+                const uint64_t due = last + static_cast<uint64_t>(frac * 1e9 / fps);
+                if (FrameLimiter::now_ns() < due) {
+                    NXFT("present.pace");
+                    nxrt::HitchTimer ht(nxrt::kHpRenderLimiter);
+                    wait_until_ns(due);
+                }
+            }
+            last = FrameLimiter::now_ns();
+        }
     }
     {
         const int64_t n = static_cast<int64_t>(counters().presents.load());

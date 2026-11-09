@@ -101,7 +101,7 @@ size_t files_in(const fs::path& d) {
     size_t n = 0;
     std::error_code ec;
     for (auto it = fs::recursive_directory_iterator(d, ec); it != fs::recursive_directory_iterator(); ++it)
-        if (it->is_regular_file()) ++n;
+        if (it->is_regular_file() && it->path().extension() == ".bc7") ++n;   // cache entries (not the format index)
     return n;
 }
 

@@ -135,6 +135,9 @@ float current_dt();
 bool active();
 // The installed mode feeds the game a step (real or fixed) and the game lists sites: known before the first frame.
 bool active_mode();
+// A game with Sites::fixed_step_during_movies is showing a movie (it took a decoded picture in the last 0.5 s): its frames are one picture
+// each, so the frame limiter must not run above [display] console_fps meanwhile (play.cpp caps it). Any thread; lock-free.
+bool movie_showing();
 
 struct Stats {
     uint64_t frames = 0;

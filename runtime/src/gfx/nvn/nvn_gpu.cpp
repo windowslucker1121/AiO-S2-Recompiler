@@ -1178,6 +1178,10 @@ void register_counter_gauges() {
         nxrt::hitch_add_counter("texture_uploads", []() -> uint64_t { Gpu* gp = g; return gp ? gp->ctr.texture_uploads.load(std::memory_order_relaxed) : 0; });
         nxrt::hitch_add_counter("texture_upload_kb", []() -> uint64_t { Gpu* gp = g; return gp ? gp->ctr.texture_upload_bytes.load(std::memory_order_relaxed) >> 10 : 0; });
         nxrt::hitch_add_counter("bc7_transcodes", []() -> uint64_t { Gpu* gp = g; return gp ? gp->ctr.bc7_transcodes.load(std::memory_order_relaxed) : 0; });
+        nxrt::hitch_add_csv_counter("draws", []() -> uint64_t { Gpu* gp = g; return gp ? gp->ctr.draws.load(std::memory_order_relaxed) : 0; });
+        nxrt::hitch_add_csv_counter("draws_skipped", []() -> uint64_t { Gpu* gp = g; return gp ? gp->ctr.draws_skipped.load(std::memory_order_relaxed) : 0; });
+        nxrt::hitch_add_csv_counter("submits", []() -> uint64_t { Gpu* gp = g; return gp ? gp->ctr.submits.load(std::memory_order_relaxed) : 0; });
+        nxrt::hitch_add_csv_counter("textures_created", []() -> uint64_t { Gpu* gp = g; return gp ? gp->ctr.textures_created.load(std::memory_order_relaxed) : 0; });
         nxrt::hitch_add_level("pipeline_compiles_in_flight", []() -> int64_t { return compiles_in_flight().load(std::memory_order_relaxed); });
         return true;
     }();

@@ -224,6 +224,7 @@ void publish_dt(float dt) {
 }
 
 float read_dt() { return g().dt; }
+std::atomic<double> g_movie_pics_at{-1.0};   // movie_pics_at for movie_showing() on other threads
 
 // Pictures of movies the game has taken so far: the movie list's (Switch 1 HLE) plus nn::codec's decoded pictures read (Switch 2).
 uint64_t movie_pictures() { return media::movie_stats().video_frames_delivered + media::video_codec_stats().frames_read; }
@@ -266,6 +267,7 @@ void begin_frame() {
                 if (pics != s.movie_pics) {
                     s.movie_pics = pics;
                     s.movie_pics_at = now;
+                    g_movie_pics_at.store(now, std::memory_order_relaxed);
                 }
                 if (s.movie_pics_at >= 0.0 && now - s.movie_pics_at < 0.5) dt = kGameStep;   // a movie is showing: one picture, one 1/60 s step
             }
@@ -514,6 +516,10 @@ void shutdown() {
 
 float current_dt() { return read_dt(); }
 bool active() { return g().active.load(); }
+bool movie_showing() {
+    const double at = g_movie_pics_at.load(std::memory_order_relaxed);
+    return at >= 0.0 && clock_now() - at < 0.5;
+}
 
 Stats stats() {
     G& s = g();

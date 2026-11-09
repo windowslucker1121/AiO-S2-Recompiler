@@ -241,7 +241,7 @@ inline VkResult create_graphics_pipeline_tracked(VkDevice dev, VkPipelineCache c
     compiles_in_flight().fetch_add(1, std::memory_order_relaxed);
     const uint64_t t0 = nxrt::hitch_ticks();
     const VkResult r = vkCreateGraphicsPipelines(dev, cache, 1, gi, nullptr, out);
-    if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - t0);
+    nxrt::hitch_phase_add(nxrt::hitch_on_render_thread() ? nxrt::kHpRenderPipeline : nxrt::kHpPipelineBg, nxrt::hitch_ticks() - t0);
     compiles_in_flight().fetch_sub(1, std::memory_order_relaxed);
     return r;
 }

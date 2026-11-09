@@ -682,18 +682,33 @@ struct Parked { ParkKey key; TexGpu* g; uint64_t at; uint64_t sample; bool dirty
 std::mutex g_park_mu;
 std::vector<Parked> g_parked;
 std::atomic<uint64_t> g_park_n{0}, g_park_taken{0}, g_park_stale{0}, g_park_expired{0};   // statistics
-constexpr uint64_t kParkPresents = 8;
-constexpr size_t kParkMax = 64;
+std::atomic<uint64_t> g_park_miss{0}, g_park_miss_expired{0}, g_park_miss_big{0};   // new images of pool textures: none parked (of them: its key expired lately; >= 1 MiB)
+ParkKey g_expired_keys[64];                       // the keys of the latest expired images (miss diagnostics)
+uint64_t g_expired_at[64];                        // the present each expired at
+size_t g_expired_n = 0;
+// [nvn] tex_park_presents / tex_park_max (240 / 128): how long (presents) and how many parked images are kept. 8 / 64 missed the game's re-creation
+// of its post-process targets after more than 8 presents (Link's house: bursts of ~16 new images and ~17 MB of uploads, frames of 30-40 ms;
+// 240 / 128: uploads 446 -> 63 KB per frame, frames over 2x the median 75 -> 15, 1% low 31 -> 39 fps).
+uint64_t park_presents() {
+    static const uint64_t n = static_cast<uint64_t>(std::max<int64_t>(1, nxrt::config_get_int("nvn", "tex_park_presents", 240)));
+    return n;
+}
+size_t park_max() {
+    static const size_t n = static_cast<size_t>(std::max<int64_t>(1, nxrt::config_get_int("nvn", "tex_park_max", 128)));
+    return n;
+}
 bool tex_park_on() {
     static const bool on = nxrt::config_get_bool("nvn", "tex_park", true);
     return on && ab_tex_park_on();
 }
-// Destroys parked images older than kParkPresents (or the oldest over kParkMax). Lock held.
+// Destroys parked images older than park_presents() (or the oldest over park_max()). Lock held.
 void park_sweep_locked(uint64_t now) {
     for (size_t i = 0; i < g_parked.size();) {
-        if (now - g_parked[i].at > kParkPresents || g_parked.size() > kParkMax) {
+        if (now - g_parked[i].at > park_presents() || g_parked.size() > park_max()) {
             destroy_texture_gpu(g_parked[i].g);
             g_park_expired.fetch_add(1, std::memory_order_relaxed);
+            g_expired_at[g_expired_n % 64] = now;
+            g_expired_keys[g_expired_n++ % 64] = g_parked[i].key;
             g_parked.erase(g_parked.begin() + static_cast<std::ptrdiff_t>(i));
         } else {
             ++i;
@@ -705,7 +720,6 @@ TexGpu* tex_unpark(Texture* t) {
     if ((!t->mem && !t->vpool) || t->is_display || !tex_park_on()) return nullptr;
     const ParkKey k = park_key(*t);
     std::lock_guard<std::mutex> lk(g_park_mu);
-    if (g_parked.empty()) return nullptr;
     park_sweep_locked(counters().presents.load(std::memory_order_relaxed));
     for (size_t i = 0; i < g_parked.size(); ++i) {
         if (!(g_parked[i].key == k)) continue;
@@ -718,12 +732,36 @@ TexGpu* tex_unpark(Texture* t) {
         g_park_taken.fetch_add(1, std::memory_order_relaxed);
         return p.g;
     }
+    // a miss: say why (diagnostics; the statistics line parked texture images)
+    g_park_miss.fetch_add(1, std::memory_order_relaxed);
+    bool was_expired = false;
+    uint64_t expired_at = 0;
+    for (size_t i = 0; i < std::min<size_t>(g_expired_n, 64); ++i) if (g_expired_keys[i] == k) { was_expired = true; expired_at = g_expired_at[i]; break; }
+    if (was_expired) g_park_miss_expired.fetch_add(1, std::memory_order_relaxed);
+    if (t->storage_size >= (1u << 20)) {
+        g_park_miss_big.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<int> logged{0};
+        const int nl = logged.fetch_add(1, std::memory_order_relaxed);
+        if (nl < 40 || nl % 50 == 0)
+            NXLOG_I(kTag, "tex_park miss: t%u %ux%u %s %llu KiB %s+0x%llx, %zu parked, %s %llu presents ago (present %llu)", t->id, k.w, k.h, t->fmt ? t->fmt->name : "?",
+                    static_cast<unsigned long long>(t->storage_size >> 10), t->vpool ? "vpool" : "mem", static_cast<unsigned long long>(k.voff), g_parked.size(),
+                    was_expired ? "its key expired" : "not parked lately", static_cast<unsigned long long>(was_expired ? counters().presents.load(std::memory_order_relaxed) - expired_at : 0), static_cast<unsigned long long>(counters().presents.load(std::memory_order_relaxed)));
+    }
     return nullptr;
 }
 }  // namespace
 
 bool tex_park(const Texture& t, TexGpu* g) {
-    if (!g || g->failed || !g->gpu_written || g->refs != 1 || g->sparse || g->streamed || (!t.mem && !t.vpool) || t.is_display || !tex_park_on()) return false;
+    if (!g || g->failed || !g->gpu_written || g->refs != 1 || g->sparse || g->streamed || (!t.mem && !t.vpool) || t.is_display || !tex_park_on()) {
+        if (g && !g->failed && t.vpool && t.storage_size >= (1u << 20) && tex_park_on()) {   // diagnostics: why a big pool texture was not parked
+            static std::atomic<int> logged{0};
+            const int nl = logged.fetch_add(1, std::memory_order_relaxed);
+            if (nl < 20 || nl % 100 == 0)
+                NXLOG_I(kTag, "tex_park: t%u %ux%u %s not parked: gpu_written %d refs %u sparse %d streamed %d", t.id, static_cast<unsigned>(t.b.width),
+                        static_cast<unsigned>(t.b.height), t.fmt ? t.fmt->name : "?", g->gpu_written ? 1 : 0, static_cast<unsigned>(g->refs), g->sparse ? 1 : 0, g->streamed ? 1 : 0);
+        }
+        return false;
+    }
     Parked p{park_key(t), g, counters().presents.load(std::memory_order_relaxed), park_sample(t), false};
     std::lock_guard<std::mutex> lk(g_park_mu);
     for (Parked& o : g_parked)
@@ -748,6 +786,9 @@ void parked_cpu_wrote(uint64_t lo, uint64_t hi) {
 void park_stats(uint64_t* parked, uint64_t* taken, uint64_t* stale, uint64_t* expired) {
     *parked = g_park_n.load(); *taken = g_park_taken.load(); *stale = g_park_stale.load(); *expired = g_park_expired.load();
 }
+void park_miss_stats(uint64_t* miss, uint64_t* miss_expired, uint64_t* miss_big) {
+    *miss = g_park_miss.load(); *miss_expired = g_park_miss_expired.load(); *miss_big = g_park_miss_big.load();
+}
 
 namespace {
 // The texture's image, created on first use. Null when the texture has no usable image (the failure is counted and logged once).
@@ -770,7 +811,9 @@ TexGpu* tex_or_null(Texture* t, float want_scale = 1.0f) {
     }
     if (want_scale == 1.0f) if (TexGpu* pg = tex_unpark(t)) return pg;   // a parked image of the same storage and layout
     NXFT_MIN("tex.create", 30000);
+    const uint64_t tc0 = nxrt::hitch_ticks();
     TexGpu* g = create_texture_gpu(t, want_scale);
+    if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderTexCreate, nxrt::hitch_ticks() - tc0);
     return g->failed ? nullptr : g;
 }
 
