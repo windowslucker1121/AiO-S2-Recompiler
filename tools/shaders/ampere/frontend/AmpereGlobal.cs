@@ -88,6 +88,14 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         /// NXRT_HARNESS_GMEM_NO_CACHE=1: no page cache (for measuring).
         static readonly bool NoCache = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_NO_CACHE") == "1";
+        /// Measurement only (wrong results): NXRT_HARNESS_GMEM_IDENTITY=1 uses the guest address as the device address (no walk);
+        /// NXRT_HARNESS_GMEM_NO_SLOTS=1 leaves out the bound-slot candidates. Together: the shader's own cost without the lookup.
+        internal static readonly bool Identity = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_IDENTITY") == "1";
+        /// NXRT_HARNESS_GMEM_FIRSTSLOT=1 (measurement only): every access goes to the first candidate storage buffer at its low address word.
+        internal static readonly bool FirstSlot = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_FIRSTSLOT") == "1";
+        /// NXRT_HARNESS_GMEM_SCAN_ALL=1: the candidate search visits all 16 slots per access (the form before 2026-11-09).
+        static readonly bool ScanAllSlots = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_SCAN_ALL") == "1";
+        internal static readonly bool NoSlots = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_NO_SLOTS") == "1";
 
         public static int[] Candidates => _candidates;
 
@@ -121,11 +129,32 @@ namespace Ryujinx.Graphics.Shader.Translation
             if (w == null || w.Length < 2) return null;
             for (int i = 1; i < w.Length; i++) if (w[i] != w[0] + 4 * i) return null;
             Operand aLo = Argument(0), aHi = Argument(1);
-            Operand k = Local(), hit = Local();
+            Operand hit = Local();
             Operand slots = Cbuf(0, SlotMaskWord(w));
-            c.Copy(k, Const(0));
             c.Copy(hit, Const(-1));
             Operand loop = Label(), none = Label();
+            if (!ScanAllSlots)
+            {
+                // only the marked slots, lowest first, until one holds the address (most masks have one or two bits; the 16-step loop per
+                // 32-bit word was ~20% of a pointer draw, E3)
+                Operand m = Local();
+                c.Copy(m, c.BitwiseAnd(slots, Const(w.Length >= 32 ? -1 : (1 << w.Length) - 1)));
+                c.BranchIfFalse(none, c.ICompareNotEqual(m, Const(0)));
+                c.MarkLabel(loop);
+                Operand kk = c.FindLSB(m);
+                Operand v = c.IAdd(Const(w[0] / 4), kk);
+                Operand lo0 = c.Load(StorageKind.ConstantBuffer, cbBinding, Const(0), v, Const(w[0] & 3));
+                Operand hi0 = c.Load(StorageKind.ConstantBuffer, cbBinding, Const(0), v, Const((w[0] & 3) + 1));
+                Operand sz0 = c.Load(StorageKind.ConstantBuffer, cbBinding, Const(0), v, Const((w[0] & 3) + 2));
+                Operand in0 = c.BitwiseAnd(c.ICompareLessUnsigned(c.ISubtract(aLo, lo0), sz0), c.ICompareEqual(c.IAdd(aHi, c.ICompareLessUnsigned(aLo, lo0)), hi0));
+                c.Copy(hit, c.ConditionalSelect(in0, kk, Const(-1)));
+                c.Copy(m, c.BitwiseAnd(m, c.ISubtract(m, Const(1))));
+                c.BranchIfTrue(loop, c.BitwiseAnd(c.ICompareNotEqual(m, Const(0)), c.ICompareEqual(hit, Const(-1))));
+                c.MarkLabel(none);
+                return hit;
+            }
+            Operand k = Local();
+            c.Copy(k, Const(0));
             c.BranchIfFalse(none, c.ICompareNotEqual(slots, Const(0)));
             c.MarkLabel(loop);
             {
@@ -166,12 +195,13 @@ namespace Ryujinx.Graphics.Shader.Translation
         // The device address of (aLo, aHi): the page cache (CacheMemory) when it holds the address's span, else a walk of the page table
         // (layout above). One loop without early exits and a single branch to `miss` at its end: NVIDIA's compiler (driver 610.88) crashed
         // on the earlier form, a cache test jumping over a walk loop whose exits branch to the miss label.
-        static (Operand, Operand) EmitResolve(EmitterContext c, ResourceManager rm, Operand aLo, Operand aHi, Operand miss)
+        static (Operand, Operand) EmitResolve(EmitterContext c, ResourceManager rm, Operand aLo, Operand aHi, Operand miss, Operand[] leaf = null)
         {
             Operand shifts = Cbuf(0, PageTableC0 / 4), rootCount = Cbuf(0, PageTableC0 / 4 + 1);
             Operand tLo = Cbuf(0, PageTableC0 / 4 + 2), tHi = Cbuf(0, PageTableC0 / 4 + 3);
             Operand pLo = Local(), pHi = Local(), found = Local();
-            int cache = CacheMemory(rm);
+            // with fast-path helpers the page cache belongs to main alone: helpers neither read nor write it (leaf: the span for the caller)
+            int cache = Fast ? -1 : CacheMemory(rm);
             Operand hit = c.ICompareNotEqual(tLo, tLo);   // false, as a bool (no cache)
             if (cache >= 0)
             {
@@ -252,13 +282,16 @@ namespace Ryujinx.Graphics.Shader.Translation
                 c.Copy(pLo, c.ConditionalSelect(isLeaf, rLo, pLo));
                 c.Copy(pHi, c.ConditionalSelect(isLeaf, rHi, pHi));
                 c.Copy(found, c.BitwiseOr(found, isLeaf));
-                if (cache >= 0)
+                if (cache >= 0 || leaf != null)
                 {
                     // spans of 2^32 bytes or more are not cached (the tag compares the high word whole)
                     Operand keep = c.BitwiseOr(c.BitwiseNot(isLeaf), big);
                     Operand[] now = { c.BitwiseAnd(aLo, c.BitwiseNot(m)), aHi, m, bLo, eHi };
                     for (int i = 0; i < CacheWords; i++)
-                        c.Store(StorageKind.LocalMemory, cache, Const(i), c.ConditionalSelect(keep, c.Load(StorageKind.LocalMemory, cache, Const(i)), now[i]));
+                    {
+                        if (leaf != null) c.Copy(leaf[i], c.ConditionalSelect(keep, leaf[i], now[i]));
+                        else c.Store(StorageKind.LocalMemory, cache, Const(i), c.ConditionalSelect(keep, c.Load(StorageKind.LocalMemory, cache, Const(i)), now[i]));
+                    }
                 }
                 c.Copy(nodeOff, c.ConditionalSelect(isNode, eLo, nodeOff));
                 c.Copy(prev, c.ConditionalSelect(isNode, s, prev));
@@ -280,7 +313,16 @@ namespace Ryujinx.Graphics.Shader.Translation
             if (baseInst == IrInstruction.Store || inst.IsAtomic()) _usedWrite = true;
             Operand aLo = Argument(0), aHi = Argument(1);
             Operand skip = Label();
-            (Operand pLo, Operand pHi) = EmitResolve(c, rm, aLo, aHi, skip);
+            Operand[] leaf = null;
+            if (_helperFast && !Identity)
+            {
+                int[] none = { 1, -1, 0, 0, 0 };
+                leaf = new Operand[CacheWords];
+                for (int i = 0; i < CacheWords; i++) { leaf[i] = Local(); c.Copy(leaf[i], Const(none[i])); }
+            }
+            (Operand pLo, Operand pHi) = Identity ? (aLo, aHi) : EmitResolve(c, rm, aLo, aHi, skip, leaf);
+            if (leaf != null)
+                for (int i = 0; i < FastOuts; i++) c.Copy(Argument(_helperInArgs + i), leaf[i]);   // the span for main's page cache
 
             // Atomics other than add, exchange and compare-and-swap as a compare-and-swap loop. The device address points into a game memory
             // pool, which is host memory imported into Vulkan, and a GPU atomic on system memory is a PCIe atomic operation: PCIe has only
@@ -327,6 +369,184 @@ namespace Ryujinx.Graphics.Shader.Translation
             if (returnsValue) c.Return(dest); else c.Return();
             c.MarkLabel(skip);
         }
+
+        // ---- Out-of-line helpers and the inline fast path ---------------------------------------------------------------------------------
+        // Ryujinx makes one helper function per access kind and calls it for every 32-bit word; the driver inlined each call, so a pointer
+        // shader carried the whole candidate search and page walk once per word (OoT's fern mesh fbb731e2: 253 calls, 1.26 MB of code,
+        // 255 registers, 20 s to compile). Now (each can be switched off for measuring):
+        //  - the helpers are marked DontInline (NVIDIA's compiler keeps one copy) and take their in arguments by value;
+        //  - a plain 32-bit load calls its helper only on the slow path: at the call site the page cache (CacheMemory, main's own) is
+        //    checked inline, and when no bound slot is marked (SlotMaskC0 word 0) and the cached span holds the address, the word is loaded
+        //    through the cached device address right there (TryGenerateHelperCall); a miss calls the helper, which returns the value and the
+        //    span its walk ended in. fbb731e2: 1.26 MB -> 175 KB of code, 20 s -> 1.1 s to build; fps unchanged (the draws' own work and
+        //    register use dominate: with the lookup removed altogether, measurement mode IDENTITY, they still take 255 registers).
+        /// NXRT_HARNESS_GMEM_NOINLINE=0: the helpers may be inlined again (as before 2026-11-09).
+        public static readonly bool NoInline = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_NOINLINE") != "0";
+        /// NXRT_HARNESS_GMEM_FAST=0: no inline fast path (every word calls its helper).
+        public static readonly bool Fast = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_FAST") != "0";
+        public const string HelperSuffix = "_gmem", FastSuffix = "_gmemfast";
+        // Fast-path helpers: one extra in argument (the stage's slot mask word, c[0] SlotMaskC0), out arguments {the five cache words of
+        // the span the walk ended in}. The page cache is read and written only by main's inline code (so the driver keeps it in registers:
+        // a cache the out-of-line helper touched lived in local memory); in SPIR-V the helper returns {value, span} as a struct.
+        public const int FastArguments = 1, FastOuts = CacheWords;
+        [ThreadStatic] static bool _lastFallback;
+        [ThreadStatic] static int _helperInArgs;
+        [ThreadStatic] static bool _helperFast;
+        /// GlobalToStorage: whether the multi-target function just made or found for an access is a fallback one.
+        internal static bool LastFallback { get => _lastFallback; set => _lastFallback = value; }
+
+        /// Whether the access gets the inline fast path (a plain 32-bit load through the fallback).
+        internal static bool WantsFast(Operation op, ResourceManager rm) =>
+            Fast && _candidates is { Length: > 0 } && op.Inst == IrInstruction.Load && op.StorageKind == StorageKind.GlobalMemory &&
+            op.Dest != null && CacheMemory(rm) >= 0;
+
+        /// GlobalToStorage, at the start of a fallback helper's body: a fast helper sets its out arguments to "no span" first (every return
+        /// path then leaves them defined). Other helpers do not touch the page cache when fast helpers exist (it stays main's own).
+        internal static void BeginHelper(EmitterContext c, bool fast, int inArgs)
+        {
+            _helperFast = fast;
+            _helperInArgs = inArgs;
+            if (!fast) return;
+            int[] none = { 1, -1, 0, 0, 0 };
+            for (int i = 0; i < FastOuts; i++) c.Copy(Argument(inArgs + i), Const(none[i]));
+        }
+
+        /// The fast path's extra call argument: the slot mask word (the cache test itself is SPIR-V at the call, TryGenerateHelperCall).
+        internal static Operand[] EmitFastOperands() => new[] { Cbuf(0, SlotMaskWord(_candidates)) };
+        // The helpers' calling convention in SPIR-V. Ryujinx passes every argument as a pointer to a Function variable of the caller; with
+        // the helper out of line (DontInline) each call site's argument temporaries are then address-taken and live in local memory (fbb731e2:
+        // 13 KB of local memory). The global-memory helpers take their in arguments by value instead, and a fast-path helper returns a
+        // struct {value, the five cache words} in place of out arguments: nothing of the caller is address-taken.
+        static bool IsHelper(StructuredFunction f) => f.Name != null &&
+            (f.Name.EndsWith(HelperSuffix, StringComparison.Ordinal) || f.Name.EndsWith(FastSuffix, StringComparison.Ordinal));
+        static bool IsFastHelper(StructuredFunction f) => f.Name != null && f.Name.EndsWith(FastSuffix, StringComparison.Ordinal) &&
+            f.OutArguments.Length == FastOuts && f.ReturnType is AggregateType.U32 or AggregateType.S32 or AggregateType.FP32;
+
+        static SpvInstruction HelperReturnType(CodeGenContext ctx, StructuredFunction f)
+        {
+            if (!IsFastHelper(f)) return ctx.GetType(f.ReturnType);
+            SpvInstruction[] members = new SpvInstruction[1 + FastOuts];
+            members[0] = ctx.GetType(f.ReturnType);
+            for (int i = 0; i < FastOuts; i++) members[1 + i] = ctx.GetType(f.OutArguments[i]);
+            return ctx.TypeStruct(false, members);
+        }
+
+        /// SpirvGenerator's function declaration: a helper's type with by-value in arguments (null: not a helper, Ryujinx's form).
+        internal static SpvInstruction DeclareHelperFunction(CodeGenContext ctx, StructuredFunction f)
+        {
+            if (!IsHelper(f) || (f.OutArguments.Length != 0 && !IsFastHelper(f))) return null;
+            SpvInstruction[] args = new SpvInstruction[f.InArguments.Length];
+            for (int i = 0; i < args.Length; i++) args[i] = ctx.GetType(f.InArguments[i]);
+            SpvInstruction type = ctx.TypeFunction(HelperReturnType(ctx, f), false, args);
+            return ctx.Function(HelperReturnType(ctx, f), FunctionControl(f), type);
+        }
+
+        [ThreadStatic] static List<(SpvInstruction Param, SpvInstruction Var)> _params;
+
+        /// In place of Declarations.DeclareParameters for a helper: value parameters; the Function variables the body reads them from are made
+        /// in StoreHelperParameters (after the first label). False: not a helper.
+        internal static bool DeclareHelperParameters(CodeGenContext ctx, StructuredFunction f)
+        {
+            _params = null;
+            if (!IsHelper(f) || (f.OutArguments.Length != 0 && !IsFastHelper(f))) return false;
+            _params = new();
+            for (int i = 0; i < f.InArguments.Length; i++) _params.Add((ctx.FunctionParameter(ctx.GetType(f.InArguments[i])), null));
+            return true;
+        }
+
+        /// After the first label and DeclareLocals: a Function variable per argument (outs too), the in arguments stored into theirs.
+        internal static void StoreHelperParameters(CodeGenContext ctx, StructuredFunction f)
+        {
+            if (_params == null) return;
+            int n = f.InArguments.Length + f.OutArguments.Length;
+            for (int i = 0; i < n; i++)
+            {
+                SpvInstruction v = ctx.Variable(ctx.TypePointer(StorageClass.Function, ctx.GetType(f.GetArgumentType(i))), StorageClass.Function);
+                ctx.AddLocalVariable(v);
+                ctx.DeclareArgument(i, v);
+                if (i < _params.Count) _params[i] = (_params[i].Param, v);
+            }
+            foreach (var (p, v) in _params) ctx.Store(v, p);
+            _params = null;
+        }
+
+        /// GenerateReturn in a fast-path helper: the struct {value, out arguments}. False: not one.
+        internal static bool TryGenerateHelperReturn(CodeGenContext ctx, AstOperation operation)
+        {
+            StructuredFunction f = ctx.CurrentFunction;
+            if (ctx.IsMainFunction || f == null || !IsFastHelper(f) || operation.SourcesCount == 0) return false;
+            ctx.MayHaveReturned = true;
+            SpvInstruction[] parts = new SpvInstruction[1 + FastOuts];
+            parts[0] = ctx.Get(f.ReturnType, operation.GetSource(0));
+            int nIn = f.InArguments.Length;
+            for (int i = 0; i < FastOuts; i++)
+                parts[1 + i] = ctx.Load(ctx.GetType(f.OutArguments[i]), ctx.GetArgumentPointer(new AstOperand(Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandType.Argument, nIn + i)));
+            ctx.ReturnValue(ctx.CompositeConstruct(HelperReturnType(ctx, f), parts));
+            return true;
+        }
+
+        /// SPIR-V GenerateCall of a helper: in arguments by value; a fast-path helper gets the inline fast path (if hit, load through the
+        /// cached device address and keep the cache words, else call and take value and cache words from the returned struct).
+        internal static bool TryGenerateHelperCall(CodeGenContext ctx, AstOperation operation, StructuredFunction function, SpvInstruction spvFunc,
+                                                   out SpvInstruction result)
+        {
+            result = null;
+            if (!IsHelper(function) || (function.OutArguments.Length != 0 && !IsFastHelper(function))) return false;
+            int nIn = function.InArguments.Length, nOut = function.OutArguments.Length;
+            SpvInstruction[] vals = new SpvInstruction[nIn];
+            for (int i = 0; i < nIn; i++) vals[i] = ctx.Get(function.InArguments[i], operation.GetSource(1 + i));
+            SpvInstruction retType = ctx.GetType(function.ReturnType);
+            if (!IsFastHelper(function))
+            {
+                result = ctx.FunctionCall(retType, spvFunc, vals);
+                return true;
+            }
+            if (_cacheId < 0 || !ctx.LocalMemories.TryGetValue(_cacheId, out SpvInstruction cacheVar))
+            {
+                result = ctx.CompositeExtract(retType, ctx.FunctionCall(HelperReturnType(ctx, function), spvFunc, vals), (Spv.Generator.LiteralInteger)0);
+                return true;
+            }
+            SpvInstruction u32 = ctx.TypeU32();
+            SpvInstruction u64 = ctx.TypeInt(64, 0);
+            SpvInstruction bt = ctx.TypeBool();
+            SpvInstruction pw = ctx.TypePointer(StorageClass.Private, u32);
+            SpvInstruction C(uint v) => ctx.Constant(u32, v);
+            SpvInstruction aLo = ctx.Get(AggregateType.U32, operation.GetSource(1)), aHi = ctx.Get(AggregateType.U32, operation.GetSource(2));
+            SpvInstruction slots = ctx.Get(AggregateType.U32, operation.GetSource(3));
+            SpvInstruction[] w = new SpvInstruction[CacheWords];
+            for (int i = 0; i < CacheWords; i++) w[i] = ctx.Load(u32, ctx.AccessChain(pw, cacheVar, C((uint)i)));
+            // hit: no marked slot, and the address in the cached span: (a & ~mask) == tag low, a.hi == tag high
+            SpvInstruction hit = ctx.LogicalAnd(bt, ctx.LogicalAnd(bt, ctx.IEqual(bt, ctx.BitwiseAnd(u32, aLo, ctx.Not(u32, w[2])), w[0]), ctx.IEqual(bt, aHi, w[1])),
+                                                ctx.IEqual(bt, slots, C(0)));
+            SpvInstruction lFast = ctx.Label(), lSlow = ctx.Label(), lMerge = ctx.Label();
+            ctx.SelectionMerge(lMerge, SelectionControlMask.MaskNone);   // right before the branch
+            ctx.BranchConditional(hit, lFast, lSlow);
+            ctx.AddLabel(lFast);
+            SpvInstruction lo = ctx.IAdd(u32, w[3], ctx.BitwiseAnd(u32, aLo, w[2]));
+            SpvInstruction hi = ctx.IAdd(u32, w[4], ctx.Select(u32, ctx.ULessThan(bt, lo, w[3]), C(1), C(0)));
+            SpvInstruction addr = ctx.BitwiseOr(u64, ctx.UConvert(u64, lo), ctx.ShiftLeftLogical(u64, ctx.UConvert(u64, hi), C(32)));
+            SpvInstruction v = ctx.Load(u32, ctx.ConvertUToPtr(ctx.TypePointer((StorageClass)5349, u32), addr), MemoryAccessMask.Aligned);
+            v.AddOperand((Spv.Generator.LiteralInteger)4);
+            SpvInstruction fastValue = function.ReturnType == AggregateType.U32 ? v : ctx.Bitcast(retType, v);
+            ctx.Branch(lMerge);
+            ctx.AddLabel(lSlow);
+            // the helper: value and the span its walk ended in, which becomes the page cache
+            SpvInstruction r = ctx.FunctionCall(HelperReturnType(ctx, function), spvFunc, vals);
+            SpvInstruction slowValue = ctx.CompositeExtract(retType, r, (Spv.Generator.LiteralInteger)0);
+            for (int i = 0; i < CacheWords; i++)
+            {
+                SpvInstruction word = ctx.CompositeExtract(ctx.GetType(function.OutArguments[i]), r, (Spv.Generator.LiteralInteger)(1 + i));
+                ctx.Store(ctx.AccessChain(pw, cacheVar, C((uint)i)), ctx.BitcastIfNeeded(AggregateType.U32, function.OutArguments[i], word));
+            }
+            ctx.Branch(lMerge);
+            ctx.AddLabel(lMerge);
+            result = ctx.Phi(retType, fastValue, lFast, slowValue, lSlow);
+            return true;
+        }
+        /// The function control of a helper: DontInline for the fallback helpers (NoInline).
+        internal static FunctionControlMask FunctionControl(StructuredFunction function) =>
+            NoInline && function.Name != null && (function.Name.EndsWith(HelperSuffix, StringComparison.Ordinal) || function.Name.EndsWith(FastSuffix, StringComparison.Ordinal))
+                ? FunctionControlMask.DontInline : FunctionControlMask.MaskNone;
 
         // ---- SPIR-V back end -------------------------------------------------------------------------------------------------------------
 

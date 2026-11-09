@@ -781,6 +781,24 @@ draws whose vertex/task/mesh stage walks the page table, or run them with an emp
 - Picture: in-game screenshot at 1080 after the coordinator restored the A22 network blocks: clean (no 8-px stripes or dark blocks).
 - Pitfall: `powershell -File script.ps1 -Settings '{"a":1}'` loses the JSON quotes (settings silently not applied); pass a file.
 
+**Session 2026-11-09 (gpt pointer shaders: code size, translator).** Goal was the ~6.9 ms the gpt vertex/mesh stages cost in Kokiri
+outside. Found with the new offline tool `tools/shaders/pipestat` (compiles a .spv into a pipeline on the GPU, no game; prints the driver's
+registers / binary size / local memory / build time) and nvdisasm of the corpus blocks: **the cost is the shaders' own work, not the
+lookup.** With the lookup removed altogether (`NXRT_HARNESS_GMEM_IDENTITY=1`, measurement only) the hot blocks still use 255 registers,
+and the original SASS of 5332b131 / 40953571 already uses R247 / R252 (fbb731e2 R125). E3's window run (no walk) showed the same.
+What changed (AmpereGlobal.cs, tools/shaders/README.md "Pointer accesses"): the fallback helpers are DontInline (the 610.88 driver honours
+it), take their in arguments by value, plain loads get an inline page-cache fast path at the call site (the cache is main's own, in
+registers), a miss calls the helper which returns {value, span} as a struct, and the bound-slot search visits only the marked slots.
+Result: driver code 1.2-2.6 MB -> 140-350 KB per hot gpt executable, **pipeline build 16-82 s -> 1-3 s**, fps in Kokiri outside unchanged
+(35.0 vs 34.7 and 33.6 vs 34.3 in two pairs, steady windows +0.4); SPIR-V of the 3,425 gpt blocks 742 MB -> 1.85 GB. The shared cache is
+not changed: the re-translated set (3,413 corpus blocks + 12 "runtime" blocks from `work\ai_run\oot\a18dump\dump`) is in the main
+checkout's git-ignored `work\gpt_merge_v8` (merge with `merge_results.py`, or rebuild the harness and `retranslate_subset.py --token gpt`;
+then a preparation, which should be much shorter for these programs). Dead ends: helpers out of line with Ryujinx's pointer arguments and
+no fast path halved the fps (16.6 vs 32.7: a call per 32-bit word, its argument temporaries in local memory); a first fast path that kept
+the page cache in memory shared with the helper was fps-neutral. Pitfall: the replay of `20261108-221243-drs-drs1080` with the main
+exe of bf5366b runs at ~8 s per loop and its gp:d stamps stop after the first loop: use game runs for gpt timings. Private caches for
+such tests: `tools/shaders/scripts/private_cache.py` (hard links of the shared cache, changed files written as new files).
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
