@@ -370,6 +370,7 @@ TexStats tex_stats();
 // Called by nvn_gpu.cpp inside a submission: begin_submit resets per-submit tracking, replay_lists interprets the lists in
 // order (state persists across lists and submissions), end_submit ends the open render pass and emits the closing barrier.
 void replay_begin_submit(Frame& f);
+void texlook_submit(const std::vector<Ref<CmdList>>& lists, uint64_t serial);   // game thread: [nvn] tex_lookahead scans the submission (nvn_replay.cpp)
 void replay_lists(Frame& f, const std::vector<Ref<CmdList>>& lists);
 void replay_end_submit(Frame& f);
 void replay_request_trace();      // trace the next whole presented frame (any thread)

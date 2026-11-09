@@ -777,6 +777,17 @@ bool tex_park(const Texture& t, TexGpu* g) {
     return true;
 }
 
+// Render thread, a finalized texture object's image that other objects still share: their count drops now. destroy_texture_gpu defers the
+// drop until the GPU is done with the frame, so when the game finalized all the objects over one storage within that time (OoT's
+// post-process targets: two or three objects each, every few frames) each saw the others' references, none was parked, and the next
+// objects over that storage made new images and uploaded the stale pool bytes (~2.5 ms per 1920x1080 target on the render thread).
+// The image itself lives on: the remaining objects hold it, and the last one to go parks it or defers its destruction.
+bool tex_release_shared(TexGpu* g) {
+    if (!g || g->refs <= 1 || !tex_park_on()) return false;
+    --g->refs;
+    return true;
+}
+
 void parked_cpu_wrote(uint64_t lo, uint64_t hi) {
     std::lock_guard<std::mutex> lk(g_park_mu);
     for (Parked& p : g_parked)

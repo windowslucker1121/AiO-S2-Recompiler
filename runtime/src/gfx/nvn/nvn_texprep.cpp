@@ -38,6 +38,7 @@ struct Entry {
     bool again = false;                      // written again while the job ran: queue another when it ends
     bool slow = false;                       // Running: the job found no cache entry and transcodes (take does not wait for it)
     uint64_t held = 0;                       // bytes accounted for this entry
+    uint64_t done_ns = 0;                    // Done: when the result was finished (eviction keeps recent results)
     std::unique_ptr<PreparedTexture> res;
     gfx::Buffer stage;                       // big results: the data already copied into a host-visible buffer for the upload (res->data is then empty)
 };
@@ -121,11 +122,14 @@ void log_summary_locked(bool force) {
     if (!force && n - s.last_log_ns < 10ull * 1000000000ull) return;
     if (s.st.scheduled == 0) return;
     s.last_log_ns = n;
-    NXLOG_I(kTag, "scheduled %llu, used %llu (waited for %llu), stale %llu, taken back by the render thread %llu, no job %llu, failed %llu, crashed %llu, over budget %llu, evicted %llu, held %.1f MB",
+    NXLOG_I(kTag, "scheduled %llu, used %llu (waited for %llu), stale %llu, taken back by the render thread %llu, no job %llu, failed %llu, crashed %llu, over budget %llu, evicted %llu, held %.1f MB; "
+                  "%llu jobs, %.2f ms each; the render thread waited %.0f ms for jobs (%llu of them while making the image, %.0f ms)",
             static_cast<unsigned long long>(s.st.scheduled), static_cast<unsigned long long>(s.st.hits), static_cast<unsigned long long>(s.st.waited_hits),
             static_cast<unsigned long long>(s.st.stale), static_cast<unsigned long long>(s.st.stolen), static_cast<unsigned long long>(s.st.none),
             static_cast<unsigned long long>(s.st.failed), static_cast<unsigned long long>(s.st.crashes), static_cast<unsigned long long>(s.st.skipped_budget),
-            static_cast<unsigned long long>(s.st.evicted), static_cast<double>(s.held_bytes) / 1048576.0);
+            static_cast<unsigned long long>(s.st.evicted), static_cast<double>(s.held_bytes) / 1048576.0, static_cast<unsigned long long>(s.st.jobs),
+            s.st.jobs ? static_cast<double>(s.st.job_ns) / static_cast<double>(s.st.jobs) * 1e-6 : 0.0, static_cast<double>(s.st.wait_ns + s.st.peek_wait_ns) * 1e-6,
+            static_cast<unsigned long long>(s.st.peek_waits), static_cast<double>(s.st.peek_wait_ns) * 1e-6);
     if (s.verify)
         NXLOG_I(kTag, "verify: %llu results compared with a fresh preparation, %llu differed", static_cast<unsigned long long>(s.st.verified), static_cast<unsigned long long>(s.st.mismatches));
 }
@@ -142,22 +146,40 @@ void schedule_locked(Texture* t) {
     if (e.st == Entry::Queued) return;                // the job reads the generation when it starts
     if (e.st == Entry::Running) { e.again = true; return; }
     if (e.st == Entry::Waiting) { leave_waiting_locked(t); e.st = Entry::Idle; }
-    if (e.st == Entry::Done) drop_result(e);          // its content is older than the new write
+    if (e.st == Entry::Done) { drop_result(e); e.st = Entry::Idle; }   // its content is older than the new write (Idle: not a victim of the loop below)
     uint64_t est = std::min<uint64_t>(t->storage_size, 1ull << 30);
     // [gfx] astc_quality = uncompressed: a job holds the texture as RGBA8, 4 bytes a texel against 16 per ASTC block
     if (t->fmt && t->fmt->astc && !S().caps.astc && astc_quality() == AstcQuality::Uncompressed) est = std::min<uint64_t>(est * t->fmt->block_w * t->fmt->block_h / 4, 1ull << 30);
-    // Over budget: the oldest finished results go first (they belong to textures not used yet); those are prepared on the render thread if needed.
+    // ASTC held as BC7: 16 bytes per 4x4 block instead of per ASTC block (an 8x8 texture's result is 4 times its storage: OoT's two 56 MB
+    // ASTC 8x8 textures are 226 MB each, which the old estimate let in and the budget then evicted again)
+    else if (t->fmt && t->fmt->astc && !S().caps.astc) est = std::min<uint64_t>(est * t->fmt->block_w * t->fmt->block_h / 16, 1ull << 30);
+    // Over budget: finished results of textures not used yet go, those prepared on the render thread if needed. Among results older than 2 s
+    // the smallest go first: a small texture redone later is one of many jobs the workers share, a big one is a single job on the critical
+    // path (OoT's two 219 MB array textures, prepared when registered at the title and evicted again by the area's ~800 MB of other results,
+    // cost the area entry ~900 ms each). Results under 2 s old (a camera cut's, named by the look-ahead for the frame being replayed) go last,
+    // oldest first.
+    const uint64_t now = now_ns(), keep_ns = 2000ull * 1000000ull;
     while (s.held_bytes + est > s.budget) {
         auto victim = s.map.end();
-        for (auto it = s.map.begin(); it != s.map.end(); ++it)
-            if (it->second.st == Entry::Done && (victim == s.map.end() || it->second.seq < victim->second.seq)) victim = it;
+        bool victim_old = false;
+        for (auto it = s.map.begin(); it != s.map.end(); ++it) {
+            const Entry& c = it->second;
+            if (c.st != Entry::Done) continue;
+            const bool old = now - c.done_ns > keep_ns;
+            if (victim == s.map.end()) { victim = it; victim_old = old; continue; }
+            const Entry& v = victim->second;
+            const bool better = old != victim_old ? old : old ? (c.held != v.held ? c.held < v.held : c.seq < v.seq) : c.seq < v.seq;
+            if (better) { victim = it; victim_old = old; }
+        }
         if (victim == s.map.end()) break;
+        victim->first->prep_sched.store(0, std::memory_order_relaxed);   // its next naming (look-ahead, bind) may queue a job again
         drop_result(victim->second);
         s.map.erase(victim);
         s.st.evicted++;
     }
     if (s.held_bytes + est > s.budget) {
         s.st.skipped_budget++;
+        t->prep_sched.store(0, std::memory_order_relaxed);
         e.keep = Ref<Texture>();
         s.map.erase(t);
         return;
@@ -232,6 +254,7 @@ void worker_main() {
         const uint32_t gen = e.job_gen;
         lk.unlock();
 
+        const uint64_t job_t0 = now_ns();
         auto res = std::make_unique<PreparedTexture>();
         bool crashed = false, ok = false;
         uint64_t h0 = 0, h1 = 0, staged_size = 0;
@@ -273,7 +296,17 @@ void worker_main() {
             }
         }
 
+        const uint64_t job_ns = now_ns() - job_t0;
+        if (job_ns > 200ull * 1000000ull) {
+            static std::atomic<int> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 40)
+                NXLOG_I(kTag, "long job: texture %u %s %ux%ux%u, storage %llu KB, %llu KB of data: %.1f ms", t->id, t->fmt ? t->fmt->name : "?", t->b.width, t->b.height,
+                        t->b.depth, static_cast<unsigned long long>(t->storage_size >> 10), static_cast<unsigned long long>((staged_size ? staged_size : res->data.size()) >> 10),
+                        static_cast<double>(job_ns) * 1e-6);
+        }
         lk.lock();
+        s.st.jobs++;
+        s.st.job_ns += job_ns;
         Entry& e2 = s.map[t];   // the entry is never erased while a job runs (the render thread only erases Queued and Done entries)
         e2.slow = false;
         s.held_bytes -= std::min(s.held_bytes, e2.held);
@@ -289,6 +322,7 @@ void worker_main() {
             e2.stage = stage;
             stage = gfx::Buffer{};
             e2.st = Entry::Done;
+            e2.done_ns = now_ns();
             // the image holds a quick stand-in of this content: the next use uploads this result (cpu_dirty without a new generation)
             if (t->prep_prov.load(std::memory_order_acquire) == (gen | 0x80000000u)) t->cpu_dirty.store(true);
         } else {
@@ -351,14 +385,17 @@ void init_once() {
             NXLOG_I(kTag, "background texture preparation is off");
             return;
         }
-        s.budget = static_cast<uint64_t>(std::max<int64_t>(16, config_get_int("nvn", "tex_prep_mb", 512))) << 20;
+        // 1024: an area load registers several hundred MB of big textures (prepared early) and a camera cut names ~300 more at once (tex_lookahead)
+        s.budget = static_cast<uint64_t>(std::max<int64_t>(16, config_get_int("nvn", "tex_prep_mb", 1024))) << 20;
         s.min_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "tex_prep_min_kb", 8))) << 10;
         s.early_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "tex_prep_early_kb", 1024))) << 10;
         s.stage_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "tex_prep_stage_kb", 1024))) << 10;
         s.verify = config_get_bool("nvn", "tex_prep_verify", false);
         const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
         int n = static_cast<int>(config_get_int("nvn", "tex_prep_threads", 0));
-        if (n <= 0) n = static_cast<int>(std::clamp<unsigned>(hw / 3, 2, 8));
+        // hw / 2: a job is mostly the BC7 cache file's read (I/O latency, ~2 ms), and a camera cut names ~300 at once (tex_lookahead);
+        // the threads sleep between bursts
+        if (n <= 0) n = static_cast<int>(std::clamp<unsigned>(hw / 2, 2, 12));
         for (int i = 0; i < n; ++i) std::thread(worker_main).detach();
         g_enabled.store(1);
         g_tex_prep_on.store(true);
@@ -368,12 +405,18 @@ void init_once() {
 }
 
 // Block-compressed textures only: they are the game's assets (ASTC, BCn). Uncompressed ones are mostly render targets and small UI data whose
-// storage is not final when the texture is initialized.
+// storage is not final when the texture is initialized. (Tried 2026-11-09: uncompressed textures named by the look-ahead too. OoT's new
+// render-target objects are named before the render thread gives them a parked image, so ~600 useless jobs a second ran and the area
+// entries did not get faster.)
 bool eligible(const Texture* t) {
     if (!t || t->destroyed.load() || !t->fmt || t->is_display || (!t->mem && !t->vpool)) return false;
     if (!(t->fmt->astc || t->fmt->bc)) return false;
+    // what the GPU untiles from the storage itself (gpu_untile in nvn_gpu_texture.cpp: one level and layer, 64 KiB or more, host storage,
+    // not ASTC) never takes a job's result
+    if (!t->fmt->astc && t->mem && t->block_linear && t->levels == 1 && t->layers == 1 && t->storage_size >= (64u << 10)) return false;
     if (t->b.samples > 1 || t->fmt->aspect != kAspectColor) return false;
-    if (t->storage_size < S().min_bytes || t->storage_size > (256ull << 20)) return false;
+    // ASTC: every size. Its cost is the BC7 cache entry's file read (~1.5-3 ms even for a 4 KB texture), not the bytes.
+    if ((t->storage_size < S().min_bytes && !t->fmt->astc) || t->storage_size > (256ull << 20)) return false;
     return true;
 }
 
@@ -455,7 +498,11 @@ bool peek_entry_format(Texture* t, VkFormat& entry) {
         if (it == s.map.end()) return false;
         Entry& e = it->second;
         if (e.st == Entry::Running && e.job_gen == t->prep_gen.load(std::memory_order_acquire)) {
-            if (s.cv_done.wait_until(lk, deadline) == std::cv_status::timeout) return false;
+            const uint64_t w0 = now_ns();
+            const bool timed_out = s.cv_done.wait_until(lk, deadline) == std::cv_status::timeout;
+            s.st.peek_waits++;
+            s.st.peek_wait_ns += now_ns() - w0;
+            if (timed_out) return false;
             continue;
         }
         if (e.st != Entry::Done || e.job_gen != t->prep_gen.load(std::memory_order_acquire) || !e.res) return false;
@@ -505,7 +552,9 @@ bool take(Texture* t, PreparedTexture& out, gfx::Buffer* staged, uint64_t* src_h
             }
             waited = true;
             const uint64_t tw = nxrt::hitch_ticks();
+            const uint64_t w0 = now_ns();
             const bool timed_out = s.cv_done.wait_until(lk, deadline) == std::cv_status::timeout;
+            s.st.wait_ns += now_ns() - w0;
             if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderLockWait, nxrt::hitch_ticks() - tw);
             if (timed_out) return false;
             continue;

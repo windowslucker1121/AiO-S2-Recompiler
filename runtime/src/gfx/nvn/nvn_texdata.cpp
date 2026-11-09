@@ -193,25 +193,41 @@ bool cache_write(const std::string& path, uint64_t key, const PreparedTexture& o
 // Reads the cache file of `key` into out.data. out.format, out.level and out.layers already hold what the file must describe;
 // a missing file is a quiet miss, a file of the wrong size, magic, key or layout (for example a truncated write) is ignored
 // with a warning, and the caller transcodes again.
+// One handle, one size query and one read per part (std::filesystem + ifstream took ~5 file system calls; each costs on a scanned disk).
+struct CacheFile {
+    HANDLE h = INVALID_HANDLE_VALUE;
+    explicit CacheFile(const std::string& path) {
+        h = CreateFileW(std::filesystem::path(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    }
+    ~CacheFile() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); }
+    bool read(void* dst, uint64_t n) {
+        uint8_t* p = static_cast<uint8_t*>(dst);
+        while (n) {
+            const DWORD part = static_cast<DWORD>(std::min<uint64_t>(n, 1u << 30));
+            DWORD got = 0;
+            if (!ReadFile(h, p, part, &got, nullptr) || got != part) return false;
+            p += got;
+            n -= got;
+        }
+        return true;
+    }
+};
+
 bool cache_read(const std::string& path, uint64_t key, PreparedTexture& out) {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    if (!fs::is_regular_file(path, ec)) return false;
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
+    CacheFile f(path);
+    if (f.h == INVALID_HANDLE_VALUE) return false;
 
     const size_t head_bytes = kCacheHeadBytes + out.level.size() * kCacheLevelBytes;
     const uint64_t data_bytes = out.level.empty() ? 0 : out.level.back().offset + out.level.back().size;
-    f.seekg(0, std::ios::end);
-    const std::streamoff file_bytes = f.tellg();
-    f.seekg(0, std::ios::beg);
-    if (file_bytes < 0 || static_cast<uint64_t>(file_bytes) != head_bytes + data_bytes) {
+    LARGE_INTEGER fsz{};
+    if (!GetFileSizeEx(f.h, &fsz) || static_cast<uint64_t>(fsz.QuadPart) != head_bytes + data_bytes) {
         NXLOG_W(kTag, "cache file %s has the wrong size (truncated?): ignored", path.c_str());
         return false;
     }
 
     std::vector<uint8_t> head(head_bytes);
-    if (!f.read(reinterpret_cast<char*>(head.data()), static_cast<std::streamsize>(head_bytes))) return false;
+    if (!f.read(head.data(), head_bytes)) return false;
     const uint8_t* p = head.data();
     bool ok = std::memcmp(p, kCacheMagic, 4) == 0 && get32(p + 4) == kCacheVersion && get64(p + 8) == key &&
               get32(p + 16) == static_cast<uint32_t>(out.format) && get32(p + 20) == out.level.size() &&
@@ -228,7 +244,7 @@ bool cache_read(const std::string& path, uint64_t key, PreparedTexture& out) {
     }
 
     out.data.resize(static_cast<size_t>(data_bytes));
-    if (!f.read(reinterpret_cast<char*>(out.data.data()), static_cast<std::streamsize>(data_bytes))) {
+    if (!f.read(out.data.data(), data_bytes)) {
         out.data.clear();
         return false;
     }

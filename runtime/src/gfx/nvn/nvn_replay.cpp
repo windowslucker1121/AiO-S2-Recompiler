@@ -24,6 +24,11 @@
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <shared_mutex>
+#include <thread>
 
 #include "nxrt/config.h"
 #include "nxrt/frame_limiter.h"
@@ -226,14 +231,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432 };
+enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864 };
 uint32_t ab_mask() {
     static const uint32_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}};
         uint32_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -1147,21 +1152,39 @@ float ufs_scale_for(const BindingDesc& d, int idx) {
     return sc;
 }
 
-uint32_t read_handle_word(int stage, int bank, int word) {
+// ubo: the stage's 16 uniform block bindings (S.ubo[stage], or the texture look-ahead's simulated ones)
+uint32_t read_handle_word_in(const GState::Bind* ubo, int bank, int word) {
     // a texture handle the game wrote into uniform block (bank - 3)
     const int ub = bank - 3;
     if (ub < 0 || ub >= 16) return 0;
-    const GState::Bind& b = S.ubo[stage][ub];
+    const GState::Bind& b = ubo[ub];
     if (!b.addr || static_cast<uint64_t>(word) * 4 + 4 > b.size) return 0;
     uint32_t v = 0;
     std::memcpy(&v, host_ptr(b.addr) + static_cast<size_t>(word) * 4, 4);
     return v;
 }
+uint32_t read_handle_word(int stage, int bank, int word) { return read_handle_word_in(S.ubo[stage], bank, word); }
 
 int storage_slot_for(int nvn_stage, int c0_offset);
 
+// The texture look-ahead's thread (below): whether the 4 KiB page of addr holds a held compute result, asked once per page and scan
+// (out_overlaps off the render thread takes the held results' lock; a scan reads tens of thousands of storage-held handles).
+FlatMap64<uint8_t> g_tl_pages;   // look-ahead thread only: page -> 1 held, 2 not; cleared at each scan
+bool tl_page_held(uint64_t addr) {
+    const uint64_t page = addr >> 12;
+    if (const uint8_t* v = g_tl_pages.find(page)) return *v == 1;
+    const bool held = out_overlaps(page << 12, 4096);
+    g_tl_pages.put(page, held ? 1 : 2);
+    return held;
+}
+
 // The handle of a HandleExpr texture (nvn_shaders.h HandleExprOp) from what the draw binds now. Words outside a buffer read 0.
+// ubo / ssbo: the stage's bindings (null: the replay's S); ssbo_ok false: a storage word makes the handle unknown (*unknown set, 0 returned).
+uint32_t eval_handle_expr_in(const BindingDesc& d, const std::vector<HandleExprOp>& prog, const GState::Bind* ubo, const GState::Bind* ssbo, bool* unknown);
 uint32_t eval_handle_expr(const BindingDesc& d, const std::vector<HandleExprOp>& prog) {
+    return eval_handle_expr_in(d, prog, S.ubo[d.nvn_stage], S.ssbo[d.nvn_stage], nullptr);
+}
+uint32_t eval_handle_expr_in(const BindingDesc& d, const std::vector<HandleExprOp>& prog, const GState::Bind* ubo, const GState::Bind* ssbo, bool* unknown) {
     uint32_t st[64];
     int n = 0;
     for (const HandleExprOp& op : prog) {
@@ -1174,13 +1197,15 @@ uint32_t eval_handle_expr(const BindingDesc& d, const std::vector<HandleExprOp>&
                     const std::vector<uint8_t>& k = d.shader->constants;
                     if (static_cast<uint64_t>(op.b) * 4 + 4 <= k.size()) std::memcpy(&v, k.data() + static_cast<size_t>(op.b) * 4, 4);
                 } else {
-                    v = read_handle_word(d.nvn_stage, static_cast<int>(op.a), static_cast<int>(op.b));
+                    v = read_handle_word_in(ubo, static_cast<int>(op.a), static_cast<int>(op.b));
                 }
                 break;
             case HandleExprOp::Storage: {
                 const uint64_t idx = st[--n];
                 const int slot = storage_slot_for(d.nvn_stage, static_cast<int>(op.a));
-                const GState::Bind& sb = S.ssbo[d.nvn_stage][slot >= 0 && slot < 16 ? slot : 0];
+                const GState::Bind& sb = ssbo[slot >= 0 && slot < 16 ? slot : 0];
+                // the look-ahead (another thread): a word over a held compute result is not read (it would fault and fetch the result)
+                if (unknown && slot >= 0 && slot < 16 && sb.addr && idx * 4 + 4 <= sb.size && tl_page_held(sb.addr + idx * 4)) { *unknown = true; return 0; }
                 if (slot >= 0 && slot < 16 && sb.addr && idx * 4 + 4 <= sb.size) std::memcpy(&v, host_ptr(sb.addr) + idx * 4, 4);
                 break;
             }
@@ -6669,7 +6694,212 @@ void run_list(const CmdList& list, int depth) {
     }
 }
 
+// ---- texture look-ahead ([nvn] tex_lookahead) -------------------------------------------------------------------------------------
+// At a camera cut or an area entry a frame first uses hundreds of textures. The background preparation (nvn_texprep.h) only starts a job
+// when the game binds a texture with nvnCommandBufferBindTexture* or registers a big one; OoT's materials name theirs by handles in uniform
+// blocks and handle expressions, so the render thread read, hashed and untiled (BC7 cache read) nearly all of them itself, one after the
+// other, as its draws reached them (~3 ms each, 0.25-1.2 s per cut). Here a thread of its own walks every submission when the game submits
+// it (the render thread replays it later: the previous frame is usually still in flight), with the bindings that matter for textures
+// (programs, uniform and storage blocks, bound handles, the texture pool) simulated on the side, resolves each draw's and dispatch's
+// texture bindings like resolve_texture, and names the textures the CPU wrote since their last upload to the background preparation
+// (texture_bound). Nothing here touches the replay's state; a wrong guess only costs a wasted job: texprep::take checks generation and
+// content hash before a result is used. Storage-held handles (HandleExpr storage words, which may be GPU results) are not followed.
+struct TexLook {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<std::pair<std::vector<Ref<CmdList>>, uint64_t>> q;
+    std::atomic<uint64_t> replay_serial{0};   // the serial the render thread is replaying (replay_begin_submit)
+    // simulated state, carried from submission to submission in submission order (scanner thread only)
+    const ShaderInfo* stage[kStages] = {};
+    GState::Bind ubo[kStages][16], ssbo[kStages][16];
+    uint64_t tex[kStages][64] = {};
+    Ref<TexturePool> tpool;
+    FlatMap64<uint8_t> seen;                   // per scan: (pool, texture id) looked at
+    // statistics
+    uint64_t scans = 0, late = 0, cmds = 0, works = 0, resolved = 0, named = 0, unknown = 0, dropped = 0;
+    uint64_t scan_ns = 0, last_log_ns = 0;
+};
+TexLook* g_tl = nullptr;
+
+bool tex_lookahead_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "tex_lookahead", true);
+    return on;
+}
+
+void tl_name_textures(TexLook& L, const uint32_t stage_bits) {
+    for (int st = 0; st < kStages; ++st) {
+        if (!(stage_bits & (1u << st))) continue;
+        const ShaderInfo* sh = L.stage[st];
+        if (!sh) continue;
+        const auto& bs = sh->refl.bindings;
+        for (size_t i = 0; i < bs.size(); ++i) {
+            const DescriptorBinding& b = bs[i];
+            if (b.type != DescriptorType::CombinedImageSampler || !texture_source(b.nvn.source)) continue;
+            uint64_t handle = 0;
+            if (b.nvn.source == NvnSource::SamplerBinding) {
+                if (b.nvn.index >= 0 && b.nvn.index < 64) handle = L.tex[st][b.nvn.index];
+            } else if (b.nvn.source == NvnSource::HandleInUniform) {
+                handle = read_handle_word_in(L.ubo[st], b.nvn.bank, b.nvn.word);
+            } else {
+                BindingDesc d;
+                d.shader = sh;
+                d.index = static_cast<int>(i);
+                d.nvn_stage = st;
+                bool unknown = false;
+                handle = eval_handle_expr_in(d, b.nvn.expr, L.ubo[st], L.ssbo[st], &unknown);
+                if (unknown) { ++L.unknown; continue; }
+            }
+            TexturePool* tp = L.tpool.get();
+            const uint32_t tid = handle_texture_id(handle);
+            if (!tp || static_cast<int>(tid) >= tp->count) continue;
+            const uint64_t key = (reinterpret_cast<uint64_t>(tp) * 0x9E3779B97F4A7C15ull) ^ (static_cast<uint64_t>(tid) + 1);
+            if (L.seen.find(key)) continue;
+            L.seen.put(key, 1);
+            ++L.resolved;
+            Ref<Texture> t;
+            {
+                std::shared_lock<std::shared_mutex> lk(tp->lock);
+                if (tid < tp->entries.size()) {
+                    const TexturePool::Entry& e = tp->entries[tid];
+                    if (e.used && e.tex) t = e.tex;
+                }
+            }
+            if (t && t->cpu_dirty.load(std::memory_order_relaxed) && !t->destroyed.load(std::memory_order_relaxed)) {
+                ++L.named;
+                texture_bound(t.get());
+            }
+        }
+    }
+}
+
+// False: the render thread has begun this submission (stop: what is left helps little, and its objects are the replay's from now on).
+bool tl_scan(TexLook& L, const CmdList& list, int depth, uint64_t serial) {
+    if (depth > kMaxDepth) return true;
+    uint32_t n = 0;
+    for (RecordReader r(list); r.next();) {
+        ++L.cmds;
+        if ((++n & 255) == 0 && L.replay_serial.load(std::memory_order_relaxed) >= serial) return false;
+        switch (r.op()) {
+            case Op::BindProgram: {
+                const auto& p = r.payload<P_BindProgram>();
+                const uint32_t bits = p.stages | ((p.stages & ((1u << kCompute) - 1)) ? ((1u << kTask) | (1u << kMesh)) : 0u);
+                for (int st = 0; st < kStages; ++st)
+                    if (bits & (1u << st)) L.stage[st] = p.program ? p.program->stage[st] : nullptr;
+                break;
+            }
+            case Op::BindBuffers: {
+                const auto& p = r.payload<P_BindBuffers>();
+                const NVNbufferRange* rg = reinterpret_cast<const NVNbufferRange*>(r.blob<P_BindBuffers>());
+                for (uint32_t i = 0; i < p.count; ++i) {
+                    const uint32_t k = p.first + i;
+                    if (p.stage >= kStages || k >= 16) continue;
+                    if (p.kind == kBufUniform) L.ubo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
+                    else if (p.kind == kBufStorage) L.ssbo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
+                }
+                break;
+            }
+            case Op::BindTextures: {
+                const auto& p = r.payload<P_BindTextures>();
+                const uint64_t* h = reinterpret_cast<const uint64_t*>(r.blob<P_BindTextures>());
+                for (uint32_t i = 0; i < p.count; ++i)
+                    if (p.stage < kStages && p.first + i < 64) L.tex[p.stage][p.first + i] = h[i];
+                break;
+            }
+            case Op::SetTexturePool: L.tpool = Ref<TexturePool>::share(static_cast<TexturePool*>(r.payload<P_Pool>().pool)); break;
+            case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: case Op::DrawMeshTasks: case Op::DrawXfb:
+                ++L.works;
+                tl_name_textures(L, 0xffu & ~(1u << kCompute));
+                break;
+            case Op::Dispatch: case Op::DispatchIndirect:
+                ++L.works;
+                tl_name_textures(L, 1u << kCompute);
+                break;
+            case Op::CallCommands: {
+                const auto& p = r.payload<P_CallCommands>();
+                const uint64_t* h = reinterpret_cast<const uint64_t*>(r.blob<P_CallCommands>());
+                for (uint32_t i = 0; i < p.count; ++i) {
+                    Ref<CmdList> l = handle_lookup(h[i]);
+                    if (l && !tl_scan(L, *l, depth + 1, serial)) return false;
+                }
+                break;
+            }
+            default: break;
+        }
+    }
+    return true;
+}
+
+// The scanner reads guest memory (uniform blocks) the game may unmap: a fault ends that scan.
+bool tl_scan_guarded(TexLook& L, const CmdList& list, uint64_t serial, bool& faulted) {
+    __try {
+        return tl_scan(L, list, 0, serial);
+    } __except (1 /* EXCEPTION_EXECUTE_HANDLER (windows.h is not included here) */) {
+        faulted = true;
+        return false;
+    }
+}
+
+void tl_main() {
+    log_set_thread_name("nvn-texlook");
+    TexLook& L = *g_tl;
+    for (;;) {
+        std::vector<Ref<CmdList>> lists;
+        uint64_t serial = 0;
+        {
+            std::unique_lock<std::mutex> lk(L.mu);
+            L.cv.wait(lk, [&] { return !L.q.empty(); });
+            lists = std::move(L.q.front().first);
+            serial = L.q.front().second;
+            L.q.pop_front();
+        }
+        if (L.replay_serial.load(std::memory_order_relaxed) >= serial) { ++L.late; continue; }
+        if (!ab_on(kAbTexLook)) continue;          // an "off" window of [nvn] cpuperf_ab (the flag is the render thread's; a stale read only shifts a window edge)
+        const uint64_t t0 = ft::now_ns();
+        static const uint16_t zid = ft::zone_id("tex.lookahead");
+        ft::Scope zs(zid, 0, serial);
+        L.seen.clear();
+        g_tl_pages.clear();
+        ++L.scans;
+        for (const Ref<CmdList>& l : lists) {
+            bool faulted = false;
+            if (!l || !tl_scan_guarded(L, *l, serial, faulted)) {
+                if (!faulted) ++L.late;
+                break;
+            }
+        }
+        const uint64_t t1 = ft::now_ns();
+        L.scan_ns += t1 - t0;
+        if (t1 - L.last_log_ns > 10ull * 1000000000ull) {
+            L.last_log_ns = t1;
+            NXLOG_I(kTag, "texture look-ahead: %llu scans (%llu overtaken by the replay, %llu dropped), %.2f ms per scan, %llu commands, %llu draws/dispatches, "
+                          "%llu textures resolved, %llu named to the background preparation, %llu storage-held handles not followed",
+                    static_cast<unsigned long long>(L.scans), static_cast<unsigned long long>(L.late), static_cast<unsigned long long>(L.dropped),
+                    L.scans ? static_cast<double>(L.scan_ns) / static_cast<double>(L.scans) * 1e-6 : 0.0, static_cast<unsigned long long>(L.cmds),
+                    static_cast<unsigned long long>(L.works), static_cast<unsigned long long>(L.resolved), static_cast<unsigned long long>(L.named),
+                    static_cast<unsigned long long>(L.unknown));
+        }
+    }
+}
+
 }  // namespace
+
+// The game thread, after queueing a submission: the look-ahead scans it (above).
+void texlook_submit(const std::vector<Ref<CmdList>>& lists, uint64_t serial) {
+    if (!tex_lookahead_on() || lists.empty()) return;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        g_tl = new TexLook();   // never destroyed: the thread runs until the process ends
+        std::thread(tl_main).detach();
+        NXLOG_I(kTag, "texture look-ahead on: submissions are scanned for textures to prepare in the background ([nvn] tex_lookahead)");
+    });
+    {
+        std::lock_guard<std::mutex> lk(g_tl->mu);
+        while (g_tl->q.size() >= 16) { g_tl->q.pop_front(); ++g_tl->dropped; }
+        g_tl->q.emplace_back(lists, serial);
+    }
+    g_tl->cv.notify_one();
+}
+
 bool ab_tex_park_on() { return ab_on(kAbTexPark); }   // [nvn] cpuperf_ab_what tex_park (nvn_gpu_texture.cpp)
 bool ab_overlap_grow_on() { return ab_on(kAbOverlapGrow); }
 bool ab_index_inc_on() { return ab_on(kAbIndexInc); }   // [nvn] cpuperf_ab_what index_inc (nvn_gpu_pool.cpp)   // [nvn] cpuperf_ab_what overlap_grow (nvn_gpu_pool.cpp)
@@ -6739,6 +6969,7 @@ void replay_begin_submit(Frame& f) {
     gpl_note_presents(counters().presents.load(std::memory_order_relaxed));   // [nvn] gpl_async defers draws only while frames are flowing
     note_frame_for_pacing();
     F = &f;
+    if (g_tl) g_tl->replay_serial.store(f.serial, std::memory_order_relaxed);   // the texture look-ahead stops scanning this submission
     cmdq::begin_submission(ab_on(kAbCmdThread));   // [nvn] cmd_thread: a recorder thread makes the vkCmd* calls (nvn_cmdq.cpp)
     tex_poll_cpu_writes();
     if (extras::LowLatency* ll = extras::lowlat()) ll->submit_begin();     // RENDERSUBMIT_START of the frame (S14)
