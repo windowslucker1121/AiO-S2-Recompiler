@@ -210,6 +210,21 @@ def copy_runtime(game):
             shutil.copy2(os.path.join(root, f), os.path.join(dst, f))
 
 
+def boot_check(exefs, plain):
+    """Before the long translation: stop on what keeps the game from starting at all (nxrecomp/bootcheck.py)."""
+    progress('verify', 0, 1, 'Checking that the game can start')
+    sys.path.insert(0, RECOMP)
+    from nxrecomp import bootcheck
+    errors, warnings = bootcheck.check(exefs, [])                    # the files the loader needs (main.npdm is not in plain)
+    e2, w2 = bootcheck.check(plain, [(n, f, base) for n, f, base, _, _, _ in MODULES])
+    errors += [e for e in e2 if 'is missing' not in e]
+    for w in warnings + w2:
+        print('boot check: warning: ' + w, flush=True)
+    if errors:
+        raise Fail('The game cannot start from this dump:\n' + '\n'.join(errors))
+    progress('verify', 1, 1, 'The game can start (%d warning(s) in the log)' % len(warnings + w2))
+
+
 def lift(runner, exefs, gen, jobs):
     """One lifter process per module (the lifter itself runs `jobs` worker processes)."""
     for k, (name, nso, base, index, shards, sites) in enumerate(MODULES):
@@ -395,7 +410,9 @@ def main():
         env['ZIG_LOCAL_CACHE_DIR'] = os.path.join(build, 'zig-cache')
         gen, obj = os.path.join(build, 'lift'), os.path.join(build, 'obj')
         t = time.time()
-        lift(runner, plain_exefs(runner, a.exefs, build), gen, a.jobs)
+        plain = plain_exefs(runner, a.exefs, build)
+        boot_check(a.exefs, plain)
+        lift(runner, plain, gen, a.jobs)
         times['lift'] = round(time.time() - t, 1)
         t = time.time()
         compile_all(runner, gen, obj, a.jobs, env)
