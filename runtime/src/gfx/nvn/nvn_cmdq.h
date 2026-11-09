@@ -11,7 +11,9 @@ bool enabled();                       // [nvn] cmd_thread (read once)
 // switches queuing on or off for what follows (paired windows).
 void begin_submission(bool on);
 void set_copies(bool on);             // [nvn] cmd_thread_copies under cpuperf_ab (cmd_copies): image copies and clears queued or drained
-void drain();                         // render thread: waits until every queued call has been made
+void set_desc(bool on);               // [nvn] cmd_thread_desc under cpuperf_ab (cmd_desc): descriptor set updates queued or made at once
+void desc_stats(uint64_t* queued, uint64_t* direct);
+void drain();                        // render thread: waits until every queued call has been made
 void stats(uint64_t* packets, uint64_t* drains, uint64_t* direct, uint64_t* spins);
 void shutdown();
 std::string direct_top();          // statistics: the calls that waited for the recorder most often

@@ -231,14 +231,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912 };
+enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCmdDesc = 1073741824u };
 uint32_t ab_mask() {
     static const uint32_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cmd_desc", kAbCmdDesc}};
         uint32_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -7210,6 +7210,7 @@ void replay_begin_submit(Frame& f) {
             }
             g_cpu_ab_on = con;
             cmdq::set_copies(ab_on(kAbCmdCopies));
+            cmdq::set_desc(ab_on(kAbCmdDesc));
         }
         if (static_cast<int>(on) != last_on) {
             last_on = on ? 1 : 0;
@@ -7311,6 +7312,9 @@ void replay_begin_submit(Frame& f) {
                     cmdq::stats(&pk, &dr, &di, &sp);
                     NXLOG_I(kTag, "cmd_thread: %llu calls queued, %llu drains (%llu spins), %llu calls made directly after a drain (%s)", (unsigned long long)pk, (unsigned long long)dr,
                             (unsigned long long)sp, (unsigned long long)di, cmdq::direct_top().c_str());
+                    uint64_t dq = 0, dd = 0;
+                    cmdq::desc_stats(&dq, &dd);
+                    NXLOG_I(kTag, "cmd_thread_desc: %llu descriptor set updates queued, %llu made directly", (unsigned long long)dq, (unsigned long long)dd);
                 }
                 NXLOG_I(kTag, "draw buffer checks (odb_incremental): %llu full, %llu incremental with %llu bindings checked, %llu missed (verify)", (unsigned long long)g_odb_full,
                         (unsigned long long)g_odb_inc, (unsigned long long)g_odb_inc_checked, (unsigned long long)g_odb_verify_bad);
