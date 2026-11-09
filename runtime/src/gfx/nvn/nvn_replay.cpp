@@ -44,6 +44,7 @@
 #include "nvn_tess_gen.h"
 #include "nxrt/lowlat.h"
 #include "nxrt/gaps.h"
+#include "nxrt/write_watch.h"
 #include "extras/hdr_nvn.h"
 #include "extras/fsr1_spatial.h"
 #include "extras/spatial_upscaler.h"
@@ -3842,7 +3843,10 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
         reusable = set_reuse_mask(pl);
         const uint64_t tg = memo_pass_keep() ? g_tex_image_gen.load(std::memory_order_relaxed) ^ 0x5bd1e995ull : g_tex_state_gen.load(std::memory_order_relaxed), ob = out_bytes_total();
         // the pool registry: a pool registered over bound addresses (aliasing pools) resolves them elsewhere (set_reuse = verify found such stale hits)
-        const uint64_t epoch = (g_desc_epoch * 0x100000001b3ull ^ tg * 0x9e3779b97f4a7c15ull ^ ob ^ out_version() * 0xc2b2ae3d27d4eb4full) * 31 + pool_registry_generation();
+        // and the CPU's write faults on tracked pages: a page of a pool copy the CPU wrote is no longer served by the copy, so a uniform block
+        // there resolves to the pool now (set_reuse = verify found memo hits still bound to the copy after such a write)
+        const uint64_t epoch = ((g_desc_epoch * 0x100000001b3ull ^ tg * 0x9e3779b97f4a7c15ull ^ ob ^ out_version() * 0xc2b2ae3d27d4eb4full) * 31 + pool_registry_generation()) * 31 +
+                               mem::ww::faults();
         if (epoch != g_set_memo_epoch) {
             if (!g_set_memo.empty()) {   // statistics: what cleared a memo that held sets
                 if (g_desc_epoch != g_memo_last[0]) ++g_memo_clr[0];
