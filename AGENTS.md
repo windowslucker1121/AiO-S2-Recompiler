@@ -649,8 +649,13 @@ cache in `view_for`, a sampler memo in front of `sampler_for`, tex_park's 256-wo
 14 of 16 pairs better, +0.8 fps (29.5 -> 30.4), render replay -1.35 ms, median frame -1.05 ms, 1% low -1.75 (lower in most on windows; the
 render thread idles 0.5-1 ms more there, so other limits show; not traced); Link's house 23 of 25, +0.95 fps, replay -1.42 ms, median frame
 unchanged at ~19.5 ms (replay ~15-16 ms: **the house is no longer render-thread bound**); first scene 11 of 17, +0.35 fps, replay -1.25 ms,
-median frame -0.6 ms. `set_reuse = verify` in Kokiri: 0 of 2.8 M reused sets differed. Dropped: skipping out_draw_bindings while its last
-check found no held result and none grew (`odb_clean`: 31 skips in a run, every dispatch adds results). Pitfalls: TaskStop of a background
+median frame -0.6 ms. `set_reuse = verify` in Kokiri: 0 of 2.8 M reused sets differed. Picture: Kokiri outside screenshots with
+everything on vs every new key off, SSIM 0.91-0.95 (two shots of one run 0.96; Link's idle animation), foliage and fog the same. Dropped:
+skipping out_draw_bindings while its last check found no held result and none grew (`odb_clean`: 31 skips in a run, every dispatch adds
+results); **scoping the GPU-write epoch moves to the memoized sets that bind the written range** (`memo_write_scope`: a write log checked
+on each memo hit; verify clean, epoch moves by GPU writes 767k -> 1, but the memo was then cleared as often by texture image events
+(~20 per frame: tex_park and image sharing move `g_tex_image_gen`), commands and results sent back, so reuse stayed ~19%: Kokiri 7 of 15
+pairs, +0.00 fps; house 5 of 19, -0.2 fps). Set reuse would need all four clear sources scoped at once. Pitfalls: TaskStop of a background
 bash leaves the script running (two of my runs then raced for one instance folder): kill the bash processes by command line; the game lock
 must be held across a batch of runs (other agents take it between runs); `__udivti3` is not linked: a loop with two exit conditions over a
 64-bit stride made clang-cl emit it (count the trip first). Left, by the profile: build_set's buffer resolution (resolve_read /
