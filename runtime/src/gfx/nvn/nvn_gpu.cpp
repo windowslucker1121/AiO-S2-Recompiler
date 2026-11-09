@@ -959,7 +959,7 @@ void release_texture_gpu(Texture* t) {
             TexGpu* img = x->gpu;
             x->gpu = nullptr;
             g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
-            destroy_texture_gpu(img);
+            if (!tex_park(*x, img)) destroy_texture_gpu(img);
         });
         g_gauge_render_queue.add(1);
     }

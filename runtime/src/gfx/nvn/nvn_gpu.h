@@ -43,6 +43,12 @@ void destroy_pool_gpu(PoolGpu* p);
 // does not own the texture; ACNH finalizes ~300 textures a second and leaves most of them in its 8192-entry pool. Should the object be used
 // again, the image is made again from its storage. Queued behind the submissions already made (they are replayed in order).
 void release_texture_gpu(Texture* t);
+// [nvn] tex_park: the GPU-written image of a finalized texture is kept a few presents (any thread; false: not kept, destroy it as before). A
+// texture initialized again over the same storage with the same layout takes it back (tex_or_null) instead of a new image and an upload of
+// the storage: OoT makes its upscaler chain's 1920x1080 targets anew every frame (8.6 MB CPU untiles each). parked_cpu_wrote: the CPU wrote
+// [lo, hi): parked images there are stale (uploaded again when taken back).
+bool tex_park(const Texture& t, TexGpu* g);
+void parked_cpu_wrote(uint64_t lo, uint64_t hi);
 // A pool was created: import it into Vulkan on a background thread so the first draw that uses it does not wait for the driver (the import
 // pins the pages; it takes 10 to 80 ms). A no-op without a back end and for virtual pools.
 void prefetch_pool(MemoryPool* p);

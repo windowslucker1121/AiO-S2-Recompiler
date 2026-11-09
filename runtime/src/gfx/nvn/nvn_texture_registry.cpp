@@ -182,6 +182,7 @@ bool texture_hash_virtual(const Texture& t, uint64_t& hash) {
 
 void textures_cpu_wrote(const void* lo, uint64_t size) {
     const uint64_t a = reinterpret_cast<uint64_t>(lo), b = a + size;
+    gpu::parked_cpu_wrote(a, b);   // parked images of finalized textures there are stale now
     std::vector<Ref<Texture>> hit;
     {
         std::lock_guard<std::mutex> lk(g_mu);
