@@ -1306,7 +1306,7 @@ bool refill_written_on() {
     return on;
 }
 
-bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes) {
+bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes, bool refill_written) {
     if (bytes) *bytes = 0;
     if (!g_mirror_on || !size) return false;
     MemoryPool* mp = nullptr;
@@ -1335,8 +1335,14 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
     // copy-back is recorded already (it runs before this submission), and the CPU wrote the pool page after that result, so the pool is the
     // current one. It is copied in for this submission like a hot page (fresh). Before, the whole range went back to the pool instead: OoT
     // clears the counters in the first page of its GPU culling buffers (2-15 MB each), and every draw reading one flushed all of it.
+    // refill_written (the compute bindings, [nvn] refill_compute): the same for this caller only. OoT resets the counters in the first page of
+    // its GPU culling buffers every frame; the dispatch that writes them next found that page "newer in the copy" but unarmed, the fill
+    // failed, and the range was bound as a shadow read over PCIe from the pool (2-6 MB per buffer), then copied back whole before the
+    // indirect dispatch that reads its arguments there (compute out "indirect"). For every caller the refill cost a lot (the draws that
+    // read these buffers each broke their pass for it); compute dispatches run outside passes.
+    const bool refill = refill_written || refill_written_on();
     auto stale_new = [&](uint64_t x) {
-        return new_get(m, x) && !(m.any_fresh && fresh_get(m, x)) && !mem::ww::all_armed(m.ww, x, 1) && refill_written_on() && !out_pending_on_page(&m, x);
+        return new_get(m, x) && !(m.any_fresh && fresh_get(m, x)) && !mem::ww::all_armed(m.ww, x, 1) && refill && !out_pending_on_page(&m, x);
     };
     for (uint64_t p = first; p <= last;) {
         auto have = [&](uint64_t x) { return page_valid(m, x) || (new_get(m, x) && !stale_new(x)) || (m.any_fresh && fresh_get(m, x)); };

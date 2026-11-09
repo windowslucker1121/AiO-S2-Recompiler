@@ -196,7 +196,9 @@ void mirror_span_written(uint64_t gpu_address, uint64_t size);
 // and the copies before their readers. True when every page of the range is valid in the copy afterwards; false (nothing or only part of it
 // copied) when a page is banned or cannot be tracked, or the range has no copy. Hot pages (rewritten by the CPU every frame) are copied for
 // this use without being tracked. *bytes (optional) receives the bytes copied.
-bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes);
+// refill_written: pages newer in the copy that the CPU has written since (and that no result of this submission covers) are copied in again
+// for this submission (as [nvn] mirror_refill_written does for every caller); the compute bindings pass [nvn] refill_compute.
+bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes, bool refill_written = false);
 bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use);
 void mirror_begin_submit(Frame& f, bool on);
 void mirror_destroy(PoolGpu* p);
