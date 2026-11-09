@@ -231,15 +231,15 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912 };
-uint32_t ab_mask() {
-    static const uint32_t m = [] {
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34 };
+uint64_t ab_mask() {
+    static const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
-        static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
+        static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}};
-        uint32_t r = 0;
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}};
+        uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
             size_t j = v.find(',', i);
@@ -495,6 +495,10 @@ bool occlusion_in_pass_on() {
     return on;
 }
 
+// [nvn] occ_defer (cpuperf_ab_what name occ_defer): the reports wait for the end of the submission (or a reset of their slots) instead of
+// the end of their pass: one barrier triple per submission instead of one per pass with reports (~45 per frame in Kokiri outside). Only the
+// CPU reads them, after the submission's serial; a GPU command of the same submission that read a report word would see the old value.
+bool occ_defer_on();
 // The reports of the pass that just ended (outside any pass now): their {0, timestamp} words, then the query results over the counters.
 void occ_flush_pending() {
     if (g_occ_pend.empty()) return;
@@ -827,7 +831,7 @@ void end_pass(bool to_pass = false, std::source_location loc = std::source_locat
     P.open = false;
     flush_deferred_writes();
     if (g_pass_draws) g_pass_size_draws[(uint64_t{P.extent.width} << 32) | P.extent.height] += g_pass_draws;
-    occ_flush_pending();
+    if (!occ_defer_on()) occ_flush_pending();
     if (g_occ_pool && g_occ_want) occ_reset_ahead();
     if (gpass_on()) {
         char b[112];
@@ -988,6 +992,42 @@ bool memo_pass_keep() {
     return on && ab_on(kAbMemoPass);
 }
 
+// [nvn] pass_pre_layout (default on; cpuperf_ab_what name pre_layout): a pass break for a texture that a draw samples while it is still in
+// the attachment layout of an earlier pass. In Kokiri outside at 1080 prepare_textures ended ~45 open passes per frame, nearly all for depth
+// images left in DEPTH_STENCIL_ATTACHMENT (the shadow maps, sampled through the A7 pool arrays) and some colour targets. An image that ended
+// an open pass so once (g_break_prone, by its TexGpu) is put into its sampled layout when the next pass begins and it is not one of that
+// pass's attachments: outside any pass, next to the pass's own layout changes. A layout change keeps the contents, so a wrong guess costs
+// a transition back when the image is an attachment again, nothing else.
+std::vector<Ref<Texture>> g_prev_att;              // break-prone attachments of this submission's passes not yet put back (render thread)
+std::unordered_set<const void*> g_break_prone;     // images that ended an open pass for a layout change (keys only, never dereferenced)
+uint64_t g_pre_layout_n = 0;                       // statistics
+bool pre_layout_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "pass_pre_layout", true);
+    return on && ab_on(kAbPreLayout);
+}
+bool attachment_layout(VkImageLayout l) { return l == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL || l == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; }
+// At a pass begin (before its attachments' own layout changes): every remembered image that is not an attachment of the new pass.
+void pre_layout_prev_targets() {
+    if (g_prev_att.empty()) return;
+    if (!pre_layout_on()) { g_prev_att.clear(); return; }
+    size_t keep = 0;
+    for (size_t k = 0; k < g_prev_att.size(); ++k) {
+        Texture* t = g_prev_att[k].get();
+        if (!t || !t->gpu || !tex_gpu(t) || !attachment_layout(tex_layout(t))) continue;
+        bool attached = same_image(t, S.depth_tex.get());
+        for (uint32_t i = 0; i < S.ncolor && !attached; ++i) attached = same_image(t, S.color_tex[i].get());
+        if (attached) { g_prev_att[keep++] = g_prev_att[k]; continue; }   // still in use: later
+        tex_transition(t, *F, tex_sampled_layout(t));
+        ++g_pre_layout_n;
+    }
+    g_prev_att.resize(keep);
+}
+// After a pass begins: its break-prone attachments are remembered.
+void pre_layout_note(Texture* t) {
+    if (!t || !t->gpu || !g_break_prone.count(t->gpu) || !pre_layout_on()) return;
+    for (const Ref<Texture>& r : g_prev_att) if (same_image(r.get(), t)) return;
+    if (g_prev_att.size() < 64) g_prev_att.push_back(Ref<Texture>::share(t));
+}
 // Starts a pass on the current render targets if none is open for them. False when there is nothing to render to.
 void bind_skip_reset();   // below (bind_sets)
 void pass_lookahead();   // below: settles the reads of the coming draws before the pass begins
@@ -1005,6 +1045,7 @@ bool ensure_pass(bool depth_ro = false) {
             g_pending.clear();
         }
     }
+    pre_layout_prev_targets();
     if (out_any()) pass_lookahead();
     if (gpass_on()) gpass_stamp(*F, "gap", 0);      // copies, dispatches, barriers and layout changes since the previous pass
     g_pass_draws = 0;
@@ -1100,6 +1141,10 @@ bool ensure_pass(bool depth_ro = false) {
     if (g_occ_want) occ_begin_in_pass();
     counters().passes.fetch_add(1, std::memory_order_relaxed);
     g_bound_pipeline = VK_NULL_HANDLE;
+    if (!g_break_prone.empty()) {   // pass_pre_layout
+        for (uint32_t i = 0; i < S.ncolor; ++i) pre_layout_note(S.color_tex[i].get());
+        if (!depth_ro) pre_layout_note(S.depth_tex.get());
+    }
     return true;
 }
 
@@ -1873,6 +1918,7 @@ void pool_sets_reset() {
     g_pool_sets.clear();
 }
 
+uint64_t g_pt_breaks = 0, g_pt_from[7] = {}, g_pt_dirty = 0, g_pt_storage = 0;   // statistics: prepare_textures ending an open pass
 void prepare_textures(const ProgLayout& pl) {
     vol3d_prepare(pl);
     std::vector<Texture*> need, need_storage;
@@ -1930,7 +1976,24 @@ void prepare_textures(const ProgLayout& pl) {
     if (need.empty() && need_storage.empty()) return;
     for (Texture* t : need) out_texture_read(t);           // an upload reads game memory: compute results held there go back first
     for (Texture* t : need_storage) out_texture_read(t);
-    end_pass(true);     // layout changes and uploads follow: each carries the dependency for its own image
+    if (P.open) {   // statistics (the 10 s line): what ended an open pass here
+        ++g_pt_breaks;
+        g_pt_storage += need_storage.size();
+        for (Texture* t : need) {
+            if (t->cpu_dirty.load()) { ++g_pt_dirty; continue; }
+            if (attachment_layout(tex_layout(t)) && t->gpu && g_break_prone.size() < 4096) g_break_prone.insert(t->gpu);   // pass_pre_layout
+            switch (tex_layout(t)) {
+                case VK_IMAGE_LAYOUT_GENERAL: ++g_pt_from[0]; break;
+                case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: ++g_pt_from[1]; break;
+                case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL: ++g_pt_from[2]; break;
+                case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL: ++g_pt_from[3]; break;
+                case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: ++g_pt_from[4]; break;
+                case VK_IMAGE_LAYOUT_UNDEFINED: ++g_pt_from[5]; break;
+                default: ++g_pt_from[6]; break;
+            }
+        }
+    }
+    end_pass(true);    // layout changes and uploads follow: each carries the dependency for its own image
     counters().pass_breaks.fetch_add(1, std::memory_order_relaxed);
     for (Texture* t : need) {
         tex_ensure_current(t, *F);
@@ -2050,6 +2113,7 @@ std::vector<ShadowUse> g_shadow_uses;                       // this dispatch
 // Results of direct bindings still only in the pool copy: nvn_gpu_pool.cpp (out_add ... out_end_submit, "compute out").
 bool g_shadowing = false;
 bool g_sh_barrier = false, g_sh_copied = false;             // this dispatch: the barrier before the copies in is recorded / some copy in is
+uint32_t g_sh_kinds = 0;   // this dispatch's copies in, for the gpu_passes label: 1 pages filled into the pool copy, 2 delta snapshot, 4 shadow from the pool, 8 shadow from the copy, 16 indirect arguments into c[0]
 uint64_t g_sh_uses = 0, g_sh_from_mirror = 0, g_sh_bytes_mirror = 0, g_sh_bytes_pool = 0, g_sh_bytes_out = 0, g_sh_no_span = 0;   // summary line
 uint64_t g_sh_held = 0;   // bound from a shadow that holds an earlier dispatch's result
 uint64_t g_sh_direct = 0, g_sh_direct_filled = 0, g_sh_bytes_fill = 0, g_sh_bytes_dout = 0, g_sh_merged = 0, g_sh_flushes = 0;
@@ -2084,6 +2148,23 @@ bool gmem_ro_on() {
     static const bool on = nxrt::config_get_bool("nvn", "gmem_ro_bindings", true);
     return on && ab_on(kAbGmemRo);
 }
+bool cs_gmem_held_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "cs_gmem_held", true);
+    return on && ab_on(kAbCsGmemHeld);
+}
+// [nvn] refill_compute (cpuperf_ab_what name refill_compute): see mirror_fill's refill_written (nvn_gpu_pool.cpp).
+bool refill_compute_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "refill_compute", true);
+    return on && ab_on(kAbRefillCompute);
+}
+bool occ_defer_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "occ_defer", true);
+    return on && ab_on(kAbOccDefer);
+}
+bool cs_gmem_flush_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "cs_gmem_flush", false);
+    return on && ab_on(kAbCsGmemFlush);
+}
 bool compute_direct_on() {
     static const bool on = nxrt::config_get_bool("nvn", "compute_direct", true);
     return on;
@@ -2106,7 +2187,7 @@ void compute_out_guard(uint64_t addr, uint64_t size, int why) {
     end_pass();
     if (out_flush(F->cb, addr, size, why)) {
         ++g_sh_flushes;
-        gstamp("compute out");
+        if (gpass_on()) gstamp(("compute out " + std::to_string(why)).c_str());
     }
 }
 
@@ -2170,7 +2251,17 @@ BufRef held_or_pool(uint64_t addr, uint64_t size, int why, bool flush) {
                 return r;
             }
         }
-        if (flush) compute_out_guard(addr, size, why);
+        if (flush) {
+            static int logged = 0;
+            if (why == kOutIndirect && logged < 16) {
+                ++logged;
+                const MirrorSpan ms = mirror_span(addr, size);
+                NXLOG_I(kTag, "indirect arguments over a held result not servable from the copy: %llx +%llx (cs %s): lazy %d servable %d span %d valid %d",
+                        (unsigned long long)addr, (unsigned long long)size, S.stage[kCompute] ? S.stage[kCompute]->hash.substr(0, 8).c_str() : "-",
+                        out_lazy() ? 1 : 0, out_servable(addr, size) ? 1 : 0, ms.buf ? 1 : 0, ms.valid ? 1 : 0);
+            }
+            compute_out_guard(addr, size, why);
+        }
     }
     return resolve_buffer(addr, size);
 }
@@ -2193,6 +2284,9 @@ constexpr uint64_t kGmemUboScanWrite = 4096;   // bytes of each uniform block se
 constexpr uint64_t kGmemUboScanRead = 1024;    // readers (thousands of vertex shaders per frame)
 constexpr int kGmemMaxPointers = 128;          // per op
 uint64_t g_gmem_flushes = 0, g_gmem_windows = 0;
+uint64_t g_csmask_n = 0, g_csmask_bits = 0;   // statistics: compute dispatches with a held-slot mask (cs_gmem_held), slots marked in them
+uint64_t g_csmask_why[4] = {};                 // ... why slots were marked: no pool, virtual pool, no storage, held result
+uint64_t g_gmask_stages = 0, g_gmask_marked = 0;   // graphics_c0: pointer stages, of them with a slot marked (no inline fast path)
 
 bool gmem_coherence_on() {
     static const bool on = nxrt::config_get_bool("nvn", "gmem_coherence", true);
@@ -2658,7 +2752,7 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
         if (out_exact(addr, size, &ob, &oo, &in_mirror)) {
             ++g_sh_uses;
             ++(in_mirror ? g_sh_direct : g_sh_held);
-            if (writes && in_mirror && out_presnap(addr, size, ob, oo, F->cb)) g_sh_copied = true;   // a result sent back already: snapshot again
+            if (writes && in_mirror && out_presnap(addr, size, ob, oo, F->cb)) { g_sh_copied = true; g_sh_kinds |= 2; }   // a result sent back already: snapshot again
             g_shadow_uses.push_back({addr, size, host, ob, oo, writes, true, MirrorSpan{ob, oo, true}, !in_mirror});
             BufRef r = host; r.buffer = ob; r.offset = oo; r.avail = size;
             return r;
@@ -2673,14 +2767,14 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
         if (!ok) {
             sh_barrier_once();
             uint64_t filled = 0;
-            ok = mirror_fill(F->cb, addr, size, &filled);
-            if (filled) { g_sh_copied = true; g_sh_bytes_fill += filled; }
+            ok = mirror_fill(F->cb, addr, size, &filled, refill_compute_on());
+            if (filled) { g_sh_copied = true; g_sh_bytes_fill += filled; g_sh_kinds |= 1; }
             if (ok) ++g_sh_direct_filled;
         }
         if (ok) {
             ++g_sh_uses;
             ++g_sh_direct;
-            if (writes && out_presnap(addr, size, ms.buf, ms.offset, F->cb)) g_sh_copied = true;   // out_delta: the range before the dispatch
+            if (writes && out_presnap(addr, size, ms.buf, ms.offset, F->cb)) { g_sh_copied = true; g_sh_kinds |= 2; }   // out_delta: the range before the dispatch
             g_shadow_uses.push_back({addr, size, host, ms.buf, ms.offset, writes, true, ms});
             BufRef r = host; r.buffer = ms.buf; r.offset = ms.offset; r.avail = size;
             return r;
@@ -2705,11 +2799,24 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
     // The device-local pool copy, when it holds the range, is the cheap source (video memory to video memory instead of over PCIe); after a
     // dispatch that writes the range, the result goes to both, so the next dispatch finds the copy valid again (mirror_span_written).
     ++g_sh_uses;
-    if (!ms.buf) ++g_sh_no_span;
+    if (!ms.buf) {
+        ++g_sh_no_span;
+        static int logged = 0;
+        if (logged < 24 && first_time_key("shadow-nospan " + std::to_string(addr) + "/" + std::to_string(size))) {
+            ++logged;
+            const PoolHit hit = pool_lookup(addr);
+            NXLOG_I(kTag, "compute shadow without a pool copy span: %llx +%llx (cs %s, writes %d): pool %llx size %llx flags %x virtual %d gpu %d, offset %llx (chunk %llu..%llu)",
+                    (unsigned long long)addr, (unsigned long long)size, S.stage[kCompute] ? S.stage[kCompute]->hash.substr(0, 8).c_str() : "-", writes ? 1 : 0,
+                    hit.pool ? (unsigned long long)reinterpret_cast<uint64_t>(hit.pool->base) : 0ull, hit.pool ? (unsigned long long)hit.pool->size : 0ull,
+                    hit.pool ? hit.pool->flags : 0u, hit.pool ? (int)hit.pool->is_virtual : -1, hit.pool && hit.pool->gpu ? 1 : 0,
+                    (unsigned long long)hit.offset, (unsigned long long)(hit.offset >> 26), (unsigned long long)((hit.offset + size - 1) >> 26));
+        }
+    }
     if (ms.valid) { ++g_sh_from_mirror; g_sh_bytes_mirror += size; } else g_sh_bytes_pool += size;
     VkBufferCopy c = {ms.valid ? ms.offset : host.offset, 0, size};
     vkCmdCopyBuffer(F->cb, ms.valid ? ms.buf : host.buffer, sh.buf.buffer, 1, &c);
     g_sh_copied = true;
+    g_sh_kinds |= ms.valid ? 8 : 4;
     g_shadow_uses.push_back({addr, size, host, sh.buf.buffer, 0, writes, false, ms, true});
     BufRef r = host;
     r.buffer = sh.buf.buffer;
@@ -2754,8 +2861,12 @@ void shadows_after_dispatch() {
                 (unsigned long long)g_sh_flushes, (unsigned long long)g_sh_merged, (unsigned long long)g_sh_held);
         uint64_t spans = 0, pages = 0;
         page_table_stats(&spans, &pages);
-        NXLOG_I("nvn.replay", "global memory: %llu held-result flushes for pointer shaders, %llu write windows marked; page table %llu spans of 2 MiB, %llu pages",
-                (unsigned long long)g_gmem_flushes, (unsigned long long)g_gmem_windows, (unsigned long long)spans, (unsigned long long)pages);
+        NXLOG_I("nvn.replay", "global memory: %llu held-result flushes for pointer shaders, %llu write windows marked; page table %llu spans of 2 MiB, %llu pages; "
+                "graphics pointer stages %llu, %llu with a slot marked; "
+                "compute slot masks (cs_gmem_held) %llu, %.2f slots each (no pool %llu, virtual %llu, no storage %llu, held result %llu)",
+                (unsigned long long)g_gmem_flushes, (unsigned long long)g_gmem_windows, (unsigned long long)spans, (unsigned long long)pages,
+                (unsigned long long)g_gmask_stages, (unsigned long long)g_gmask_marked, (unsigned long long)g_csmask_n, g_csmask_n ? static_cast<double>(g_csmask_bits) / static_cast<double>(g_csmask_n) : 0.0,
+                (unsigned long long)g_csmask_why[0], (unsigned long long)g_csmask_why[1], (unsigned long long)g_csmask_why[2], (unsigned long long)g_csmask_why[3]);
         for (auto it = g_shadows.begin(); it != g_shadows.end();) {
             if (F->serial - it->second.last > 600) {
                 gfx::Buffer old = it->second.buf;
@@ -2851,7 +2962,16 @@ void pool_table_words(uint8_t* c0, bool old_table) {
 }
 
 constexpr VkDeviceSize kComputeC0Bytes = 0x1000;
-bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_table = true) {
+// [nvn] cs_gmem_held (default on; cpuperf_ab_what name cs_gmem_held): a compute pointer shader (A17 "gmem") that does not store through
+// pointers checks only the storage slots whose binding may differ from the pool before the page table: a result held in the pool copy or a
+// shadow (out_overlaps), a virtual pool. As graphics_c0 does for draws. The other slots are bound to the pool copy or a shadow made from the
+// pool or from a current copy, so the page table (the pool) holds the same bytes there; gmem_before_op has sent held results near the
+// shader's uniform pointers back already. Before, every slot was checked for every 32-bit pointer access: OoT's culling/HiZ chain
+// (a17259b2 x6, a68b51f9, d89e74b6, 39a1f760, 5d8324bd: 11 storage slots each) took ~0.33 ms per dispatch at 1080 (Kokiri outside, ~3.3 ms
+// per frame in the submission the game's main thread waits on), ~0.04 ms with the slot loop skipped. Shaders that store or do atomics
+// through pointers ("gmemw", OoT's culling root 4c1e8564) keep every slot: their stores must reach the binding that is copied back.
+bool cs_gmem_held_on();
+bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_table = true, bool held_mask = false) {
     if (!c.nvn2 || c.stage != 5 || c.c0_table > n) return false;
     std::memset(p, 0, n);
     std::memcpy(p + 4, g_dispatch_groups, 12);
@@ -2869,8 +2989,37 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_tabl
     for (int i = 0; i < c.c0_textures; ++i, off += 8) put64(i < 64 ? S.tex[kCompute][i] : 0);
     for (int i = 0; i < c.c0_images; ++i, off += 8) put64(i < 16 ? S.img[kCompute][i] : 0);
     if (n >= kPoolTableC0 + 8 && off <= kGmemSlotMaskC0) {
-        // compute: every bound storage descriptor before the page table (compute shadows and virtual pools are bound, not in the table)
-        const uint32_t all = ~0u;
+        // compute: every bound storage descriptor before the page table (compute shadows and virtual pools are bound, not in the table), or
+        // with held_mask only the slots whose binding may differ from the pool (cs_gmem_held_on)
+        uint32_t all = ~0u;
+        static const bool exp_none = nxrt::config_get_bool("nvn", "exp_cs_gmem_none", false);   // measurement only: no slot checked (wrong reads of held results)
+        if (held_mask && exp_none) all = 0;
+        else if (held_mask) {
+            all = 0;
+            for (int k = 0; k < 16 && k < c.c0_ssbos; ++k) {
+                const GState::Bind& b = S.ssbo[kCompute][k];
+                if (!b.addr) continue;
+                const PoolHit hit = pool_lookup(b.addr);
+                const int why = !hit.pool ? 0 : hit.pool->is_virtual ? 1 : !hit.pool->base ? 2 : out_overlaps(b.addr, b.size ? b.size : 1) ? 3 : -1;
+                if (why >= 0) { all |= 1u << k; ++g_csmask_why[why]; }
+            }
+            {
+                static int logged = 0;
+                if (logged < 40 && all && first_time_key("csmask " + std::to_string(c.c0_table) + " " + std::to_string(all))) {
+                    ++logged;
+                    std::string sl;
+                    for (int k = 0; k < 16 && k < c.c0_ssbos; ++k) {
+                        const GState::Bind& b = S.ssbo[kCompute][k];
+                        char t[64];
+                        std::snprintf(t, sizeof t, " %d:%llx+%llx%s", k, (unsigned long long)b.addr, (unsigned long long)b.size, (all >> k) & 1 ? "*" : "");
+                        sl += t;
+                    }
+                    NXLOG_I(kTag, "cs_gmem_held: cs %s mask %x:%s", S.stage[kCompute] ? S.stage[kCompute]->hash.substr(0, 8).c_str() : "-", all, sl.c_str());
+                }
+            }
+            ++g_csmask_n;
+            g_csmask_bits += static_cast<uint64_t>(std::popcount(all));
+        }
         std::memcpy(p + kGmemSlotMaskC0, &all, 4);
     }
     if (n >= kPoolTableC0 + 8 && off <= kPageTableC0) pool_table_words(p, old_table);
@@ -2924,6 +3073,8 @@ uint64_t graphics_c0_build_raw(bool old_table) {
             const PoolHit hit = pool_lookup(b.addr);
             if (!hit.pool || hit.pool->is_virtual || !hit.pool->base || out_overlaps(b.addr, b.size ? b.size : 1)) mask_of[st] |= 1u << k;
         }
+        ++g_gmask_stages;
+        if (mask_of[st]) ++g_gmask_marked;
     }
     for (int st : kStagesWithStorage) {
         const int base = storage_c0_base(st);
@@ -3036,7 +3187,8 @@ bool compute_c0(const ShaderInfo& s, VkDescriptorBufferInfo& bi) {
     if (!s.control.nvn2 || s.control.stage != 5) return false;
     const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
     UploadAlloc u = F->upload(kComputeC0Bytes, std::max<VkDeviceSize>(align, 256));
-    if (!u || !fill_compute_c0(s.control, u.ptr, static_cast<size_t>(kComputeC0Bytes), s.refl.global_fallback && !s.refl.global_pt)) return false;
+    if (!u || !fill_compute_c0(s.control, u.ptr, static_cast<size_t>(kComputeC0Bytes), s.refl.global_fallback && !s.refl.global_pt,
+                               s.refl.global_fallback && s.refl.global_pt && !s.refl.global_writes && cs_gmem_held_on())) return false;
     bi = {u.buffer, u.offset, kComputeC0Bytes};
     g_c0_made = bi;   // do_dispatch: an indirect dispatch's GPU-written counts are copied into words 1-3 of this header
     return true;
@@ -5596,6 +5748,13 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     prepare_textures(*pl);
     end_pass();
     gmem_before_op(true);   // A17: held results back, ranges its pointers name written
+    // [nvn] cs_gmem_flush: a compute pointer shader that only reads through pointers gets the results held over its storage bindings sent
+    // back first, so no slot needs checking before the page table (cs_gmem_held: mask 0, the shader's inline fast path).
+    if (cs->refl.global_fallback && cs->refl.global_pt && !cs->refl.global_writes && cs_gmem_held_on() && cs_gmem_flush_on() && out_any())
+        for (int k = 0; k < 16 && k < cs->control.c0_ssbos; ++k) {
+            const GState::Bind& b = S.ssbo[kCompute][k];
+            if (b.addr && b.size) compute_out_guard(b.addr, b.size, kOutGlobal);
+        }
     if (g_trace) {   // the compute bindings: buffers (source, slot, address), texel buffers and textures, and the first words of each uniform block
         for (const BindingDesc& d : pl->bindings) {
             const DescriptorBinding& b = d.shader->refl.bindings[d.index];
@@ -5633,6 +5792,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     g_shadowing = compute_shadows_on();
     g_shadow_uses.clear();
     g_sh_barrier = g_sh_copied = false;
+    g_sh_kinds = 0;
     // The work-group counts for the c[0] header (fill_compute_c0). An indirect dispatch's arguments as the CPU sees them (a dispatch
     // that wrote them on the GPU this frame is not visible here: then the header holds the values of the last host copy, or 1s).
     g_dispatch_groups[0] = x; g_dispatch_groups[1] = y; g_dispatch_groups[2] = z;
@@ -5650,10 +5810,18 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
         const VkBufferCopy rg = {ind.offset, g_c0_made.offset + 4, 12};
         vkCmdCopyBuffer(F->cb, ind.buffer, g_c0_made.buffer, 1, &rg);
         memory_barrier(F->cb);
+        g_sh_kinds |= 16;
     }
-    if (g_sh_copied) {
-        memory_barrier(F->cb);     // the copies into the shadows before the dispatch reads them
-        if (gpass_on()) gstamp(("shadow in " + cs->hash.substr(0, 8)).c_str());
+    if (g_sh_copied) memory_barrier(F->cb);     // the copies into the shadows before the dispatch reads them
+    if ((g_sh_copied || g_sh_kinds) && gpass_on()) {
+        char k[8] = {};
+        int n = 0;
+        if (g_sh_kinds & 1) k[n++] = 'f';
+        if (g_sh_kinds & 2) k[n++] = 'p';
+        if (g_sh_kinds & 4) k[n++] = 's';
+        if (g_sh_kinds & 8) k[n++] = 'm';
+        if (g_sh_kinds & 16) k[n++] = 'i';
+        gstamp(("shadow in " + cs->hash.substr(0, 8) + " " + k).c_str());
     }
     if (checkpoints_on()) {
         char t[128];
@@ -6686,7 +6854,7 @@ void run_list(const CmdList& list, int depth) {
                         g_reports[p.address] = kReportUnknown;   // the query result lands on the GPU
                         gpu_wrote(p.address, sizeof rep, kWriteUpdate);
                         g_occ_pend.push_back({p.address, rep.timestamp, split ? -1 : slot, split ? kOccSplitCount : 0});
-                        if (!P.open) occ_flush_pending();
+                        if (!P.open && !occ_defer_on()) occ_flush_pending();
                     }
                     ++g_occ_fast;
                     break;
@@ -7087,7 +7255,6 @@ bool ab_tex_park_on() { return ab_on(kAbTexPark); }   // [nvn] cpuperf_ab_what t
 bool ab_overlap_grow_on() { return ab_on(kAbOverlapGrow); }
 bool ab_index_inc_on() { return ab_on(kAbIndexInc); }   // [nvn] cpuperf_ab_what index_inc (nvn_gpu_pool.cpp)   // [nvn] cpuperf_ab_what overlap_grow (nvn_gpu_pool.cpp)
 bool ab_out_delta_on() { return ab_on(kAbOutDelta); }  // out_delta (nvn_gpu_pool.cpp delta copy-backs)
-
 // [display] unpaced_loading (default on): the limiter stops waiting while the game loads, since its loading code advances once per
 // presented frame. Loading = presented frames with fewer than 16 draws (boot's black screen draws 3: exposure, bloom, tone map; the
 // loading screen a few more) AND the game still stalling: a present gap over 100 ms in the last 1.5 s. A light screen that presents
@@ -7274,6 +7441,13 @@ void replay_begin_submit(Frame& f) {
                 }
                 NXLOG_I(kTag, "passes ended by:%s; memory writes kept to the pass end %llu (%llu flushes)", s.c_str(), (unsigned long long)g_wdefer_n,
                         (unsigned long long)g_wdefer_flushes);
+                NXLOG_I(kTag, "pass_pre_layout: %llu images put into their sampled layout at a pass begin, %zu images known to break passes",
+                        (unsigned long long)g_pre_layout_n, g_break_prone.size());
+                NXLOG_I(kTag, "texture work that ended an open pass: %llu breaks; textures by old layout: general %llu, color attachment %llu, depth attachment %llu, "
+                        "depth read-only %llu, transfer %llu, undefined %llu, other %llu; CPU-written (uploads) %llu, storage images %llu",
+                        (unsigned long long)g_pt_breaks, (unsigned long long)g_pt_from[0], (unsigned long long)g_pt_from[1], (unsigned long long)g_pt_from[2],
+                        (unsigned long long)g_pt_from[3], (unsigned long long)g_pt_from[4], (unsigned long long)g_pt_from[5], (unsigned long long)g_pt_from[6],
+                        (unsigned long long)g_pt_dirty, (unsigned long long)g_pt_storage);
             }
             NXLOG_I(kTag, "occlusion reports: %llu in their pass, %llu with a pass break; %llu queries ended early by a pass break (split)",
                     (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
@@ -7426,9 +7600,12 @@ void replay_end_submit(Frame& f) {
     F = &f;
     if (out_any()) {         // every compute result is in game memory, or held and guarded, before the submission's serial signals
         end_pass();
+        gstamp("pre-tail");   // gpu_passes: "tail" is then the end-of-submission copy-backs (and the rest after them)
         out_end_submit(F->cb, F->serial);
     }
     end_pass();
+    occ_flush_pending();   // [nvn] occ_defer: the reports of the whole submission, written here once
+    g_prev_att.clear();   // pass_pre_layout: no references past the submission
     if ((f.serial & 127) == 0 && !g_fb_clone.empty()) fb_sweep(f.serial);
     if ((f.serial & 127) == 0 && !g_vol3d.empty()) {   // 3D copies of 2D textures no submission used for kFbIdleSubmits are released
         g_vol3d_use.clear();

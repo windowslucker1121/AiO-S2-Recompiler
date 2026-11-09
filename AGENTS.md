@@ -1016,6 +1016,55 @@ dedicated (NVIDIA render targets; 91% of vmaCreateImage time was dedicated alloc
 share an image), 0 of 16 group runs and the next full runs; the BC7 format index now records only entries written 2 s ago, which removes the
 same-tick case of `astc_with_rgba8_and_bc5_cache_entries`.
 
+**Session 2026-11-09 (P4: our GPU time at 1080, Kokiri outside: the culling submission).** Runs alone, `load_state("kokiri_outside")`,
+1920x1080, paired `cpuperf_ab = 300` windows (one feature each, `cpuperf_ab_what`), unstamped; GPU time per submission class from the
+trace's `gpu.exec` (scratch `subab.py` in the worktree's `work\scripts`: "mid" = the culling/HiZ submission #3 the game's main thread
+waits on, "main" = #6). **The frame is GPU-bound: #6 ~18.7 + #3 ~8.5 ms of GPU = the ~27 ms frame** (36-37 fps), so every ms of either
+counts. Stamped profile of #3 (`gpu_passes` + `gpu_draws`, labels now say what each dispatch copied in: `shadow in <cs> f|p|s|m|i` = pages
+filled into the pool copy, delta snapshot, shadow from the pool, shadow from the copy, indirect arguments into c[0]; `compute out <why>`;
+a `pre-tail` stamp so `tail` is the end-of-submission copy-backs): no draws; ~150 dispatches; the compute pointer shaders (gmem + gpt) of the
+culling chain a17259b2 x6, a68b51f9, d89e74b6, 39a1f760, 5d8324bd ~0.33 ms each (3.3 ms), 4c1e8564 0.41, fog 20593fd9 0.39; ours: shadow
+in 34931785 0.55 (a 2.3 MB shadow read from the pool over PCIe), copy-backs mid-submission 0.54 (26 per frame, 7 of them "indirect"),
+end-of-submission copy-backs 0.36, ~70 tiny dispatches that each fill a few CPU-written pages first (~0.7 ms with their barriers).
+- **Compute pointer shaders: the slot search is the cost.** The translator's inline page-cache fast path (AmpereGlobal.cs) runs only when
+  the stage's slot mask (c[0] 0xfc0) is 0; compute had every slot marked, so every 32-bit pointer load called the out-of-line helper that
+  searches the bound slots. `[nvn] exp_cs_gmem_none` (measurement: mask 0, wrong where a slot holds a result newer than the pool): #3
+  8.65 -> 5.49 ms, **36.0 -> 40.5 fps (13 of 13 pairs)**. Kept: `[nvn] cs_gmem_held` (default on): read-only compute pointer shaders mark
+  only slots whose binding may differ from the pool (as draws): #3 -0.24 ms (16/16), +0.33 fps (14/16): ~5 of their ~11 slots hold results
+  (the `global memory` 10 s line counts them). The same holds for draws: **55% of the gpt pre-raster stages' descriptor sets have a slot
+  marked** (`graphics pointer stages N, M with a slot marked`), so they never take the fast path either. Tried: `[nvn] cs_gmem_flush`
+  (send those held results back before the reader, mask 0): #3 -1.7 ms but #6 +1.1 ms, fps +0.45 (8/14): off. **Next (its own agent):
+  guest page-table entries that point into the pool copy while a result is held there** (GPU-ordered: vkCmdUpdateBuffer of the leaf words
+  after the writing dispatch / at submission begin for results held from before, restored when the result goes back and at submission
+  end; a CPU-side shadow of the table for navigation and the pool values; 2 MiB spans split into page nodes; mirror chunks need
+  SHADER_DEVICE_ADDRESS usage). Then no held slot needs checking, for draws as well, and gmem_before_op's ~200 flushes per second for
+  pointer readers go away. Ceiling for #3 alone: the 3.2 ms / +4.7 fps above.
+- `[nvn] refill_compute` (default on): mirror_refill_written for compute bindings only. OoT's CPU clears the counters in the first page of
+  its culling buffers every frame; that page was "newer in the copy" but unarmed, the fill failed, the dispatch bound a shadow read from
+  the pool over PCIe, and the indirect dispatch reading its arguments there flushed the shadow back (the 7 "indirect" copy-backs). #3
+  -0.57 ms (12/12), +0.8 fps (11/12). For every caller (`mirror_refill_written`, re-measured): #6 +13 ms, -10 fps (draws break passes).
+- `[nvn] pass_pre_layout` (default on): ~45 open passes per frame were ended by prepare_textures, nearly all for depth images still in
+  DEPTH_STENCIL_ATTACHMENT (shadow maps read through the A7 pool arrays: ~13 texture objects per break) and some colour targets (10 s line
+  `texture work that ended an open pass` by old layout). Images that did so once are put into their sampled layout at the next pass begin
+  that does not attach them. First form (only the previous pass's attachments): #6 -0.15 ms (13/13), +0.25 fps (11/13); the committed
+  form (every remembered attachment of the submission, list of Refs cleared at submission end): #6 -0.19 ms (9/12), fps +0.15 (5/7) in a
+  render-thread-bound run. Breaks remain (~40 per frame): the rest needs VK_KHR_unified_image_layouts (supported by 610.88, not enabled in
+  vk_device.cpp) or a look-ahead.
+- `[nvn] occ_defer` (default on): occlusion reports made in passes are written once at the end of the submission (or before their slots
+  are reset) instead of at every pass end with reports (~45 per frame, a barrier triple each): +0.6 fps (12/13), #6 -0.36 ms.
+- **Combined, after the shared cache changed under the session** (mid-session merges made #3 ~5.3 ms and the runs render-thread bound,
+  idle ~0.7 ms): `cs_gmem_held` + `refill_compute` on vs off, 18 steady pairs: #3 -0.61 ms (19/23), fps +0.78 (13/18). All four with
+  another agent's 6-job build on the machine: -0.75 fps (2/11, replay +0.75 ms): measure on a quiet machine; the earlier single-feature
+  pairs were quiet and GPU-bound.
+- Correctness: in-game screenshots at 1080 (Kokiri outside, both keys on vs off): SSIM 0.934-0.941 against 0.967-0.978 for two shots of
+  one run (Navi, particles and Link's idle animation move); foliage, grass and crowns present in both. The replay does not exercise held
+  results (`compute_out_lazy` off there). Runtime tests: all 174 pass.
+- Dropped/measured: `mirror_refill_written` for all callers (above); `cs_gmem_flush` (above). Not done, handed on (barriers belong to
+  agent B1): range-level barrier elision; barrier counts per site in Kokiri (per frame): post-dispatch ~116, shadow copy-in pair ~87 x2,
+  occlusion report triple ~65 x3 (now once per submission with occ_defer), mesh-indirect record copy pair ~29 x2, delta snapshot ~20.
+- Pitfalls: `powershell -File x.ps1 -Runs a,b` passes one string (split it yourself); a run after a refill-on build showed ab windows of
+  300-400 fps for the first minute (loading screens): skip the first ~8 windows; `ab.py`-style means are skewed by them, use pair medians.
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
