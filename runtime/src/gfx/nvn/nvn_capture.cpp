@@ -1075,6 +1075,7 @@ bool load_capture(const stdfs::path& dir, Loaded& L, std::string* err) {
             e.tex = Ref<Texture>::share(t);
             e.view = v;
             e.has_view = hv;
+            if (!e.used) tp->used_ids.push_back(idx);
             e.used = true;
         }
         L.tpools.emplace_back(tp);

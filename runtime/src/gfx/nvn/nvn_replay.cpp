@@ -54,6 +54,55 @@ namespace {
 constexpr const char* kTag = "nvn.replay";
 constexpr int kMaxDepth = 8;
 
+// A hash table of 64-bit keys (already hashed) for the render thread's per-set caches: open addressing, linear probing, no erase; clear()
+// is O(1) (slots of an older generation count as empty). std::unordered_map allocated a node per insert and freed every node at each
+// clear: ~4% of the render thread with thousands of sets per frame and the set memo cleared every few draws.
+template <typename V>
+struct FlatMap64 {
+    struct Slot { uint64_t key = 0; uint32_t gen = 0; V val{}; };
+    std::vector<Slot> s;
+    uint32_t gen = 1;
+    size_t n = 0;
+    static size_t pos(uint64_t k, size_t mask) { return static_cast<size_t>((k * 0x9E3779B97F4A7C15ull) >> 32) & mask; }
+    bool empty() const { return n == 0; }
+    size_t size() const { return n; }
+    void clear() {
+        if (!n) return;
+        n = 0;
+        if (++gen == 0) { for (Slot& x : s) x.gen = 0; gen = 1; }
+    }
+    V* find(uint64_t k) {
+        if (!n) return nullptr;
+        const size_t mask = s.size() - 1;
+        for (size_t i = pos(k, mask);; i = (i + 1) & mask) {
+            Slot& x = s[i];
+            if (x.gen != gen) return nullptr;
+            if (x.key == k) return &x.val;
+        }
+    }
+    void put(uint64_t k, const V& v) {
+        if ((n + 1) * 2 > s.size()) grow();
+        const size_t mask = s.size() - 1;
+        for (size_t i = pos(k, mask);; i = (i + 1) & mask) {
+            Slot& x = s[i];
+            if (x.gen != gen) { x.key = k; x.gen = gen; x.val = v; ++n; return; }
+            if (x.key == k) { x.val = v; return; }
+        }
+    }
+    void grow() {
+        std::vector<Slot> old;
+        old.swap(s);
+        s.assign(std::max<size_t>(64, old.size() * 2), Slot{});
+        const uint32_t g = gen;
+        n = 0;
+        gen = 1;
+        for (const Slot& x : old)
+            if (x.gen == g) put(x.key, x.val);
+    }
+};
+// [nvn] flat_set_maps (default on): g_set_cache and g_set_memo in FlatMap64 instead of std::unordered_map (cpuperf_ab_what flat_maps)
+bool flat_set_maps_on();
+
 enum Stage { kVertex = 0, kFragment = 1, kGeometry = 2, kTessCtl = 3, kTessEval = 4, kCompute = 5, kTask = 6, kMesh = 7, kStages = 8 };
 
 struct GState {
@@ -147,7 +196,21 @@ uint32_t g_pass_draws = 0;      // draws recorded in the open pass (GPU pass pro
 std::unordered_map<uint64_t, uint64_t> g_pass_size_draws;
 uint64_t g_pass_verts = 0;      // vertices (indices for indexed draws) times instances of those draws
 Frame* F = nullptr;
-std::unordered_map<uint64_t, VkDescriptorSet> g_set_cache;
+// a descriptor set cache keyed by a hash: FlatMap64, or std::unordered_map in the off windows of cpuperf_ab_what flat_maps (picked at clear)
+struct SetMap {
+    FlatMap64<VkDescriptorSet> f;
+    std::unordered_map<uint64_t, VkDescriptorSet> u;
+    bool flat = true;
+    void clear() { f.clear(); u.clear(); flat = flat_set_maps_on(); }
+    bool empty() const { return flat ? f.empty() : u.empty(); }
+    VkDescriptorSet* find(uint64_t k) {
+        if (flat) return f.find(k);
+        auto it = u.find(k);
+        return it == u.end() ? nullptr : &it->second;
+    }
+    void put(uint64_t k, VkDescriptorSet v) { if (flat) f.put(k, v); else u[k] = v; }
+};
+SetMap g_set_cache;
 uint64_t g_desc_epoch = 1;      // the resolve epoch of [nvn] set_reuse (bind_sets): moves whenever a binding could resolve differently
 enum BumpWhy { kBumpOp, kBumpWrite, kBumpPass, kBumpSubmit, kBumpWhyN };
 uint64_t g_bump_n[kBumpWhyN] = {};   // statistics: epoch moves by cause
@@ -159,14 +222,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096 };
+enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072 };
 uint32_t ab_mask() {
     static const uint32_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}};
         uint32_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -182,6 +245,10 @@ uint32_t ab_mask() {
 }
 // False only in an "off" window of [nvn] cpuperf_ab for a feature it switches.
 inline bool ab_on(AbFeat f) { return g_cpu_ab_on || !(ab_mask() & f); }
+bool flat_set_maps_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "flat_set_maps", true);
+    return on && ab_on(kAbFlatMaps);
+}
 enum class SetReuse { Off, On, Verify };
 SetReuse set_reuse_mode() {
     static const SetReuse m = [] {
@@ -362,6 +429,10 @@ UploadAlloc ubo_snapshot(uint64_t addr, uint64_t n, VkDeviceSize align) {
 }
 
 uint64_t g_bump_use[9] = {};   // statistics: epoch moves by GPU writes, by use (0-5 note_gpu_write uses, 8 update ranges)
+// statistics: epoch moves by GPU writes, by call site (g_gw_site: 0 other, 1 gmem bound storage, 2 gmem pointer window, 3 draw over a held
+// result, 4 graphics storage binding, 5 compute storage binding, 6 storage texel buffer)
+int g_gw_site = 0;
+uint64_t g_bump_site[8] = {};
 void gpu_wrote(uint64_t addr, uint64_t size, int use) {
     // [nvn] set_reuse: a write changes how bindings resolve only when it makes copied pages stale or marks an update range written
     if (upd_note_gpu_write(addr, size)) { desc_epoch_bump(kBumpWrite); ++g_bump_use[8]; }
@@ -370,6 +441,7 @@ void gpu_wrote(uint64_t addr, uint64_t size, int use) {
     if (note_gpu_write(addr, size, use)) {
         desc_epoch_bump(kBumpWrite);
         ++g_bump_use[static_cast<unsigned>(use) % 8];
+        ++g_bump_site[g_gw_site & 7];
         g_dirty |= kVb | kDesc;
         g_mirror_stale = true;
     }
@@ -1454,6 +1526,7 @@ struct PoolSet {
     std::vector<Ref<Texture>> tex;      // texture sets: the texture of each live entry (held: the game may free it before the next sync,
                                         // and the descriptor names its view until then)
     std::vector<uint32_t> live;         // texture sets: entries with a real view
+    std::vector<uint64_t> esig;         // texture sets: per live entry, the signature its view was found for ([nvn] pool_sync_cache; 0 = none)
     uint64_t synced = ~0ull;
     bool failed = false;
     // prepare_textures found every live texture current and in its sampled layout at this g_tex_state_gen (and this sync): nothing to check
@@ -1502,10 +1575,32 @@ PoolSet* pool_set_create(const PoolBinding& pb, PoolSet& st) {
     vkUpdateDescriptorSets(vkdev(), 1, &w, 0, nullptr);
     st.written.assign(n, 0);
     st.tex.assign(pb.sampler ? 0 : n, Ref<Texture>());
+    st.esig.assign(pb.sampler ? 0 : n, 0);
     if (pb.sampler) NXLOG_I(kTag, "pool array set: samplers (%u entries)", n);
     else NXLOG_I(kTag, "pool array set: textures, view type %d%s (%u entries)", static_cast<int>(pb.view), pb.depth ? ", depth compare" : "", n);
     return &st;
 }
+
+// [nvn] pool_sync_cache (default on): a texture entry whose texture object, image views (tex_view_stamp), view info and binding are what its
+// written view was found for is kept without asking for the view again. The sync runs again whenever an image is created (several times
+// per frame in Kokiri outside), and each run asked every live entry for its view: ~4% of the render thread.
+bool pool_sync_cache_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "pool_sync_cache", true);
+    return on && ab_on(kAbPoolSync);
+}
+// What decides an entry's view: the texture object, its image's view stamp and the request (shaders sharing the set ask with their own bindings)
+uint64_t pool_entry_sig(const Texture* t, uint64_t stamp, const ViewRequest& q) {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+    mix(reinterpret_cast<uint64_t>(t)); mix(stamp);
+    mix(static_cast<uint64_t>(q.type) | (static_cast<uint64_t>(q.depth_compare) << 32) | (static_cast<uint64_t>(q.depth_aspect) << 33) |
+        (static_cast<uint64_t>(q.component) << 40));
+    mix(q.base_level | (static_cast<uint64_t>(q.level_count) << 32)); mix(q.base_layer | (static_cast<uint64_t>(q.layer_count) << 32));
+    mix(static_cast<uint64_t>(q.format));
+    mix(static_cast<uint64_t>(q.swizzle.r) | (static_cast<uint64_t>(q.swizzle.g) << 16) | (static_cast<uint64_t>(q.swizzle.b) << 32) | (static_cast<uint64_t>(q.swizzle.a) << 48));
+    return h | 1;   // never 0
+}
+uint64_t g_psync_kept = 0, g_psync_asked = 0;   // statistics
 
 // The set of this pool array, its entries brought up to date with the bound pool (once per present, or when images were created since).
 PoolSet* pool_set_sync(const PoolBinding& pb) {
@@ -1541,24 +1636,47 @@ PoolSet* pool_set_sync(const PoolBinding& pb) {
         if (count > kPoolTextures) log_once("pool-array-short", "a texture pool has more entries than the pool arrays (65536): later ids read the last entry");
         const uint32_t n = std::min<uint32_t>(kPoolTextures, count);
         st.live.clear();
-        for (uint32_t i = 0; i < n; ++i) {
+        const bool cache = pool_sync_cache_on();
+        // with the cache, only the ids ever registered (an unused entry has no view and stays the stand-in it was written as): OoT's pool
+        // has tens of thousands of entries and the walk over all of them was a quarter of the sync
+        const uint32_t nwalk = cache ? static_cast<uint32_t>(S.tpool->used_ids.size()) : n;
+        for (uint32_t w = 0; w < nwalk; ++w) {
+            const uint32_t i = cache ? S.tpool->used_ids[w] : w;
+            if (i >= n) continue;
             const TexturePool::Entry& e = S.tpool->entries[i];
             Texture* t = (e.used && e.tex) ? e.tex.get() : nullptr;
+            if (cache && t && st.written[i] && st.tex[i].get() == t && st.esig[i]) {
+                if (const uint64_t stamp = tex_view_stamp(t)) {
+                    TexResolved r;
+                    r.tex = t;
+                    r.view = e.view;
+                    r.has_view = e.has_view;
+                    if (pool_entry_sig(t, stamp, make_request(b, r)) == st.esig[i]) { st.live.push_back(i); ++g_psync_kept; continue; }
+                }
+            }
+            st.esig[i] = 0;
             if (t && pb.depth && (!t->fmt || t->fmt->aspect == kAspectColor)) t = nullptr;   // a depth comparison reads depth textures only
+            if (t) ++g_psync_asked;
             if (t && !t->gpu) {   // no image of its own yet: one only when another object over the same storage has one (tex_gpu shares it)
                 const Ref<Texture> alias = texture_registry_find_alias(t);
                 if (!alias || !alias->gpu) t = nullptr;
             }
             VkImageView v = VK_NULL_HANDLE;
+            ViewRequest q;
             if (t) {
                 TexResolved r;
                 r.tex = t;
                 r.view = e.view;
                 r.has_view = e.has_view;
-                v = tex_sampled_view(t, make_request(b, r));
+                q = make_request(b, r);
+                v = tex_sampled_view(t, q);
             }
             st.tex[i] = v ? e.tex : Ref<Texture>();
-            if (v) st.live.push_back(i);
+            if (v) {
+                st.live.push_back(i);
+                if (cache && t == e.tex.get())
+                    if (const uint64_t stamp = tex_view_stamp(t)) st.esig[i] = pool_entry_sig(t, stamp, q);
+            }
             const uint64_t h = reinterpret_cast<uint64_t>(v);
             if (h == st.written[i]) continue;
             put(i, v ? VkDescriptorImageInfo{VK_NULL_HANDLE, v, tex_sampled_layout(t)}
@@ -1566,6 +1684,7 @@ PoolSet* pool_set_sync(const PoolBinding& pb) {
         }
         for (uint32_t i = n; i < st.tex.size(); ++i) {                                     // a pool that shrank: stand-ins
             st.tex[i] = Ref<Texture>();
+            st.esig[i] = 0;
             if (st.written[i]) put(i, {VK_NULL_HANDLE, dummy_view(pb.view, pb.depth), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, 0);
         }
     }
@@ -1818,6 +1937,20 @@ bool ssbo_readonly_on() {
     static const bool on = nxrt::config_get_bool("nvn", "ssbo_readonly", true);
     return on;
 }
+// [nvn] gmem_ro_bindings (default on): a pointer shader (A17 "gmem") that does not store through pointers ("gmemw" absent) writes only the
+// storage bindings its SPIR-V stores into (DescriptorBinding::written), like any other shader. Before, every storage binding of a pointer
+// shader counted as written: each such draw marked its bound buffers written (pool-copy pages stale, the resolve epoch moved, every set
+// resolved anew) and its sets were never reused. Stores through the page table are handled by gmem_before_op (global_writes).
+bool gmem_ro_on();
+inline bool storage_binding_writes(const DescriptorBinding& b, const ShaderInfo* s) {
+    if (b.written || !ssbo_readonly_on()) return true;
+    if (!s->refl.global_fallback) return false;
+    return s->refl.global_writes || !gmem_ro_on();
+}
+bool gmem_ro_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "gmem_ro_bindings", true);
+    return on && ab_on(kAbGmemRo);
+}
 bool compute_direct_on() {
     static const bool on = nxrt::config_get_bool("nvn", "compute_direct", true);
     return on;
@@ -1864,11 +1997,11 @@ uint64_t g_draw_fills = 0, g_draw_fill_bytes = 0;
 // why the copy could not serve a draw's read over held results (the 10 s line): copy not allowed, no copy span (no copy for the pool, two
 // chunks, over 64 MiB), the fill failed
 uint64_t g_dr_fail[3] = {}, g_dr_fail_bytes[3] = {};
-void out_draw_read(uint64_t addr, uint64_t size, bool copy_ok, int why) {
-    if (!addr) return;
+bool out_draw_read(uint64_t addr, uint64_t size, bool copy_ok, int why) {
+    if (!addr) return false;
     if (!size) size = 65536;
-    if (!(ab_on(kAbOverlapCache) ? out_overlaps_window(addr, size) : out_overlaps(addr, size))) return;   // the same bindings are checked draw after draw: no-overlap answers are cached per index version
-    if (copy_ok && out_servable(addr, size)) return;
+    if (!(ab_on(kAbOverlapCache) ? out_overlaps_window(addr, size) : out_overlaps(addr, size))) return false;   // the same bindings are checked draw after draw: no-overlap answers are cached per index version
+    if (copy_ok && out_servable(addr, size)) return true;
     const bool span = copy_ok && out_lazy() && draw_fill_on() && mirror_span(addr, size).buf;
     const int fail = !copy_ok ? 0 : (!span ? 1 : 2);
     if (span) {
@@ -1880,12 +2013,13 @@ void out_draw_read(uint64_t addr, uint64_t size, bool copy_ok, int why) {
         if (ok && out_servable(addr, size)) {
             ++g_draw_fills;
             g_draw_fill_bytes += bytes;
-            return;
+            return true;
         }
     }
     ++g_dr_fail[fail];
     g_dr_fail_bytes[fail] += size;
     compute_out_guard(addr, size, why);
+    return true;
 }
 
 // The buffer for [addr, +size) that a command reads through a plain buffer binding (storage buffers, indirect arguments, copy sources): the
@@ -1977,7 +2111,7 @@ void gmem_before_op(bool compute) {
                 const PoolHit hit = pool_lookup(b.addr);
                 if (!hit.pool || hit.pool->is_virtual || !hit.pool->base) continue;
                 if (out_overlaps(b.addr, b.size)) { compute_out_guard(b.addr, b.size, kOutGlobal); ++g_gmem_flushes; }
-                gpu_wrote(b.addr, b.size, kWriteStorage);
+                g_gw_site = 1; gpu_wrote(b.addr, b.size, kWriteStorage); g_gw_site = 0;
             }
         }
         for (int k = 0; k < 16 && !full; ++k) {
@@ -2011,7 +2145,7 @@ void gmem_before_op(bool compute) {
                 const uint64_t end = std::min<uint64_t>(page + kGmemWindow, reinterpret_cast<uint64_t>(hit.pool->base) + hit.pool->size);
                 if (end > page) {
                     if (out_overlaps(page, end - page)) { compute_out_guard(page, end - page, kOutGlobal); ++g_gmem_flushes; }
-                    gpu_wrote(page, end - page, kWriteStorage);
+                    g_gw_site = 2; gpu_wrote(page, end - page, kWriteStorage); g_gw_site = 0;
                     ++g_gmem_windows;
                 }
             }
@@ -2728,9 +2862,9 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                     }
                     if (slot >= 0 && slot < 16 && S.ssbo[d.nvn_stage][slot].addr) {
                         const GState::Bind& bind = S.ssbo[d.nvn_stage][slot];
-                        // the shader may write the binding (its SPIR-V stores or atomics into it; a shader that also reaches memory through
-                        // pointers, A17, counts as writing everything it binds)
-                        const bool writes = b.written || d.shader->refl.global_fallback || !ssbo_readonly_on();
+                        // the shader may write the binding (its SPIR-V stores or atomics into it; a pointer shader that stores through
+                        // pointers, A17 gmemw, counts as writing everything it binds: storage_binding_writes)
+                        const bool writes = storage_binding_writes(b, d.shader);
                         BufRef br = resolve_buffer(bind.addr, bind.size);
                         upd_note_read(bind.addr, bind.size ? bind.size : br.avail);
                         // The console's storage access is a raw load at the descriptor's address: nothing stops a shader at the bound size.
@@ -2743,7 +2877,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                                 bi.buffer = hb.buffer;
                                 bi.offset = hb.offset;
                                 if (writes) {
-                                    gpu_wrote(bind.addr, bi.range, kWriteStorage);
+                                    g_gw_site = 3; gpu_wrote(bind.addr, bi.range, kWriteStorage); g_gw_site = 0;
                                     out_add(bind.addr, bi.range, hb.buffer, hb.offset, br);
                                     if (!held_version_epoch()) desc_epoch_bump(kBumpWrite);   // the held result may have grown: readers resolve anew (out_version moved then)   // what the draw writes there is held like a dispatch's
                                 }
@@ -2755,7 +2889,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             bi.buffer = sh.buffer;
                             bi.offset = sh.offset;
                         }
-                        if (br.ok && writes) gpu_wrote(bind.addr, bi.range, kWriteStorage);   // the shader may write it
+                        if (br.ok && writes) { g_gw_site = d.nvn_stage == kCompute ? 5 : 4; gpu_wrote(bind.addr, bi.range, kWriteStorage); g_gw_site = 0; }   // the shader may write it
                     }
                     break;
                 }
@@ -2890,7 +3024,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                 if (mv) v = mv;
                 else log_once("out-texel", "a draw reads a compute result held in the pool copy as a texel buffer the copy cannot serve: it reads the pool");
             }
-            if (v && storage) gpu_wrote(addr, bytes, kWriteStorage);      // an image buffer may be written by the shader
+            if (v && storage) { g_gw_site = 6; gpu_wrote(addr, bytes, kWriteStorage); g_gw_site = 0; }   // an image buffer may be written by the shader
             if (!v) {
                 if (r.tex && first_time_key("texel-buffer " + d.shader->hash + " " + b.name + " " + std::to_string(r.tex->id)))
                     NXLOG_W(kTag, "texel buffer: texture %u (%s, target %d, %dx%dx%d, storage %llu bytes at %p) has no buffer view: shader %s binding %s (NVN slot %d, set %u binding %u)",
@@ -2914,13 +3048,12 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
         writes.push_back(w);
     }
     ++g_sets_built;
-    auto it = g_set_cache.find(key);
-    if (it != g_set_cache.end()) { ++g_sets_cached; return it->second; }
+    if (VkDescriptorSet* hit = g_set_cache.find(key)) { ++g_sets_cached; return *hit; }
     VkDescriptorSet ds = F->alloc_set(pl.sets[set]);
     if (!ds) return VK_NULL_HANDLE;
     for (auto& w : writes) w.dstSet = ds;
     vkUpdateDescriptorSets(vkdev(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-    g_set_cache[key] = ds;
+    g_set_cache.put(key, ds);
     return ds;
 }
 
@@ -3004,7 +3137,9 @@ void support_for_draw(const ProgLayout& pl, bool compute) {
 // Per program layout: which of its four sets may be reused (bit n = set n), worked out once.
 std::unordered_map<const ProgLayout*, uint8_t> g_reuse_masks;   // cleared at replay shutdown (layouts are freed with the pipelines)
 uint8_t set_reuse_mask(const ProgLayout& pl) {
-    auto it = g_reuse_masks.find(&pl);
+    // keyed by the layout and gmem_ro_on() (its paired windows change which storage bindings count as written)
+    const ProgLayout* mk = reinterpret_cast<const ProgLayout*>(reinterpret_cast<uintptr_t>(&pl) | (gmem_ro_on() ? 1u : 0u));
+    auto it = g_reuse_masks.find(mk);
     if (it != g_reuse_masks.end()) return it->second;
     uint8_t ok = 0xf;
     for (const BindingDesc& d : pl.bindings) {
@@ -3013,7 +3148,7 @@ uint8_t set_reuse_mask(const ProgLayout& pl) {
         switch (d.type) {
             case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
                 if (b.nvn.source == NvnSource::DriverConstants) bad = d.shader->refl.global_fallback;     // graphics_c0: per draw
-                else if (b.nvn.source == NvnSource::StorageBuffer) bad = b.written || d.shader->refl.global_fallback || !ssbo_readonly_on();
+                else if (b.nvn.source == NvnSource::StorageBuffer) bad = storage_binding_writes(b, d.shader);
                 else bad = b.nvn.source != NvnSource::SupportBuffer && b.nvn.source != NvnSource::ConstantData && b.nvn.source != NvnSource::UniformBlock;
                 break;
             case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
@@ -3023,7 +3158,7 @@ uint8_t set_reuse_mask(const ProgLayout& pl) {
         }
         if (bad && d.set < 4) ok &= static_cast<uint8_t>(~(1u << d.set));
     }
-    g_reuse_masks.emplace(&pl, ok);
+    g_reuse_masks.emplace(mk, ok);
     return ok;
 }
 
@@ -3067,7 +3202,7 @@ uint64_t set_signature(const ProgLayout& pl, uint32_t set) {
     return key;
 }
 
-std::unordered_map<uint64_t, VkDescriptorSet> g_set_memo;   // signature -> set, valid for g_set_memo_epoch
+SetMap g_set_memo;   // signature -> set, valid for g_set_memo_epoch
 uint64_t g_set_memo_epoch = 0;
 uint64_t g_sets_reused = 0, g_sets_verify_bad = 0;          // statistics
 uint64_t g_memo_clr[3] = {}, g_memo_last[3] = {};            // statistics: memo clears by the resolve epoch, texture state, results sent back
@@ -3119,9 +3254,8 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
         uint64_t sig = 0;
         if (reusable & (1u << set)) {
             sig = set_signature(pl, set);
-            auto it = g_set_memo.find(sig);
-            if (it != g_set_memo.end()) {
-                ds = it->second;
+            if (VkDescriptorSet* hit = g_set_memo.find(sig)) {
+                ds = *hit;
                 ++g_sets_reused;
                 if (mode == SetReuse::Verify) {
                     const VkDescriptorSet fresh = build_set(pl, set);
@@ -3138,7 +3272,7 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
         }
         if (!ds) {
             ds = build_set(pl, set);
-            if (ds && (reusable & (1u << set))) g_set_memo[sig] = ds;
+            if (ds && (reusable & (1u << set))) g_set_memo.put(sig, ds);
         }
         if (ds) bind_graphics_set(pl, bp, set, ds);
     }
@@ -5840,6 +5974,8 @@ void run_list(const CmdList& list, int depth) {
 
 }  // namespace
 bool ab_tex_park_on() { return ab_on(kAbTexPark); }   // [nvn] cpuperf_ab_what tex_park (nvn_gpu_texture.cpp)
+bool ab_overlap_grow_on() { return ab_on(kAbOverlapGrow); }
+bool ab_index_inc_on() { return ab_on(kAbIndexInc); }   // [nvn] cpuperf_ab_what index_inc (nvn_gpu_pool.cpp)   // [nvn] cpuperf_ab_what overlap_grow (nvn_gpu_pool.cpp)
 
 // [display] unpaced_loading (default on): the limiter stops waiting while the game loads, since its loading code advances once per
 // presented frame. Loading = presented frames with fewer than 16 draws (boot's black screen draws 3: exposure, bloom, tone map; the
@@ -6014,6 +6150,11 @@ void replay_begin_submit(Frame& f) {
             NXLOG_I(kTag, "game barriers: %llu, %llu in an open pass: %llu kept the pass (barrier_keep_pass, bits seen %x), %llu ended it after storage or stream-out writes (bits of all %x)",
                     (unsigned long long)g_bar_n, (unsigned long long)g_bar_in_pass, (unsigned long long)g_bar_kept, g_bar_bits_kept, (unsigned long long)g_bar_unsafe, g_bar_bits_all);
             NXLOG_I(kTag, "graphics descriptor set binds: %llu made, %llu skipped as already bound (bind_skip)", (unsigned long long)g_bs_bound, (unsigned long long)g_bs_skipped);
+            NXLOG_I(kTag, "pool array texture entries: %llu kept (pool_sync_cache), %llu asked for their view", (unsigned long long)g_psync_kept, (unsigned long long)g_psync_asked);
+
+            NXLOG_I(kTag, "resolve epoch moves by GPU write site: other %llu, gmem bound storage %llu, gmem pointer windows %llu, draws over held results %llu, graphics storage %llu, compute storage %llu, storage texel %llu",
+                    (unsigned long long)g_bump_site[0], (unsigned long long)g_bump_site[1], (unsigned long long)g_bump_site[2], (unsigned long long)g_bump_site[3],
+                    (unsigned long long)g_bump_site[4], (unsigned long long)g_bump_site[5], (unsigned long long)g_bump_site[6]);
             {
                 uint64_t pk = 0, tk = 0, st = 0, ex = 0;
                 park_stats(&pk, &tk, &st, &ex);

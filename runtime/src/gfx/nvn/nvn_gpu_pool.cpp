@@ -1466,6 +1466,10 @@ struct OutLock {
 // off windows of [nvn] out_index_ab = N presents) scans as before.
 std::atomic<uint64_t> g_out_ver{1};
 void out_changed() { g_out_ver.fetch_add(1, std::memory_order_acq_rel); }
+// Moves only when the live set may gain pages (out_add: a new entry, or one copied back in this submission written again). Every other
+// change takes entries out or makes them less live, so a "no overlap with a live result" answer stays true until this moves
+// ([nvn] overlap_grow, out_overlaps_window). Changed under g_out_mu on the render thread.
+std::atomic<uint64_t> g_out_grow{1};
 using Spans = std::vector<std::pair<uint64_t, uint64_t>>;    // [lo, hi) page-granular, sorted, merged
 struct OutIndex {
     uint64_t ver = 0;
@@ -1633,6 +1637,41 @@ const OutIndex& index_fresh() {
 }
 bool use_index() { return on_render_thread() && out_index_on(); }
 
+// [nvn] out_index_inc (default on): a result added on the render thread (out_add) goes into the index in place when the index was current,
+// instead of making the next query rebuild it from every entry (each dispatch adds results, and the next dispatch's storage checks rebuilt
+// the index: ~100 rebuilds per frame in Kokiri outside).
+bool index_inc_on() {
+    static const bool on = config_get_bool("nvn", "out_index_inc", true);
+    return on && ab_index_inc_on();
+}
+void add_span(Spans& v, uint64_t lo, uint64_t hi) {   // merged like the rebuild: touching spans become one
+    auto it = std::lower_bound(v.begin(), v.end(), lo, [](const std::pair<uint64_t, uint64_t>& s, uint64_t x) { return s.second < x; });
+    if (it == v.end() || it->first > hi) { v.insert(it, {lo, hi}); return; }
+    it->first = std::min(it->first, lo);
+    it->second = std::max(it->second, hi);
+    auto j = it + 1;
+    while (j != v.end() && j->first <= it->second) { it->second = std::max(it->second, j->second); ++j; }
+    v.erase(it + 1, j);
+}
+std::atomic<uint64_t> g_idx_inc{0};   // statistics: index updates in place
+// After out_add changed e (lock held; ver_before: g_out_ver before its out_changed). was_*: e's state before (a new entry: all false).
+void index_note_add(uint64_t ver_before, const OutEntry& e, bool is_new, bool was_live, bool was_pending) {
+    if (!index_inc_on() || !on_render_thread() || !out_index_on() || g_idx.ver != ver_before) return;
+    if (g_out_ver.load(std::memory_order_acquire) != ver_before + 1) return;   // another change in between: rebuild as before
+    const uint64_t a0 = e.addr & ~(kPageBytes - 1), a1 = (e.addr + e.size + kPageBytes - 1) & ~(kPageBytes - 1);
+    if (is_new) add_span(g_idx.all, a0, a1);
+    if (live(e) && !was_live) {
+        add_span(g_idx.live, a0, a1);
+        if (!e.m) add_span(g_idx.shadow, a0, a1);
+    }
+    if (e.m && e.pending && !was_pending) {
+        const uint64_t base = reinterpret_cast<uint64_t>(e.m->pg->base);
+        add_span(g_idx.pending, base + e.first * kPageBytes, base + (e.last + 1) * kPageBytes);
+    }
+    g_idx.ver = ver_before + 1;
+    g_idx_inc.fetch_add(1, std::memory_order_relaxed);
+}
+
 // After entries of m covering [first, last] were removed or changed (lock held): pages no entry covers any more are not newer in the
 // copy; pages no guarded entry covers lose their guard.
 void settle(Mirror* m, uint64_t first, uint64_t last) {
@@ -1788,12 +1827,16 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
     OutLock ol;
     for (OutEntry& e : g_out)
         if (e.addr == addr && e.size == size && e.m == m) {
+            const uint64_t v0 = g_out_ver.load(std::memory_order_acquire);
+            const bool was_live = live(e), was_pending = e.pending;
             if (!e.pending) out_changed();          // live and pending again
+            if (e.flushed && !e.pending) g_out_grow.fetch_add(1, std::memory_order_acq_rel);   // was not live: its pages are live again
             ++e.gen;                                // a newer result than one a fetch may be copying back
             e.pending = true;
             e.partial = false;
             e.mbuf = mbuf; e.moff = moff; e.hbuf = host.buffer; e.hoff = host.offset;
             if (m) bits_set(m->gpu_new.get(), e.first, e.last, true);    // a copy-back recorded earlier in this submission cleared them
+            if (!was_pending) index_note_add(v0, e, false, was_live, was_pending);
             return true;
         }
     OutEntry e;
@@ -1807,8 +1850,11 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
         e.last = std::min<uint64_t>((addr + size - 1 - base) / kPageBytes, m->npages - 1);
         bits_set(m->gpu_new.get(), e.first, e.last, true);
     }
+    const uint64_t v0 = g_out_ver.load(std::memory_order_acquire);
     g_out.push_back(e);
     out_changed();
+    g_out_grow.fetch_add(1, std::memory_order_acq_rel);
+    index_note_add(v0, e, true, false, false);
     g_out_lo.store(std::min(g_out_lo.load(std::memory_order_relaxed), addr), std::memory_order_relaxed);
     g_out_hi.store(std::max(g_out_hi.load(std::memory_order_relaxed), addr + size), std::memory_order_relaxed);
     g_out_n.store(g_out.size(), std::memory_order_release);
@@ -1864,13 +1910,19 @@ bool out_overlaps(uint64_t addr, uint64_t size) {
 
 // out_overlaps(page, size) for the pointer windows of gmem_before_op (render thread): the same pages are asked about in draw after draw and
 // almost never overlap, so a "no overlap" answer is kept per (page, size, index version) in a small direct-mapped table.
+// [nvn] overlap_grow (default on): the answers are kept per g_out_grow instead, which moves only when live results may cover more pages
+// (g_out_ver moves on every copy-back, split and fetch too: ~140 times per frame in Kokiri outside, and every move emptied the table).
+bool overlap_grow_on() {
+    static const bool on = config_get_bool("nvn", "overlap_grow", true);
+    return on && ab_overlap_grow_on();
+}
 uint64_t g_win_hits = 0, g_win_asks = 0;   // render thread
 bool out_overlaps_window(uint64_t page, uint64_t size) {
     if (!out_any() || !size) return false;
     if (!use_index()) return out_overlaps(page, size);
     struct Slot { uint64_t page = ~0ull, size = 0, ver = 0; };
     static Slot cache[4096];
-    const uint64_t v = g_out_ver.load(std::memory_order_acquire);
+    const uint64_t v = overlap_grow_on() ? (g_out_grow.load(std::memory_order_acquire) | (1ull << 63)) : g_out_ver.load(std::memory_order_acquire);
     Slot& s = cache[((page >> 12) ^ (page >> 24)) & 4095];
     ++g_win_asks;
     if (s.page == page && s.size == size && s.ver == v) { ++g_win_hits; return false; }
@@ -2398,6 +2450,7 @@ void out_log() {
                       "(max %.2f ms since start); fetches that waited for another %llu, entries written again during a fetch %llu",
                 secs, (unsigned long long)(q - p_q), (unsigned long long)(rb - p_rb), (rbns - p_rbns) / 1e6, g_out_n.load(), (unsigned long long)(lw - p_lw),
                 (lwns - p_lwns) / 1e6, g_lock_wait_max_ns.load() / 1e6, (unsigned long long)(bw - p_bw), (unsigned long long)(ov - p_ov));
+        NXLOG_I(kTag, "compute out index: %llu updates in place since start (out_index_inc)", (unsigned long long)g_idx_inc.load(std::memory_order_relaxed));
         static uint64_t p_wa = 0, p_wh = 0;
         const uint64_t wa = g_win_asks, wh = g_win_hits;
         if (wa != p_wa) NXLOG_I(kTag, "compute out: pointer windows asked %llu times, %llu answered from the no-overlap table", (unsigned long long)(wa - p_wa), (unsigned long long)(wh - p_wh));

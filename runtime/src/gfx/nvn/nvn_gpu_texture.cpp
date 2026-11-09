@@ -51,6 +51,9 @@ namespace nxrt::nvn::be {
 // The Vulkan side of a texture: Texture::gpu points to it (created by gpu::tex_gpu, freed by gpu::tex_destroy).
 static std::mutex g_live_mu;
 static std::set<struct TexGpu*> g_live_set;
+// Unique stamps of an image's views: a new TexGpu and every clear of its views take a new one (tex_view_stamp: the pool arrays' entry cache)
+static std::atomic<uint64_t> g_view_gen_next{1};
+static uint64_t new_view_gen() { return g_view_gen_next.fetch_add(1, std::memory_order_relaxed); }
 
 struct TexGpu {
     bool promoted = false;                              // HDR scene pipeline: an 8-bit sRGB render target kept as RGBA16F (src/gfx/extras/hdr_nvn.h)
@@ -73,6 +76,9 @@ struct TexGpu {
     float scale = 1.0f;                                 // resolution scale: base is the NVN size times this ([gfx] render_scale, render targets only)
     bool scale_blocked = false;                         // was scaled, brought back to 1 (bound as a storage image, or paired with an unscaled target)
     std::map<std::array<uint32_t, 12>, VkImageView> views;
+    std::array<uint32_t, 12> last_key{};                // the last view view_for found (most bindings ask for one view of a texture again and again)
+    VkImageView last_view = VK_NULL_HANDLE;             // reset with views
+    uint64_t view_gen = new_view_gen();                 // renewed with views
     int refs = 1;                                       // texture objects over the same storage share one image (render thread)
     struct SparseState* sparse = nullptr;               // a sparse-residency image (a big texture of a virtual pool), else null
     // CPU-streamed textures (tex_ensure_current): uploads for CPU writes that came at most kStreamGap presents apart, in a row
@@ -662,12 +668,14 @@ uint64_t park_sample(const Texture& t) {
     if ((!t.mem && !t.vpool) || t.storage_size < 8) return 0;
     uint64_t h = 0x9e3779b97f4a7c15ull;
     const uint64_t n = 256, step = std::max<uint64_t>(8, (t.storage_size / n) & ~7ull);
-    for (uint64_t off = 0; off + 8 <= t.storage_size; off += step) {
-        uint64_t v = 0;
-        if (t.mem) std::memcpy(&v, t.mem + off, 8);
-        else texture_read_virtual(t, off, 8, reinterpret_cast<uint8_t*>(&v));
-        h = (h ^ v) * 0x100000001b3ull;
-    }
+    uint64_t offs[260], vals[260];
+    size_t k = 0;
+    // the offsets 0, step, ... while off + 8 <= size, counted first (a loop with both conditions made clang-cl call __udivti3, not linked)
+    const size_t cnt = static_cast<size_t>(std::min<uint64_t>(260, (t.storage_size - 8) / step + 1));
+    for (; k < cnt; ++k) offs[k] = static_cast<uint64_t>(k) * step;
+    if (t.mem) for (size_t i = 0; i < k; ++i) std::memcpy(&vals[i], t.mem + offs[i], 8);
+    else texture_read_virtual_words(t, offs, k, vals);   // one walk of the virtual mappings, not one per word (was ~1.4% of the render thread)
+    for (size_t i = 0; i < k; ++i) h = (h ^ vals[i]) * 0x100000001b3ull;
     return h;
 }
 struct Parked { ParkKey key; TexGpu* g; uint64_t at; uint64_t sample; bool dirty; };
@@ -1068,8 +1076,9 @@ VkImageView view_for(TexGpu& g, VkImageViewType type, uint32_t base_level, uint3
     const std::array<uint32_t, 12> key = {static_cast<uint32_t>(type), base_level, level_count, base_layer, layer_count,
                                           static_cast<uint32_t>(fmt), static_cast<uint32_t>(aspect), static_cast<uint32_t>(swz.r),
                                           static_cast<uint32_t>(swz.g), static_cast<uint32_t>(swz.b), static_cast<uint32_t>(swz.a), 0u};
+    if (g.last_view && g.last_key == key) return g.last_view;
     auto it = g.views.find(key);
-    if (it != g.views.end()) return it->second;
+    if (it != g.views.end()) { g.last_key = key; g.last_view = it->second; return it->second; }
     VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vi.image = g.img.image;
     vi.viewType = type;
@@ -1544,6 +1553,8 @@ bool tex_rescale(Texture* t, Frame& f, float to, const char* why) {
     std::vector<VkImageView> views;
     for (auto& kv : g->views) views.push_back(kv.second);
     g->views.clear();
+    g->last_view = VK_NULL_HANDLE;
+    g->view_gen = new_view_gen();
     defer_destroy([old, views]() mutable {
         for (VkImageView v : views) { vkDestroyImageView(vkdev(), v, nullptr); vk_gauge_image_views().sub(1); }
         device().destroy_image(old);
@@ -1967,6 +1978,10 @@ uint32_t tex_layers(Texture* t) { return t->layers; }
 
 bool tex_is_depth(Texture* t) { return t->fmt && t->fmt->aspect != kAspectColor; }
 
+uint64_t tex_view_stamp(const Texture* t) {
+    return t && t->gpu && !t->gpu->failed ? t->gpu->view_gen : 0;
+}
+
 VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
     TexGpu* g = tex_or_null(t);
     if (!g) return VK_NULL_HANDLE;
@@ -2145,14 +2160,23 @@ SamplerInfo tuned_sampler(const SamplerInfo& in) {
     return s;
 }
 
+// The game's sampler (and the tuning it was tuned with) -> its VkSampler, direct-mapped in front of g_sh.samplers (render thread; samplers
+// live until tex_shutdown, which clears it): build_set and the pool-array sync ask for the same few samplers thousands of times per frame.
+struct SamplerMemo { SamplerInfo in{}; int aniso = 0; float bias = 0.0f; VkSampler v = VK_NULL_HANDLE; };
+SamplerMemo g_sampler_memo[256];
 VkSampler sampler_for(const SamplerInfo& game_sampler) {
+    const int aniso = gfx::tuning().anisotropy.load(std::memory_order_relaxed);
+    const float bias = gfx::tuning().lod_bias.load(std::memory_order_relaxed);
+    SamplerMemo& mm = g_sampler_memo[sampler_hash(game_sampler) & 255];
+    if (mm.v && mm.aniso == aniso && mm.bias == bias && mm.in == game_sampler) return mm.v;
     const SamplerInfo s = tuned_sampler(game_sampler);
     auto& bucket = g_sh.samplers[sampler_hash(s)];
     for (const auto& e : bucket)
-        if (e.first == s) return e.second;
+        if (e.first == s) { mm = SamplerMemo{game_sampler, aniso, bias, e.second}; return e.second; }
     const VkSampler v = create_sampler(s);
     if (v == VK_NULL_HANDLE) return dummy_sampler();
     bucket.emplace_back(s, v);
+    mm = SamplerMemo{game_sampler, aniso, bias, v};
     return v;
 }
 
@@ -2166,6 +2190,8 @@ void tex_destroy(TexGpu* g) {
     g_gauge_textures_live.sub(1);
     for (auto& kv : g->views) { vkDestroyImageView(vkdev(), kv.second, nullptr); vk_gauge_image_views().sub(1); }
     g->views.clear();
+    g->last_view = VK_NULL_HANDLE;
+    g->view_gen = new_view_gen();
     if (g->img) g_live_images.fetch_sub(1);
     device().destroy_image(g->img);
     if (g->sparse) {
@@ -2203,6 +2229,7 @@ void tex_shutdown() {
     for (auto& kv : g_sh.samplers)
         for (auto& e : kv.second) { vkDestroySampler(vkdev(), e.second, nullptr); vk_gauge_samplers().sub(1); }
     g_sh.samplers.clear();
+    for (SamplerMemo& mm : g_sampler_memo) mm = SamplerMemo{};
     if (g_sh.dummy_sampler != VK_NULL_HANDLE) { vkDestroySampler(vkdev(), g_sh.dummy_sampler, nullptr); vk_gauge_samplers().sub(1); }
     for (auto& kv : g_sh.storage) {
         if (kv.second.view != VK_NULL_HANDLE) { vkDestroyImageView(vkdev(), kv.second.view, nullptr); vk_gauge_image_views().sub(1); }
