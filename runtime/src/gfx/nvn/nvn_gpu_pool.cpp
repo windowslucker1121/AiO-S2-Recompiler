@@ -770,25 +770,8 @@ struct Mirror {
     // pages mirror_fill copied in this submission without tracking them (hot): current in the copy until the submission ends (render thread)
     std::unique_ptr<std::atomic<uint64_t>[]> fresh;
     bool any_fresh = false;
-    // out_delta (below): pages where the pool may differ from the delta snapshots made at the last copy-back (the CPU wrote them, they were
-    // armed again, the GPU wrote the pool there, a copy-back other than the delta one ran): copied whole at the next delta copy-back
-    std::unique_ptr<std::atomic<uint64_t>[]> snap_dirty;
-    std::vector<gfx::Buffer> snap_chunks;   // the snapshots, per chunk of the copy (made at the first delta copy-back there)
+    std::vector<gfx::Buffer> snap_chunks;   // out_delta (below): the snapshots of results before their dispatch, per chunk of the copy
 };
-
-// Marks pages [first, first + count) of m as possibly changed in the pool since the delta snapshots (out_delta). Any thread.
-std::atomic<uint64_t> g_snap_mark_src[8];   // pages marked by source (the delta statistics line): arm, CPU write, GPU write, pool write, fetch, new snapshot, whole copy, split part
-void snap_dirty_mark(Mirror& m, uint64_t first, uint64_t count, int src) {
-    if (!m.snap_dirty || !count) return;
-    g_snap_mark_src[src & 7].fetch_add(count, std::memory_order_relaxed);
-    const uint64_t last = std::min(first + count, m.npages) - 1;
-    for (uint64_t p = first; p <= last;) {
-        const uint64_t lo = p & 63, hi = std::min<uint64_t>(63, lo + (last - p));
-        const uint64_t mask = (hi - lo == 63) ? ~uint64_t{0} : (((uint64_t{1} << (hi - lo + 1)) - 1) << lo);
-        m.snap_dirty[static_cast<size_t>(p >> 6)].fetch_or(mask, std::memory_order_acq_rel);
-        p += hi - lo + 1;
-    }
-}
 
 namespace {
 
@@ -838,9 +821,6 @@ bool arm_in_budget() {
 
 bool arm_timed(Mirror& m, uint64_t first, uint64_t count) {
     mem::ww::Region* r = m.ww;
-    if (count && !mem::ww::all_armed(r, first, count))   // pages not armed until now: the CPU may have written them unseen
-        for (uint64_t p = first; p < first + count; ++p)
-            if (!mem::ww::all_armed(r, p, 1)) snap_dirty_mark(m, p, 1, 0);
     const auto t0 = std::chrono::steady_clock::now();
     const bool ok = mem::ww::arm(r, first, count);
     g_arm_spent_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
@@ -950,12 +930,10 @@ Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
     m->gpu_new.reset(new std::atomic<uint64_t>[words]);
     m->cpu_read.reset(new std::atomic<uint64_t>[words]);
     m->fresh.reset(new std::atomic<uint64_t>[words]);
-    m->snap_dirty.reset(new std::atomic<uint64_t>[words]);
     for (size_t i = 0; i < words; ++i) {
         m->gpu_new[i].store(0, std::memory_order_relaxed);
         m->cpu_read[i].store(0, std::memory_order_relaxed);
         m->fresh[i].store(0, std::memory_order_relaxed);
-        m->snap_dirty[i].store(~uint64_t{0}, std::memory_order_relaxed);
     }
     out_register(m.get());
     NXLOG_I(kTag, "pool %p: device-local copy (%llu KiB in %zu chunks made on demand, pool flags 0x%x, %s)", static_cast<void*>(pg->base),
@@ -974,7 +952,6 @@ void absorb_writes(Mirror& m, uint32_t now) {
     m.st_written += static_cast<int64_t>(g_written_tmp.size());
     for (uint64_t p : g_written_tmp) {
         const size_t i = static_cast<size_t>(p);
-        snap_dirty_mark(m, p, 1, 1);
         bit_put(m.want, p, false);
         if (m.copied_at[i] == 0) continue;                     // never copied: nothing was wasted
         const bool soon = hot_used_on() && now - m.copied_at[i] <= kHotWindow;   // rewritten right after its copy: per-frame data
@@ -1306,9 +1283,6 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
     const uint64_t first = off / kPageBytes, last = std::min<uint64_t>((off + size - 1) / kPageBytes, m.npages - 1);
     g_wr_calls[use % 6]++;
     g_wr_pages[use % 6] += static_cast<int64_t>(last - first + 1);
-    // the pool there changed under the delta snapshots; storage writes are marked by the replay where they reach the pool itself
-    // (snap_pool_written): most go to the copy or a shadow and come back through the copy-backs
-    if (use != kWriteStorage) snap_dirty_mark(m, first, last - first + 1, 2);
     bool stale = mem::ww::any_valid(m.ww, first, last - first + 1);
     mem::ww::invalidate(m.ww, first, last - first + 1);
     if (m.any_fresh) {             // the pool there is written: what fill copied is old now
@@ -1316,19 +1290,6 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
     }
     bits_put(m.want, first, last, false);
     return stale;
-}
-
-std::atomic<uint64_t> g_spw_src[4];   // snap_pool_written pages by caller (diagnosis): bound buffers of pointer writers, pointer windows, direct storage, shadow out
-void snap_pool_written(uint64_t gpu_address, uint64_t size, int src) {
-    if (g_mirrors.empty() || !size) return;
-    const PoolHit hit = pool_lookup(gpu_address);
-    if (!hit.pool || !hit.pool->gpu || !hit.pool->gpu->mirror) return;
-    PoolGpu* pg = hit.pool->gpu;
-    const uint64_t off = gpu_address - reinterpret_cast<uint64_t>(pg->base);
-    if (off >= pg->size) return;
-    const uint64_t first = off / kPageBytes, last = (std::min<uint64_t>(off + size, pg->size) - 1) / kPageBytes;
-    snap_dirty_mark(*pg->mirror, first, last - first + 1, 3);
-    g_spw_src[src & 3].fetch_add(last - first + 1, std::memory_order_relaxed);
 }
 
 void mirror_begin_submit(Frame& f, bool on) {
@@ -1466,6 +1427,7 @@ struct OutEntry {
     uint64_t id = 0;                    // unique, so out_fetch finds it again after the lock was free
     uint64_t gen = 0;                   // moves when a later write takes it over again (out_add): the result out_fetch copied is no longer the newest
     bool fetching = false;              // out_fetch copies it back with the lock free: other fetches wait (g_out_cv), retire and unregister leave it
+    bool snapped = false;               // out_delta: the snapshot chunk holds the range as it was before its first write (delta copy-back)
 };
 
 std::mutex g_out_mu;                    // g_out, g_out_mirrors; never held while touching guest memory
@@ -1730,7 +1692,6 @@ struct CopyJob { VkBuffer src, dst; VkBufferCopy c; };
 void collect_copies(const std::vector<size_t>& idx, std::vector<CopyJob>& out) {
     for (size_t i : idx) {
         const OutEntry& e = g_out[i];
-        if (e.m) snap_dirty_mark(*e.m, e.first, e.last - e.first + 1, 4);   // not a delta copy: the snapshots no longer know the pool there
         if (e.partial && e.m) {                 // only the pages still newer in the copy
             const uint64_t base = reinterpret_cast<uint64_t>(e.m->pg->base);
             auto newer = [&](uint64_t p) { return ((e.m->gpu_new[static_cast<size_t>(p >> 6)].load(std::memory_order_relaxed) >> (p & 63)) & 1) != 0; };
@@ -1762,24 +1723,25 @@ uint64_t record_jobs(VkCommandBuffer cb, const std::vector<CopyJob>& jobs) {
 
 // ---- delta copy-backs ([nvn] out_delta, default on) -----------------------------------------------------------------------------------
 // The copy-backs of held results sent ~1.9 GB/s over PCIe at 1920x1080 (first scene): OoT's GPU culling buffers (2-15 MB each) go back
-// whole every frame, because the CPU reads and clears their first page, while the dispatches change a small part of them. A delta copy-back
-// keeps a device-local snapshot of what the pool holds for the result's range (Snap, made at its first copy-back) and runs a compute shader
-// that compares the copy with the snapshot 16 bytes at a time and writes the pool (and the snapshot) only where they differ: the reads stay
-// in video memory, only changed bytes cross PCIe. The snapshot is only trusted for pages nothing else changed in the pool since: pages the
-// CPU wrote (write-watch records), pages not armed (the CPU may write them unseen), pages armed again (written while unarmed), GPU writes to
-// the pool itself (snap_pool_written), and copy-backs that are not delta ones (CPU fetches, split parts) mark a page (Mirror::snap_dirty),
-// and such pages are copied whole, as before. Pages the range shares with others at its ends are always copied whole.
+// whole every frame because the CPU reads and clears the counters in their first page, while the dispatches change a small part of them.
+// Before a dispatch writes a range in the pool copy that holds no unsent result (the copy is what the pool holds there), the range is
+// copied into a device-local snapshot (out_presnap, per 64 MiB chunk of the copy, at the same offset). The copy-back of that result then
+// runs a compute shader (nvn_delta_shader.inc) that compares the copy with the snapshot 16 bytes at a time and writes the pool only where
+// the GPU changed something: the reads stay in video memory, only changed bytes cross PCIe, and what the CPU wrote into the pool meanwhile
+// (the counter resets) survives wherever the GPU did not write. A result without a snapshot (written first by a draw, retaken while an
+// unsent result was in the copy, a shadow buffer) goes back whole as before.
 #include "nvn_delta_shader.inc"
 uint64_t g_snap_bytes = 0, g_snap_n = 0;   // snapshot chunks (Mirror::snap_chunks), g_out_mu held
 struct DeltaPipe { bool tried = false, ok = false; VkDescriptorSetLayout dsl = VK_NULL_HANDLE; VkPipelineLayout layout = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE; VkDeviceSize align = 256; };
 DeltaPipe g_delta;
 bool g_delta_blocked = false;                   // render thread: a dispatch's compute state is bound (the delta shader would replace it)
-std::atomic<uint64_t> g_dl_n{0}, g_dl_scanned{0}, g_dl_forced{0}, g_dl_init{0}, g_dl_plain{0};   // statistics (the 10 s line)
-std::atomic<uint64_t> g_dl_why[3];   // pages copied whole: range ends, marked (snap_dirty), not armed (counted per page test, runs test twice)
+std::atomic<uint64_t> g_dl_n{0}, g_dl_scanned{0}, g_dl_plain{0}, g_dl_snaps{0}, g_dl_snap_bytes{0};   // statistics (the 10 s line)
+struct PreSnap { uint64_t addr, size; };
+std::vector<PreSnap> g_presnap;                 // snapshots recorded for the dispatch being set up (g_out_mu held), taken by out_add
 
 bool delta_on() {
     static const bool on = config_get_bool("nvn", "out_delta", true);
-    return on && !g_delta_blocked && ab_out_delta_on();
+    return on && ab_out_delta_on();
 }
 uint64_t delta_cap() {
     static const uint64_t b = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "out_delta_mb", 512))) << 20;
@@ -1828,60 +1790,48 @@ bool delta_init() {
     return true;
 }
 
-bool snap_dirty_get(const Mirror& m, uint64_t p) { return (m.snap_dirty[static_cast<size_t>(p >> 6)].load(std::memory_order_acquire) >> (p & 63)) & 1; }
-void snap_dirty_clear(Mirror& m, uint64_t p) { m.snap_dirty[static_cast<size_t>(p >> 6)].fetch_and(~(uint64_t{1} << (p & 63)), std::memory_order_acq_rel); }
-
-// Lock held. Records the copy-back of e as delta copies; false: not eligible (the caller copies it whole).
-bool record_delta(VkCommandBuffer cb, const OutEntry& e, uint64_t* bytes, bool* dispatched) {
-    if (!e.m || !e.m->snap_dirty || !delta_on() || e.size < (64u << 10) || !delta_init()) return false;
+// The snapshot chunk of the copy chunk that holds [addr, +size) at moff of mbuf (null: not eligible). Lock held.
+VkBuffer snap_chunk_for(Mirror& m, uint64_t addr, uint64_t size, VkBuffer mbuf, VkDeviceSize moff) {
+    if (!delta_init()) return VK_NULL_HANDLE;
     const DeltaPipe& d = g_delta;
-    if ((e.size % 16) || (e.moff % d.align) || (e.hoff % d.align) || (e.addr % d.align)) return false;
-    Mirror& m = *e.m;
+    if (size < (64u << 10) || (size % 16) || (moff % d.align) || (addr % d.align)) return VK_NULL_HANDLE;
     const uint64_t base = reinterpret_cast<uint64_t>(m.pg->base);
-    const size_t ci = static_cast<size_t>((e.addr - base) / kChunkBytes);
-    if (ci >= m.chunks.size() || m.chunks[ci].buffer != e.mbuf) return false;
+    const size_t ci = static_cast<size_t>((addr - base) / kChunkBytes);
+    if (ci >= m.chunks.size() || m.chunks[ci].buffer != mbuf) return VK_NULL_HANDLE;
     if (m.snap_chunks.size() < m.chunks.size()) m.snap_chunks.resize(m.chunks.size());
     gfx::Buffer& sb = m.snap_chunks[ci];
-    if (!sb.buffer) {   // the snapshot of this chunk of the pool: every page marked until its first copy-back
+    if (!sb.buffer) {
         const uint64_t sz = m.chunks[ci].size;
-        if (g_snap_bytes + sz > delta_cap()) return false;
+        if (g_snap_bytes + sz > delta_cap()) return VK_NULL_HANDLE;
         if (device().create_buffer(sz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                    gfx::MemoryUse::GpuOnly, &sb, "nvn delta snapshot") != VK_SUCCESS) {
             sb = gfx::Buffer{};
-            return false;
+            return VK_NULL_HANDLE;
         }
         g_snap_bytes += sz;
         ++g_snap_n;
-        const uint64_t cp = kChunkBytes / kPageBytes;
-        snap_dirty_mark(m, ci * cp, cp, 5);
     }
-    auto inner = [&](uint64_t p) { return base + p * kPageBytes >= e.addr && base + (p + 1) * kPageBytes <= e.addr + e.size; };
+    return sb.buffer;
+}
+
+// Lock held. Records the copy-back of e as a delta copy-back; false: not eligible (the caller copies it whole).
+bool record_delta(VkCommandBuffer cb, const OutEntry& e, uint64_t* bytes, bool* dispatched) {
+    if (!e.snapped || !e.m || g_delta_blocked || !delta_on()) return false;
+    const VkBuffer sb = snap_chunk_for(*e.m, e.addr, e.size, e.mbuf, e.moff);
+    if (!sb || (e.hoff % g_delta.align)) return false;
+    Mirror& m = *e.m;
+    const uint64_t base = reinterpret_cast<uint64_t>(m.pg->base);
     auto newer = [&](uint64_t p) { return ((m.gpu_new[static_cast<size_t>(p >> 6)].load(std::memory_order_relaxed) >> (p & 63)) & 1) != 0; };
-    // 0: left alone (a split result's page that went back already), 1: copied whole, 2: compared
-    auto kind = [&](uint64_t p) {
-        if (e.partial && !newer(p)) return 0;
-        if (!inner(p)) { g_dl_why[0].fetch_add(1, std::memory_order_relaxed); return 1; }
-        if (snap_dirty_get(m, p)) { g_dl_why[1].fetch_add(1, std::memory_order_relaxed); return 1; }
-        if (!mem::ww::all_armed(m.ww, p, 1)) { g_dl_why[2].fetch_add(1, std::memory_order_relaxed); return 1; }
-        return 2;
-    };
-    for (uint64_t p = e.first; p <= e.last;) {
-        const int k0 = kind(p);
+    for (uint64_t p = e.first; p <= e.last;) {   // a split result: only the runs of pages still newer in the copy
+        const bool take = !e.partial || newer(p);
         uint64_t q = p + 1;
-        while (q <= e.last && kind(q) == k0) ++q;
-        const uint64_t lo = std::max(e.addr, base + p * kPageBytes), hi = std::min(e.addr + e.size, base + q * kPageBytes);
-        const uint64_t off = lo - e.addr, len = hi - lo;
-        if (k0 == 1) {
-            const VkBufferCopy c = {e.moff + off, e.hoff + off, len};
-            vkCmdCopyBuffer(cb, e.mbuf, e.hbuf, 1, &c);
-            const VkBufferCopy cs = {e.moff + off, e.moff + off, len};
-            vkCmdCopyBuffer(cb, e.mbuf, sb.buffer, 1, &cs);
-            *bytes += len;
-            g_dl_forced.fetch_add(len, std::memory_order_relaxed);
-        } else if (k0 == 2) {
-            if (!*dispatched) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, d.pipe);
+        while (q <= e.last && (!e.partial || newer(q)) == take) ++q;
+        if (take) {
+            const uint64_t lo = std::max(e.addr, base + p * kPageBytes), hi = std::min(e.addr + e.size, base + q * kPageBytes);
+            const uint64_t off = lo - e.addr, len = hi - lo;
+            if (!*dispatched) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_delta.pipe);
             *dispatched = true;
-            const VkDescriptorBufferInfo bi[3] = {{e.mbuf, e.moff + off, len}, {e.hbuf, e.hoff + off, len}, {sb.buffer, e.moff + off, len}};
+            const VkDescriptorBufferInfo bi[3] = {{e.mbuf, e.moff + off, len}, {e.hbuf, e.hoff + off, len}, {sb, e.moff + off, len}};
             VkWriteDescriptorSet w[3] = {};
             for (uint32_t k = 0; k < 3; ++k) {
                 w[k] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -1890,14 +1840,12 @@ bool record_delta(VkCommandBuffer cb, const OutEntry& e, uint64_t* bytes, bool* 
                 w[k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 w[k].pBufferInfo = &bi[k];
             }
-            vkCmdPushDescriptorSetKHR(cb, VK_PIPELINE_BIND_POINT_COMPUTE, d.layout, 0, 3, w);
+            vkCmdPushDescriptorSetKHR(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_delta.layout, 0, 3, w);
             vkCmdDispatch(cb, static_cast<uint32_t>((len / 16 + 255) / 256), 1, 1);
             g_dl_scanned.fetch_add(len, std::memory_order_relaxed);
         }
         p = q;
     }
-    for (uint64_t p = e.first; p <= e.last; ++p)   // pool and snapshot now hold what the copy holds there
-        if (inner(p) && (!e.partial || newer(p))) snap_dirty_clear(m, p);
     g_dl_n.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -1913,33 +1861,23 @@ void snaps_forget(Mirror* m) {   // lock held
     }
 }
 
+bool presnap_take(uint64_t addr, uint64_t size) {   // lock held
+    for (size_t i = 0; i < g_presnap.size(); ++i)
+        if (g_presnap[i].addr == addr && g_presnap[i].size == size) {
+            g_presnap.erase(g_presnap.begin() + static_cast<std::ptrdiff_t>(i));
+            return true;
+        }
+    return false;
+}
+
 void delta_log(double secs) {
     static uint64_t p[5] = {};
-    const uint64_t v[5] = {g_dl_n.load(), g_dl_scanned.load(), g_dl_forced.load(), g_dl_init.load(), g_dl_plain.load()};
-    if (v[0] == p[0] && v[4] == p[4]) return;
-    NXLOG_I(kTag, "delta copy-backs over %.1f s: %llu results, %llu MiB compared on the GPU, %llu MiB of pages copied whole (CPU-written, not armed, "
-                  "range ends), %llu MiB first copies; %llu MiB copied whole outside the delta path; snapshots %zu, %llu MiB",
+    const uint64_t v[5] = {g_dl_n.load(), g_dl_scanned.load(), g_dl_plain.load(), g_dl_snaps.load(), g_dl_snap_bytes.load()};
+    if (v[0] == p[0] && v[2] == p[2] && v[3] == p[3]) return;
+    NXLOG_I(kTag, "delta copy-backs over %.1f s: %llu results, %llu MiB compared on the GPU; %llu MiB copied back whole (no snapshot); %llu snapshots "
+                  "before dispatches (%llu MiB); snapshot chunks %llu, %llu MiB",
             secs, (unsigned long long)(v[0] - p[0]), (unsigned long long)((v[1] - p[1]) >> 20), (unsigned long long)((v[2] - p[2]) >> 20),
-            (unsigned long long)((v[3] - p[3]) >> 20), (unsigned long long)((v[4] - p[4]) >> 20), (size_t)g_snap_n, (unsigned long long)(g_snap_bytes >> 20));
-    static uint64_t pw[3] = {};
-    uint64_t w[3];
-    for (int k = 0; k < 3; ++k) w[k] = g_dl_why[k].load();
-    static uint64_t pm[8] = {};
-    uint64_t mk[8];
-    for (int k = 0; k < 8; ++k) mk[k] = g_snap_mark_src[k].load();
-    NXLOG_I(kTag, "delta copy-backs: page tests that copy whole: range ends %llu, marked %llu, not armed %llu; pages marked by arm %llu, CPU write %llu, "
-                  "GPU write %llu, pool write %llu, fetch %llu, new snapshot %llu, whole copy %llu, split part %llu", (unsigned long long)(w[0] - pw[0]),
-            (unsigned long long)(w[1] - pw[1]), (unsigned long long)(w[2] - pw[2]), (unsigned long long)(mk[0] - pm[0]), (unsigned long long)(mk[1] - pm[1]),
-            (unsigned long long)(mk[2] - pm[2]), (unsigned long long)(mk[3] - pm[3]), (unsigned long long)(mk[4] - pm[4]), (unsigned long long)(mk[5] - pm[5]),
-            (unsigned long long)(mk[6] - pm[6]), (unsigned long long)(mk[7] - pm[7]));
-    static uint64_t ps[4] = {};
-    uint64_t sv[4];
-    for (int k = 0; k < 4; ++k) sv[k] = g_spw_src[k].load();
-    NXLOG_I(kTag, "delta copy-backs: pool writes marked: bound buffers of pointer writers %llu, pointer windows %llu, direct storage %llu, shadow out %llu pages",
-            (unsigned long long)(sv[0] - ps[0]), (unsigned long long)(sv[1] - ps[1]), (unsigned long long)(sv[2] - ps[2]), (unsigned long long)(sv[3] - ps[3]));
-    std::copy(sv, sv + 4, ps);
-    std::copy(mk, mk + 8, pm);
-    std::copy(w, w + 3, pw);
+            (unsigned long long)(v[3] - p[3]), (unsigned long long)((v[4] - p[4]) >> 20), (unsigned long long)g_snap_n, (unsigned long long)(g_snap_bytes >> 20));
     std::copy(v, v + 5, p);
 }
 
@@ -1951,8 +1889,7 @@ uint64_t record_copies(VkCommandBuffer cb, const std::vector<size_t>& idx) {
     for (size_t i : idx) {
         const OutEntry& e = g_out[i];
         if (record_delta(cb, e, &bytes, &dispatched)) continue;
-        if (e.m) snap_dirty_mark(*e.m, e.first, e.last - e.first + 1, 6);   // a whole copy: the snapshots no longer know the pool there
-        g_dl_plain.fetch_add(e.size, std::memory_order_relaxed);
+        if (e.m) g_dl_plain.fetch_add(e.size, std::memory_order_relaxed);
         if (e.partial && e.m) {                 // only the pages still newer in the copy
             const uint64_t base = reinterpret_cast<uint64_t>(e.m->pg->base);
             auto newer = [&](uint64_t p) { return ((e.m->gpu_new[static_cast<size_t>(p >> 6)].load(std::memory_order_relaxed) >> (p & 63)) & 1) != 0; };
@@ -2015,6 +1952,28 @@ void snaps_forget_locked(Mirror* m) {
 }
 void out_delta_block(bool on) { g_delta_blocked = on; }
 
+void out_presnap_end() { OutLock ol; g_presnap.clear(); }
+
+bool out_presnap(uint64_t addr, uint64_t size, VkBuffer mbuf, VkDeviceSize moff, VkCommandBuffer cb) {
+    if (!size || !out_lazy() || !delta_on()) return false;
+    const PoolHit hit = pool_lookup(addr);
+    Mirror* m = hit.pool && hit.pool->gpu ? hit.pool->gpu->mirror : nullptr;
+    if (!m) return false;
+    OutLock ol;
+    for (const OutEntry& e : g_out)   // an unsent result there: the copy is not what the pool holds (the entry keeps its snapshot, if any)
+        if (live(e) && e.addr < addr + size && addr < e.addr + e.size) return false;
+    const VkBuffer sb = snap_chunk_for(*m, addr, size, mbuf, moff);
+    if (!sb) return false;
+    memory_barrier(cb);                  // the fills of the copy before the snapshot reads it (the dispatch waits for the snapshot: g_sh_copied)
+    const VkBufferCopy c = {moff, moff, size};
+    vkCmdCopyBuffer(cb, mbuf, sb, 1, &c);
+    if (g_presnap.size() > 64) g_presnap.erase(g_presnap.begin());
+    g_presnap.push_back({addr, size});
+    g_dl_snaps.fetch_add(1, std::memory_order_relaxed);
+    g_dl_snap_bytes.fetch_add(size, std::memory_order_relaxed);
+    return true;
+}
+
 bool out_lazy() {
     static const bool on = config_get_bool("nvn", "compute_out_lazy", true);
     return on;
@@ -2038,6 +1997,8 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
     OutLock ol;
     for (OutEntry& e : g_out)
         if (e.addr == addr && e.size == size && e.m == m) {
+            const bool snap = presnap_take(addr, size);
+            if (!live(e)) e.snapped = snap;         // sent back already: the copy was the pool again when the new snapshot was taken
             if (!e.pending) out_changed();          // live and pending again
             ++e.gen;                                // a newer result than one a fetch may be copying back
             e.pending = true;
@@ -2050,6 +2011,7 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
     e.addr = addr; e.size = size; e.m = m;
     e.mbuf = mbuf; e.moff = moff; e.hbuf = host.buffer; e.hoff = host.offset;
     e.pending = true;
+    e.snapped = presnap_take(addr, size);
     e.id = g_out_next_id++;
     if (m) {
         const uint64_t base = reinterpret_cast<uint64_t>(m->pg->base);
@@ -2243,7 +2205,6 @@ int out_split(size_t i, uint64_t serial, std::vector<VkBufferCopy>& parts, std::
             const uint64_t lo = std::max(e.addr, base + p * kPageBytes), hi = std::min(e.addr + e.size, base + q * kPageBytes);
             parts.push_back(VkBufferCopy{e.moff + (lo - e.addr), e.hoff + (lo - e.addr), hi - lo});
             bufs.emplace_back(e.mbuf, e.hbuf);
-            snap_dirty_mark(*m, p, q - p, 7);
             rearm.emplace_back(lo, hi - lo);
             bits_set(m->gpu_new.get(), p, q - 1, false);   // current in the pool once the copy has run: a later copy-back leaves them alone
         }

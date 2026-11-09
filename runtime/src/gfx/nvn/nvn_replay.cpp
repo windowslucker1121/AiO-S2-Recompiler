@@ -2008,9 +2008,6 @@ void gmem_before_op(bool compute) {
                 if (!hit.pool || hit.pool->is_virtual || !hit.pool->base) continue;
                 if (out_overlaps(b.addr, b.size)) { compute_out_guard(b.addr, b.size, kOutGlobal); ++g_gmem_flushes; }
                 gpu_wrote(b.addr, b.size, kWriteStorage);
-                // through the page table into the pool itself, unless the slot search finds the binding first: compute marks every slot
-                // (SlotMaskC0), so its writes there land in the bound buffer (shadow or copy) and come back through the copy-backs
-                if (!compute) snap_pool_written(b.addr, b.size, 0);
             }
         }
         for (int k = 0; k < 16 && !full; ++k) {
@@ -2045,7 +2042,6 @@ void gmem_before_op(bool compute) {
                 if (end > page) {
                     if (out_overlaps(page, end - page)) { compute_out_guard(page, end - page, kOutGlobal); ++g_gmem_flushes; }
                     gpu_wrote(page, end - page, kWriteStorage);
-                    snap_pool_written(page, end - page, 1);
                     ++g_gmem_windows;
                 }
             }
@@ -2343,6 +2339,7 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
         if (out_exact(addr, size, &ob, &oo, &in_mirror)) {
             ++g_sh_uses;
             ++(in_mirror ? g_sh_direct : g_sh_held);
+            if (writes && in_mirror && out_presnap(addr, size, ob, oo, F->cb)) g_sh_copied = true;   // a result sent back already: snapshot again
             g_shadow_uses.push_back({addr, size, host, ob, oo, writes, true, MirrorSpan{ob, oo, true}, !in_mirror});
             BufRef r = host; r.buffer = ob; r.offset = oo; r.avail = size;
             return r;
@@ -2364,6 +2361,7 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
         if (ok) {
             ++g_sh_uses;
             ++g_sh_direct;
+            if (writes && out_presnap(addr, size, ms.buf, ms.offset, F->cb)) g_sh_copied = true;   // out_delta: the range before the dispatch
             g_shadow_uses.push_back({addr, size, host, ms.buf, ms.offset, writes, true, ms});
             BufRef r = host; r.buffer = ms.buf; r.offset = ms.offset; r.avail = size;
             return r;
@@ -2416,7 +2414,6 @@ void shadows_after_dispatch() {
         if (!any) { memory_barrier(F->cb); any = true; }
         VkBufferCopy c = {0, u.host.offset, u.size};
         vkCmdCopyBuffer(F->cb, u.buf, u.host.buffer, 1, &c);
-        snap_pool_written(u.addr, u.size, 3);
         g_sh_bytes_out += u.size;
         if (u.mirror.buf) {
             VkBufferCopy mc = {0, u.mirror.offset, u.size};
@@ -2791,7 +2788,6 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             bi.offset = sh.offset;
                         }
                         if (br.ok && writes) gpu_wrote(bind.addr, bi.range, kWriteStorage);   // the shader may write it
-                        if (br.ok && writes && bi.buffer == br.buffer) snap_pool_written(bind.addr, bi.range, 2);   // into the pool itself
                     }
                     break;
                 }
@@ -4696,6 +4692,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     }
     out_delta_block(false);
     shadows_after_dispatch();
+    out_presnap_end();
     memory_barrier(F->cb);
     ++g_chunk_work;
     if (g_trace) {
