@@ -553,7 +553,7 @@ were deleted, so the on-demand translator redoes them; list in `work\shaders\gpt
 results.tsv are in `work\shaders\gpt_backup_old`). Every pipeline with one of these shaders builds again on demand (14-70 s each, the
 "Preparing shaders" overlay counts them) until **the full shader preparation runs again (due; the user runs it at the very end of the
 project)**. `prepare.state`'s key changed with results.tsv, so the default run's start opens the "Preparing shaders" window by itself.
-Re-translating a subset now: `tools\.venv\Scripts\python -I tools\shaders\scripts\retranslate_subset.py --corpus work\shaders\oot\corpus
+**Merge pitfall (2026-11-09):** a full re-translation folder also holds rows of "runtime"-group blocks (from `work\shaders\oot\missing`) translated with the translator of that day; merging it later with `merge_results.py` overwrote the 27 A22-fixed upscaler network blocks with their pre-fix SPIR-V and brought the 1080 stripes back for ~1.5 h. Before merging an older full translation, drop its runtime rows (or every row whose block changed in the cache since), and screenshot the game at 1080 afterwards. Re-translating a subset now: `tools\.venv\Scripts\python -I tools\shaders\scripts\retranslate_subset.py --corpus work\shaders\oot\corpus
 --cache work\shaders\oot\spirv (--token gpt | --hashes FILE | PREFIX ...) [--backup DIR]` (temporary subset and output folders, removed
 when done; `--keep-temp` keeps them).
 Copy-backs, measured and dropped the same day: splitting results that are still guarded from an earlier frame (so the eight culling
