@@ -803,8 +803,16 @@ void park_miss_stats(uint64_t* miss, uint64_t* miss_expired, uint64_t* miss_big)
 
 namespace {
 // The texture's image, created on first use. Null when the texture has no usable image (the failure is counted and logged once).
-TexGpu* tex_or_null(Texture* t, float want_scale = 1.0f) {
-    if (!t || !active()) return nullptr;
+// The image of t, made when it has none. The look-up of an existing image is the hot path (several calls per draw); the making of one has
+// a large stack frame (its stack probe, __chkstk, showed in every call when it was one function), so it lives in tex_or_null_make.
+TexGpu* tex_or_null_make(Texture* t, float want_scale);
+inline TexGpu* tex_or_null(Texture* t, float want_scale = 1.0f) {
+    if (!t) return nullptr;
+    if (TexGpu* g = t->gpu) return g->failed || !active() ? nullptr : g;
+    return tex_or_null_make(t, want_scale);
+}
+__declspec(noinline) TexGpu* tex_or_null_make(Texture* t, float want_scale) {
+    if (!active()) return nullptr;
     if (t->gpu) return t->gpu->failed ? nullptr : t->gpu;
     if (Ref<Texture> alias = texture_registry_find_alias(t)) {
         TexGpu* ag = alias->gpu;

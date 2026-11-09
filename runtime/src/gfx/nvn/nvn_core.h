@@ -210,6 +210,10 @@ struct TexturePool : Obj {
     int count = 0;
     std::vector<Entry> entries;             // index = texture id
     std::vector<uint32_t> used_ids;         // ids whose entry is used, in the order they were first registered (an entry never becomes unused)
+    // Every registration's id, in order (the pool-array sync of the replay follows it to find new depth entries without walking used_ids);
+    // cleared when it grows past a million, which moves reg_log_epoch (readers then walk everything once).
+    std::vector<uint32_t> reg_log;
+    uint64_t reg_log_epoch = 0;
     std::shared_mutex lock;
 };
 

@@ -414,7 +414,8 @@ uint64_t cache_key_of(uint64_t storage_size, const uint8_t* mem, const TexLayout
 // The formats of cache entries by key, remembered in memory and in <cache>/formats2.idx ([nvn] bc7_format_index, default on). Opening
 // an entry to read its header cost ~4 ms on the render thread for every new texture image (the file open, with the virus scanner): a
 // camera cut in the intro made ~250 images in one frame (0.6-1 s). A known key needs only the entry's attributes (one call, no open):
-// a record holds the entry's size and last write time, and an entry rewritten since (another format, a tool's entry) is read again.
+// a record holds the entry's size and last write time, and an entry rewritten since (another format, a tool's entry) is read again
+// (records only for entries whose write time is 2 s old: see fmt_index_add).
 // Records are 32 bytes (key, format, size, write time, check word), appended by every run; a record that does not check is ignored.
 // Several processes may append to the same file.
 struct FmtRec { uint32_t format; uint64_t size, mtime; };
@@ -472,6 +473,13 @@ void fmt_index_add(const std::string& path, uint64_t key, uint32_t f) {
     if (!fmt_index_on() || path.empty()) return;
     FmtRec r{f, 0, 0};
     if (!file_stamp(path, r.size, r.mtime)) return;
+    // Only entries written at least 2 s ago get a record: the write time ticks in steps of up to ~16 ms, so an entry rewritten with
+    // another format of the same size (BC7 -> BC5) right after its first write kept the same size and write time and matched the old
+    // record (seen once in gfx_nvn_texgpu.astc_with_rgba8_and_bc5_cache_entries). A fresh entry is read from its header until then.
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    const uint64_t now = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    if (now < r.mtime + 20'000'000ull) return;
     FormatIndex& ix = fmt_index();
     std::lock_guard<std::mutex> lk(ix.mu);
     fmt_index_load_locked(ix, std::filesystem::path(path).parent_path().parent_path());

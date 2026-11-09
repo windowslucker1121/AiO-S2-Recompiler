@@ -940,6 +940,40 @@ runs by ~5 ms per frame; check `Get-Process spirv_harness` before trusting a run
 `gfx_nvn_texgpu.astc_with_rgba8_and_bc5_cache_entries` read a stale format for a rewritten cache entry (`cache_entry_format` 0 vs BC5),
 probably the format index's size + write-time check within one timestamp tick.
 
+**Session 2026-11-09 (R5: render thread at 1080, area-load frame).** Alone, `load_state` + `memory.limit_gb 24`, uncapped, `[diag] frame_csv`,
+paired `cpuperf_ab = 300` windows; scratch scripts in the worktree's `work/scripts` (not committed: `an.py` load frame / steady stats / folded
+profile per thread, `ab.py` pairing, `ftload.py` self time per ftrace zone inside the longest present interval).
+**Load frame:** it was the pointer-shader pass (`import_pools_for_pointers`) importing every chunk of every pool (~4 GiB, 56 chunks of 80 MiB at
+~31 ms) on the render thread. Now the background importer imports big pools chunk by chunk too (`[nvn] pool_prefetch_chunks`; the chunk table is
+handed over first, `PoolGpu::bg` + per-chunk `ready` flags and `chunk_mu`, a chunk the render thread needs first is imported there) and every pool
+with storage is queued at `nvnMemoryPoolInitialize` (`[nvn] pool_prefetch_at_init`): the pools exist from boot, so the imports are done long before
+the first 3D frame. Load frame (pool imports in it): Kokiri outside 2,672 ms (2,137) -> 744 ms (7); Link's house 2,795 (2,084) -> 804 (62); first
+scene 2,799 (1,812) -> 858-1,040 (< 1); frames over 100 ms around the entry summed 4.4-4.5 s -> 1.6-2.5 s. What is left in it: texture uploads
+~250 ms (~900 MB in the first scene), image creation 100-190 ms, ~240 ms of pipeline links in the first scene (the prewarm is still running 27 s
+after boot), mirror chunk copies.
+**Render thread:** Kokiri profile (sampler) at the start: bind_sets 23% (build_set 14), prepare_textures 9.6 (pool_set_sync 5.5), out_draw_bindings
+8, do_dispatch 5.7, keep_lookup_or_build 5 (3.6 self), pool_lookup 3.4, graphics_pipeline 3.4, handle_lookup 2.5, tex_or_null 2.3 + __chkstk.
+Kept: (1) `[nvn] pool_sync_depth_ids`: the depth-comparison pool array (OoT's only texture pool array) walks only ids that hold depth textures,
+followed through a registration log in the texture pool (`TexturePool::reg_log`), and drops ids whose texture is no longer depth: ~32k -> ~2.3k
+entries per walk (~1.3 walks per frame). (2) `[nvn] c0_persist`: the graphics c[0] tables of pointer shaders in a persistent content-addressed
+buffer (8,192 slots per era, the hash in the set signature), so those sets are reused and kept like read-only sets; the buffer two eras old is
+destroyed after the GPU (the first scene fills an era in ~100 s). (3) `tex_or_null` split into an inline look-up and a noinline maker (its big
+stack frame's probe ran on every call). Statistics lines: `sets that may not be reused, why` (first scene per frame: ~70 per-draw c[0], ~420
+written storage), `c0_persist`, pool-array `walks over N entries`. Verify: `set_reuse = verify` in Kokiri (2 runs) and the first scene: 0 kept-set
+and 0 memo differences with everything on. **Paired (both on vs off, final build):** Kokiri outside replay 18.2 -> 17.4 ms (8/9), fps 35.6 either
+way (render thread idle ~10 ms per frame: GPU-bound); first scene replay -0.8 ms (10/12), fps ~50 either way (render idle ~7 ms; main waits ~10 ms
+in nvnSyncWait); Link's house replay 10.6 -> 9.6 ms (15/15), 1% low +1.0, fps 59.5 either way. Over the session the render thread's replay per
+frame went 26.7 -> 17.8 ms in Kokiri and ~15.4 -> 11.9 ms in the first scene (earlier runs, not paired). **None of the three scenes is
+render-thread bound any more at 1080**: what is left is GPU work (S3) and the main thread's chain (~10 ms busy + its sync wait).
+**Dropped (measured):** `cmd_thread_copies` (image copies/clears, extended dynamic state 3 and push descriptors queued for the recorder; code kept,
+default off): Kokiri replay -0.56 ms (8/8) but first scene replay +0.5/+0.8 ms and fps -0.4/-1.5 (median, two runs). A per-submission cache of
+storage-writing sets (checked like kept sets, `set_write_diag` showed 71% repeat within a submission) and keeping sets over held results as a new
+dependency kind: replay +0.4-0.6 ms (the checks and replayed writes cost more than the build). VMA block pools for images the driver prefers
+dedicated (NVIDIA render targets; 91% of vmaCreateImage time was dedicated allocations): load frame and steady replay unchanged (858 vs 905 ms,
+11.7 vs 11.3 ms), removed. Flaky test: `gfx_nvn_texgpu.parked_image_of_shared_storage` failed once in a full ctest run (a and its twin did not
+share an image), 0 of 16 group runs and the next full runs; the BC7 format index now records only entries written 2 s ago, which removes the
+same-tick case of `astc_with_rgba8_and_bc5_cache_entries`.
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
