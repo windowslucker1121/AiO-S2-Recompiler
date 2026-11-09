@@ -20,6 +20,7 @@
 #include "nvn_core.h"
 #include "nvn_gpu.h"
 #include "nvn_impl.h"
+#include "nxrt/config.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 
@@ -170,6 +171,11 @@ NVNboolean nvnMemoryPoolInitialize(NVNmemoryPool* pool, const NVNmemoryPoolBuild
     bind_guest(pool, p);
     g_memory_pools.add(1);
     g_memory_pool_bytes.add(static_cast<int64_t>(p->size));
+    // [nvn] pool_prefetch_at_init (default on): import every pool with storage in the background as soon as it exists, not only those
+    // a buffer is made in. Pointer shaders (A17) need every pool imported (import_pools_for_pointers): pools first imported there cost
+    // the first frame that draws with them seconds of imports on the render thread.
+    static const bool at_init = config_get_bool("nvn", "pool_prefetch_at_init", true);
+    if (at_init && !is_virtual && gpu::active()) gpu::prefetch_pool(p);
     return 1;
 }
 
@@ -413,6 +419,8 @@ void texture_pool_register(const NVNtexturePool* pool, int id, const NVNtexture*
     e.view = info;
     e.has_view = view != nullptr;
     if (!e.used) { g_texture_handles.add(1); tp->used_ids.push_back(static_cast<uint32_t>(id)); }
+    if (tp->reg_log.size() >= (1u << 20)) { tp->reg_log.clear(); ++tp->reg_log_epoch; }
+    tp->reg_log.push_back(static_cast<uint32_t>(id));
     e.used = true;
     be::tx_mark("tx.reg", t);
     be::g_tex_scan_epoch.fetch_add(1, std::memory_order_relaxed);   // a new texture sits behind this id now

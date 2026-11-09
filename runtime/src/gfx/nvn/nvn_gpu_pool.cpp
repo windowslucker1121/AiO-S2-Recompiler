@@ -76,6 +76,11 @@ struct PoolGpu {
     gpu::Mirror* mirror = nullptr;  // device-local copy of the pages draws read (S38, [nvn] pool_mirror); render thread
     bool mirror_tried = false;
     bool ptr_all = false;             // import_pools_for_pointers tried every chunk already (render thread)
+    // Background chunk import ([nvn] pool_prefetch_chunks): while `bg` is set the importer may still import chunks, each under chunk_mu,
+    // and ready[k] says (release) that chunk k was tried; once `bg` is clear every chunk field is the render thread's alone again.
+    std::atomic<bool> bg{false};
+    std::unique_ptr<std::atomic<bool>[]> ready;
+    std::mutex chunk_mu;
 };
 
 MemoryPool::~MemoryPool() {
@@ -420,11 +425,25 @@ PoolGpu* import_pool(MemoryPool* p) {
 PoolChunk* pool_chunk(PoolGpu* g, uint64_t k) {
     if (k >= g->chunks.size()) return nullptr;
     PoolChunk& c = g->chunks[static_cast<size_t>(k)];
-    if (!c.tried) {
+    if (g->bg.load(std::memory_order_acquire)) {
+        if (!g->ready[static_cast<size_t>(k)].load(std::memory_order_acquire)) {   // the importer has not reached it: import it here (or wait for its import)
+            NXFT("pool.chunk_wait");
+            std::lock_guard<std::mutex> lk(g->chunk_mu);
+            if (!c.tried) {
+                const uint64_t off = k * g->stride;
+                import_range(g, c, off, std::min<uint64_t>(g->clen, g->size - off), "chunk", static_cast<size_t>(k), g->chunks.size());
+            }
+            g->ready[static_cast<size_t>(k)].store(true, std::memory_order_release);
+        }
+    } else if (!c.tried) {
         const uint64_t off = k * g->stride;
         import_range(g, c, off, std::min<uint64_t>(g->clen, g->size - off), "chunk", static_cast<size_t>(k), g->chunks.size());
     }
     return c.failed || !c.buffer ? nullptr : &c;
+}
+bool chunk_tried(PoolGpu* g, uint64_t k) {
+    if (g->bg.load(std::memory_order_acquire)) return g->ready[static_cast<size_t>(k)].load(std::memory_order_acquire);
+    return g->chunks[static_cast<size_t>(k)].tried;
 }
 
 // An import holding pool bytes [off, off + size) when no chunk does: an existing span, or a new one over the strides the range touches.
@@ -456,28 +475,86 @@ PoolChunk* pool_span(PoolGpu* g, uint64_t off, uint64_t size) {
 std::mutex g_pf_mu;
 std::condition_variable g_pf_cv;
 std::deque<Ref<MemoryPool>> g_pf_queue;
+// [nvn] pool_prefetch_chunks: pools larger than one chunk whose chunks the importer imports one at a time when no whole pool waits. The
+// pool's chunk table is handed to the render thread first (prefetch state 2, PoolGpu::bg set), so a chunk the render thread needs before
+// the importer reached it is imported there (pool_chunk). Pointer shaders need every chunk of every pool (import_pools_for_pointers):
+// at an area's or the first scene's first frame that was 1.4-2.9 s of imports on the render thread.
+struct ChunkJob { Ref<MemoryPool> pool; PoolGpu* g; size_t next; };
+std::deque<ChunkJob> g_pf_chunks;
 std::thread g_pf_thread;
 bool g_pf_stop = false;
+std::atomic<uint64_t> g_pf_chunks_done{0}, g_pf_chunk_bytes{0};   // statistics: chunks the importer imported
+
+bool prefetch_chunks_on() {
+    static const bool on = config_get_bool("nvn", "pool_prefetch_chunks", true);
+    return on;
+}
+
+// One chunk of the front chunk job (importer thread, g_pf_mu not held).
+void prefetch_one_chunk(ChunkJob& j) {
+    PoolGpu* g = j.g;
+    const size_t k = j.next++;
+    if (j.pool->dead.load()) return;
+    std::lock_guard<std::mutex> lk(g->chunk_mu);
+    PoolChunk& c = g->chunks[k];
+    if (!c.tried) {
+        const uint64_t off = k * g->stride;
+        if (import_range(g, c, off, std::min<uint64_t>(g->clen, g->size - off), "chunk", k, g->chunks.size()) && c.buffer) {
+            g_pf_chunks_done.fetch_add(1, std::memory_order_relaxed);
+            g_pf_chunk_bytes.fetch_add(c.size, std::memory_order_relaxed);
+        }
+    }
+    g->ready[k].store(true, std::memory_order_release);
+}
 
 void prefetch_loop() {
     log_set_thread_name("nvn-pool-import");
     for (;;) {
         Ref<MemoryPool> p;
+        ChunkJob job{};
+        bool chunk = false;
         {
             std::unique_lock<std::mutex> lk(g_pf_mu);
-            g_pf_cv.wait(lk, [] { return g_pf_stop || !g_pf_queue.empty(); });
+            g_pf_cv.wait(lk, [] { return g_pf_stop || !g_pf_queue.empty() || !g_pf_chunks.empty(); });
             if (g_pf_stop) return;
-            p = std::move(g_pf_queue.front());
-            g_pf_queue.pop_front();
+            if (!g_pf_queue.empty()) {
+                p = std::move(g_pf_queue.front());
+                g_pf_queue.pop_front();
+            } else {
+                job = std::move(g_pf_chunks.front());
+                g_pf_chunks.pop_front();
+                chunk = true;
+            }
+        }
+        if (chunk) {   // whole pools first; between them one chunk at a time
+            if (job.next < job.g->chunks.size()) prefetch_one_chunk(job);
+            if (job.next >= job.g->chunks.size() || job.pool->dead.load()) {
+                job.g->bg.store(false, std::memory_order_release);   // the render thread's alone from here on
+                NXLOG_I(kTag, "pool %p, %llu MiB: chunks imported in the background (%llu chunks, %llu MiB by the importer so far)",
+                        static_cast<void*>(job.g->base), static_cast<unsigned long long>(job.g->size >> 20),
+                        static_cast<unsigned long long>(g_pf_chunks_done.load()), static_cast<unsigned long long>(g_pf_chunk_bytes.load() >> 20));
+            } else {
+                std::lock_guard<std::mutex> lk(g_pf_mu);
+                if (g_pf_stop) job.g->bg.store(false, std::memory_order_release);
+                else g_pf_chunks.push_front(std::move(job));
+            }
+            continue;
         }
         int expect = 1;
         if (!p->prefetch.compare_exchange_strong(expect, 3)) continue;   // the render thread needed it first and imports it itself
         PoolGpu* g = nullptr;
         if (!p->dead.load()) g = import_pool(p.get());
+        const bool chunks = g && !g->failed && g->chunks.size() > 1 && prefetch_chunks_on();
+        if (chunks) {
+            g->ready.reset(new std::atomic<bool>[g->chunks.size()]);
+            for (size_t k = 0; k < g->chunks.size(); ++k) g->ready[k].store(false, std::memory_order_relaxed);
+            g->bg.store(true, std::memory_order_release);
+        }
         {
             std::lock_guard<std::mutex> lk(g_pf_mu);
             p->prefetched.store(g);
             p->prefetch.store(2);
+            if (chunks) g_pf_chunks.push_back(ChunkJob{p, g, 0});
         }
         g_pf_cv.notify_all();
     }
@@ -504,8 +581,9 @@ void make_dummy() {
 void prefetch_pool(MemoryPool* p) {
     static const bool enabled = config_get_bool("nvn", "pool_prefetch", true);   // [nvn] pool_prefetch = false: import on first use only
     if (!enabled || !p || p->is_virtual || !p->base || !p->size || !active()) return;
-    // a pool larger than one chunk is imported chunk by chunk as the render thread touches it (pool_chunk), never whole
-    if (import_stride() && p->size > import_stride() + import_overlap()) return;
+    // a pool larger than one chunk is imported chunk by chunk: by the importer in its idle time ([nvn] pool_prefetch_chunks), or as the
+    // render thread touches it (pool_chunk), never whole
+    if (!prefetch_chunks_on() && import_stride() && p->size > import_stride() + import_overlap()) return;
     std::lock_guard<std::mutex> lk(g_pf_mu);
     if (g_pf_stop) return;
     int expect = 0;
@@ -547,7 +625,7 @@ void import_pools_for_pointers() {
         if (pg && (pg->failed || pg->chunks.size() < 2)) { pg->ptr_all = true; continue; }
         if (!pg) continue;
         for (uint64_t k = 0; k < pg->chunks.size(); ++k) {
-            const bool had = pg->chunks[static_cast<size_t>(k)].tried;
+            const bool had = chunk_tried(pg, k);
             const PoolChunk* c = pool_chunk(pg, k);
             if (!had && c && c->buffer) { ++chunks; bytes += c->size; }
         }
@@ -701,6 +779,8 @@ void pool_shutdown() {
         std::unique_lock<std::mutex> lk(g_pf_mu);
         g_pf_stop = true;
         g_pf_queue.clear();
+        for (ChunkJob& j : g_pf_chunks) j.g->bg.store(false, std::memory_order_release);
+        g_pf_chunks.clear();
     }
     g_pf_cv.notify_all();
     if (g_pf_thread.joinable()) g_pf_thread.join();

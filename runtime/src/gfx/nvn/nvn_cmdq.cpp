@@ -398,6 +398,163 @@ void VKAPI_PTR h_fsr(VkCommandBuffer cb, const VkExtent2D* size, const VkFragmen
     commit();
 }
 
+// [nvn] cmd_thread_copies, switched by cpuperf_ab (`cmd_copies`): off makes these calls wait for the recorder as before.
+std::atomic<bool> g_copies_q{true};
+inline bool q_copy() {
+    if (!queue_here()) return false;
+    if (!g_copies_q.load(std::memory_order_relaxed)) { drain_now(); ++g_direct; return false; }
+    return true;
+}
+// Image copies, blits, resolves and clears (texture uploads, render-target copies): their region arrays are copied. They waited for the
+// recorder ("drain") before, which made the render thread wait for every queued call at each texture upload.
+PFN_vkCmdCopyBufferToImage o_cbti = nullptr;
+struct CbtiArgs { VkCommandBuffer cb; VkBuffer b; VkImage i; VkImageLayout l; uint32_t n; const VkBufferImageCopy* r; };
+void x_cbti(const uint8_t* p) { const CbtiArgs& a = *reinterpret_cast<const CbtiArgs*>(p); o_cbti(a.cb, a.b, a.i, a.l, a.n, a.r); }
+void VKAPI_PTR h_cbti(VkCommandBuffer cb, VkBuffer b, VkImage i, VkImageLayout l, uint32_t n, const VkBufferImageCopy* r) {
+    if (!q_copy()) return o_cbti(cb, b, i, l, n, r);
+    uint8_t* p = reserve(&x_cbti, sizeof(CbtiArgs) + room<VkBufferImageCopy>(n));
+    CbtiArgs* a = reinterpret_cast<CbtiArgs*>(p);
+    Wr w{p + sizeof(CbtiArgs)};
+    *a = {cb, b, i, l, n, w.put(r, n)};
+    commit();
+}
+PFN_vkCmdCopyImageToBuffer o_citb = nullptr;
+struct CitbArgs { VkCommandBuffer cb; VkImage i; VkImageLayout l; VkBuffer b; uint32_t n; const VkBufferImageCopy* r; };
+void x_citb(const uint8_t* p) { const CitbArgs& a = *reinterpret_cast<const CitbArgs*>(p); o_citb(a.cb, a.i, a.l, a.b, a.n, a.r); }
+void VKAPI_PTR h_citb(VkCommandBuffer cb, VkImage i, VkImageLayout l, VkBuffer b, uint32_t n, const VkBufferImageCopy* r) {
+    if (!q_copy()) return o_citb(cb, i, l, b, n, r);
+    uint8_t* p = reserve(&x_citb, sizeof(CitbArgs) + room<VkBufferImageCopy>(n));
+    CitbArgs* a = reinterpret_cast<CitbArgs*>(p);
+    Wr w{p + sizeof(CitbArgs)};
+    *a = {cb, i, l, b, n, w.put(r, n)};
+    commit();
+}
+PFN_vkCmdCopyImage o_ci = nullptr;
+struct CiArgs { VkCommandBuffer cb; VkImage s; VkImageLayout sl; VkImage d; VkImageLayout dl; uint32_t n; const VkImageCopy* r; };
+void x_ci(const uint8_t* p) { const CiArgs& a = *reinterpret_cast<const CiArgs*>(p); o_ci(a.cb, a.s, a.sl, a.d, a.dl, a.n, a.r); }
+void VKAPI_PTR h_ci(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageCopy* r) {
+    if (!q_copy()) return o_ci(cb, s, sl, d, dl, n, r);
+    uint8_t* p = reserve(&x_ci, sizeof(CiArgs) + room<VkImageCopy>(n));
+    CiArgs* a = reinterpret_cast<CiArgs*>(p);
+    Wr w{p + sizeof(CiArgs)};
+    *a = {cb, s, sl, d, dl, n, w.put(r, n)};
+    commit();
+}
+PFN_vkCmdBlitImage o_bi = nullptr;
+struct BiArgs { VkCommandBuffer cb; VkImage s; VkImageLayout sl; VkImage d; VkImageLayout dl; uint32_t n; const VkImageBlit* r; VkFilter f; };
+void x_bi(const uint8_t* p) { const BiArgs& a = *reinterpret_cast<const BiArgs*>(p); o_bi(a.cb, a.s, a.sl, a.d, a.dl, a.n, a.r, a.f); }
+void VKAPI_PTR h_bi(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageBlit* r, VkFilter f) {
+    if (!q_copy()) return o_bi(cb, s, sl, d, dl, n, r, f);
+    uint8_t* p = reserve(&x_bi, sizeof(BiArgs) + room<VkImageBlit>(n));
+    BiArgs* a = reinterpret_cast<BiArgs*>(p);
+    Wr w{p + sizeof(BiArgs)};
+    *a = {cb, s, sl, d, dl, n, w.put(r, n), f};
+    commit();
+}
+PFN_vkCmdResolveImage o_ri = nullptr;
+struct RiArgs { VkCommandBuffer cb; VkImage s; VkImageLayout sl; VkImage d; VkImageLayout dl; uint32_t n; const VkImageResolve* r; };
+void x_ri(const uint8_t* p) { const RiArgs& a = *reinterpret_cast<const RiArgs*>(p); o_ri(a.cb, a.s, a.sl, a.d, a.dl, a.n, a.r); }
+void VKAPI_PTR h_ri(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageResolve* r) {
+    if (!q_copy()) return o_ri(cb, s, sl, d, dl, n, r);
+    uint8_t* p = reserve(&x_ri, sizeof(RiArgs) + room<VkImageResolve>(n));
+    RiArgs* a = reinterpret_cast<RiArgs*>(p);
+    Wr w{p + sizeof(RiArgs)};
+    *a = {cb, s, sl, d, dl, n, w.put(r, n)};
+    commit();
+}
+PFN_vkCmdClearColorImage o_cci = nullptr;
+struct CciArgs { VkCommandBuffer cb; VkImage i; VkImageLayout l; VkClearColorValue c; uint32_t n; const VkImageSubresourceRange* r; };
+void x_cci(const uint8_t* p) { const CciArgs& a = *reinterpret_cast<const CciArgs*>(p); o_cci(a.cb, a.i, a.l, &a.c, a.n, a.r); }
+void VKAPI_PTR h_cci(VkCommandBuffer cb, VkImage i, VkImageLayout l, const VkClearColorValue* c, uint32_t n, const VkImageSubresourceRange* r) {
+    if (!q_copy()) return o_cci(cb, i, l, c, n, r);
+    uint8_t* p = reserve(&x_cci, sizeof(CciArgs) + room<VkImageSubresourceRange>(n));
+    CciArgs* a = reinterpret_cast<CciArgs*>(p);
+    Wr w{p + sizeof(CciArgs)};
+    *a = {cb, i, l, *c, n, w.put(r, n)};
+    commit();
+}
+PFN_vkCmdClearDepthStencilImage o_cdsi = nullptr;
+struct CdsiArgs { VkCommandBuffer cb; VkImage i; VkImageLayout l; VkClearDepthStencilValue c; uint32_t n; const VkImageSubresourceRange* r; };
+void x_cdsi(const uint8_t* p) { const CdsiArgs& a = *reinterpret_cast<const CdsiArgs*>(p); o_cdsi(a.cb, a.i, a.l, &a.c, a.n, a.r); }
+void VKAPI_PTR h_cdsi(VkCommandBuffer cb, VkImage i, VkImageLayout l, const VkClearDepthStencilValue* c, uint32_t n, const VkImageSubresourceRange* r) {
+    if (!q_copy()) return o_cdsi(cb, i, l, c, n, r);
+    uint8_t* p = reserve(&x_cdsi, sizeof(CdsiArgs) + room<VkImageSubresourceRange>(n));
+    CdsiArgs* a = reinterpret_cast<CdsiArgs*>(p);
+    Wr w{p + sizeof(CdsiArgs)};
+    *a = {cb, i, l, *c, n, w.put(r, n)};
+    commit();
+}
+PFN_vkCmdBindVertexBuffers o_bvb = nullptr;
+struct BvbArgs { VkCommandBuffer cb; uint32_t first, n; const VkBuffer* b; const VkDeviceSize* off; };
+void x_bvb(const uint8_t* p) { const BvbArgs& a = *reinterpret_cast<const BvbArgs*>(p); o_bvb(a.cb, a.first, a.n, a.b, a.off); }
+void VKAPI_PTR h_bvb(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer* b, const VkDeviceSize* off) {
+    if (!q_copy()) return o_bvb(cb, first, n, b, off);
+    uint8_t* p = reserve(&x_bvb, sizeof(BvbArgs) + room<VkBuffer>(n) + room<VkDeviceSize>(n));
+    BvbArgs* a = reinterpret_cast<BvbArgs*>(p);
+    Wr w{p + sizeof(BvbArgs)};
+    const VkBuffer* cb_ = w.put(b, n);
+    *a = {cb, first, n, cb_, w.put(off, n)};
+    commit();
+}
+// Extended dynamic state 3 with arrays: one element type per call, copied.
+template <auto* Slot, auto* Orig, typename E>
+struct Arr3 {
+    struct Args { VkCommandBuffer cb; uint32_t first, n; const E* v; };
+    static void exec(const uint8_t* p) { const Args& a = *reinterpret_cast<const Args*>(p); (*Orig)(a.cb, a.first, a.n, a.v); }
+    static void VKAPI_PTR call(VkCommandBuffer cb, uint32_t first, uint32_t n, const E* v) {
+        if (!q_copy()) return (*Orig)(cb, first, n, v);
+        uint8_t* p = reserve(&exec, sizeof(Args) + room<E>(n));
+        Args* a = reinterpret_cast<Args*>(p);
+        Wr w{p + sizeof(Args)};
+        *a = {cb, first, n, w.put(v, n)};
+        commit();
+    }
+};
+PFN_vkCmdSetColorBlendEnableEXT o_cbe = nullptr;
+PFN_vkCmdSetColorBlendEquationEXT o_cbq = nullptr;
+PFN_vkCmdSetColorWriteMaskEXT o_cwm = nullptr;
+PFN_vkCmdSetSampleMaskEXT o_smk = nullptr;
+struct SmkArgs { VkCommandBuffer cb; VkSampleCountFlagBits s; const VkSampleMask* m; };
+void x_smk(const uint8_t* p) { const SmkArgs& a = *reinterpret_cast<const SmkArgs*>(p); o_smk(a.cb, a.s, a.m); }
+void VKAPI_PTR h_smk(VkCommandBuffer cb, VkSampleCountFlagBits s, const VkSampleMask* m) {
+    if (!q_copy()) return o_smk(cb, s, m);
+    const size_t n = (static_cast<size_t>(s) + 31) / 32;
+    uint8_t* p = reserve(&x_smk, sizeof(SmkArgs) + room<VkSampleMask>(n));
+    SmkArgs* a = reinterpret_cast<SmkArgs*>(p);
+    Wr w{p + sizeof(SmkArgs)};
+    *a = {cb, s, m ? w.put(m, n) : nullptr};
+    commit();
+}
+
+// vkCmdPushDescriptorSetKHR (the delta copy-back shader, ~25 per frame): the writes and their buffer / image / texel-view arrays are copied
+// (no pNext anywhere, else it waits for the recorder as before).
+PFN_vkCmdPushDescriptorSetKHR o_pds = nullptr;
+struct PdsArgs { VkCommandBuffer cb; VkPipelineBindPoint bp; VkPipelineLayout layout; uint32_t set, n; const VkWriteDescriptorSet* w; };
+void x_pds(const uint8_t* p) { const PdsArgs& a = *reinterpret_cast<const PdsArgs*>(p); o_pds(a.cb, a.bp, a.layout, a.set, a.n, a.w); }
+void VKAPI_PTR h_pds(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout layout, uint32_t set, uint32_t n, const VkWriteDescriptorSet* w) {
+    if (!q_copy()) return o_pds(cb, bp, layout, set, n, w);
+    size_t extra = room<VkWriteDescriptorSet>(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        if (w[i].pNext) { drain_now(); ++g_direct; return o_pds(cb, bp, layout, set, n, w); }
+        const uint32_t c = w[i].descriptorCount;
+        if (w[i].pBufferInfo) extra += room<VkDescriptorBufferInfo>(c);
+        if (w[i].pImageInfo) extra += room<VkDescriptorImageInfo>(c);
+        if (w[i].pTexelBufferView) extra += room<VkBufferView>(c);
+    }
+    uint8_t* p = reserve(&x_pds, sizeof(PdsArgs) + extra);
+    PdsArgs* a = reinterpret_cast<PdsArgs*>(p);
+    Wr wr{p + sizeof(PdsArgs)};
+    VkWriteDescriptorSet* cw = wr.put(w, n);
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t c = w[i].descriptorCount;
+        if (w[i].pBufferInfo) cw[i].pBufferInfo = wr.put(w[i].pBufferInfo, c);
+        if (w[i].pImageInfo) cw[i].pImageInfo = wr.put(w[i].pImageInfo, c);
+        if (w[i].pTexelBufferView) cw[i].pTexelBufferView = wr.put(w[i].pTexelBufferView, c);
+    }
+    *a = {cb, bp, layout, set, n, cw};
+    commit();
+}
+
 template <typename P> void hook(P& slot, P& orig, P fn) { if (slot && !orig) { orig = slot; slot = fn; } }
 
 void install_all() {
@@ -422,16 +579,32 @@ void install_all() {
     hook(vkCmdSetScissorWithCount, o_scc, &h_scc); hook(vkCmdSetBlendConstants, o_bc, &h_bc); hook(vkCmdCopyBuffer, o_cpb, &h_cpb);
     hook(vkCmdClearAttachments, o_cla, &h_cla); hook(vkCmdUpdateBuffer, o_upd, &h_upd); hook(vkCmdPipelineBarrier2, o_pb2, &h_pb2);
     hook(vkCmdBeginRendering, o_br, &h_br);
+    // [nvn] cmd_thread_copies (default off): image copies/clears and push descriptors queued too. Paired windows at 1080: Kokiri outside replay
+    // -0.56 ms (8/8) but fps +0.1; first scene replay +0.8 / +0.5 ms and fps -1.5 / -0.4 (median, two runs): the recorder falls behind there
+    static const bool more = config_get_bool("nvn", "cmd_thread_copies", false);
+    if (more) {
+        hook(vkCmdCopyBufferToImage, o_cbti, &h_cbti); hook(vkCmdCopyImageToBuffer, o_citb, &h_citb); hook(vkCmdCopyImage, o_ci, &h_ci);
+        hook(vkCmdBlitImage, o_bi, &h_bi); hook(vkCmdResolveImage, o_ri, &h_ri); hook(vkCmdClearColorImage, o_cci, &h_cci);
+        hook(vkCmdClearDepthStencilImage, o_cdsi, &h_cdsi); hook(vkCmdBindVertexBuffers, o_bvb, &h_bvb);
+        if (vkCmdSetColorBlendEnableEXT) { o_cbe = vkCmdSetColorBlendEnableEXT; vkCmdSetColorBlendEnableEXT = &Arr3<&vkCmdSetColorBlendEnableEXT, &o_cbe, VkBool32>::call; }
+        if (vkCmdSetColorBlendEquationEXT) { o_cbq = vkCmdSetColorBlendEquationEXT; vkCmdSetColorBlendEquationEXT = &Arr3<&vkCmdSetColorBlendEquationEXT, &o_cbq, VkColorBlendEquationEXT>::call; }
+        if (vkCmdSetColorWriteMaskEXT) { o_cwm = vkCmdSetColorWriteMaskEXT; vkCmdSetColorWriteMaskEXT = &Arr3<&vkCmdSetColorWriteMaskEXT, &o_cwm, VkColorComponentFlags>::call; }
+        hook(vkCmdSetSampleMaskEXT, o_smk, &h_smk); hook(vkCmdPushDescriptorSetKHR, o_pds, &h_pds);
+        NXQ_QUEUED(vkCmdSetPolygonModeEXT); NXQ_QUEUED(vkCmdSetDepthClampEnableEXT); NXQ_QUEUED(vkCmdSetLogicOpEnableEXT);
+        NXQ_QUEUED(vkCmdSetAlphaToCoverageEnableEXT); NXQ_QUEUED(vkCmdSetRasterizationSamplesEXT); NXQ_QUEUED(vkCmdSetDepthClipEnableEXT);
+    } else {
+        NXQ_DIRECT(vkCmdCopyImageToBuffer); NXQ_DIRECT(vkCmdCopyBufferToImage); NXQ_DIRECT(vkCmdCopyImage); NXQ_DIRECT(vkCmdBlitImage);
+        NXQ_DIRECT(vkCmdResolveImage); NXQ_DIRECT(vkCmdClearColorImage); NXQ_DIRECT(vkCmdClearDepthStencilImage); NXQ_DIRECT(vkCmdBindVertexBuffers);
+        NXQ_DIRECT(vkCmdSetSampleMaskEXT); NXQ_DIRECT(vkCmdSetColorBlendEnableEXT); NXQ_DIRECT(vkCmdSetColorBlendEquationEXT);
+        NXQ_DIRECT(vkCmdSetColorWriteMaskEXT); NXQ_DIRECT(vkCmdSetPolygonModeEXT); NXQ_DIRECT(vkCmdSetDepthClampEnableEXT);
+        NXQ_DIRECT(vkCmdSetLogicOpEnableEXT); NXQ_DIRECT(vkCmdSetAlphaToCoverageEnableEXT); NXQ_DIRECT(vkCmdSetRasterizationSamplesEXT);
+        NXQ_DIRECT(vkCmdSetDepthClipEnableEXT); NXQ_DIRECT(vkCmdPushDescriptorSetKHR);
+    }
     // everything else the replay records: drained first, then called directly
-    NXQ_DIRECT(vkCmdPipelineBarrier); NXQ_DIRECT(vkCmdCopyImageToBuffer); NXQ_DIRECT(vkCmdCopyImageToBuffer2); NXQ_DIRECT(vkCmdCopyBufferToImage);
-    NXQ_DIRECT(vkCmdCopyBufferToImage2); NXQ_DIRECT(vkCmdCopyImage); NXQ_DIRECT(vkCmdBlitImage); NXQ_DIRECT(vkCmdResolveImage);
-    NXQ_DIRECT(vkCmdClearColorImage); NXQ_DIRECT(vkCmdClearDepthStencilImage); NXQ_DIRECT(vkCmdBindVertexBuffers);
+    NXQ_DIRECT(vkCmdPipelineBarrier); NXQ_DIRECT(vkCmdCopyImageToBuffer2); NXQ_DIRECT(vkCmdCopyBufferToImage2);
     NXQ_DIRECT(vkCmdBeginTransformFeedbackEXT); NXQ_DIRECT(vkCmdEndTransformFeedbackEXT); NXQ_DIRECT(vkCmdBindTransformFeedbackBuffersEXT);
     hook(vkCmdBeginDebugUtilsLabelEXT, o_bdl, &h_bdl); hook(vkCmdSetFragmentShadingRateKHR, o_fsr, &h_fsr); NXQ_DIRECT(vkCmdSetCheckpointNV);
-    NXQ_DIRECT(vkCmdPushDescriptorSetKHR); NXQ_DIRECT(vkCmdSetVertexInputEXT); NXQ_DIRECT(vkCmdSetSampleMaskEXT);
-    NXQ_DIRECT(vkCmdSetColorBlendEnableEXT); NXQ_DIRECT(vkCmdSetColorBlendEquationEXT); NXQ_DIRECT(vkCmdSetColorWriteMaskEXT);
-    NXQ_DIRECT(vkCmdSetPolygonModeEXT); NXQ_DIRECT(vkCmdSetDepthClampEnableEXT); NXQ_DIRECT(vkCmdSetLogicOpEnableEXT);
-    NXQ_DIRECT(vkCmdSetAlphaToCoverageEnableEXT); NXQ_DIRECT(vkCmdSetRasterizationSamplesEXT); NXQ_DIRECT(vkCmdSetDepthClipEnableEXT);
+    NXQ_DIRECT(vkCmdSetVertexInputEXT);
     NXQ_DIRECT(vkCmdExecuteCommands);
     // the command buffers, their pools and the queues as a whole
     NXQ_DIRECT(vkBeginCommandBuffer); NXQ_DIRECT(vkEndCommandBuffer); NXQ_DIRECT(vkResetCommandBuffer); NXQ_DIRECT(vkResetCommandPool);
@@ -465,6 +638,8 @@ void begin_submission(bool on) {
     drain_now();       // switching only with nothing queued
     g_active.store(on, std::memory_order_relaxed);
 }
+
+void set_copies(bool on) { g_copies_q.store(on, std::memory_order_relaxed); }
 
 void drain() {
     if (g_ring && g_active.load(std::memory_order_relaxed) && gpu::on_render_thread()) drain_now();

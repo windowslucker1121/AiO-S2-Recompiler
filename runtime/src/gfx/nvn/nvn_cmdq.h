@@ -10,6 +10,7 @@ bool enabled();                       // [nvn] cmd_thread (read once)
 // At the start of a submission (render thread, nothing recorded yet): installs the hooks the first time, waits for the recorder, and
 // switches queuing on or off for what follows (paired windows).
 void begin_submission(bool on);
+void set_copies(bool on);             // [nvn] cmd_thread_copies under cpuperf_ab (cmd_copies): image copies and clears queued or drained
 void drain();                         // render thread: waits until every queued call has been made
 void stats(uint64_t* packets, uint64_t* drains, uint64_t* direct, uint64_t* spins);
 void shutdown();
