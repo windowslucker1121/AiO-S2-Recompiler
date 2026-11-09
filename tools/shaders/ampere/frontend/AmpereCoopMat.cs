@@ -37,6 +37,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
     partial class CodeGenContext
     {
         internal AmpereCoopMat.Types CoopMatTypes;
+        internal SpvInstruction HalfType;   // float16, declared by the first Float16Arithmetic (AmpereCoopMat.HalfTypeOf)
     }
 
     public static class AmpereCoopMat
@@ -56,6 +57,20 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         [ThreadStatic] public static bool Used;
         /// Set by a translation (scalar or not) with an HMMA this path can take: the harness then makes the variant too.
         [ThreadStatic] public static bool Eligible;
+
+        // ---- native float16 for packed-half arithmetic (any stage) ---------------------------------------------------------
+        // The float16 variant of a block (<hash>.f16.spv, harness Program.cs TranslateVariants): HADD2 / HMUL2 / HFMA2 with a half
+        // result computed in float16 (TryHalf), every stage. The module declares Float16 and the float-controls execution modes
+        // DenormPreserve 16 and SignedZeroInfNanPreserve 16, so the runtime loads it only on a device with shaderFloat16 and both
+        // float16 properties (runtime nvn_shaders.cpp read_spv); the plain <hash>.spv (fp32 arithmetic, HFMA2 rounded to odd in fp64:
+        // AmpereEmit.cs HalfFmaOdd) stays the fallback. The cooperative-matrix variant always computes them in float16.
+
+        [ThreadStatic] static bool _half;
+        /// NXRT_HARNESS_F16=1: every translation computes packed-half arithmetic in float16 (the harness then makes no separate variant).
+        public static readonly bool EnvHalf = Environment.GetEnvironmentVariable("NXRT_HARNESS_F16") == "1";
+        public static bool HalfActive { get => _half || EnvHalf || Active; set => _half = value; }
+        /// Set by a translation with packed-half arithmetic that TryHalf can take: the harness then makes the float16 variant too.
+        [ThreadStatic] public static bool HalfEligible;
 
         // Element order: component index i of the cooperative matrix holds PTX fragment element Order[i] of the lane
         // (element e = register e >> 1, half e & 1; AmpereEmit.Tensor.cs). A (16 x 16): 8, B (16 x 8): 4, C/D F16 (16 x 8): 4,
@@ -115,10 +130,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         /// Packed-half arithmetic of the variant (HADD2 / HMUL2 / HFMA2 with a half result): one lane's add (kind 0), multiply (1) or
         /// fused multiply-add (2) of fp32 operands holding fp16 values, done in float16. The hardware's own rounding (once, to nearest)
         /// instead of fp32 arithmetic rounded twice (and, for HFMA2, the fp64 round-to-odd step that avoids that: AmpereEmit.cs
-        /// HalfFmaOdd), which made most of the network passes' cost after HMMA. Null outside the variant: the caller emits fp32.
+        /// HalfFmaOdd), which made most of the network passes' cost after HMMA (and up to ~100 fp64 operations in each of OoT's hot
+        /// material fragment shaders). Null outside the cooperative-matrix and float16 variants: the caller emits fp32.
         internal static IrOperand TryHalf(EmitterContext ctx, int kind, IrOperand a, IrOperand b, IrOperand c)
         {
-            if (!Active) return null;
+            HalfEligible = true;
+            if (!HalfActive) return null;
             IrOperand d = OperandHelper.Local();
             ctx.Add(new Operation(Instruction.Float16Arithmetic, kind, d, kind == 2 ? new[] { a, b, c } : new[] { a, b }));
             return d;
@@ -126,18 +143,35 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         internal static OperationResult GenerateFloat16(CodeGenContext c, AstOperation op)
         {
-            Types t = TypesOf(c);
+            SpvInstruction f16 = HalfTypeOf(c);
             SpvInstruction f32 = c.TypeFP32();
-            SpvInstruction H(int s) => c.FConvert(t.F16, c.GetFP32(op.GetSource(s)));   // exact: the operands are fp16 values
+            SpvInstruction H(int s) => c.FConvert(f16, c.GetFP32(op.GetSource(s)));   // exact: the operands are fp16 values
             SpvInstruction r = op.Index switch
             {
-                0 => c.FAdd(t.F16, H(0), H(1)),
-                1 => c.FMul(t.F16, H(0), H(1)),
-                2 => c.GlslFma(t.F16, H(0), H(1), H(2)),
+                0 => c.FAdd(f16, H(0), H(1)),
+                1 => c.FMul(f16, H(0), H(1)),
+                2 => c.GlslFma(f16, H(0), H(1), H(2)),
                 _ => throw new InvalidOperationException($"Float16Arithmetic kind {op.Index}"),
             };
             if (op.Index != 2) c.Decorate(r, Decoration.NoContraction);   // HMUL2 then HADD2 are two roundings, never one fma
             return new OperationResult(AggregateType.FP32, c.FConvert(f32, r));
+        }
+
+        /// float16, plus what float16 arithmetic needs to round as the hardware does: fp16 denormals kept (the conversions of fp16
+        /// denormal operands and results included) and no fast-math on signed zeros, infinities and NaN. Vulkan leaves both to the
+        /// implementation otherwise.
+        static SpvInstruction HalfTypeOf(CodeGenContext c)
+        {
+            if (c.HalfType != null) return c.HalfType;
+            c.AddCapability(Capability.Float16);
+            c.AddCapability(Capability.DenormPreserve);
+            c.AddCapability(Capability.SignedZeroInfNanPreserve);
+            c.AddExtension("SPV_KHR_float_controls");
+            SpvInstruction main = c.GetFunction(0).Item2;
+            c.AddExecutionMode(main, ExecutionMode.DenormPreserve, (Spv.Generator.LiteralInteger)16);
+            c.AddExecutionMode(main, ExecutionMode.SignedZeroInfNanPreserve, (Spv.Generator.LiteralInteger)16);
+            c.HalfType = c.TypeFloat(16);
+            return c.HalfType;
         }
 
         // ---- SPIR-V back end ---------------------------------------------------------------------------------------------
@@ -173,7 +207,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             c.AddCapability(CooperativeMatrixKHR);
             c.AddExtension("SPV_KHR_cooperative_matrix");
             var t = new Types();
-            t.F16 = c.TypeFloat(16);
+            t.F16 = HalfTypeOf(c);
             t.V2F16 = c.TypeVector(t.F16, 2);
             t.A = MatrixType(c, t.F16, 16, 16, UseA);
             t.B = MatrixType(c, t.F16, 16, 8, UseB);

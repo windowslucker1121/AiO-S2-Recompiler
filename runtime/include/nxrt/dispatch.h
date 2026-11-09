@@ -22,6 +22,18 @@ void fn_clear();                                  // tests only: no thread may b
 // Used by the crash handler and the watchdog to turn a host address into the lifted function it belongs to.
 uint64_t guest_function_of(uint64_t host_rip);
 
+// ---- inline caches of the lifted code (recomp/include/nxrecomp/ctx.h NxIc, NX_ICALL / NX_IIMPORT) ------------------------
+// [cpu] inline_caches = on (default) | off | ab: whether the miss paths (nx_icall_miss / nx_iimport_miss, abi_glue.cpp) fill a
+// site's cache. ab alternates [cpu] ic_ab_ms windows (default 5000; frame-trace marks ic.on / ic.off; caches are emptied when an
+// off window begins) for paired measurements in one run.
+// ic_fill points `ic` at an immutable target {addr, fn} (interned, never freed) unless the site keeps changing its target (after
+// a few refills it stays as it is and misses dispatch normally); it registers the site so ic_invalidate_all can empty it.
+bool ic_enabled();
+void ic_fill(NxIc* ic, uint64_t addr, GuestFn fn);
+void ic_invalidate_all();                         // a registration was replaced, the import resolution changed, or an ab window
+struct IcStats { uint64_t sites = 0, fills = 0, refills = 0, frozen = 0, targets = 0, invalidations = 0; };
+IcStats ic_stats();
+
 // ---- HLE thunks ----------------------------------------------------------------------------------------------------
 // Each thunk is a 16-byte slot in [mem::kHleBase, +mem::kHleSize). Calling the address through call_indirect runs the host
 // handler with the guest registers; the handler returns by writing x0.. and returning (the caller continues after the call).

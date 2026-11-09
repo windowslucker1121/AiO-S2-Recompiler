@@ -23,7 +23,41 @@ Also: an access no descriptor can be traced for is resolved at run time instead 
                      {
                          LinkedListNode<INode> nextNode = ReplaceGlobalMemoryWithStorage(
                              gtsContext,
-@@ -653,6 +654,16 @@
+@@ -386,8 +387,33 @@
+                     return null;
+                 }
+ 
++                // A fallback load gets the inline fast path at its call site (AmpereGlobal.cs, out-of-line helpers)
++                if (AmpereGlobal.LastFallback && AmpereGlobal.WantsFast(operation, resourceManager))
++                {
++                    return GenerateFastCallStorageOp(resourceManager, node, operation, functionId);
++                }
++
+                 return GenerateCallStorageOp(node, operation, null, functionId);
+             }
++        }
++
++        private static LinkedListNode<INode> GenerateFastCallStorageOp(ResourceManager resourceManager, LinkedListNode<INode> node, Operation operation, int functionId)
++        {
++            Operand[] fast = AmpereGlobal.EmitFastOperands();
++            Operand returnValue = Local();
++            Operand[] outs = new Operand[AmpereGlobal.FastOuts];
++            Operand[] dests = new Operand[1 + outs.Length];
++            dests[0] = returnValue;
++            for (int i = 0; i < outs.Length; i++) dests[1 + i] = outs[i] = Local();
++            Operand[] sources = new Operand[3 + fast.Length];
++            sources[0] = Const(functionId);
++            sources[1] = operation.GetSource(0);
++            sources[2] = operation.GetSource(1);
++            fast.CopyTo(sources, 3);
++            Operation callOp = new(Instruction.Call, 0, dests, sources);
++            node.List.AddBefore(node, callOp);
++            operation.TurnIntoCopy(returnValue);
++            return node;
+         }
+ 
+         private static bool CanUseInlineStorageOp(Operation operation, TargetLanguage targetLanguage)
+@@ -653,11 +679,24 @@
  
              targetCbs.Sort();
  
@@ -32,7 +66,7 @@ Also: an access no descriptor can be traced for is resolved at run time instead 
 +            if (targetCbs.Count == 0 && AmpereGlobal.Candidates is { Length: > 0 } fallback)
 +            {
 +                viaFallback = true;
-+                foreach (int word in fallback) targetCbs.Add(PackCbSlotAndOffset(0, word));
++                if (!AmpereGlobal.NoSlots) foreach (int word in fallback) targetCbs.Add(PackCbSlotAndOffset(0, word));
 +                AmpereGlobal.Used = true;
 +                gpuAccessor.Log($"Global memory fallback for operation \"{operation.Inst}\": {fallback.Length} storage descriptors checked at run time.");
 +            }
@@ -40,34 +74,50 @@ Also: an access no descriptor can be traced for is resolved at run time instead 
              if (targetCbs.Count == 0)
              {
                  gpuAccessor.Log($"Failed to find storage buffer for global memory operation \"{operation.Inst}\".");
-@@ -679,6 +690,12 @@
+             }
+ 
++            AmpereGlobal.LastFallback = viaFallback;
++            bool fastPath = viaFallback && AmpereGlobal.WantsFast(operation, resourceManager);
++
+             if (gtsContext.TryGetFunctionId(operation, isMultiTarget: true, targetCbs, out functionId))
+             {
+                 return true;
+@@ -675,9 +714,20 @@
+             }
+ 
+             EmitterContext context = new();
++
++            if (viaFallback)
++            {
++                AmpereGlobal.BeginHelper(context, fastPath, inArgumentsCount + (fastPath ? AmpereGlobal.FastArguments : 0));
++            }
+ 
              Operand globalAddressLow = Argument(0);
              Operand globalAddressHigh = Argument(1);
- 
++
 +            bool returnsValue = operation.Dest != null;
 +
 +            // The fallback's candidates: the bound descriptors the runtime marks (AmpereGlobal.SlotMaskC0) are searched in a loop first
 +            Operand fallbackHit = viaFallback ? AmpereGlobal.EmitCandidateSearch(context, resourceManager.GetConstantBufferBinding(0)) : null;
 +            int targetIndex = 0;
-+
+ 
              foreach (uint targetCb in targetCbs)
              {
-                 (int sbCbSlot, int sbCbOffset) = UnpackCbSlotAndOffset(targetCb);
-@@ -687,6 +704,13 @@
+@@ -687,6 +737,13 @@
                  Operand baseAddrHigh = Cbuf(sbCbSlot, sbCbOffset + 1);
                  Operand size = Cbuf(sbCbSlot, sbCbOffset + 2);
  
 +                Operand inRange;
 +                if (fallbackHit != null)
 +                {
-+                    inRange = context.ICompareEqual(fallbackHit, Const(targetIndex));
++                    inRange = AmpereGlobal.FirstSlot ? context.ICompareEqual(Const(0), Const(targetIndex)) : context.ICompareEqual(fallbackHit, Const(targetIndex));
 +                }
 +                else
 +                {
                  Operand offset = context.ISubtract(globalAddressLow, baseAddrLow);
                  Operand borrow = context.ICompareLessUnsigned(globalAddressLow, baseAddrLow);
  
-@@ -696,7 +720,9 @@
+@@ -696,7 +753,9 @@
  
                  Operand inRangeHigh = context.ICompareEqual(addrHighBorrowed, baseAddrHigh);
  
@@ -78,7 +128,7 @@ Also: an access no descriptor can be traced for is resolved at run time instead 
  
                  Operand lblSkip = Label();
                  context.BranchIfFalse(lblSkip, inRange);
-@@ -749,7 +775,9 @@
+@@ -749,7 +808,9 @@
                  context.MarkLabel(lblSkip);
              }
  
@@ -89,7 +139,33 @@ Also: an access no descriptor can be traced for is resolved at run time instead 
  
              if (returnsValue)
              {
-@@ -1046,6 +1074,14 @@
+@@ -761,13 +822,24 @@
+             }
+ 
+             string functionName = GetFunctionName(operation, isMultiTarget: true, targetCbs);
++
++            // the fallback helpers: out of line, and a load's fast-path values as three unused arguments (AmpereGlobal.cs)
++            if (fastPath)
++            {
++                functionName += AmpereGlobal.FastSuffix;
++                inArgumentsCount += AmpereGlobal.FastArguments;
++            }
++            else if (viaFallback)
++            {
++                functionName += AmpereGlobal.HelperSuffix;
++            }
+ 
+             Function function = new(
+                 ControlFlowGraph.Create(context.GetOperations()).Blocks,
+                 functionName,
+                 returnsValue,
+                 inArgumentsCount,
+-                0);
++                fastPath ? AmpereGlobal.FastOuts : 0);
+ 
+             functionId = gtsContext.AddFunction(operation, isMultiTarget: true, targetCbs, function);
+ 
+@@ -1046,6 +1118,14 @@
              // because constant buffer are always encoded as the second operand,
              // so the second operand will always be the one from the last instruction.
  

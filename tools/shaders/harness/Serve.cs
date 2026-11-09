@@ -176,33 +176,37 @@ namespace SpirvHarness
 
             Result r;
             byte[] spv = null;
-            byte[] spvCm = null;
-            Task<(Result, byte[], byte[])> t = Task.Run(() =>
+            byte[] spvCm = null, spvF16 = null;
+            Task<(Result, byte[], byte[], byte[])> t = Task.Run(() =>
             {
-                Result x = TranslateVariants(code, ctrl, out byte[] s, out byte[] cm, false, glslc);
-                return (x, s, cm);
+                Result x = TranslateVariants(code, ctrl, out byte[] s, out byte[] cm, out byte[] f16, false, glslc);
+                return (x, s, cm, f16);
             });
-            if (t.Wait(Timeout)) (r, spv, spvCm) = t.Result;
+            if (t.Wait(Timeout)) (r, spv, spvCm, spvF16) = t.Result;
             else r = new Result { Status = "timeout", Error = $"no result after {Timeout.TotalSeconds} s" };
             r.Hash = req.Hash;
             r.Group = ce?.Group ?? "runtime";
             r.Stages = ce?.Occurrences ?? 1;
             string row = FormatRow(r);
-            if (spv != null) PutSpv(cache, req.Hash, spv, spvCm);
+            if (spv != null) PutSpv(cache, req.Hash, spv, spvCm, spvF16);
             AppendRow(Path.Combine(cache, "results.tsv"), row);
             say("R\t" + row);
         }
 
-        static void PutSpv(string cache, string hash, byte[] spv, byte[] spvCm = null)
+        static void PutSpv(string cache, string hash, byte[] spv, byte[] spvCm = null, byte[] spvF16 = null)
         {
-            // the cooperative-matrix variant first (AmpereCoopMat.cs): a stale one must not outlive the words it was made with
-            string cmDst = Path.Combine(cache, hash + ".cm.spv");
-            if (spvCm != null) PutFile(cache, cmDst, spvCm);
-            else
+            // the variants first (cooperative-matrix and float16, AmpereCoopMat.cs): a stale one must not outlive the words it was
+            // made with
+            foreach (var (ext, bytes) in new[] { (".cm.spv", spvCm), (".f16.spv", spvF16) })
             {
-                try { if (File.Exists(cmDst)) File.Delete(cmDst); }
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
+                string dst = Path.Combine(cache, hash + ext);
+                if (bytes != null) PutFile(cache, dst, bytes);
+                else
+                {
+                    try { if (File.Exists(dst)) File.Delete(dst); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
             }
             PutFile(cache, Path.Combine(cache, hash + ".spv"), spv);
         }

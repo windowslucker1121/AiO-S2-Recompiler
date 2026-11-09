@@ -132,6 +132,38 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   (one compute block branches on an undefined value and is not checked). The fix changes the SPIR-V of 14,692 blocks (the 8 more
   fail before it after 100-107 walks); 17,094 corpus blocks contain a BRX/BRXU or CALL.REL.NOINC.
 
+## Structurizer for reducible graphs (register pressure, 2026-11-09)
+
+- Ryujinx's structurizer (`StructuredProgramContext` + `GotoElimination`) makes a goto of every branch that does not land inside the
+  current `if` and then removes the gotos with the "Taming Control Flow" moves. OoT's material fragment shaders (a light loop with a
+  BRX switch whose cases leave to a common merge from different depths) came out with five `do { } while (flag)` loops nested in the
+  light loop plus many `if (!flag)` guards, and NVIDIA's compiler (610.88) needed 235-255 registers (or capped at 168 and spilled) for
+  code whose SASS uses 75-112.
+- `harness/translator/CfgStructurizer.cs` (+ `.Lowering.cs`; hooks `structured-program-cfg-structurizer.patch`,
+  `structured-context-cfg-structurizer.patch`, applied through the csproj's new `Then2` metadata) structures every function whose block
+  graph is reducible after Ramsey, "Beyond Relooper" (ICFP 2022): dominator tree, merge nodes (two or more forward in-edges, or entered
+  by an edge leaving a loop) after the code they follow, branches to a node dominated alone inlined, back edges as `continue`. A branch
+  to a merge node from the end of an if/else chain needs nothing; from further inside it sets a flag that guards the statements up to
+  the merge (`if (!flag)`), and across a loop it breaks (`flag = true; break;`, `if (flag) break;`). Loops are `do { ...; break; }
+  while (true)` or `do { } while (c)` when the body ends with its only continue. `if (c) { ...; return/discard/break/continue; }` takes
+  the else part after it, not in an else block. Flags nobody reads are removed. Irreducible graphs keep Ryujinx's path, and so do the
+  translator's own helper functions (only fun0..N use the new one): with it the gmem page-walk helpers grew ~1% and the gmem compute
+  shaders that call them (OoT's HiZ a17259b2 & co.) ran ~30% slower in game.
+  Off: `NXRT_HARNESS_STRUCTURIZER=ryujinx`; `=all` also the helpers; `=log` prints fallbacks. `NXRT_HARNESS_STRUCT_FLAT_ELSE=0` keeps
+  else blocks (without the flat form small fragment shaders came out 1-8 registers above the old path).
+- Measured with `pipestat` on random corpus samples (old cache vs new, RTX 4080, 610.88): fragment n=200 registers mean 136.4 -> 93.1,
+  median 168 -> 96, binary 51.3 -> 39.4 KB, 133 better / 2 worse; vertex n=120 59.5 -> 59.7 (9 worse / 6 better by a few registers);
+  mesh n=60 139 -> 129; compute n=60 unchanged. Hot material fragment shaders 168-255 -> 80-124 (their SASS: 75-112). The gpt mesh/vertex
+  stages stay at 255 (also with `NXRT_HARNESS_GMEM_IDENTITY=1`, `NO_SLOTS=1` and the new `NXRT_HARNESS_GMEM_FORCEINLINE=1`, helpers
+  inlined: measurement only).
+- Only real loops are loops now, so the vertex/fragment loop cap (`NXRT_HARNESS_LOOP_CAP`) counts real back edges only. Ballots and
+  votes stay where the IR has them (`structured-subgroup-propagation.patch` works on the AST afterwards as before).
+- Checked: the OoT corpus with `NXRT_HARNESS_CFG_CHECK=100` (47,202 blocks, 56,594 functions): 0 exceptions (the 7
+  GotoElimination NullReferenceExceptions of the old path translate now), 46,995 ok as before.
+- `BlockOrder.cs` (`cfg-block-order.patch`, a first guess: blocks in a loop-contiguous topological order before structuring) changes
+  nothing for OoT (the IR is already in such an order) and is kept as a guard for code laid out otherwise; `NXRT_HARNESS_BLOCK_ORDER=0`
+  turns it off, `=log` prints each function's block graph.
+
 ## Pool arrays: texture handles computed per pixel (OoT A7)
 
 - A bindless sample whose handle neither the bindless-handle patch nor Ryujinx's `TryConvertBindless` can tie to something fixed per
@@ -166,6 +198,44 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   results, volatile device-pointer accesses, maximal reconvergence, memory the replay does not reset (`[capture] reset_full`), barriers
   between dispatches (every dispatch already ends with a full memory barrier), and the chain's inputs (the same up to the order of
   atomically appended lists).
+
+## Pointer accesses: out-of-line helpers, inline fast path (A17 follow-up, 2026-11-09)
+
+- Ryujinx's `GlobalToStorage` makes one helper function per access kind and calls it for every 32-bit word; NVIDIA's compiler inlined
+  every call, so a pointer shader (`gpt`) carried the bound-slot search and the page walk once per word: OoT's fern mesh `fbb731e2`
+  253 calls, 1.26 MB of driver code, 20 s to build; the heavier gpt mesh blocks 2.5 MB and 45-82 s.
+- Now (`ampere/frontend/AmpereGlobal.cs`, hooks in `spirv-g2s-c0-base.patch`, `ampere-mesh-instructions.patch`, `spirv-else-if.patch`):
+  the fallback helpers are `DontInline` (the 610.88 driver honours it), take their in arguments by value (Ryujinx's pointer arguments put
+  every call site's temporaries into local memory once the call stays a call) and a plain 32-bit load gets an inline fast path: the
+  page cache (5 words, now main's own, so it stays in registers) is checked at the call site, and with no bound slot marked (c[0]
+  `SlotMaskC0` word 0) and the address in the cached span, the word is loaded right there through the cached device address; only a
+  miss calls the helper, which returns {value, the span its walk ended in} as a struct. The bound-slot search visits only the marked
+  slots (FindLSB loop) instead of all 16.
+- Measured (RTX 4080, driver 610.88, `pipestat`), code / build time before -> after: fern mesh fbb731e2 1.26 MB / 20 s -> 169 KB / 1.4 s;
+  vertex 5332b131 1.22 MB / 16 s -> 140 KB / 1.0 s; mesh 596bf624 2.57 MB / 82 s -> 351 KB / 3.0 s (the other 2.5 MB mesh blocks
+  99908ab2, acf920b7, a5bfd19f, a873d795, b8b873e5 took 46-68 s before). Registers stay at 255: the original SASS of 5332b131 / 40953571
+  already uses R247 / R252, and with the lookup removed altogether (`IDENTITY`) they are still 255. In game (Kokiri outside, 1920x1080,
+  100-300 s, alone, same exe; two pairs): 35.0 vs 34.7 fps and 33.6 vs 34.3 (one slow window while new pipelines built in the
+  background), steady windows +0.4: **fps unchanged**; the gain is the pipeline build time (on-demand builds, the shader preparation).
+  Cost: the SPIR-V of the 3,425 gpt blocks grows from 742 MB to 1.85 GB (the per-word call sites). Dead end: helpers out of line with
+  Ryujinx's pointer arguments and no fast path halved the fps (16.6 vs 32.7: every word a call, its temporaries in local memory).
+- Switches (for measuring): `NXRT_HARNESS_GMEM_NOINLINE=0` (helpers inlined again), `NXRT_HARNESS_GMEM_FAST=0` (no fast path),
+  `NXRT_HARNESS_GMEM_SCAN_ALL=1` (the 16-slot search). Measurement only, wrong results: `NXRT_HARNESS_GMEM_IDENTITY=1` (guest address
+  used as device address), `NXRT_HARNESS_GMEM_NO_SLOTS=1`, `NXRT_HARNESS_GMEM_FIRSTSLOT=1`.
+- `pipestat/` (`build.cmd`, then `pipestat.exe [--frag fs.spv] a.spv [task.spv+mesh.spv] ...`): compiles modules into pipelines on the
+  local GPU with no game (descriptor layouts from the modules' decorations; vertex/mesh without a fragment stage) and prints the
+  driver's statistics per executable (registers, binary size, local memory) and the compile time.
+
+## TLD / TLD4 / TXD .F16 (OoT upscaler network, A22)
+
+- TEX, TLD, TLD4 and TXD all carry `.F16.RN` / `.F16.RZ` in bits 79..80 (nvdisasm 13.3 probe: `TLD4.SCR.R.F16.RN.PTP`,
+  `TLD.SCR.F16.RN.LZ`, `TXD.F16.RN`; TMML ignores the bits). The decoder knew the field for TEX only, so TLD4.F16 was translated as an
+  fp32 gather: four components into Rd, Rd+1, Rd2, Rd2+1 instead of two fp16 pairs into Rd and Rd2. That clobbered live registers (in
+  f90d726d the blue gather's Rd2+1 = R34 was the x coordinate of the next gather) and left fp32 bits where the code reads half pairs.
+- With the field decoded the existing F16 path applies: Rd = packHalf2x16(t0, t1), Rd2 = packHalf2x16(t2, t3). For OoT's
+  `TLD4.PTP` with offsets (0,0) (1,0) (0,1) (1,1) the code stores Rd as the row-y pair and Rd2 as the row-y+1 pair of a shared-memory
+  tile (`STS [R8], R12; STS [R8+0x90], R13`), which fits that order. TXD now takes `.F16.RN` the same way. `.F16.RZ` stays unsupported.
+- Affects only blocks from `main` (27 "runtime" compute blocks: OoT's upscaler network variants); no bfsha/vsetb corpus block has it.
 
 ## Cache completeness (S40)
 

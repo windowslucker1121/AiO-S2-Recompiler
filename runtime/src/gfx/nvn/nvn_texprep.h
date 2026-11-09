@@ -6,6 +6,8 @@
 //
 // When a job starts (only block-compressed textures, the game's assets; render targets and video planes are not candidates):
 //   * a handle of the texture is bound in a command list being recorded (nvnCommandBufferBindTexture*), which is shortly before the list is submitted;
+//   * the texture look-ahead ([nvn] tex_lookahead, nvn_replay.cpp) finds it among the textures a submitted draw or dispatch reads (handles in uniform
+//     blocks and handle expressions included, which is how OoT names nearly all of its textures);
 //   * the texture is registered in a texture pool and has at least [nvn] tex_prep_early_kb of storage (the big ones are registered long before use);
 //   * a sparse texture that was named by one of the above is written again (tile maps and tile writes arrive in many small steps): the job starts
 //     when the writes have stopped for 40 ms.
@@ -67,6 +69,7 @@ void reopen_staging();
 // Counters for the log line and the tests.
 struct Stats {
     uint64_t scheduled = 0, hits = 0, waited_hits = 0, stale = 0, stolen = 0, none = 0, mismatches = 0, verified = 0, crashes = 0, failed = 0, skipped_budget = 0, evicted = 0;
+    uint64_t jobs = 0, job_ns = 0, wait_ns = 0, peek_waits = 0, peek_wait_ns = 0;   // jobs run and their time; render thread waits in take / peek_entry_format
 };
 Stats stats();
 // Test aid: returns when no job is queued or running (at most 10 s).

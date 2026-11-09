@@ -209,6 +209,8 @@ struct G {
     bool loaded = false, started = false, load_ok = true;
 
     FrameLimiter limiter;
+    std::atomic<double> cap_base{0.0};   // the cap apply_frame_cap chose; the limiter runs at most at [display] console_fps while a movie shows
+    std::atomic<bool> movie_capped{false};   // set by the presenting thread: the movie cap is in force
     std::unique_ptr<Engine> engine;
     std::unique_ptr<PlaySource> source_owner;
     std::shared_ptr<hid::InputSource> source;
@@ -322,6 +324,12 @@ void apply_unfocused_mute() {
     audio::set_muted(st.window && st.settings.audio.mute_unfocused && !platform::focused());
 }
 
+// A movie is one picture per frame (timestep::movie_showing): the cap may not exceed the console's rate then, or the movie and its voice lines part.
+double movie_cap(double cap) {
+    const double cf = config_get_double("display", "console_fps", 60.0);
+    return (cap <= 0 || cap > cf) ? cf : cap;
+}
+
 void apply_frame_cap(const Settings& s) {
     G& st = g();
     double cap = s.display.fps_cap;
@@ -352,6 +360,8 @@ void apply_frame_cap(const Settings& s) {
     if (cap != st.limiter.target_fps())
         NXLOG_I(kTag, "frame cap: %.2f fps (fps_limit %d, vsync %d, display %.2f Hz)", cap, s.display.fps_cap, s.display.vsync ? 1 : 0,
                 st.window ? static_cast<double>(platform::display_refresh_hz()) : 0.0);
+    st.cap_base.store(cap);
+    if (st.movie_capped) cap = movie_cap(cap);
     st.limiter.set_target_fps(cap);
     extras::lowlat_note_cap(cap);     // Reflex / Anti-Lag pace to the same cap (remembered for a renderer that is created later)
 }
@@ -360,6 +370,15 @@ void apply_frame_cap(const Settings& s) {
 void pre_frame(void*) {
     // On the presenting thread, before the frame: the one place a present-mode change cannot collide with a frame in flight.
     G& st = g();
+    if (const bool mv = timestep::movie_showing(); mv != st.movie_capped) {   // runs on the presenting thread before every limiter wait
+        st.movie_capped = mv;
+        const double base = st.cap_base.load();
+        const double cap = mv ? movie_cap(base) : base;
+        if (cap != st.limiter.target_fps()) {
+            NXLOG_I(kTag, "frame cap: %.2f fps (%s)", cap, mv ? "a movie is showing: the console's rate" : "movie over");
+            st.limiter.set_target_fps(cap);
+        }
+    }
     const int want = st.want_present.exchange(-1);
     if (st.renderer && want >= 0) st.renderer->set_present_mode(static_cast<gfx::PresentMode>(want));
     if (st.overlay) st.overlay->apply_present_pending();

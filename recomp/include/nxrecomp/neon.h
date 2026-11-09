@@ -4,7 +4,7 @@
 #ifndef NXRECOMP_NEON_H
 #define NXRECOMP_NEON_H
 
-static inline uint64_t vget(const V128 *v, int sz, int i) {
+NX_HELPER uint64_t vget(const V128 *v, int sz, int i) {
     switch (sz) {
     case 0: return v->b[i];
     case 1: return v->h[i];
@@ -12,7 +12,7 @@ static inline uint64_t vget(const V128 *v, int sz, int i) {
     default: return v->d[i];
     }
 }
-static inline void vset(V128 *v, int sz, int i, uint64_t x) {
+NX_HELPER void vset(V128 *v, int sz, int i, uint64_t x) {
     switch (sz) {
     case 0: v->b[i] = (uint8_t)x; break;
     case 1: v->h[i] = (uint16_t)x; break;
@@ -20,7 +20,7 @@ static inline void vset(V128 *v, int sz, int i, uint64_t x) {
     default: v->d[i] = x; break;
     }
 }
-static inline int64_t vsext(uint64_t x, int sz) {
+NX_HELPER int64_t vsext(uint64_t x, int sz) {
     switch (sz) {
     case 0: return (int8_t)x;
     case 1: return (int16_t)x;
@@ -34,7 +34,7 @@ static inline int64_t vsext(uint64_t x, int sz) {
 enum { F_ADD, F_SUB, F_MUL, F_DIV, F_MLA, F_MLS, F_MAX, F_MIN, F_MAXNM, F_MINNM, F_ABD,
        F_CMEQ, F_CMGE, F_CMGT, F_RECPS, F_RSQRTS, F_ADDP };
 
-static inline float f3s(int op, float acc, float a, float b, uint32_t *mask, int *is_mask) {
+NX_HELPER float f3s(int op, float acc, float a, float b, uint32_t *mask, int *is_mask) {
     switch (op) {
     case F_ADD: return fp_add32(a, b);
     case F_SUB: return fp_sub32(a, b);
@@ -55,7 +55,7 @@ static inline float f3s(int op, float acc, float a, float b, uint32_t *mask, int
     }
     return 0;
 }
-static inline double f3d(int op, double acc, double a, double b, uint64_t *mask, int *is_mask) {
+NX_HELPER double f3d(int op, double acc, double a, double b, uint64_t *mask, int *is_mask) {
     switch (op) {
     case F_ADD: return fp_add64(a, b);
     case F_SUB: return fp_sub64(a, b);
@@ -78,7 +78,7 @@ static inline double f3d(int op, double acc, double a, double b, uint64_t *mask,
 }
 
 /* Floating-point "three same": n elements, upper part of the destination cleared. */
-static inline void v_f3v(V128 *d, const V128 *pn, const V128 *pm, int op, int dbl, int n) {
+NX_HELPER void v_f3v(V128 *d, const V128 *pn, const V128 *pm, int op, int dbl, int n) {
     V128 a = *pn, b = *pm, acc = *d, r;
     r.d[0] = 0; r.d[1] = 0;
     if (op == F_ADDP) {
@@ -90,6 +90,31 @@ static inline void v_f3v(V128 *d, const V128 *pn, const V128 *pm, int op, int db
         *d = r;
         return;
     }
+#if defined(__clang__)
+    /* Single-precision ADD / SUB / MUL / DIV / MLA: all lanes at once with host vector arithmetic, then one test for a NaN lane.
+     * Only when a lane is NaN does the exact per-lane path below run (the host result of a lane is the per-lane result whenever it
+     * is not a NaN, fpexact.h). With n < 4 (two lanes, or one for the scalar by-element forms) the unused lanes are computed too and dropped. */
+    if (!dbl && (op == F_ADD || op == F_SUB || op == F_MUL || op == F_DIV || op == F_MLA)) {
+        typedef float nx_f4 __attribute__((vector_size(16)));
+        typedef int nx_i4 __attribute__((vector_size(16)));
+        nx_f4 va, vb, vc, t;
+        memcpy(&va, &a, 16); memcpy(&vb, &b, 16); memcpy(&vc, &acc, 16);
+        if (op == F_ADD) t = va + vb;
+        else if (op == F_SUB) t = va - vb;
+        else if (op == F_MUL) t = va * vb;
+        else if (op == F_DIV) t = va / vb;
+        else t = __builtin_elementwise_fma(va, vb, vc);
+        nx_i4 nan = (nx_i4)(t != t);
+        nx_i4 lanes = {-1, n > 1 ? -1 : 0, n > 2 ? -1 : 0, n > 2 ? -1 : 0};
+        if (!__builtin_reduce_or(nan & lanes)) {
+            memcpy(&r, &t, 16);
+            if (n == 1) { r.w[1] = 0; r.d[1] = 0; }
+            else if (n == 2) r.d[1] = 0;
+            *d = r;
+            return;
+        }
+    }
+#endif
     for (int i = 0; i < n; i++) {
         int is_mask = 0;
         if (dbl) {
@@ -105,7 +130,7 @@ static inline void v_f3v(V128 *d, const V128 *pn, const V128 *pm, int op, int db
     *d = r;
 }
 /* Same, with the second operand taken from one element of vm. */
-static inline void v_f3e(V128 *d, const V128 *pn, const V128 *pm, int idx, int op, int dbl, int n) {
+NX_HELPER void v_f3e(V128 *d, const V128 *pn, const V128 *pm, int idx, int op, int dbl, int n) {
     V128 b;
     for (int i = 0; i < 4; i++) { if (dbl) b.df[i & 1] = pm->df[idx]; else b.f[i] = pm->f[idx]; }
     v_f3v(d, pn, &b, op, dbl, n);
@@ -114,7 +139,7 @@ static inline void v_f3e(V128 *d, const V128 *pn, const V128 *pm, int idx, int o
 enum { F1_ABS, F1_NEG, F1_SQRT, F1_RSQRTE, F1_RECPE, F1_SCVTF, F1_UCVTF, F1_CVTZS, F1_CVTZU,
        F1_CMEQ0, F1_CMGT0, F1_CMGE0, F1_CMLT0, F1_CMLE0 };
 
-static inline void v_f1v(V128 *d, const V128 *pn, int op, int dbl, int n) {
+NX_HELPER void v_f1v(V128 *d, const V128 *pn, int op, int dbl, int n) {
     V128 a = *pn, r;
     r.d[0] = 0; r.d[1] = 0;
     for (int i = 0; i < n; i++) {
@@ -160,7 +185,7 @@ static inline void v_f1v(V128 *d, const V128 *pn, int op, int dbl, int n) {
 }
 
 /* FRINTA / FRINTM / FRINTP / FRINTZ / FRINTN / FRINTX / FRINTI on n elements; modes as in fp_frint32 (fpexact.h). */
-static inline void v_frint(V128 *d, const V128 *pn, int mode, int dbl, int n) {
+NX_HELPER void v_frint(V128 *d, const V128 *pn, int mode, int dbl, int n) {
     V128 a = *pn, r;
     r.d[0] = 0; r.d[1] = 0;
     for (int i = 0; i < n; i++) {
@@ -172,7 +197,7 @@ static inline void v_frint(V128 *d, const V128 *pn, int mode, int dbl, int n) {
 
 /* FMAXV / FMINV / FMAXNMV / FMINNMV across the four single lanes. Arm's Reduce is a tree, (lane0 op lane1) op
  * (lane2 op lane3), with the operand order of fpexact.h. The result goes to element 0; the rest is cleared. */
-static inline void v_fred32(V128 *d, const V128 *pn, int is_min, int num) {
+NX_HELPER void v_fred32(V128 *d, const V128 *pn, int is_min, int num) {
     uint32_t lo = fp_maxmin32_bits(pn->w[0], pn->w[1], is_min, num);
     uint32_t hi = fp_maxmin32_bits(pn->w[2], pn->w[3], is_min, num);
     uint32_t r = fp_maxmin32_bits(lo, hi, is_min, num);
@@ -197,7 +222,7 @@ static inline uint64_t v_sat_u(__int128 v, int sz) {
     return (uint64_t)v;
 }
 
-static inline void v_i3v(V128 *d, const V128 *pn, const V128 *pm, int op, int sz, int n) {
+NX_HELPER void v_i3v(V128 *d, const V128 *pn, const V128 *pm, int op, int sz, int n) {
     V128 a = *pn, b = *pm, acc = *d, r;
     r.d[0] = 0; r.d[1] = 0;
     uint64_t ones = sz == 3 ? ~0ull : ((1ull << (8 << sz)) - 1);
@@ -225,7 +250,7 @@ static inline void v_i3v(V128 *d, const V128 *pn, const V128 *pm, int op, int sz
 }
 
 /* ADDV: the sum of the n elements (size sz) of n, modulo the size, alone in d (the rest zeroed). */
-static inline void v_addv(V128 *d, const V128 *pn, int sz, int n) {
+NX_HELPER void v_addv(V128 *d, const V128 *pn, int sz, int n) {
     uint64_t s = 0;
     for (int i = 0; i < n; i++) s += vget(pn, sz, i);
     V128 r;
@@ -238,7 +263,7 @@ static inline void v_addv(V128 *d, const V128 *pn, int sz, int n) {
  * (upper = 0) or upper (SMULL2 ..., upper = 1) half of n and m; results of size sz + 1 fill d. acc: 0 = d := product,
  * 1 = d += product, 2 = d -= product (modulo the result size, as the instructions do). elem >= 0: every product uses
  * element `elem` of m (the indexed form; m is then read whole, not its upper half). */
-static inline void v_mull(V128 *d, const V128 *pn, const V128 *pm, int sz, int upper, int is_unsigned, int acc, int elem) {
+NX_HELPER void v_mull(V128 *d, const V128 *pn, const V128 *pm, int sz, int upper, int is_unsigned, int acc, int elem) {
     V128 a = *pn, b = *pm, r = *d;
     int n = 8 >> sz, base = upper ? n : 0, rs = sz + 1;
     for (int i = 0; i < n; i++) {
@@ -253,7 +278,7 @@ static inline void v_mull(V128 *d, const V128 *pn, const V128 *pm, int sz, int u
 }
 
 /* MUL / MLA / MLS (vector, by element): every element of n times element `elem` of m, modulo the size. */
-static inline void v_mul_elem(V128 *d, const V128 *pn, const V128 *pm, int sz, int elem, int acc, int n) {
+NX_HELPER void v_mul_elem(V128 *d, const V128 *pn, const V128 *pm, int sz, int elem, int acc, int n) {
     V128 a = *pn, r = *d, out;
     uint64_t y = vget(pm, sz, elem);
     out.d[0] = 0; out.d[1] = 0;
@@ -268,7 +293,7 @@ static inline void v_mul_elem(V128 *d, const V128 *pn, const V128 *pm, int sz, i
  * unsigned), SQSHRUN / SQRSHRUN (signed -> unsigned). Elements of size dsz + 1 of n are shifted right by `shift`
  * (with rounding: + 1 << (shift - 1) first), saturated to size dsz, and written to the lower half of d (upper half
  * zeroed) or, for the "2" forms (upper = 1), to the upper half (lower half kept). */
-static inline void v_qshrn(V128 *d, const V128 *pn, int shift, int dsz, int round, int src_signed, int dst_signed, int upper) {
+NX_HELPER void v_qshrn(V128 *d, const V128 *pn, int shift, int dsz, int round, int src_signed, int dst_signed, int upper) {
     V128 a = *pn, r = *d;
     int n = 8 >> dsz, ssz = dsz + 1;
     uint64_t out[16];
@@ -284,7 +309,7 @@ static inline void v_qshrn(V128 *d, const V128 *pn, int shift, int dsz, int roun
     *d = r;
 }
 /* the scalar forms of the same (SQRSHRN h, s, #n ...): element 0 only, the rest of d zeroed. */
-static inline void v_qshrn_s(V128 *d, const V128 *pn, int shift, int dsz, int round, int src_signed, int dst_signed) {
+NX_HELPER void v_qshrn_s(V128 *d, const V128 *pn, int shift, int dsz, int round, int src_signed, int dst_signed) {
     uint64_t x = vget(pn, dsz + 1, 0);
     __int128 v = src_signed ? (__int128)vsext(x, dsz + 1) : (__int128)x;
     if (round) v += (__int128)1 << (shift - 1);
@@ -297,7 +322,7 @@ static inline void v_qshrn_s(V128 *d, const V128 *pn, int shift, int dsz, int ro
 
 enum { I1_NOT, I1_NEG, I1_ABS, I1_CMEQ0, I1_REV64, I1_CNT };
 
-static inline void v_i1v(V128 *d, const V128 *pn, int op, int sz, int n) {
+NX_HELPER void v_i1v(V128 *d, const V128 *pn, int op, int sz, int n) {
     V128 a = *pn, r;
     r.d[0] = 0; r.d[1] = 0;
     uint64_t ones = sz == 3 ? ~0ull : ((1ull << (8 << sz)) - 1);
@@ -319,7 +344,7 @@ static inline void v_i1v(V128 *d, const V128 *pn, int op, int sz, int n) {
 
 /* Narrow each element of vn to half size: XTN writes the low half of the destination and zeroes the upper half; XTN2
  * (upper = 1) writes the upper half and keeps the lower. */
-static inline void v_xtn(V128 *d, const V128 *pn, int sz, int upper) {
+NX_HELPER void v_xtn(V128 *d, const V128 *pn, int sz, int upper) {
     V128 a = *pn, r;
     if (upper) r = *d; else { r.d[0] = 0; r.d[1] = 0; }
     for (int i = 0; i < (8 >> sz); i++) vset(&r, sz, (upper ? (8 >> sz) : 0) + i, vget(&a, sz + 1, i));
@@ -327,7 +352,7 @@ static inline void v_xtn(V128 *d, const V128 *pn, int sz, int upper) {
 }
 
 /* BSL / BIT / BIF */
-static inline void v_bitsel(V128 *d, const V128 *pn, const V128 *pm, int kind, int q) {
+NX_HELPER void v_bitsel(V128 *d, const V128 *pn, const V128 *pm, int kind, int q) {
     V128 r;
     for (int i = 0; i < 2; i++) {
         uint64_t x = d->d[i], n = pn->d[i], m = pm->d[i];
@@ -339,14 +364,14 @@ static inline void v_bitsel(V128 *d, const V128 *pn, const V128 *pm, int kind, i
     *d = r;
 }
 
-static inline void v_dup(V128 *d, uint64_t value, int sz, int n) {
+NX_HELPER void v_dup(V128 *d, uint64_t value, int sz, int n) {
     V128 r;
     r.d[0] = 0; r.d[1] = 0;
     for (int i = 0; i < n; i++) vset(&r, sz, i, value);
     *d = r;
 }
 
-static inline void v_ext(V128 *d, const V128 *pn, const V128 *pm, int imm, int q) {
+NX_HELPER void v_ext(V128 *d, const V128 *pn, const V128 *pm, int imm, int q) {
     V128 a = *pn, b = *pm, r;
     int n = q ? 16 : 8;
     r.d[0] = 0; r.d[1] = 0;
@@ -392,7 +417,7 @@ static inline void v_stn(Ctx *c, uint64_t a, int rt, int n, int sz, int q) {
 }
 
 /* UZP1/TRN1/ZIP1/UZP2/TRN2/ZIP2: opcode is bits 14:12 of the instruction. */
-static inline void v_perm(V128 *d, const V128 *pn, const V128 *pm, int opcode, int sz, int n) {
+NX_HELPER void v_perm(V128 *d, const V128 *pn, const V128 *pm, int opcode, int sz, int n) {
     V128 a = *pn, b = *pm, r;
     int part = (opcode >> 2) & 1, kind = opcode & 3, half = n / 2;
     r.d[0] = 0; r.d[1] = 0;
@@ -415,7 +440,7 @@ static inline void v_perm(V128 *d, const V128 *pn, const V128 *pm, int opcode, i
 }
 
 /* SSHLL/USHLL (also SXTL/UXTL): widen the low (or high) half and shift left. */
-static inline void v_shll(V128 *d, const V128 *pn, int shift, int sz, int is_unsigned, int upper) {
+NX_HELPER void v_shll(V128 *d, const V128 *pn, int shift, int sz, int is_unsigned, int upper) {
     V128 a = *pn, r;
     int n = 8 >> sz;
     r.d[0] = 0; r.d[1] = 0;
@@ -426,7 +451,7 @@ static inline void v_shll(V128 *d, const V128 *pn, int shift, int sz, int is_uns
     *d = r;
 }
 /* SHL / SSHR / USHR by immediate. kind: 0 shl, 1 sshr, 2 ushr. */
-static inline void v_shift(V128 *d, const V128 *pn, int shift, int sz, int kind, int n) {
+NX_HELPER void v_shift(V128 *d, const V128 *pn, int shift, int sz, int kind, int n) {
     V128 a = *pn, r;
     int bits = 8 << sz;
     r.d[0] = 0; r.d[1] = 0;

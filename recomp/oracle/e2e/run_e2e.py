@@ -49,7 +49,12 @@ def read_x64(prefix, img):
 
 def compare(uc, regs, mem):
     diffs = []
+    # With function-local scratch registers (GameConfig.scratch_locals, the default; needs local_flags) x9..x17 are not written back
+    # at a return either: temporaries of the procedure call standard, dead there. Every use inside the program still sees them.
+    scratch_dead = os.environ.get('NX_SCRATCH_LOCALS', '') != '0' and os.environ.get('NX_LOCAL_FLAGS', '') != '0'
     for i in range(31):
+        if scratch_dead and 9 <= i <= 17:
+            continue
         if uc['x'][i] != int(regs['x%d' % i], 16):
             diffs.append('x%d uc=%x x64=%s' % (i, uc['x'][i], regs['x%d' % i]))
     if uc['sp'] != int(regs['sp'], 16):
@@ -57,7 +62,9 @@ def compare(uc, regs, mem):
     for i in range(32):
         if int(uc['v'][i], 16) != int(regs['v%d' % i], 16):
             diffs.append('v%d uc=%s x64=%s' % (i, uc['v'][i], regs['v%d' % i]))
-    if uc['nzcv'] != int(regs['nzcv'], 16):
+    # With function-local flags (GameConfig.local_flags, the default) the lifted entry function does not write NZCV back when it
+    # returns: the procedure call standard leaves the flags undefined there. Every branch inside the program still depends on them.
+    if os.environ.get('NX_LOCAL_FLAGS', '') == '0' and uc['nzcv'] != int(regs['nzcv'], 16):
         diffs.append('nzcv uc=%x x64=%s' % (uc['nzcv'], regs['nzcv']))
     for name, h in uc['mem'].items():
         if h != mem.get(name):

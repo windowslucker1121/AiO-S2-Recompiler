@@ -128,6 +128,7 @@ void pool_unregister(MemoryPool* p);
 PoolHit pool_lookup(uint64_t gpu_address);          // pool is null when the address is in no pool
 void pool_collect(std::vector<Ref<MemoryPool>>& out);   // every registered pool, referenced (frame capture)
 uint64_t pool_registry_generation();                  // changes with every pool registered or unregistered
+uint64_t pool_unregister_generation();                // changes with every pool unregistered
 inline uint8_t* host_ptr(uint64_t gpu_address) { return reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(gpu_address)); }
 
 // The data of an NVNbuffer (0x30 bytes in the game's memory).
@@ -145,6 +146,9 @@ struct TexGpu;    // Vulkan side of a texture (nvn_gpu_texture.cpp)
 // Counts every change that can make a sampled texture need work before a draw: a texture marked CPU-dirty, a layout change of a texture's image
 // (nvn_gpu_texture.cpp). The replay skips its per-draw walk over the pool arrays' textures while it has not moved (prepare_textures).
 inline std::atomic<uint64_t> g_tex_state_gen{0};
+// Counts changes of which image (and so which views) a texture object has: an image made, shared, replaced (rescale) or released. The descriptor
+// set memo ([nvn] set_reuse) holds views: it is valid only while this has not moved (layout changes and CPU writes do not change a view).
+inline std::atomic<uint64_t> g_tex_image_gen{0};
 // Texture::cpu_dirty: an atomic flag whose setting counts in g_tex_state_gen.
 struct DirtyFlag {
     std::atomic<bool> v{true};
@@ -205,6 +209,7 @@ struct TexturePool : Obj {
     int64_t offset = 0;
     int count = 0;
     std::vector<Entry> entries;             // index = texture id
+    std::vector<uint32_t> used_ids;         // ids whose entry is used, in the order they were first registered (an entry never becomes unused)
     std::shared_mutex lock;
 };
 
@@ -250,6 +255,8 @@ bool texture_gather_virtual(const Texture& t, std::vector<uint8_t>& out);
 // Copies [at, at + len) of a sparse texture's storage out of the mapped tiles into dst (unmapped bytes are zeros). Returns true when the
 // whole range is mapped.
 bool texture_read_virtual(const Texture& t, uint64_t at, uint64_t len, uint8_t* dst);
+// n 8-byte words at the storage offsets at[] of a texture in a virtual pool (unmapped bytes 0), with one walk of the pool's mappings
+void texture_read_virtual_words(const Texture& t, const uint64_t* at, size_t n, uint64_t* out);
 // Writes a buffer of the whole storage (texture_gather_virtual's layout) back into the mapped tiles: CPU texel writes to a sparse texture.
 bool texture_scatter_virtual(const Texture& t, const std::vector<uint8_t>& in);
 // The physical memory behind each 64 KiB tile of a sparse texture's storage (null: not mapped as one piece); a later map wins.

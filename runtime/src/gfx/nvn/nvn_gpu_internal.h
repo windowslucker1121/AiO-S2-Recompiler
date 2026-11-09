@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <source_location>
 #include <string>
 #include <vector>
 
@@ -92,6 +93,9 @@ bool frame_chunk(Frame& f);
 
 // Destruction: fn runs once every submission made so far (and the one being recorded) has completed.
 void defer_destroy(std::function<void()> fn);
+// Descriptor pools that outlive submissions ([nvn] set_keep): made like the slots' pools; released once every submission so far has completed.
+VkDescriptorPool keep_dpool_new();
+void keep_dpool_release(VkDescriptorPool p);
 uint64_t completed_serial();      // cached timeline value; call poll_completed() for a fresh read
 uint64_t poll_completed();
 uint64_t current_serial();        // the serial of the submission being recorded (or the last one)
@@ -114,7 +118,12 @@ void device_lost(const char* where);
 void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImageLayout to, VkImageAspectFlags aspect,
                    uint32_t base_level, uint32_t level_count, uint32_t base_layer, uint32_t layer_count);
 // All commands before, all commands after, all memory (used after passes, dispatches, copies and fills).
-void memory_barrier(VkCommandBuffer cb);
+void memory_barrier(VkCommandBuffer cb, std::source_location loc = std::source_location::current());
+// Full memory barriers by call site since the start, most first ("file:line count ...", the 10 s statistics line).
+std::string memory_barrier_sites(size_t top);
+// Full memory barriers recorded by the calling thread so far (a later count equal to an earlier one: none in between).
+uint64_t memory_barriers_here();
+uint64_t thread_cpu_us();     // CPU time of the calling thread in microseconds (measurement: [nvn] cpuperf_ab)
 // [nvn] pass_barriers = tracked (S38): image_barrier derives its stage and access masks from the two layouts instead of all commands and
 // all memory. Set by the replay for each submission; any thread may record image barriers, so it is an atomic.
 void set_narrow_barriers(bool on);
@@ -163,6 +172,15 @@ bool mirror_enabled();
 enum ReadUse { kReadVertex = 0, kReadIndex = 1, kReadUniform = 2 };
 enum WriteUse { kWriteStorage = 0, kWriteXfb = 1, kWriteImageCopy = 2, kWriteUpdate = 3, kWriteFill = 4, kWriteCopy = 5 };
 BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use);
+// [nvn] set_keep (nvn_replay.cpp): what resolve_read decided for a range, so a kept descriptor set can check the decision again later without
+// the pool look-up. state 0: the pool, and the range can never be served by a copy (no copy, over 64 MiB, two chunks, outside a pool);
+// 1: the copy; 2: the pool, but the copy could serve it once its pages are current. keep false: the decision depends on something the check
+// cannot see (no copy chunk yet): the set is not kept.
+struct Mirror;
+struct ReadDep { Mirror* m = nullptr; const void* pool = nullptr; uint64_t first = 0, last = 0; uint8_t state = 0; bool mirror_on = false; bool keep = true; };
+BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* dep);
+// True when resolve_read would decide the same now (and then does what it would do besides: marks the pages used or wanted).
+bool read_dep_check(const ReadDep& dep, int use);
 // The device-local copy of [gpu_address, +size) for the compute shadows (nvn_replay.cpp): its chunk and offset (buf null: no copy for it, or the
 // range spans two chunks), and whether the copy holds the pool's bytes right now. Call it before note_gpu_write invalidates the range.
 struct MirrorSpan { VkBuffer buf = VK_NULL_HANDLE; VkDeviceSize offset = 0; bool valid = false; VkDeviceSize avail = 0; };   // avail: bytes to the chunk's end
@@ -202,6 +220,19 @@ bool out_touches(uint64_t addr, uint64_t size);
 bool out_overlaps_shadow(uint64_t addr, uint64_t size);
 // Some page of [addr, +size) holds a result that is newer in the copy than in the pool.
 bool out_overlaps(uint64_t addr, uint64_t size);
+uint64_t out_version();
+uint64_t out_grow_version();   // moves only when held results may cover more pages ([nvn] overlap_grow)
+bool ab_tex_park_on();   // false in an off window of [nvn] cpuperf_ab with tex_park
+bool ab_overlap_grow_on();   // false in an off window of [nvn] cpuperf_ab with overlap_grow
+bool ab_index_inc_on();      // false in an off window of [nvn] cpuperf_ab with index_inc
+bool ab_out_delta_on();  // ... with out_delta (delta copy-backs, nvn_gpu_pool.cpp)
+void out_delta_block(bool on);   // render thread: true while a dispatch's compute pipeline and sets are bound (no delta copy-back then)
+void out_presnap_end();   // after the dispatch: snapshots no out_add took are dropped
+bool out_presnap(uint64_t addr, uint64_t size, VkBuffer mbuf, VkDeviceSize moff, VkCommandBuffer cb);   // a dispatch is about to write [addr, +size) in the copy (out_delta)
+void park_miss_stats(uint64_t* miss, uint64_t* miss_expired, uint64_t* miss_big);   // tex_park misses (diagnostics)
+void park_stats(uint64_t* parked, uint64_t* taken, uint64_t* stale, uint64_t* expired);   // [nvn] tex_park (nvn_gpu_texture.cpp)   // moves whenever the set of held results changes (an entry added, pending again, or taken out)
+// out_overlaps for a pointer window (gmem_before_op): render thread; "no overlap" answers are remembered until the held results change.
+bool out_overlaps_window(uint64_t page, uint64_t size);
 // resolve_read would bind the copy for [addr, +size) (every page current there).
 bool out_servable(uint64_t addr, uint64_t size);
 // Why results went back (the stats line): the end of a submission, or the GPU reader of the pool that needed them.
@@ -280,6 +311,8 @@ uint32_t tex_layers(Texture* t);
 bool tex_is_depth(Texture* t);
 // Sampled image view for a binding (cached). Null when impossible (the caller binds the dummy view).
 VkImageView tex_sampled_view(Texture* t, const ViewRequest& req);
+// A stamp of t's image and its views (0: no image yet): equal stamps give the same view for the same request (pool array entry cache)
+uint64_t tex_view_stamp(const Texture* t);
 // Single-level, single-layer (or all layers when layer_count > 1) view for use as an attachment.
 VkImageView tex_attachment_view(Texture* t, uint32_t level, uint32_t layer, uint32_t layer_count, VkFormat view_format);
 // The format colour attachments of this texture are rendered through (integer 32-bit formats as their float alias).
@@ -337,6 +370,7 @@ TexStats tex_stats();
 // Called by nvn_gpu.cpp inside a submission: begin_submit resets per-submit tracking, replay_lists interprets the lists in
 // order (state persists across lists and submissions), end_submit ends the open render pass and emits the closing barrier.
 void replay_begin_submit(Frame& f);
+void texlook_submit(const std::vector<Ref<CmdList>>& lists, uint64_t serial);   // game thread: [nvn] tex_lookahead scans the submission (nvn_replay.cpp)
 void replay_lists(Frame& f, const std::vector<Ref<CmdList>>& lists);
 void replay_end_submit(Frame& f);
 void replay_request_trace();      // trace the next whole presented frame (any thread)

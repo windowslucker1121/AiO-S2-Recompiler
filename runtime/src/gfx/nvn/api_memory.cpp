@@ -15,6 +15,7 @@
 #include <cstring>
 #include <mutex>
 
+#include "nvn_arch_exp.h"
 #include "nvn_cmd.h"
 #include "nvn_core.h"
 #include "nvn_gpu.h"
@@ -192,6 +193,7 @@ void nvnMemoryPoolFlushMappedRange(const NVNmemoryPool* pool, ptrdiff_t offset, 
     uint64_t start = 0;
     const uint64_t n = clip_range(offset, size, p->size, start);
     if (n) textures_cpu_wrote(p->base + start, n);
+    if (n && be::archexp::coherence_on()) be::archexp::note_flush(reinterpret_cast<uint64_t>(p->base) + start, n);   // E2a
 }
 
 void nvnMemoryPoolInvalidateMappedRange(const NVNmemoryPool* pool, ptrdiff_t offset, size_t size) {
@@ -199,6 +201,7 @@ void nvnMemoryPoolInvalidateMappedRange(const NVNmemoryPool* pool, ptrdiff_t off
     if (!p || !p->base) return;
     uint64_t start = 0;
     const uint64_t n = clip_range(offset, size, p->size, start);
+    if (n && be::archexp::coherence_on()) be::archexp::note_invalidate(reinterpret_cast<uint64_t>(p->base) + start, n);   // E2a
     if (n) gpu::cpu_will_read(reinterpret_cast<uint64_t>(p->base) + start, n);   // compute results held in video memory come back first
 }
 
@@ -323,6 +326,7 @@ void nvnBufferFlushMappedRange(const NVNbuffer* buffer, ptrdiff_t offset, size_t
     uint64_t start = 0;
     const uint64_t n = clip_range(offset, size, d.size, start);
     if (n) textures_cpu_wrote(map + start, n);
+    if (n && be::archexp::coherence_on()) be::archexp::note_flush(reinterpret_cast<uint64_t>(map) + start, n);   // E2a
 }
 
 void nvnBufferInvalidateMappedRange(const NVNbuffer* buffer, ptrdiff_t offset, size_t size) {
@@ -332,6 +336,7 @@ void nvnBufferInvalidateMappedRange(const NVNbuffer* buffer, ptrdiff_t offset, s
     if (!map) return;
     uint64_t start = 0;
     const uint64_t n = clip_range(offset, size, d.size, start);
+    if (n && be::archexp::coherence_on()) be::archexp::note_invalidate(reinterpret_cast<uint64_t>(map) + start, n);   // E2a
     if (n) gpu::cpu_will_read(reinterpret_cast<uint64_t>(map) + start, n);
 }
 
@@ -407,7 +412,7 @@ void texture_pool_register(const NVNtexturePool* pool, int id, const NVNtexture*
     e.tex = Ref<Texture>::share(t);
     e.view = info;
     e.has_view = view != nullptr;
-    if (!e.used) g_texture_handles.add(1);
+    if (!e.used) { g_texture_handles.add(1); tp->used_ids.push_back(static_cast<uint32_t>(id)); }
     e.used = true;
     be::tx_mark("tx.reg", t);
     be::g_tex_scan_epoch.fetch_add(1, std::memory_order_relaxed);   // a new texture sits behind this id now

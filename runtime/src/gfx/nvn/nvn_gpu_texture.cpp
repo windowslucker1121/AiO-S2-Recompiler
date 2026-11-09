@@ -51,6 +51,9 @@ namespace nxrt::nvn::be {
 // The Vulkan side of a texture: Texture::gpu points to it (created by gpu::tex_gpu, freed by gpu::tex_destroy).
 static std::mutex g_live_mu;
 static std::set<struct TexGpu*> g_live_set;
+// Unique stamps of an image's views: a new TexGpu and every clear of its views take a new one (tex_view_stamp: the pool arrays' entry cache)
+static std::atomic<uint64_t> g_view_gen_next{1};
+static uint64_t new_view_gen() { return g_view_gen_next.fetch_add(1, std::memory_order_relaxed); }
 
 struct TexGpu {
     bool promoted = false;                              // HDR scene pipeline: an 8-bit sRGB render target kept as RGBA16F (src/gfx/extras/hdr_nvn.h)
@@ -73,6 +76,9 @@ struct TexGpu {
     float scale = 1.0f;                                 // resolution scale: base is the NVN size times this ([gfx] render_scale, render targets only)
     bool scale_blocked = false;                         // was scaled, brought back to 1 (bound as a storage image, or paired with an unscaled target)
     std::map<std::array<uint32_t, 12>, VkImageView> views;
+    std::array<uint32_t, 12> last_key{};                // the last view view_for found (most bindings ask for one view of a texture again and again)
+    VkImageView last_view = VK_NULL_HANDLE;             // reset with views
+    uint64_t view_gen = new_view_gen();                 // renewed with views
     int refs = 1;                                       // texture objects over the same storage share one image (render thread)
     struct SparseState* sparse = nullptr;               // a sparse-residency image (a big texture of a virtual pool), else null
     // CPU-streamed textures (tex_ensure_current): uploads for CPU writes that came at most kStreamGap presents apart, in a row
@@ -103,7 +109,7 @@ struct SparseState {
 };
 
 Texture::~Texture() {
-    if (gpu) gpu::destroy_texture_gpu(gpu);
+    if (gpu && !gpu::tex_park(*this, gpu)) gpu::destroy_texture_gpu(gpu);
     gpu = nullptr;
 }
 
@@ -512,6 +518,7 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
     { std::lock_guard<std::mutex> lk(g_live_mu); g_live_set.insert(g); }
     g_gauge_textures_live.add(1);
     t->gpu = g;
+    g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
     const Shape s = shape_of(*t);
     g->fmt = t->fmt;
     g->type = s.type;
@@ -637,6 +644,164 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
     return g;
 }
 
+// ---- parked images ([nvn] tex_park, nvn_gpu.h) ------------------------------------------------------------------------------------
+struct ParkKey {
+    uint64_t mem, size;   // mem: the storage, or for a texture of a virtual pool the pool object (voff: the offset there)
+    uint64_t voff;
+    const FormatInfo* fmt;
+    uint32_t levels, layers, w, h, d, target, samples, bh;
+    bool bl;
+    bool operator==(const ParkKey& o) const { return std::memcmp(this, &o, sizeof *this) == 0; }
+};
+ParkKey park_key(const Texture& t) {
+    ParkKey k;
+    std::memset(&k, 0, sizeof k);   // padding too: compared with memcmp
+    k.mem = t.vpool ? reinterpret_cast<uint64_t>(t.vpool.get()) : reinterpret_cast<uint64_t>(t.mem); k.voff = t.vpool ? t.voffset : 0; k.size = t.storage_size; k.fmt = t.fmt; k.levels = t.levels; k.layers = t.layers;
+    k.w = static_cast<uint32_t>(t.b.width); k.h = static_cast<uint32_t>(t.b.height); k.d = static_cast<uint32_t>(t.b.depth);
+    k.target = static_cast<uint32_t>(t.b.target); k.samples = static_cast<uint32_t>(t.b.samples); k.bh = static_cast<uint32_t>(t.block_height_gobs);
+    k.bl = t.block_linear;
+    return k;
+}
+// A sampled hash of the storage (256 words spread over it): a CPU rewrite of the memory between park and take that no flush reported
+// (coherent pools) shows up as another hash, and the image is then uploaded again.
+uint64_t park_sample(const Texture& t) {
+    if ((!t.mem && !t.vpool) || t.storage_size < 8) return 0;
+    uint64_t h = 0x9e3779b97f4a7c15ull;
+    const uint64_t n = 256, step = std::max<uint64_t>(8, (t.storage_size / n) & ~7ull);
+    uint64_t offs[260], vals[260];
+    size_t k = 0;
+    // the offsets 0, step, ... while off + 8 <= size, counted first (a loop with both conditions made clang-cl call __udivti3, not linked)
+    const size_t cnt = static_cast<size_t>(std::min<uint64_t>(260, (t.storage_size - 8) / step + 1));
+    for (; k < cnt; ++k) offs[k] = static_cast<uint64_t>(k) * step;
+    if (t.mem) for (size_t i = 0; i < k; ++i) std::memcpy(&vals[i], t.mem + offs[i], 8);
+    else texture_read_virtual_words(t, offs, k, vals);   // one walk of the virtual mappings, not one per word (was ~1.4% of the render thread)
+    for (size_t i = 0; i < k; ++i) h = (h ^ vals[i]) * 0x100000001b3ull;
+    return h;
+}
+struct Parked { ParkKey key; TexGpu* g; uint64_t at; uint64_t sample; bool dirty; };
+std::mutex g_park_mu;
+std::vector<Parked> g_parked;
+std::atomic<uint64_t> g_park_n{0}, g_park_taken{0}, g_park_stale{0}, g_park_expired{0};   // statistics
+std::atomic<uint64_t> g_park_miss{0}, g_park_miss_expired{0}, g_park_miss_big{0};   // new images of pool textures: none parked (of them: its key expired lately; >= 1 MiB)
+ParkKey g_expired_keys[64];                       // the keys of the latest expired images (miss diagnostics)
+uint64_t g_expired_at[64];                        // the present each expired at
+size_t g_expired_n = 0;
+// [nvn] tex_park_presents / tex_park_max (240 / 128): how long (presents) and how many parked images are kept. 8 / 64 missed the game's re-creation
+// of its post-process targets after more than 8 presents (Link's house: bursts of ~16 new images and ~17 MB of uploads, frames of 30-40 ms;
+// 240 / 128: uploads 446 -> 63 KB per frame, frames over 2x the median 75 -> 15, 1% low 31 -> 39 fps).
+uint64_t park_presents() {
+    static const uint64_t n = static_cast<uint64_t>(std::max<int64_t>(1, nxrt::config_get_int("nvn", "tex_park_presents", 240)));
+    return n;
+}
+size_t park_max() {
+    static const size_t n = static_cast<size_t>(std::max<int64_t>(1, nxrt::config_get_int("nvn", "tex_park_max", 128)));
+    return n;
+}
+bool tex_park_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "tex_park", true);
+    return on && ab_tex_park_on();
+}
+// Destroys parked images older than park_presents() (or the oldest over park_max()). Lock held.
+void park_sweep_locked(uint64_t now) {
+    for (size_t i = 0; i < g_parked.size();) {
+        if (now - g_parked[i].at > park_presents() || g_parked.size() > park_max()) {
+            destroy_texture_gpu(g_parked[i].g);
+            g_park_expired.fetch_add(1, std::memory_order_relaxed);
+            g_expired_at[g_expired_n % 64] = now;
+            g_expired_keys[g_expired_n++ % 64] = g_parked[i].key;
+            g_parked.erase(g_parked.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
+}
+// Takes back a parked image for t (render thread). Null: none.
+TexGpu* tex_unpark(Texture* t) {
+    if ((!t->mem && !t->vpool) || t->is_display || !tex_park_on()) return nullptr;
+    const ParkKey k = park_key(*t);
+    std::lock_guard<std::mutex> lk(g_park_mu);
+    park_sweep_locked(counters().presents.load(std::memory_order_relaxed));
+    for (size_t i = 0; i < g_parked.size(); ++i) {
+        if (!(g_parked[i].key == k)) continue;
+        Parked p = g_parked[i];
+        g_parked.erase(g_parked.begin() + static_cast<std::ptrdiff_t>(i));
+        t->gpu = p.g;
+        g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
+        if (!p.dirty && park_sample(*t) == p.sample) t->cpu_dirty.store(false);   // the image holds what the GPU wrote there last, as the memory would on the console
+        else { p.g->gpu_written = false; g_park_stale.fetch_add(1, std::memory_order_relaxed); }
+        g_park_taken.fetch_add(1, std::memory_order_relaxed);
+        return p.g;
+    }
+    // a miss: say why (diagnostics; the statistics line parked texture images)
+    g_park_miss.fetch_add(1, std::memory_order_relaxed);
+    bool was_expired = false;
+    uint64_t expired_at = 0;
+    for (size_t i = 0; i < std::min<size_t>(g_expired_n, 64); ++i) if (g_expired_keys[i] == k) { was_expired = true; expired_at = g_expired_at[i]; break; }
+    if (was_expired) g_park_miss_expired.fetch_add(1, std::memory_order_relaxed);
+    if (t->storage_size >= (1u << 20)) {
+        g_park_miss_big.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<int> logged{0};
+        const int nl = logged.fetch_add(1, std::memory_order_relaxed);
+        if (nl < 40 || nl % 50 == 0)
+            NXLOG_I(kTag, "tex_park miss: t%u %ux%u %s %llu KiB %s+0x%llx, %zu parked, %s %llu presents ago (present %llu)", t->id, k.w, k.h, t->fmt ? t->fmt->name : "?",
+                    static_cast<unsigned long long>(t->storage_size >> 10), t->vpool ? "vpool" : "mem", static_cast<unsigned long long>(k.voff), g_parked.size(),
+                    was_expired ? "its key expired" : "not parked lately", static_cast<unsigned long long>(was_expired ? counters().presents.load(std::memory_order_relaxed) - expired_at : 0), static_cast<unsigned long long>(counters().presents.load(std::memory_order_relaxed)));
+    }
+    return nullptr;
+}
+}  // namespace
+
+bool tex_park(const Texture& t, TexGpu* g) {
+    if (!g || g->failed || !g->gpu_written || g->refs != 1 || g->sparse || g->streamed || (!t.mem && !t.vpool) || t.is_display || !tex_park_on()) {
+        if (g && !g->failed && t.vpool && t.storage_size >= (1u << 20) && tex_park_on()) {   // diagnostics: why a big pool texture was not parked
+            static std::atomic<int> logged{0};
+            const int nl = logged.fetch_add(1, std::memory_order_relaxed);
+            if (nl < 20 || nl % 100 == 0)
+                NXLOG_I(kTag, "tex_park: t%u %ux%u %s not parked: gpu_written %d refs %u sparse %d streamed %d", t.id, static_cast<unsigned>(t.b.width),
+                        static_cast<unsigned>(t.b.height), t.fmt ? t.fmt->name : "?", g->gpu_written ? 1 : 0, static_cast<unsigned>(g->refs), g->sparse ? 1 : 0, g->streamed ? 1 : 0);
+        }
+        return false;
+    }
+    Parked p{park_key(t), g, counters().presents.load(std::memory_order_relaxed), park_sample(t), false};
+    std::lock_guard<std::mutex> lk(g_park_mu);
+    for (Parked& o : g_parked)
+        if (o.key == p.key) {          // an older image of the same storage: the newer one wins
+            destroy_texture_gpu(o.g);
+            o = p;
+            g_park_n.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+    g_parked.push_back(p);
+    g_park_n.fetch_add(1, std::memory_order_relaxed);
+    park_sweep_locked(p.at);
+    return true;
+}
+
+// Render thread, a finalized texture object's image that other objects still share: their count drops now. destroy_texture_gpu defers the
+// drop until the GPU is done with the frame, so when the game finalized all the objects over one storage within that time (OoT's
+// post-process targets: two or three objects each, every few frames) each saw the others' references, none was parked, and the next
+// objects over that storage made new images and uploaded the stale pool bytes (~2.5 ms per 1920x1080 target on the render thread).
+// The image itself lives on: the remaining objects hold it, and the last one to go parks it or defers its destruction.
+bool tex_release_shared(TexGpu* g) {
+    if (!g || g->refs <= 1 || !tex_park_on()) return false;
+    --g->refs;
+    return true;
+}
+
+void parked_cpu_wrote(uint64_t lo, uint64_t hi) {
+    std::lock_guard<std::mutex> lk(g_park_mu);
+    for (Parked& p : g_parked)
+        if (!p.key.voff && p.key.mem < hi && p.key.mem + std::max<uint64_t>(p.key.size, 1) > lo) p.dirty = true;   // virtual-pool images: the sample hash
+}
+
+void park_stats(uint64_t* parked, uint64_t* taken, uint64_t* stale, uint64_t* expired) {
+    *parked = g_park_n.load(); *taken = g_park_taken.load(); *stale = g_park_stale.load(); *expired = g_park_expired.load();
+}
+void park_miss_stats(uint64_t* miss, uint64_t* miss_expired, uint64_t* miss_big) {
+    *miss = g_park_miss.load(); *miss_expired = g_park_miss_expired.load(); *miss_big = g_park_miss_big.load();
+}
+
+namespace {
 // The texture's image, created on first use. Null when the texture has no usable image (the failure is counted and logged once).
 TexGpu* tex_or_null(Texture* t, float want_scale = 1.0f) {
     if (!t || !active()) return nullptr;
@@ -647,6 +812,7 @@ TexGpu* tex_or_null(Texture* t, float want_scale = 1.0f) {
             // the same bytes under another texture object: one image (the object rendered to and the one that is sampled are not the same
             // object); what the image holds is as current for this object as for the one it was made for
             t->gpu = ag;
+            g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
             ++ag->refs;
             if (ag->uploaded || ag->gpu_written) t->cpu_dirty.store(false);
             static int logged = 0;
@@ -654,8 +820,11 @@ TexGpu* tex_or_null(Texture* t, float want_scale = 1.0f) {
             return ag;
         }
     }
+    if (want_scale == 1.0f) if (TexGpu* pg = tex_unpark(t)) return pg;   // a parked image of the same storage and layout
     NXFT_MIN("tex.create", 30000);
+    const uint64_t tc0 = nxrt::hitch_ticks();
     TexGpu* g = create_texture_gpu(t, want_scale);
+    if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderTexCreate, nxrt::hitch_ticks() - tc0);
     return g->failed ? nullptr : g;
 }
 
@@ -961,8 +1130,9 @@ VkImageView view_for(TexGpu& g, VkImageViewType type, uint32_t base_level, uint3
     const std::array<uint32_t, 12> key = {static_cast<uint32_t>(type), base_level, level_count, base_layer, layer_count,
                                           static_cast<uint32_t>(fmt), static_cast<uint32_t>(aspect), static_cast<uint32_t>(swz.r),
                                           static_cast<uint32_t>(swz.g), static_cast<uint32_t>(swz.b), static_cast<uint32_t>(swz.a), 0u};
+    if (g.last_view && g.last_key == key) return g.last_view;
     auto it = g.views.find(key);
-    if (it != g.views.end()) return it->second;
+    if (it != g.views.end()) { g.last_key = key; g.last_view = it->second; return it->second; }
     VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vi.image = g.img.image;
     vi.viewType = type;
@@ -1437,6 +1607,8 @@ bool tex_rescale(Texture* t, Frame& f, float to, const char* why) {
     std::vector<VkImageView> views;
     for (auto& kv : g->views) views.push_back(kv.second);
     g->views.clear();
+    g->last_view = VK_NULL_HANDLE;
+    g->view_gen = new_view_gen();
     defer_destroy([old, views]() mutable {
         for (VkImageView v : views) { vkDestroyImageView(vkdev(), v, nullptr); vk_gauge_image_views().sub(1); }
         device().destroy_image(old);
@@ -1445,6 +1617,7 @@ bool tex_rescale(Texture* t, Frame& f, float to, const char* why) {
     g->base = s.base;
     g->layout = nl;
     g_tex_state_gen.fetch_add(1, std::memory_order_acq_rel);
+    g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
     g->scale = to;
     if (to == 1.0f) g->scale_blocked = true;
     return true;
@@ -1859,6 +2032,10 @@ uint32_t tex_layers(Texture* t) { return t->layers; }
 
 bool tex_is_depth(Texture* t) { return t->fmt && t->fmt->aspect != kAspectColor; }
 
+uint64_t tex_view_stamp(const Texture* t) {
+    return t && t->gpu && !t->gpu->failed ? t->gpu->view_gen : 0;
+}
+
 VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
     TexGpu* g = tex_or_null(t);
     if (!g) return VK_NULL_HANDLE;
@@ -2037,14 +2214,23 @@ SamplerInfo tuned_sampler(const SamplerInfo& in) {
     return s;
 }
 
+// The game's sampler (and the tuning it was tuned with) -> its VkSampler, direct-mapped in front of g_sh.samplers (render thread; samplers
+// live until tex_shutdown, which clears it): build_set and the pool-array sync ask for the same few samplers thousands of times per frame.
+struct SamplerMemo { SamplerInfo in{}; int aniso = 0; float bias = 0.0f; VkSampler v = VK_NULL_HANDLE; };
+SamplerMemo g_sampler_memo[256];
 VkSampler sampler_for(const SamplerInfo& game_sampler) {
+    const int aniso = gfx::tuning().anisotropy.load(std::memory_order_relaxed);
+    const float bias = gfx::tuning().lod_bias.load(std::memory_order_relaxed);
+    SamplerMemo& mm = g_sampler_memo[sampler_hash(game_sampler) & 255];
+    if (mm.v && mm.aniso == aniso && mm.bias == bias && mm.in == game_sampler) return mm.v;
     const SamplerInfo s = tuned_sampler(game_sampler);
     auto& bucket = g_sh.samplers[sampler_hash(s)];
     for (const auto& e : bucket)
-        if (e.first == s) return e.second;
+        if (e.first == s) { mm = SamplerMemo{game_sampler, aniso, bias, e.second}; return e.second; }
     const VkSampler v = create_sampler(s);
     if (v == VK_NULL_HANDLE) return dummy_sampler();
     bucket.emplace_back(s, v);
+    mm = SamplerMemo{game_sampler, aniso, bias, v};
     return v;
 }
 
@@ -2058,6 +2244,8 @@ void tex_destroy(TexGpu* g) {
     g_gauge_textures_live.sub(1);
     for (auto& kv : g->views) { vkDestroyImageView(vkdev(), kv.second, nullptr); vk_gauge_image_views().sub(1); }
     g->views.clear();
+    g->last_view = VK_NULL_HANDLE;
+    g->view_gen = new_view_gen();
     if (g->img) g_live_images.fetch_sub(1);
     device().destroy_image(g->img);
     if (g->sparse) {
@@ -2095,6 +2283,7 @@ void tex_shutdown() {
     for (auto& kv : g_sh.samplers)
         for (auto& e : kv.second) { vkDestroySampler(vkdev(), e.second, nullptr); vk_gauge_samplers().sub(1); }
     g_sh.samplers.clear();
+    for (SamplerMemo& mm : g_sampler_memo) mm = SamplerMemo{};
     if (g_sh.dummy_sampler != VK_NULL_HANDLE) { vkDestroySampler(vkdev(), g_sh.dummy_sampler, nullptr); vk_gauge_samplers().sub(1); }
     for (auto& kv : g_sh.storage) {
         if (kv.second.view != VK_NULL_HANDLE) { vkDestroyImageView(vkdev(), kv.second.view, nullptr); vk_gauge_image_views().sub(1); }

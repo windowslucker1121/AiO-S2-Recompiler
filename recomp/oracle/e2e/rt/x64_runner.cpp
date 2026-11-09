@@ -54,6 +54,8 @@ void call_indirect(Ctx *c, uint64_t addr) {
     exit(3);
 }
 void host_import(Ctx *c, uint32_t sym) { (void)c; fprintf(stderr, "host_import %u\n", sym); exit(3); }
+void nx_icall_miss(Ctx *c, uint64_t addr, NxIc *ic) { (void)ic; call_indirect(c, addr); }
+void nx_iimport_miss(Ctx *c, uint32_t id, NxIc *ic) { (void)ic; host_import(c, id); }
 void guest_trap(const char *what, uint64_t addr) { fprintf(stderr, "guest_trap: %s at %llx\n", what, (unsigned long long)addr); exit(10); }
 void guest_unimpl(uint64_t pc, uint32_t insn, const char *what) { fprintf(stderr, "guest_unimpl at %llx: %08x %s\n", (unsigned long long)pc, insn, what); exit(11); }
 void guest_svc(Ctx *c, uint32_t n) { (void)c; fprintf(stderr, "guest_svc %u\n", n); exit(12); }

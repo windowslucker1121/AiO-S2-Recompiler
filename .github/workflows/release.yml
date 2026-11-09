@@ -4,7 +4,8 @@
 # and publishes it as a GitHub release.
 #   - push a tag v1.2.3            -> build + release "v1.2.3" (pre-release when the tag has a suffix, e.g. v0.2.0-rc1)
 #   - Actions tab, "Run workflow"  -> build; with a version given, also a release (tag created on the chosen commit)
-#   - pull requests / pushes       -> build only (the zip is kept as a workflow artifact)
+#   - a merged pull request (push to oot-nup or main) -> build only (the zip is kept as a workflow artifact); opening or
+#     updating a pull request runs nothing
 # The package holds no game data and no lifted code (LEGAL.md). A game exe is never part of it: the library builds it on the
 # player's PC from their own dump (game-build/release_b/game_build.py).
 name: Release
@@ -12,7 +13,7 @@ name: Release
 on:
   push:
     tags: ['v*']
-  pull_request:
+    branches: [oot-nup, main]
     paths:
       - 'runtime/**'
       - 'recomp/nxrecomp/**'

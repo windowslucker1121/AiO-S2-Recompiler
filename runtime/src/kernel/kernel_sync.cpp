@@ -16,6 +16,7 @@
 
 #include "kernel_internal.h"
 #include "nxrt/config.h"
+#include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/kernel.h"
 #include "nxrt/log.h"
@@ -80,11 +81,86 @@ int64_t now_ns() {
     return static_cast<int64_t>(t / hz * 1000000000ull + t % hz * 1000000000ull / hz);
 }
 
+// [sched] wake_spin_us (default 0 = off): a guest thread named in [sched] wake_spin_threads (comma-separated name prefixes, default
+// "main"; "*" = every guest thread) that is about to sleep in a kernel wait first polls its wake flag for this long with the kernel
+// lock free. A wake-up that comes within the spin costs no host sleep and wake (tens of microseconds each on Windows). "ab" in
+// [sched] wake_spin_mode with [sched] ab_ms = N alternates on/off windows of N ms (frame-trace marks ks.on / ks.off), for paired runs.
+struct SpinCfg {
+    int64_t ns = 0;
+    int mode = 0;                       // 0 off, 1 on, 2 ab
+    std::vector<std::string> names;
+};
+const SpinCfg& spin_cfg() {
+    static const SpinCfg cfg = [] {
+        SpinCfg s;
+        s.ns = config_get_int("sched", "wake_spin_us", 0) * 1000;
+        const std::string m = config_get_str("sched", "wake_spin_mode", "on");
+        s.mode = s.ns <= 0 ? 0 : m == "ab" ? 2 : m == "off" ? 0 : 1;
+        std::string list = config_get_str("sched", "wake_spin_threads", "main");
+        size_t p = 0;
+        while (p <= list.size()) {
+            size_t q = list.find(',', p);
+            if (q == std::string::npos) q = list.size();
+            std::string n = list.substr(p, q - p);
+            while (!n.empty() && n.front() == ' ') n.erase(n.begin());
+            while (!n.empty() && n.back() == ' ') n.pop_back();
+            if (!n.empty()) s.names.push_back(n);
+            p = q + 1;
+        }
+        if (s.mode) {
+            std::string l;
+            for (auto& n : s.names) l += (l.empty() ? "" : ",") + n;
+            NXLOG_I("sched", "kernel waits spin %lld us before sleeping (threads %s, mode %s)", static_cast<long long>(s.ns / 1000), l.c_str(),
+                    s.mode == 2 ? "ab" : "on");
+        }
+        return s;
+    }();
+    return cfg;
+}
+
+bool spin_thread(const KThread& t) {
+    const SpinCfg& s = spin_cfg();
+    for (const std::string& n : s.names)
+        if (n == "*" || t.name.compare(0, n.size(), n) == 0) return true;
+    return false;
+}
+
 }  // namespace
+
+// [sched] ab_ms = N: on in odd windows of N ms of the trace clock, off in even ones (marks ks.on / ks.off). Always on when unset.
+bool sched_ab_on() {
+    static const int64_t w = config_get_int("sched", "ab_ms", 0) * 1000000;
+    if (w <= 0) return true;
+    const int on = static_cast<int>((ft::now_ns() / static_cast<uint64_t>(w)) & 1);
+    static std::atomic<int> last{-1};
+    if (last.exchange(on, std::memory_order_relaxed) != on) ft::mark(on ? "ks.on" : "ks.off");
+    return on != 0;
+}
 
 // Waits (g_k held, released while sleeping) until t.wake or the timeout; false on timeout.
 bool block_on_wake(KThread& t, int64_t timeout_ns) {
     const int64_t until = timeout_ns < 0 ? 0 : now_ns() + timeout_ns;
+    if (!t.wake && timeout_ns != 0) {
+        const SpinCfg& s = spin_cfg();
+        // The thread's own name decides once (names are set at creation); cached per KThread through a thread_local.
+        thread_local const KThread* cached = nullptr;
+        thread_local bool cached_spin = false;
+        if (s.mode && cached != &t) {
+            cached = &t;
+            cached_spin = spin_thread(t);
+        }
+        if (s.mode && cached_spin && (s.mode == 1 || sched_ab_on())) {
+            int64_t spin = s.ns;
+            if (timeout_ns > 0 && timeout_ns < spin) spin = timeout_ns;
+            ReleaseSRWLockExclusive(&g_k);
+            const uint64_t end = ft::now_ns() + static_cast<uint64_t>(spin);
+            for (uint32_t i = 0; !__atomic_load_n(&t.wake, __ATOMIC_ACQUIRE); ++i) {
+                YieldProcessor();
+                if ((i & 31) == 31 && ft::now_ns() >= end) break;
+            }
+            AcquireSRWLockExclusive(&g_k);
+        }
+    }
     while (!t.wake) {
         DWORD ms = INFINITE;
         if (timeout_ns >= 0) {
@@ -95,12 +171,18 @@ bool block_on_wake(KThread& t, int64_t timeout_ns) {
         }
         SleepConditionVariableSRW(thread_cv(t), &g_k, ms, 0);
     }
+    if (t.wake_ns && ft::on()) {             // wake latency: from the waker's wake_thread to this thread running again
+        static const uint16_t z = ft::zone_id("kwake");
+        ft::event(z, t.wake_ns, ft::now_ns(), t.waker_tid);
+    }
     return true;
 }
 
 void wake_thread(KThread& t, uint32_t result) {
     t.wake = true;
     t.wait_result = result;
+    t.wake_ns = ft::on() ? ft::now_ns() : 0;
+    t.waker_tid = t.wake_ns ? GetCurrentThreadId() : 0;
     WakeConditionVariable(thread_cv(t));
 }
 

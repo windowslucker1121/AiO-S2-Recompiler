@@ -52,6 +52,7 @@ struct Source {
     const char* label = nullptr;
     uint64_t (*counter)() = nullptr;     // cumulative; shown as growth during the frame
     int64_t (*level)() = nullptr;        // instantaneous; shown when non-zero
+    bool csv_only = false;               // [diag] frame_csv only (not on the hitch line)
 };
 Source g_src[kMaxSources];
 std::atomic<size_t> g_nsrc{0};
@@ -83,6 +84,21 @@ std::mutex g_recent_mu;                           // the logged hitch lines, for
 std::vector<std::string> g_recent;
 constexpr size_t kRecentMax = 64;
 
+// [diag] frame_csv: every frame's row, queued by the presenting thread and written by the monitor thread
+struct CsvRow {
+    uint64_t frame = 0;
+    double at_s = 0, ms = 0;
+    int64_t val[kMaxSources] = {};
+    uint64_t phase[kHpCount] = {};
+    uint64_t game_gap = 0;
+};
+std::atomic<bool> g_csv_on{false};
+std::mutex g_csv_mu;
+std::vector<CsvRow> g_csv_rows;
+FILE* g_csv_f = nullptr;
+std::string g_csv_path;
+size_t g_csv_cols = 0;                            // sources when the header was written (later ones are left out)
+
 // Called for every presented frame at tick t (previous frame's tick prev_t, 0 for the first), frame number n.
 void hitch_on_frame(uint64_t t, uint64_t prev_t, uint64_t n) {
     if (!g_hitch_on.load(std::memory_order_relaxed)) return;
@@ -104,6 +120,17 @@ void hitch_on_frame(uint64_t t, uint64_t prev_t, uint64_t n) {
         g_hitch_total.fetch_add(1, std::memory_order_relaxed);
         std::lock_guard<std::mutex> lk(g_ev_mu);
         if (g_pending.size() < 256) g_pending.push_back(ev);
+    }
+    if (g_csv_on.load(std::memory_order_relaxed) && prev_t && t > prev_t) {
+        CsvRow r;
+        r.frame = n;
+        r.ms = (double)(t - prev_t) * 1000.0 / qpc_freq();
+        r.at_s = (double)(t - g_t0_ticks.load(std::memory_order_relaxed)) / qpc_freq();
+        for (size_t i = 0; i < ns; i++) r.val[i] = g_src[i].counter ? (int64_t)(cur[i] - g_prev_val[i]) : (int64_t)cur[i];
+        for (int i = 0; i < kHpCount; i++) r.phase[i] = curp[i] - g_prev_phase[i];
+        r.game_gap = gap;
+        std::lock_guard<std::mutex> lk(g_csv_mu);
+        if (g_csv_rows.size() < 100000) g_csv_rows.push_back(r);
     }
     for (size_t i = 0; i < ns; i++) g_prev_val[i] = cur[i];
     for (int i = 0; i < kHpCount; i++) g_prev_phase[i] = curp[i];
@@ -139,7 +166,7 @@ std::string format_event(const HitchEvent& ev, size_t others) {
     const size_t ns = g_nsrc.load(std::memory_order_acquire);
     bool any = false;
     for (size_t i = 0; i < ns; i++) {
-        if (ev.val[i] == 0) continue;
+        if (ev.val[i] == 0 || g_src[i].csv_only) continue;
         out += any ? ", " : "; during it: ";
         out += g_src[i].label;
         snprintf(b, sizeof b, " %s%lld", g_src[i].counter ? "+" : "=", (long long)ev.val[i]);
@@ -160,6 +187,8 @@ std::string format_event(const HitchEvent& ev, size_t others) {
     part(rep, "submit", kHpRenderSubmit);
     part(rep, "uploads", kHpRenderUpload);
     part(rep, "pipeline creation", kHpRenderPipeline);
+    part(rep, "pipeline misses", kHpRenderPipeMiss);
+    part(rep, "texture images made", kHpRenderTexCreate);
     part(rep, "lock waits", kHpRenderLockWait);
     part(pre, "limiter", kHpRenderLimiter);
     part(pre, "acquire", kHpRenderAcquire);
@@ -187,7 +216,13 @@ std::string format_event(const HitchEvent& ev, size_t others) {
     std::string any_thr;
     part(any_thr, "write-fault handler", kHpFaults);
     part(any_thr, "write-watch arming", kHpWwArm);
+    part(any_thr, "of faults on guarded pages", kHpFaultGuard);
+    part(any_thr, "region lock waits (shared)", kHpWwSharedWait);
+    part(any_thr, "region lock held exclusive", kHpWwExclHold);
     part(any_thr, "memory pool imports", kHpPoolImport);
+    part(any_thr, "held-result fetches", kHpOutFetch);
+    part(any_thr, "of them by guard faults", kHpOutFetchFault);
+    part(any_thr, "background pipeline builds", kHpPipelineBg);
     if (!any_thr.empty()) out += "; any thread ms: " + any_thr;
     if (others) {
         snprintf(b, sizeof b, " (+%zu more slow frames in the last second)", others);
@@ -208,6 +243,51 @@ Monitor& mon() {
     return *s;
 }
 
+const char* const kPhaseNames[] = {
+    "r_idle", "r_replay", "r_gpu_wait", "r_submit", "r_upload", "r_pipeline", "r_lock_wait", "ww_arm", "r_present", "r_limiter",
+    "r_acquire", "r_present_end", "faults", "g_backpressure", "g_sync_wait", "pool_import", "g_svc", "g_ipc", "g_wait",
+    "out_fetch", "out_fetch_fault", "pipeline_bg", "r_pipe_miss", "r_tex_create", "fault_guard", "ww_shared_wait", "ww_excl_hold", "any_ipc"};
+static_assert(sizeof(kPhaseNames) / sizeof(kPhaseNames[0]) == kHpCount, "a name for every HitchPhase");
+
+void csv_flush() {
+    std::vector<CsvRow> rows;
+    {
+        std::lock_guard<std::mutex> lk(g_csv_mu);
+        rows.swap(g_csv_rows);
+    }
+    if (rows.empty()) return;
+    if (!g_csv_f) {
+        if (g_csv_path.empty()) return;
+        g_csv_f = fopen(g_csv_path.c_str(), "wb");
+        if (!g_csv_f) {
+            NXLOG_W("diag", "frame csv: cannot open %s", g_csv_path.c_str());
+            g_csv_path.clear();
+            g_csv_on.store(false);
+            return;
+        }
+        g_csv_cols = g_nsrc.load(std::memory_order_acquire);
+        std::string h = "frame,t_s,ms";
+        for (size_t i = 0; i < g_csv_cols; i++) { h += ","; h += g_src[i].label; }
+        for (int i = 0; i < kHpCount; i++) { h += ",ms_"; h += kPhaseNames[i]; }
+        h += ",ms_game_gap\n";
+        fwrite(h.data(), 1, h.size(), g_csv_f);
+        NXLOG_I("diag", "frame csv: every presented frame to %s (%zu sources)", g_csv_path.c_str(), g_csv_cols);
+    }
+    const double f = 1000.0 / qpc_freq();
+    std::string line;
+    char b[64];
+    for (const CsvRow& r : rows) {
+        snprintf(b, sizeof b, "%llu,%.3f,%.3f", (unsigned long long)r.frame, r.at_s, r.ms);
+        line = b;
+        for (size_t i = 0; i < g_csv_cols; i++) { snprintf(b, sizeof b, ",%lld", (long long)r.val[i]); line += b; }
+        for (int i = 0; i < kHpCount; i++) { snprintf(b, sizeof b, ",%.3f", (double)r.phase[i] * f); line += b; }
+        snprintf(b, sizeof b, ",%.3f\n", (double)r.game_gap * f);
+        line += b;
+        fwrite(line.data(), 1, line.size(), g_csv_f);
+    }
+    fflush(g_csv_f);
+}
+
 void monitor_run(double summary_s) {
     Monitor& s = mon();
     log_set_thread_name("hitch");
@@ -220,8 +300,9 @@ void monitor_run(double summary_s) {
     for (;;) {
         {
             std::unique_lock<std::mutex> lk(s.m);
-            if (s.cv.wait_for(lk, std::chrono::milliseconds(100), [&] { return s.stop; })) return;
+            if (s.cv.wait_for(lk, std::chrono::milliseconds(100), [&] { return s.stop; })) { csv_flush(); return; }
         }
+        csv_flush();
         const auto now = Clock::now();
         // at most one hitch line per second: the worst frame waiting, with the count of the others
         if (now - last_line >= std::chrono::seconds(1)) {
@@ -385,6 +466,10 @@ void soak_note_frame() {
 }
 
 uint64_t hitch_ticks() { return qpc(); }
+double hitch_phase_seconds(int phase) {
+    return phase >= 0 && phase < kHpCount ? static_cast<double>(g_phase[phase].load(std::memory_order_relaxed)) / qpc_freq() : 0.0;
+}
+
 void hitch_phase_add(int phase, uint64_t ticks) {
     if (phase >= 0 && phase < kHpCount) g_phase[phase].fetch_add(ticks, std::memory_order_relaxed);
 }
@@ -415,6 +500,13 @@ void hitch_add_level(const char* label, int64_t (*fn)()) {
     g_nsrc.store(i + 1, std::memory_order_release);
 }
 
+void hitch_add_csv_counter(const char* label, uint64_t (*fn)()) {
+    const size_t i = g_nsrc.load();
+    if (i >= kMaxSources || !fn) return;
+    g_src[i] = {label, fn, nullptr, true};
+    g_nsrc.store(i + 1, std::memory_order_release);
+}
+
 void hitch_start() {
     if (!config_get_bool("diag", "hitch_log", true)) return;
     Monitor& s = mon();
@@ -432,6 +524,18 @@ void hitch_start() {
         const size_t ns = g_nsrc.load(std::memory_order_acquire);
         for (size_t i = 0; i < ns; i++) g_prev_val[i] = g_src[i].counter ? g_src[i].counter() : (uint64_t)g_src[i].level();
         for (int i = 0; i < kHpCount; i++) g_prev_phase[i] = g_phase[i].load(std::memory_order_relaxed);
+    }
+    {   // [diag] frame_csv: opened at the first flush with rows (the back end registers its sources when the GPU comes up)
+        g_csv_path = config_get_str("diag", "frame_csv", "");
+        if (!g_csv_path.empty()) {
+            g_csv_on.store(true);
+            static const bool cpu_registered = (hitch_add_csv_counter("proc_cpu_us", []() -> uint64_t {   // CPU time of all threads
+                FILETIME c, e, k, u;
+                if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return 0;
+                return ((((uint64_t)k.dwHighDateTime << 32) | k.dwLowDateTime) + (((uint64_t)u.dwHighDateTime << 32) | u.dwLowDateTime)) / 10;
+            }), true);
+            (void)cpu_registered;
+        }
     }
     g_hitch_on.store(true);
     s.stop = false;

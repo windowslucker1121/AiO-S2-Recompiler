@@ -149,6 +149,13 @@ if(NOT GAME_RELEASE)
     target_compile_definitions(game_exe PRIVATE GAME_DEV_ROOT="${GAME_ROOT}")
 endif()
 target_link_libraries(game_exe PRIVATE ${GM_MODULE_LIBS} nxrt_game_${GM_ID} nxrt_gfx nxrt)   # nxrt_game_<id>: runtime/games/<id>
+# Lifted libraries built with NX_PGO=generate (recomp/cmake/NxRecomp.cmake) need clang's profile runtime: the full path of
+# clang_rt.profile-x86_64.lib (lib/clang/<n>/lib/windows of the LLVM that built them). Empty: none.
+set(GAME_LLVM_PROFILE_LIB "" CACHE FILEPATH "clang_rt.profile-x86_64.lib for instrumented (PGO generate) lifted libraries")
+if(GAME_LLVM_PROFILE_LIB)
+    target_link_libraries(game_exe PRIVATE "${GAME_LLVM_PROFILE_LIB}")
+    target_link_options(game_exe PRIVATE "/INCLUDE:__llvm_profile_runtime")
+endif()
 # Same link options as the runtime test executables: a linker map next to the exe (host frames get names), a big main stack (lifted
 # code nests deeply), low host allocations so the guest ranges at 0x71_0000_0000 and up stay free.
 if(GAME_RELEASE)

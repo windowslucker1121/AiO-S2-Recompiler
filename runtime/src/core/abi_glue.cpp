@@ -13,6 +13,7 @@
 #include "nxrt/dispatch.h"
 #include "nxrt/kernel.h"
 #include "nxrt/log.h"
+#include "nxrt/memory.h"
 #include "nxrt/module.h"
 #include "nxrt/nxmodule.h"
 #include "nxrt/svc.h"
@@ -50,6 +51,39 @@ void host_import(Ctx* c, uint32_t import_id) {
     nxrt::dispatch_call(c, target);
     c->in_import = saved_name;
     c->import_from = saved_from;
+}
+
+// Inline-cache misses (ctx.h NX_ICALL / NX_IIMPORT; nxrt/dispatch.h ic_fill). A lifted function found for the address fills the
+// site's cache and is called; everything else (HLE thunks, guest longjmp landings, unknown addresses, a site that keeps changing its
+// target) goes the ordinary way.
+void nx_icall_miss(Ctx* c, uint64_t addr, NxIc* ic) {
+    if (__atomic_load_n(&ic->state, __ATOMIC_RELAXED) != 2 && addr - nxrt::mem::kHleBase >= nxrt::mem::kHleSize && nxrt::ic_enabled()) {
+        if (nxrt::GuestFn fn = nxrt::fn_lookup(addr)) {
+            nxrt::ic_fill(ic, addr, fn);
+            fn(c);
+            return;
+        }
+    }
+    nxrt::dispatch_call(c, addr);
+}
+
+// An import whose target is a lifted function of another module, or a leaf HLE handler (strlen, memcpy, ...), is cached: later calls
+// skip the resolution, the import count and the in_import bookkeeping (diagnostics only; HLE handlers that are not leaves keep it).
+void nx_iimport_miss(Ctx* c, uint32_t import_id, NxIc* ic) {
+    if (__atomic_load_n(&ic->state, __ATOMIC_RELAXED) != 2 && nxrt::ic_enabled()) {
+        const uint64_t target = nxrt::import_resolve(import_id);
+        nxrt::GuestFn fn = nullptr;
+        if (target - nxrt::mem::kHleBase < nxrt::mem::kHleSize)
+            fn = nxrt::hle_leaf_fn(target);
+        else if (target)
+            fn = nxrt::fn_lookup(target);
+        if (fn) {
+            nxrt::ic_fill(ic, target, fn);
+            fn(c);
+            return;
+        }
+    }
+    host_import(c, import_id);
 }
 
 void guest_trap(const char* what, uint64_t addr) { nxrt::trap(what, addr); }

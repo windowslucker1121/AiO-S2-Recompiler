@@ -1,0 +1,16 @@
+Ryujinx shader translator, ControlFlowGraph.Create: the blocks go through translator/BlockOrder.cs before anything else sees
+them (every non-loop edge forward, loops contiguous; NXRT_HARNESS_BLOCK_ORDER=0 keeps the emission order). See BlockOrder.cs.
+The Ryujinx code in the context lines is MIT.
+--- a/Translation/ControlFlowGraph.cs
++++ b/Translation/ControlFlowGraph.cs
+@@ -152,9 +152,9 @@
+                         block.Index = blkIndex;
+                     }
+                 }
+             } while (hasUnreachable);
+
+-            return new ControlFlowGraph(blocks.ToArray());
++            return new ControlFlowGraph(BlockOrder.Run(blocks.ToArray()));
+         }
+
+         private static bool EndsWithUnconditionalInst(INode node)

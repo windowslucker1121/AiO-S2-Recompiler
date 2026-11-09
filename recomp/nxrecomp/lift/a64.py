@@ -60,6 +60,15 @@ def T(sf):
     return 'uint64_t' if sf else 'uint32_t'
 
 
+# A scalar write of `t` to the low lane of v<rd>, the rest of the register cleared: built as one V128 and stored once (ctx.h
+# vmk*), not zeroed and then patched (two stores that a later 16-byte read cannot forward from).
+_VMK = {'f[0]': 'vmkf', 'df[0]': 'vmkd', 'w[0]': 'vmk32', 'd[0]': 'vmk64', 'h[0]': 'vmk32'}
+
+
+def vput(rd, field):
+    return 'c->v[%d] = %s(t);' % (rd, _VMK[field])
+
+
 def decode_bitmasks(n, imms, immr, datasize):
     v = (n << 6) | (~imms & 0x3f)
     length = v.bit_length() - 1
@@ -251,6 +260,11 @@ class Fn:
         if (w & 0xffffffe0) == 0xd51b4200:               # msr nzcv, xt
             return 'set_nzcv(c, (int)(%s >> 28));' % X(rt)
         if (w & 0xfffff0ff) in (0xd50330bf, 0xd503309f):  # dmb / dsb: x86 is stronger than AArch64 except store->load
+            # CRm<1:0> is the access type: 01 = LD (loads before the barrier against later loads and stores), 10 = ST (stores
+            # against stores), 11 = all. x86 (TSO) keeps LD and ST ordering in hardware, so those need only a compiler
+            # barrier; the full forms also order stores against later loads, which only mfence gives.
+            if bits(w, 9, 8) in (1, 2):
+                return '__atomic_signal_fence(__ATOMIC_SEQ_CST);'
             return '__atomic_thread_fence(__ATOMIC_SEQ_CST);'
         if (w & 0xfffff0ff) == 0xd503305f:               # clrex: the monitor is closed
             return 'c->ex_addr = ~0ULL;'
@@ -573,7 +587,7 @@ class Fn:
                 src = R(rn, sf)
                 if opcode == 2:
                     src = '(%s)%s' % ('int64_t' if sf else 'int32_t', src)
-                return '{ %s t = (%s)%s * (%s)%s; vzero(&c->v[%d]); c->v[%d].%s = t; }' % (ft, ft, src, ft, repr(2.0 ** -fbits), rd, rd, f)
+                return '{ %s t = (%s)%s * (%s)%s; %s }' % (ft, ft, src, ft, repr(2.0 ** -fbits), vput(rd, f))
             if rmode == 3 and opcode in (0, 1):              # FCVTZS / FCVTZU
                 return SET(rd, sf, 'f2%s%d(trunc((double)c->v[%d].%s * %s))' % ('u' if opcode else 's', 64 if sf else 32, rn, f, repr(2.0 ** fbits)))
             raise Unimpl('fcvt')
@@ -593,11 +607,11 @@ class Fn:
                     src = R(rn, sf)
                     if opcode == 2:
                         src = '(%s)%s' % ('int64_t' if sf else 'int32_t', src)
-                    return '{ %s t = (%s)%s; vzero(&c->v[%d]); c->v[%d].%s = t; }' % (ft, ft, src, rd, rd, f)
+                    return '{ %s t = (%s)%s; %s }' % (ft, ft, src, vput(rd, f))
                 if rmode == 0 and opcode == 6:
                     return SET(rd, sf, 'c->v[%d].%s' % (rn, 'd[0]' if sf else 'w[0]'))
                 if rmode == 0 and opcode == 7:
-                    return '{ uint64_t t = %s; vzero(&c->v[%d]); c->v[%d].%s = t; }' % (R(rn, sf), rd, rd, 'd[0]' if sf else 'w[0]')
+                    return '{ uint64_t t = %s; %s }' % (R(rn, sf), vput(rd, 'd[0]' if sf else 'w[0]'))
                 rnd = {(3, 0): 'trunc', (3, 1): 'trunc', (0, 0): 'rint', (0, 1): 'rint', (1, 0): 'ceil', (1, 1): 'ceil',
                        (2, 0): 'floor', (2, 1): 'floor', (0, 4): 'round', (0, 5): 'round'}.get((rmode, opcode))
                 if rnd is None:
@@ -608,10 +622,10 @@ class Fn:
                 # FCVT to or from half precision (opcode 7 = to half; type 3 = from half, opcode 4 / 5 = to single / double)
                 op = bits(w, 20, 15)
                 if ty != 3 and op == 7:
-                    return '{ uint16_t t = %s(c->v[%d].%s); vzero(&c->v[%d]); c->v[%d].h[0] = t; }' % ('f64_to_half' if ty else 'f32_to_half', rn, 'df[0]' if ty else 'f[0]', rd, rd)
+                    return '{ uint16_t t = %s(c->v[%d].%s); %s }' % ('f64_to_half' if ty else 'f32_to_half', rn, 'df[0]' if ty else 'f[0]', vput(rd, 'h[0]'))
                 if ty == 3 and op in (4, 5):
                     tf, tt, fn = ('df[0]', 'double', 'half_to_f64') if op == 5 else ('f[0]', 'float', 'half_to_f32')
-                    return '{ %s t = %s(c->v[%d].h[0]); vzero(&c->v[%d]); c->v[%d].%s = t; }' % (tt, fn, rn, rd, rd, tf)
+                    return '{ %s t = %s(c->v[%d].h[0]); %s }' % (tt, fn, rn, vput(rd, tf))
             if bits(w, 31, 24) != 0x1e or ty > 1:
                 raise Unimpl('fp16')
             f = 'df[0]' if ty else 'f[0]'
@@ -620,14 +634,14 @@ class Fn:
 
             nbits = 64 if ty else 32                 # the arithmetic is exact in fpexact.h (fp_<op><bits>); setf adds no NaN fix
             def setf(expr):
-                return '{ %s t = %s; vzero(&c->v[%d]); c->v[%d].%s = t; }' % (ft, expr, rd, rd, f)
+                return '{ %s t = %s; %s }' % (ft, expr, vput(rd, f))
             a, b = 'c->v[%d].%s' % (rn, f), 'c->v[%d].%s' % (rm, f)
             if bits(w, 11, 10) == 2:
                 op = bits(w, 15, 12)
                 if op < 4:                           # FMUL, FDIV, FADD, FSUB
                     return setf('fp_%s%d(%s, %s)' % (('mul', 'div', 'add', 'sub')[op], nbits, a, b))
                 if op in (4, 5, 6, 7):               # FMAX, FMIN, FMAXNM, FMINNM: exact NaN and signed-zero rules (fpexact.h); the result is an operand, no fnan
-                    return '{ %s t = fp_maxmin%d(%s, %s, %d, %d); vzero(&c->v[%d]); c->v[%d].%s = t; }' % (ft, 64 if ty else 32, a, b, op & 1, op >> 1 & 1, rd, rd, f)
+                    return '{ %s t = fp_maxmin%d(%s, %s, %d, %d); %s }' % (ft, 64 if ty else 32, a, b, op & 1, op >> 1 & 1, vput(rd, f))
                 if op == 8:                          # FNMUL = FPNeg(FPMul(n, m)): the sign is flipped after the product
                     return setf('fp_neg%d(fp_mul%d(%s, %s))' % (nbits, nbits, a, b))
                 raise Unimpl('fp2')
@@ -644,7 +658,7 @@ class Fn:
                 if op in (4, 5):
                     tf, tt = ('df[0]', 'double') if op == 5 else ('f[0]', 'float')
                     # FCVT single <-> double: a signalling NaN is quietened on the bit patterns (fp_s2d / fp_d2s, fpexact.h)
-                    return '{ %s t = %s(%s); vzero(&c->v[%d]); c->v[%d].%s = t; }' % (tt, 'fp_s2d' if op == 5 else 'fp_d2s', a, rd, rd, tf)
+                    return '{ %s t = %s(%s); %s }' % (tt, 'fp_s2d' if op == 5 else 'fp_d2s', a, vput(rd, tf))
                 # FRINTN (8) nearest-even, FRINTP (9) ceiling, FRINTM (10) floor, FRINTZ (11) towards zero,
                 # FRINTA (12) nearest ties away, FRINTX (14) and FRINTI (15) the current mode = nearest-even
                 frmode = {8: 0, 9: 3, 10: 2, 11: 4, 12: 1, 14: 0, 15: 0}.get(op)
@@ -681,7 +695,7 @@ class Fn:
             fma = 'fp_fma%d' % nbits
             expr = ['%s(%s, %s, %s)' % (fma, a, b, r), '%s(%s, %s, %s)' % (fma, na, b, r),
                     '%s(%s, %s, %s)' % (fma, na, b, nr), '%s(%s, %s, %s)' % (fma, a, b, nr)][o1 * 2 + o0]
-            return '{ %s t = %s; vzero(&c->v[%d]); c->v[%d].%s = t; }' % (ft, expr, rd, rd, f)
+            return '{ %s t = %s; %s }' % (ft, expr, vput(rd, f))
         return self.simd(w, pc)
 
     def simd(self, w, pc):
@@ -786,7 +800,7 @@ class Fn:
                 return 'v_i1v(%s, %s, %s, %d, %d);' % (V(rd), V(rn), op, size, icount(size))
             if scalar and u and bits(w, 20, 17) == 8 and bits(w, 16, 12) == 0x0d and bits(w, 11, 10) == 2:
                 f, ft = ('df', 'double') if sz else ('f', 'float')   # faddp scalar
-                return '{ %s t = c->v[%d].%s[0] + c->v[%d].%s[1]; vzero(%s); c->v[%d].%s[0] = t; }' % (ft, rn, f, rn, f, V(rd), rd, f)
+                return '{ %s t = c->v[%d].%s[0] + c->v[%d].%s[1]; %s }' % (ft, rn, f, rn, f, vput(rd, f + '[0]'))
             if bits(w, 11, 10) == 0 and not scalar and size < 3:    # SMO addition: three registers, different types
                 acc = {0xc: 0, 0x8: 1, 0xa: 2}.get(bits(w, 15, 12))  # SMULL/UMULL, SMLAL/UMLAL, SMLSL/UMLSL (and the "2" forms)
                 if acc is not None:

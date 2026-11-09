@@ -65,8 +65,26 @@ struct GfxEntry {
     VkPipeline second = VK_NULL_HANDLE;
     VkPipeline alt = VK_NULL_HANDLE;                 // measurement only ([nvn] gpl_ab): the optimised pipeline, kept next to the linked one
     std::shared_ptr<PipeUpgrade> up;
+    bool linked = false;                             // second came from pipeline library parts (gpl_link) and was not replaced by a whole one yet
 };
 std::unordered_map<uint64_t, std::vector<GfxEntry>> g_gfx;
+// Statistics (render thread): pipeline look-ups that returned a linked vs a whole pipeline, logged every 10 s (linked_pipeline_log).
+uint64_t g_lk_linked = 0, g_lk_whole = 0, g_lk_upgraded = 0;
+void linked_pipeline_log() {
+    static auto last = std::chrono::steady_clock::now();
+    static uint64_t p_l = 0, p_w = 0;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(10)) return;
+    const double s = std::chrono::duration<double>(now - last).count();
+    last = now;
+    size_t live_linked = 0, live = 0;
+    for (const auto& kv : g_gfx)
+        for (const GfxEntry& e : kv.second) { ++live; live_linked += e.linked ? 1 : 0; }
+    NXLOG_I(kTag, "pipeline binds over %.1f s: %llu of linked pipelines, %llu of whole ones; %zu of %zu graphics pipelines are still linked (%llu replaced so far)", s,
+            static_cast<unsigned long long>(g_lk_linked - p_l), static_cast<unsigned long long>(g_lk_whole - p_w), live_linked, live,
+            static_cast<unsigned long long>(g_lk_upgraded));
+    p_l = g_lk_linked; p_w = g_lk_whole;
+}
 std::map<std::pair<const ShaderInfo*, VkPipelineLayout>, VkPipeline> g_compute;
 VkPipelineCache g_cache = VK_NULL_HANDLE;
 bool g_cache_tried = false;
@@ -734,6 +752,46 @@ const VkPipelineDynamicStateCreateInfo* mesh_dynamic_state() {
     return &dyn.ci;
 }
 
+namespace {
+// [nvn] exp_pipeline_stats (architecture experiment E5, measurement only): pipelines are created with CAPTURE_STATISTICS and the driver's
+// statistics of each executable (registers, binary size ...) are logged with the shader hashes. The flag changes the pipeline cache key.
+bool exp_pipeline_stats() {
+    static const bool on = config_get_bool("nvn", "exp_pipeline_stats", false);
+    return on;
+}
+void log_pipeline_stats(VkPipeline pipe, const std::string& what) {
+    if (!pipe || !vkGetPipelineExecutablePropertiesKHR || !vkGetPipelineExecutableStatisticsKHR) return;
+    VkPipelineInfoKHR pi = {VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR};
+    pi.pipeline = pipe;
+    uint32_t n = 0;
+    if (vkGetPipelineExecutablePropertiesKHR(vkdev(), &pi, &n, nullptr) != VK_SUCCESS || !n) return;
+    std::vector<VkPipelineExecutablePropertiesKHR> props(n, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR});
+    vkGetPipelineExecutablePropertiesKHR(vkdev(), &pi, &n, props.data());
+    for (uint32_t i = 0; i < n; ++i) {
+        VkPipelineExecutableInfoKHR ei = {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR};
+        ei.pipeline = pipe;
+        ei.executableIndex = i;
+        uint32_t ns = 0;
+        vkGetPipelineExecutableStatisticsKHR(vkdev(), &ei, &ns, nullptr);
+        std::vector<VkPipelineExecutableStatisticKHR> st(ns, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR});
+        if (ns) vkGetPipelineExecutableStatisticsKHR(vkdev(), &ei, &ns, st.data());
+        std::string line;
+        for (const auto& s : st) {
+            char b[160];
+            switch (s.format) {
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR: std::snprintf(b, sizeof b, "%s=%u; ", s.name, s.value.b32); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR: std::snprintf(b, sizeof b, "%s=%lld; ", s.name, (long long)s.value.i64); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR: std::snprintf(b, sizeof b, "%s=%llu; ", s.name, (unsigned long long)s.value.u64); break;
+            default: std::snprintf(b, sizeof b, "%s=%g; ", s.name, s.value.f64); break;
+            }
+            line += b;
+        }
+        NXLOG_I("nvn.exp", "E5 pipeline %s exec %u (%s, stages 0x%x, subgroup %u): %s", what.c_str(), i, props[i].name,
+                static_cast<unsigned>(props[i].stages), props[i].subgroupSize, line.c_str());
+    }
+}
+}  // namespace
+
 VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     ensure_cache();
     const auto t0 = std::chrono::steady_clock::now();
@@ -846,8 +904,11 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
     gi.pColorBlendState = &cb;
     gi.pDynamicState = mesh ? mesh_dynamic_state() : pipeline_dynamic_state();
     gi.layout = layout.layout;
+    if (exp_pipeline_stats()) gi.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
     VkPipeline pipe = VK_NULL_HANDLE;
     const VkResult r = create_graphics_pipeline_tracked(vkdev(), g_cache, &gi, &pipe);
+    if (r == VK_SUCCESS && exp_pipeline_stats())
+        log_pipeline_stats(pipe, std::string(mesh ? "ms " : "vs ") + (mesh ? key.mesh[1]->hash : key.stage[0] ? key.stage[0]->hash : std::string("-")) + " fs " + (key.stage[1] ? key.stage[1]->hash : std::string("-")));
     const double ms_taken = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (r != VK_SUCCESS) {
         NXLOG_E(kTag, "graphics pipeline failed (%d): %s %s fs %s, %u colour targets", static_cast<int>(r), mesh ? "ms" : "vs",
@@ -878,11 +939,22 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     for (auto& e : bucket)
         if (e.first == key) {
             counters().pipeline_cache_hits.fetch_add(1, std::memory_order_relaxed);
-            if (e.up && e.up->state.load(std::memory_order_acquire) != 0) gpl_take_upgrade(e.second, e.alt, e.up);
-            if (e.alt && gpl_ab_whole()) return e.alt;
+            if (e.up && e.up->state.load(std::memory_order_acquire) != 0) {
+                const VkPipeline before = e.second;
+                gpl_take_upgrade(e.second, e.alt, e.up);
+                if (e.second != before && e.linked) { e.linked = false; ++g_lk_upgraded; }
+            }
+            linked_pipeline_log();
+            if (e.alt && gpl_ab_whole()) { ++g_lk_whole; return e.alt; }
+            ++(e.linked ? g_lk_linked : g_lk_whole);
             return e.second;
         }
     prewarm_init();
+    struct MissTimer {   // the hitch line / [diag] frame_csv: a pipeline the render thread did not have (links, waits for parts compiled ahead, builds)
+        uint64_t t0 = nxrt::hitch_on_render_thread() ? nxrt::hitch_ticks() : 0;
+        ~MissTimer() { if (t0) nxrt::hitch_phase_add(nxrt::kHpRenderPipeMiss, nxrt::hitch_ticks() - t0); }
+    } miss_timer;
+    NXFT_MIN("pipe.miss", 200000);
     VkPipeline pipe = VK_NULL_HANDLE;
     std::shared_ptr<PipeUpgrade> later;          // the key file's whole pipeline, still being built: it replaces the linked one
     // compiled ahead on a worker; one being compiled is linked from its parts meanwhile when they are built (else waited for)
@@ -909,7 +981,9 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
         g_mesh_builds.emplace_back(key, std::move(b));
         return VK_NULL_HANDLE;
     }
-    if (prewarm_take(key, &pipe, [&] { return gpl_ready(key, layout); }, &later)) {
+    bool taken = false;
+    { NXFT_MIN("pipe.prewarm_take", 200000); taken = prewarm_take(key, &pipe, [&] { return gpl_ready(key, layout); }, &later); }
+    if (taken) {
         ++g_pipeline_count;
         g_gfx_keys.add(1);
         bucket.push_back({key, pipe, VK_NULL_HANDLE, nullptr});
@@ -917,14 +991,14 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     }
     std::shared_ptr<PipeUpgrade> up;
     bool pending = false;
-    pipe = gpl_link(key, layout, later ? nullptr : &up, &pending); // linked from shader parts compiled ahead (null: not eligible or a part failed)
+    { NXFT_MIN("pipe.gpl_link", 200000); pipe = gpl_link(key, layout, later ? nullptr : &up, &pending); } // linked from shader parts compiled ahead (null: not eligible or a part failed)
     if (later) up = later;
-    prewarm_record(key);                         // every key a draw asked for: the next run builds it from boot
+    { NXFT_MIN("pipe.record", 200000); prewarm_record(key); }   // every key a draw asked for: the next run builds it from boot
     if (pending && !later) return VK_NULL_HANDLE;   // its parts are compiling in the background: the draw is skipped, the next one asks again
     g_gfx_keys.add(1);                           // every path below adds one entry to the bucket
     if (pipe) {
         ++g_pipeline_count;
-        bucket.push_back({key, pipe, VK_NULL_HANDLE, up});
+        bucket.push_back({key, pipe, VK_NULL_HANDLE, up, true});
         return pipe;
     }
     if (pending) {                               // (rare) parts gone missing between the check and the link: skipped until the whole pipeline is in
@@ -950,11 +1024,12 @@ VkPipeline create_compute(const ShaderInfo* cs, VkShaderModule m, VkPipelineLayo
     ci.stage.module = m;
     ci.stage.pName = "main";
     ci.layout = layout;
+    if (exp_pipeline_stats()) ci.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
     VkPipeline pipe = VK_NULL_HANDLE;
     const uint64_t tp0 = nxrt::hitch_ticks();
     const auto t0 = std::chrono::steady_clock::now();
     const VkResult cr = vkCreateComputePipelines(vkdev(), g_cache, 1, &ci, nullptr, &pipe);
-    if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - tp0);
+    nxrt::hitch_phase_add(nxrt::hitch_on_render_thread() ? nxrt::kHpRenderPipeline : nxrt::kHpPipelineBg, nxrt::hitch_ticks() - tp0);
     const double ms = ms_from(t0);
     if (ms >= 250.0)
         NXLOG_W(kTag, "compute pipeline %s took %.0f ms to create (%zu bytes of SPIR-V)", cs->hash.c_str(), ms, cs->spirv.size() * 4);
@@ -962,6 +1037,7 @@ VkPipeline create_compute(const ShaderInfo* cs, VkShaderModule m, VkPipelineLayo
         NXLOG_E(kTag, "compute pipeline failed for %s", cs->hash.c_str());
         return VK_NULL_HANDLE;
     }
+    if (exp_pipeline_stats()) log_pipeline_stats(pipe, "cs " + cs->hash);
     counters().pipelines_created.fetch_add(1);
     ++g_pipeline_count;
     g_pipes_created.add(1);

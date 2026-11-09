@@ -28,6 +28,21 @@
 #include <string.h>
 #include <math.h>
 
+/* NX_HELPER: the helpers below that lifted code calls at nearly every instruction (flags, memory, scalar and vector FP).
+ * Always inlined: their mode arguments (op, size, lane count, condition) are constants at every call site, so the switches
+ * fold away; at -O1 / -Os the inliner kept many of them as calls (v_f3v, fcmp, fp_fma32). NX_COLD_HELPER: slow paths that
+ * almost never run (the NaN operand rules): out of line and cold, so they do not bloat the hot code they are called from. */
+#if defined(__clang__) || defined(__GNUC__)
+#define NX_HELPER static inline __attribute__((always_inline))
+#define NX_COLD_HELPER static inline __attribute__((noinline, cold))
+#elif defined(_MSC_VER)
+#define NX_HELPER static __forceinline
+#define NX_COLD_HELPER static inline __declspec(noinline)
+#else
+#define NX_HELPER static inline
+#define NX_COLD_HELPER static inline
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -74,6 +89,30 @@ void call_indirect(Ctx *c, uint64_t addr);
 #define NX_IMPORT_MODULE(id) ((uint32_t)(id) >> 20)
 #define NX_IMPORT_SYM(id) ((uint32_t)(id) & 0xfffffu)
 void host_import(Ctx *c, uint32_t import_id);
+/* Inline caches (nxrecomp/program.py inline_caches): every indirect call site and every import stub of the lifted code owns a
+ * zero-initialised static NxIc. The fast path below calls the cached target directly (one load, one compare, an indirect call
+ * the host predicts per site); a miss goes to the runtime, which dispatches the call as call_indirect / host_import would and
+ * may fill the cache. The runtime fills it only with a lifted function that nothing replaces (no HLE thunk, no host override)
+ * and points `t` at an immutable NxIcTarget it never frees; it resets every cache it filled when a function registration is
+ * replaced or the import resolution changes. `misses` / `state` belong to the runtime (it stops refilling a site whose target
+ * keeps changing). A runtime without caches implements the two miss functions as call_indirect(c, addr) / host_import(c, id). */
+typedef struct NxIcTarget { uint64_t addr; void (*fn)(Ctx *); } NxIcTarget;
+typedef struct NxIc { const NxIcTarget *t; uint32_t misses; uint32_t state; } NxIc;
+void nx_icall_miss(Ctx *c, uint64_t addr, NxIc *ic);
+void nx_iimport_miss(Ctx *c, uint32_t import_id, NxIc *ic);
+NX_HELPER void nx_icall(Ctx *c, uint64_t addr, NxIc *ic) {
+    const NxIcTarget *t = __atomic_load_n(&ic->t, __ATOMIC_ACQUIRE);
+    if (__builtin_expect(t != 0 && t->addr == addr, 1)) { t->fn(c); return; }
+    nx_icall_miss(c, addr, ic);
+}
+NX_HELPER void nx_iimport(Ctx *c, uint32_t import_id, NxIc *ic) {
+    const NxIcTarget *t = __atomic_load_n(&ic->t, __ATOMIC_ACQUIRE);
+    if (__builtin_expect(t != 0, 1)) { t->fn(c); return; }
+    nx_iimport_miss(c, import_id, ic);
+}
+/* What the lifter emits at an indirect call site / in an import stub: a cache of its own per site. */
+#define NX_ICALL(c, addr) do { static NxIc nx_ic_; nx_icall((c), (addr), &nx_ic_); } while (0)
+#define NX_IIMPORT(c, id) do { static NxIc nx_ic_; nx_iimport((c), (id), &nx_ic_); } while (0)
 /* Raised by the generated code for: an undefined / reserved instruction word, BRK, falling off the end of a function. */
 void guest_trap(const char *what, uint64_t addr);
 /* An instruction the lifter could not translate (a gap in coverage, listed by `cover`). */
@@ -155,8 +194,8 @@ typedef struct NxModule {
 /* ======================================================================================================== */
 
 #define NX_DEF_MEM(bits) \
-    static inline uint##bits##_t rd##bits(uint64_t a) { uint##bits##_t v; memcpy(&v, (void *)(uintptr_t)a, sizeof v); return v; } \
-    static inline void wr##bits(uint64_t a, uint##bits##_t v) { memcpy((void *)(uintptr_t)a, &v, sizeof v); }
+    NX_HELPER uint##bits##_t rd##bits(uint64_t a) { uint##bits##_t v; memcpy(&v, (void *)(uintptr_t)a, sizeof v); return v; } \
+    NX_HELPER void wr##bits(uint64_t a, uint##bits##_t v) { memcpy((void *)(uintptr_t)a, &v, sizeof v); }
 NX_DEF_MEM(8) NX_DEF_MEM(16) NX_DEF_MEM(32) NX_DEF_MEM(64)
 
 /* STXR: store only if the location still holds the value the matching LDXR read (compare-and-swap). Returns 0 on
@@ -187,15 +226,22 @@ static inline uint32_t stxp64(Ctx *c, uint64_t a, uint64_t lo, uint64_t hi) {
     return __atomic_compare_exchange_n((unsigned __int128 *)(uintptr_t)a, &e, n, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ? 0 : 1;
 }
 
-static inline V128 rdv(uint64_t a, int n) { V128 v; v.d[0] = 0; v.d[1] = 0; memcpy(&v, (void *)(uintptr_t)a, (size_t)n); return v; }
-static inline void wrv(uint64_t a, const V128 *v, int n) { memcpy((void *)(uintptr_t)a, v, (size_t)n); }
-static inline void vzero(V128 *v) { v->d[0] = 0; v->d[1] = 0; }
+NX_HELPER V128 rdv(uint64_t a, int n) { V128 v; v.d[0] = 0; v.d[1] = 0; memcpy(&v, (void *)(uintptr_t)a, (size_t)n); return v; }
+NX_HELPER void wrv(uint64_t a, const V128 *v, int n) { memcpy((void *)(uintptr_t)a, v, (size_t)n); }
+NX_HELPER void vzero(V128 *v) { v->d[0] = 0; v->d[1] = 0; }
+/* A scalar FP / SIMD write: the value in the low lane, the rest of the register zero, built in a host register and stored
+ * once (zeroing first and then storing the lane is two stores, and a later 16-byte read of the register then cannot be
+ * forwarded from them). */
+NX_HELPER V128 vmk32(uint32_t w) { V128 r; r.d[0] = w; r.d[1] = 0; return r; }
+NX_HELPER V128 vmk64(uint64_t d) { V128 r; r.d[0] = d; r.d[1] = 0; return r; }
+NX_HELPER V128 vmkf(float f) { uint32_t w; memcpy(&w, &f, 4); return vmk32(w); }
+NX_HELPER V128 vmkd(double f) { uint64_t d; memcpy(&d, &f, 8); return vmk64(d); }
 
 /* ======================================================================================================== */
 /* flags and integer helpers                                                                                  */
 /* ======================================================================================================== */
 
-static inline uint64_t adds64(Ctx *c, uint64_t a, uint64_t b, uint32_t cin) {
+NX_HELPER uint64_t adds64(Ctx *c, uint64_t a, uint64_t b, uint32_t cin) {
     uint64_t r = a + b + cin;
     c->N = (uint32_t)(r >> 63);
     c->Z = r == 0;
@@ -203,7 +249,7 @@ static inline uint64_t adds64(Ctx *c, uint64_t a, uint64_t b, uint32_t cin) {
     c->V = (uint32_t)(((a ^ r) & (b ^ r)) >> 63);
     return r;
 }
-static inline uint32_t adds32(Ctx *c, uint32_t a, uint32_t b, uint32_t cin) {
+NX_HELPER uint32_t adds32(Ctx *c, uint32_t a, uint32_t b, uint32_t cin) {
     uint64_t wide = (uint64_t)a + b + cin;
     uint32_t r = (uint32_t)wide;
     c->N = r >> 31;
@@ -212,12 +258,12 @@ static inline uint32_t adds32(Ctx *c, uint32_t a, uint32_t b, uint32_t cin) {
     c->V = ((a ^ r) & (b ^ r)) >> 31;
     return r;
 }
-static inline uint64_t logic64(Ctx *c, uint64_t r) { c->N = (uint32_t)(r >> 63); c->Z = r == 0; c->C = 0; c->V = 0; return r; }
-static inline uint32_t logic32(Ctx *c, uint32_t r) { c->N = r >> 31; c->Z = r == 0; c->C = 0; c->V = 0; return r; }
-static inline void set_nzcv(Ctx *c, int f) { c->N = (f >> 3) & 1; c->Z = (f >> 2) & 1; c->C = (f >> 1) & 1; c->V = f & 1; }
-static inline uint64_t get_nzcv(const Ctx *c) { return ((uint64_t)c->N << 31) | ((uint64_t)c->Z << 30) | ((uint64_t)c->C << 29) | ((uint64_t)c->V << 28); }
+NX_HELPER uint64_t logic64(Ctx *c, uint64_t r) { c->N = (uint32_t)(r >> 63); c->Z = r == 0; c->C = 0; c->V = 0; return r; }
+NX_HELPER uint32_t logic32(Ctx *c, uint32_t r) { c->N = r >> 31; c->Z = r == 0; c->C = 0; c->V = 0; return r; }
+NX_HELPER void set_nzcv(Ctx *c, int f) { c->N = (f >> 3) & 1; c->Z = (f >> 2) & 1; c->C = (f >> 1) & 1; c->V = f & 1; }
+NX_HELPER uint64_t get_nzcv(const Ctx *c) { return ((uint64_t)c->N << 31) | ((uint64_t)c->Z << 30) | ((uint64_t)c->C << 29) | ((uint64_t)c->V << 28); }
 
-static inline int cond(const Ctx *c, int cc) {
+NX_HELPER int cond(const Ctx *c, int cc) {
     int r;
     switch (cc >> 1) {
     case 0: r = c->Z; break;
@@ -232,44 +278,49 @@ static inline int cond(const Ctx *c, int cc) {
     return (cc & 1) ? !r : r;
 }
 
-static inline void fcmp(Ctx *c, double a, double b) {
+NX_HELPER void fcmp(Ctx *c, double a, double b) {
     if (a != a || b != b) set_nzcv(c, 3);
     else if (a == b) set_nzcv(c, 6);
     else if (a < b) set_nzcv(c, 8);
     else set_nzcv(c, 2);
 }
 
-static inline uint32_t ror32(uint32_t v, unsigned n) { n &= 31; return n ? (v >> n) | (v << (32 - n)) : v; }
-static inline uint64_t ror64(uint64_t v, unsigned n) { n &= 63; return n ? (v >> n) | (v << (64 - n)) : v; }
-static inline uint32_t bswap32(uint32_t v) { return __builtin_bswap32(v); }
-static inline uint64_t bswap64(uint64_t v) { return __builtin_bswap64(v); }
-static inline uint64_t rev32_64(uint64_t v) { return ((uint64_t)bswap32((uint32_t)(v >> 32)) << 32) | bswap32((uint32_t)v); }
-static inline uint32_t rev16_32(uint32_t v) { return ((v & 0xff00ff00u) >> 8) | ((v & 0x00ff00ffu) << 8); }
-static inline uint64_t rev16_64(uint64_t v) { return ((v & 0xff00ff00ff00ff00ull) >> 8) | ((v & 0x00ff00ff00ff00ffull) << 8); }
-static inline uint32_t clz32(uint32_t v) { return v ? (uint32_t)__builtin_clz(v) : 32; }
-static inline uint64_t clz64(uint64_t v) { return v ? (uint64_t)__builtin_clzll(v) : 64; }
-static inline uint32_t cls32(uint32_t v) { return clz32(((v >> 1) ^ v) & 0x7fffffffu) - 1; }
-static inline uint64_t cls64(uint64_t v) { return clz64(((v >> 1) ^ v) & 0x7fffffffffffffffull) - 1; }
+NX_HELPER uint32_t ror32(uint32_t v, unsigned n) { n &= 31; return n ? (v >> n) | (v << (32 - n)) : v; }
+NX_HELPER uint64_t ror64(uint64_t v, unsigned n) { n &= 63; return n ? (v >> n) | (v << (64 - n)) : v; }
+NX_HELPER uint32_t bswap32(uint32_t v) { return __builtin_bswap32(v); }
+NX_HELPER uint64_t bswap64(uint64_t v) { return __builtin_bswap64(v); }
+NX_HELPER uint64_t rev32_64(uint64_t v) { return ((uint64_t)bswap32((uint32_t)(v >> 32)) << 32) | bswap32((uint32_t)v); }
+NX_HELPER uint32_t rev16_32(uint32_t v) { return ((v & 0xff00ff00u) >> 8) | ((v & 0x00ff00ffu) << 8); }
+NX_HELPER uint64_t rev16_64(uint64_t v) { return ((v & 0xff00ff00ff00ff00ull) >> 8) | ((v & 0x00ff00ff00ff00ffull) << 8); }
+NX_HELPER uint32_t clz32(uint32_t v) { return v ? (uint32_t)__builtin_clz(v) : 32; }
+NX_HELPER uint64_t clz64(uint64_t v) { return v ? (uint64_t)__builtin_clzll(v) : 64; }
+NX_HELPER uint32_t cls32(uint32_t v) { return clz32(((v >> 1) ^ v) & 0x7fffffffu) - 1; }
+NX_HELPER uint64_t cls64(uint64_t v) { return clz64(((v >> 1) ^ v) & 0x7fffffffffffffffull) - 1; }
+#if defined(__clang__)
+NX_HELPER uint32_t rbit32(uint32_t v) { return __builtin_bitreverse32(v); }
+NX_HELPER uint64_t rbit64(uint64_t v) { return __builtin_bitreverse64(v); }
+#else
 static inline uint32_t rbit32(uint32_t v) { uint32_t r = 0; for (int i = 0; i < 32; i++) r |= ((v >> i) & 1u) << (31 - i); return r; }
 static inline uint64_t rbit64(uint64_t v) { uint64_t r = 0; for (int i = 0; i < 64; i++) r |= ((v >> i) & 1ull) << (63 - i); return r; }
-static inline uint64_t umulh(uint64_t a, uint64_t b) { return (uint64_t)(((unsigned __int128)a * b) >> 64); }
-static inline uint64_t smulh(uint64_t a, uint64_t b) { return (uint64_t)(((__int128)(int64_t)a * (int64_t)b) >> 64); }
-static inline uint32_t sdiv32(uint32_t a, uint32_t b) {
+#endif
+NX_HELPER uint64_t umulh(uint64_t a, uint64_t b) { return (uint64_t)(((unsigned __int128)a * b) >> 64); }
+NX_HELPER uint64_t smulh(uint64_t a, uint64_t b) { return (uint64_t)(((__int128)(int64_t)a * (int64_t)b) >> 64); }
+NX_HELPER uint32_t sdiv32(uint32_t a, uint32_t b) {
     if (b == 0) return 0;
     if (a == 0x80000000u && b == 0xffffffffu) return a;
     return (uint32_t)((int32_t)a / (int32_t)b);
 }
-static inline uint64_t sdiv64(uint64_t a, uint64_t b) {
+NX_HELPER uint64_t sdiv64(uint64_t a, uint64_t b) {
     if (b == 0) return 0;
     if (a == 0x8000000000000000ull && b == ~0ull) return a;
     return (uint64_t)((int64_t)a / (int64_t)b);
 }
 
 /* float -> integer with AArch64 saturation semantics */
-static inline uint32_t f2s32(double v) { if (v != v) return 0; if (v >= 2147483647.0) return 0x7fffffffu; if (v <= -2147483648.0) return 0x80000000u; return (uint32_t)(int32_t)v; }
-static inline uint32_t f2u32(double v) { if (v != v || v <= 0) return 0; if (v >= 4294967295.0) return 0xffffffffu; return (uint32_t)v; }
-static inline uint64_t f2s64(double v) { if (v != v) return 0; if (v >= 9223372036854775807.0) return 0x7fffffffffffffffull; if (v <= -9223372036854775808.0) return 0x8000000000000000ull; return (uint64_t)(int64_t)v; }
-static inline uint64_t f2u64(double v) { if (v != v || v <= 0) return 0; if (v >= 18446744073709551615.0) return ~0ull; return (uint64_t)v; }
+NX_HELPER uint32_t f2s32(double v) { if (v != v) return 0; if (v >= 2147483647.0) return 0x7fffffffu; if (v <= -2147483648.0) return 0x80000000u; return (uint32_t)(int32_t)v; }
+NX_HELPER uint32_t f2u32(double v) { if (v != v || v <= 0) return 0; if (v >= 4294967295.0) return 0xffffffffu; return (uint32_t)v; }
+NX_HELPER uint64_t f2s64(double v) { if (v != v) return 0; if (v >= 9223372036854775807.0) return 0x7fffffffffffffffull; if (v <= -9223372036854775808.0) return 0x8000000000000000ull; return (uint64_t)(int64_t)v; }
+NX_HELPER uint64_t f2u64(double v) { if (v != v || v <= 0) return 0; if (v >= 18446744073709551615.0) return ~0ull; return (uint64_t)v; }
 
 #ifdef __cplusplus
 }

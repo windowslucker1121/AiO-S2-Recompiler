@@ -19,12 +19,38 @@
 # (nxrecomp/ctx.h) and the generated folder (funcs.h).
 #
 # Flags: clang-cl, C++20, no exceptions/RTTI, -fno-strict-aliasing and -ffp-contract=off (smo-recomp's: lifted FP must not be
-# fused or reordered), -mcx16 (128-bit exclusives are cmpxchg16b). Functions longer than the game config's optnone_insns are
-# emitted with NX_OPTNONE by the lifter itself (bounded compile time); cmake/nx_cc_launcher.py adds the time-limit fallback.
+# fused or reordered), -mcx16 (128-bit exclusives are cmpxchg16b), NX_LIFT_OPT (/O2) and NX_ISA (-march=x86-64-v3, or
+# baseline). Functions longer than the game config's optnone_insns are emitted with NX_OPTNONE by the lifter itself (bounded
+# compile time); cmake/nx_cc_launcher.py adds the time-limit fallback.
 
 set(NXRECOMP_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." CACHE PATH "recomp/ folder")
 set(NX_PYTHON "${NXRECOMP_ROOT}/../tools/.venv/Scripts/python.exe" CACHE FILEPATH "Python with the nxrecomp requirements")
-set(NX_OPT "/O1" CACHE STRING "optimisation flag of the lifted code (clang-cl syntax)")
+# (NX_LIFT_OPT, not the earlier NX_OPT: build folders configured before keep NX_OPT=/O1 in their cache)
+set(NX_LIFT_OPT "/O2" CACHE STRING "optimisation flag of the lifted code (clang-cl syntax)")
+# Target ISA of the lifted code. x86-64-v3 (AVX2, FMA3, BMI1/2, LZCNT, MOVBE; Haswell / Zen 1 and later) turns the exact
+# fmaf / fma of FMADD and FMLA into one vfmadd and FRINT* into vroundss instead of C library calls. -ffp-contract=off stays,
+# so separate FMUL + FADD are never fused and results are bit-identical to the baseline build. Release builds for players
+# whose CPUs lack AVX2 configure with -DNX_ISA=baseline (plain x86-64, SSE2; scripts/build_game.cmd passes the environment
+# variable NX_ISA through).
+set(NX_ISA "x86-64-v3" CACHE STRING "target ISA of the lifted code: x86-64-v3 (default) or baseline (any x86-64 CPU)")
+set_property(CACHE NX_ISA PROPERTY STRINGS x86-64-v3 x86-64-v2 baseline)
+if(NX_ISA STREQUAL "baseline")
+  set(NX_ISA_FLAGS "")
+else()
+  set(NX_ISA_FLAGS "-march=${NX_ISA}")
+endif()
+# Profile-guided optimisation of the lifted code (clang instrumentation PGO). NX_PGO=generate builds instrumented libraries (link
+# clang_rt.profile into the exe; the runtime writes the counters, see runtime/docs/CONFIG.md [prof] llvm_profile); NX_PGO_USE=<merged
+# .profdata> (llvm-profdata merge) builds optimised with that profile. Empty (default): neither.
+set(NX_PGO "" CACHE STRING "profile-guided optimisation of the lifted code: empty, or generate")
+set(NX_PGO_USE "" CACHE FILEPATH "a merged .profdata to optimise the lifted code with (empty: none)")
+set(NX_PGO_FLAGS "")
+if(NX_PGO STREQUAL "generate")
+  list(APPEND NX_PGO_FLAGS -fprofile-instr-generate)
+elseif(NX_PGO_USE)
+  # functions the profile never saw keep their normal optimisation; a mismatch (lifter changed since the profile) is not an error
+  list(APPEND NX_PGO_FLAGS "-fprofile-instr-use=${NX_PGO_USE}" -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled)
+endif()
 option(NX_USE_LAUNCHER "wrap lifted-code compiles in cmake/nx_cc_launcher.py (time-limit fallback to optnone / -O0)" OFF)
 
 file(GLOB NX_LIFTER_SOURCES CONFIGURE_DEPENDS
@@ -93,9 +119,13 @@ function(nxrecomp_add_module target)
   target_include_directories(${target} PUBLIC "${NXRECOMP_ROOT}/include" "${A_OUTDIR}")
   target_compile_features(${target} PUBLIC cxx_std_20)
   if(MSVC)   # clang-cl
-    target_compile_options(${target} PRIVATE ${NX_OPT} /w /EHs-c- /GR- -fno-strict-aliasing -ffp-contract=off -mcx16)
+    # /GS-: no stack cookies (the guest has its own stack; host frames of lifted code hold no buffers to protect);
+    # -fno-math-errno: sqrtf of a negative number stays one sqrtss (no errno call; the lifted code never reads errno)
+    target_compile_options(${target} PRIVATE ${NX_LIFT_OPT} ${NX_ISA_FLAGS} /w /EHs-c- /GR- /GS- -fno-strict-aliasing
+                           -ffp-contract=off -fno-math-errno -mcx16 ${NX_PGO_FLAGS})
   else()
-    target_compile_options(${target} PRIVATE -O1 -w -fno-exceptions -fno-rtti -fno-strict-aliasing -ffp-contract=off -mcx16)
+    target_compile_options(${target} PRIVATE -O2 ${NX_ISA_FLAGS} -w -fno-exceptions -fno-rtti -fno-strict-aliasing
+                           -ffp-contract=off -fno-math-errno -mcx16)
   endif()
   if(NX_USE_LAUNCHER)
     set_target_properties(${target} PROPERTIES CXX_COMPILER_LAUNCHER "${NX_PYTHON};${NXRECOMP_ROOT}/cmake/nx_cc_launcher.py")

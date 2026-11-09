@@ -9,8 +9,10 @@
 //
 // Areas in use: nvn-proc (an NVN entry point with no implementation), nvn (an operation the back end leaves out or answers wrongly),
 // draw / dispatch (a draw or dispatch skipped or drawn incompletely, detail = the shader that was missing), import (an unresolved import of
-// a lifted module), ipc (an unhandled service command), svc (an unknown supervisor call). Thread-safe; one mutex and a map lookup per call.
+// a lifted module), ipc (an unhandled service command), svc (an unknown supervisor call). Thread-safe; one mutex and a map lookup per call,
+// so call sites that run per op or per draw use a GapCounter instead.
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -19,6 +21,33 @@
 namespace nxrt {
 
 void gap(const char* area, std::string_view what, std::string_view detail = {});
+// gap() with a count of n (one store update for several occurrences).
+void gap_n(const char* area, std::string_view what, std::string_view detail, uint64_t n);
+
+// A hot call site (per op or per draw): counts with one relaxed atomic add and reaches the store on its first hit, every 4096 hits and
+// whenever the gaps are read or written (gaps_snapshot, gaps_write, gaps_log). area, what and detail are copied; the counter is meant to be
+// a function-local static that lives to the end of the process.
+//   static nxrt::GapCounter vrs("nvn", "VRS palette image not converted"); vrs.hit();
+class GapCounter {
+public:
+    GapCounter(const char* area, std::string_view what, std::string_view detail = {});
+    GapCounter(const GapCounter&) = delete;
+    GapCounter& operator=(const GapCounter&) = delete;
+    void hit() {
+        if ((total_.fetch_add(1, std::memory_order_relaxed) & 4095) == 0) flush();
+    }
+    void flush();   // moves the pending count into the store
+
+private:
+    friend void gap_counters_flush();
+    const char* area_;
+    std::string what_, detail_;
+    std::atomic<uint64_t> total_{0};   // hits so far
+    uint64_t flushed_ = 0;             // of those, in the store (under the registry lock)
+    GapCounter* next_ = nullptr;   // registry (gap_counters_flush)
+};
+// Flushes every GapCounter (done by gaps_snapshot; for tests).
+void gap_counters_flush();
 
 struct GapRecord {
     std::string area, what, detail;

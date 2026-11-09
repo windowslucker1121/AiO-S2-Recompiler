@@ -290,6 +290,8 @@ void host_import(Ctx *c, uint32_t sym) {
     (void)c;
     add_msg(false, "host_import %u is not modelled by the known-answer tests", sym);
 }
+void nx_icall_miss(Ctx *c, uint64_t addr, NxIc *ic) { (void)ic; call_indirect(c, addr); }
+void nx_iimport_miss(Ctx *c, uint32_t id, NxIc *ic) { (void)ic; host_import(c, id); }
 
 void guest_trap(const char *what, uint64_t addr) {
     ++traps;

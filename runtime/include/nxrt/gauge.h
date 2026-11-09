@@ -58,6 +58,10 @@ void soak_note_frame();
 // they must be lock-free (an atomic load).
 void hitch_add_counter(const char* label, uint64_t (*fn)());   // cumulative count / bytes: the hitch line shows the growth during the frame
 void hitch_add_level(const char* label, int64_t (*fn)());      // a level (jobs in flight): shown when non-zero at the end of the frame
+// A cumulative counter only for `[diag] frame_csv` (not on the hitch line: it moves every frame, e.g. draws).
+void hitch_add_csv_counter(const char* label, uint64_t (*fn)());
+// `[diag] frame_csv = <file>` (relative: the instance folder): one row per presented frame with its interval, every counter's growth and every
+// phase's ms inside it (the hitch line's data for all frames, for classifying 1%-low frames offline). Written by the hitch monitor thread.
 void hitch_start();
 void hitch_stop();
 
@@ -85,10 +89,20 @@ enum HitchPhase : int {
     kHpGameSvc,             // the game's presenting thread: inside system calls (the rest of its time between presents is guest code)
     kHpGameIpc,             //   of it: IPC requests (service calls, file reads)
     kHpGameWait,            //   of it: waits (SleepThread, WaitSynchronization, ArbitrateLock, WaitProcessWideKeyAtomic, WaitForAddress)
+    kHpOutFetch,            // any thread: fetching held compute results back to the pool (out_fetch, its GPU wait and copy included)
+    kHpOutFetchFault,       //   of it: fetches started by a guard fault (a CPU thread touched a held result and waits)
+    kHpPipelineBg,          // any thread but the render thread: pipeline creation (background builds, the shader preparation)
+    kHpRenderPipeMiss,      // render thread: graphics pipeline lookups that missed (link from parts, waits for parts compiled ahead, builds; overlaps kHpRenderPipeline)
+    kHpRenderTexCreate,     // render thread: making texture images (format choice, cache entry peek, vkCreateImage and its memory)
+    kHpFaultGuard,          // any thread: faults on guarded pages (held compute results), the guard handler and the unguard included
+    kHpWwSharedWait,        // any thread: write-watch region lock taken shared after a wait (faults, os writes behind an exclusive holder)
+    kHpWwExclHold,          // any thread: write-watch region lock held exclusive (arming, guarding, unguarding)
+    kHpAnyIpc,              // any guest thread: IPC requests (file reads, service calls; the presenting thread's included)
     kHpCount
 };
 uint64_t hitch_ticks();                                  // QueryPerformanceCounter
 void hitch_phase_add(int phase, uint64_t ticks);
+double hitch_phase_seconds(int phase);                   // the phase's total so far (measurement windows, e.g. [nvn] out_index_ab)
 struct HitchTimer {
     int phase;
     uint64_t t0;
