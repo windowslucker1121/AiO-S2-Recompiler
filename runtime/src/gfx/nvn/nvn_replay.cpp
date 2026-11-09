@@ -45,6 +45,7 @@
 #include "nvn_capture.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_arch_exp.h"
+#include "nvn_hazard.h"
 #include "nvn_cmdq.h"
 #include "nvn_tess_gen.h"
 #include "nxrt/lowlat.h"
@@ -231,14 +232,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912 };
+enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbHazard = 1073741824 };
 uint32_t ab_mask() {
     static const uint32_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"hazard", kAbHazard}};
         uint32_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -7154,6 +7155,7 @@ void replay_begin_submit(Frame& f) {
     F = &f;
     if (g_tl) g_tl->replay_serial.store(f.serial, std::memory_order_relaxed);   // the texture look-ahead stops scanning this submission
     cmdq::begin_submission(ab_on(kAbCmdThread));   // [nvn] cmd_thread: a recorder thread makes the vkCmd* calls (nvn_cmdq.cpp)
+    hazard::begin_submission(f.cb, ab_on(kAbHazard));   // [nvn] hazard: barriers where commands touch what others wrote (nvn_hazard.cpp)
     tex_poll_cpu_writes();
     if (extras::LowLatency* ll = extras::lowlat()) ll->submit_begin();     // RENDERSUBMIT_START of the frame (S14)
     if (g_trace_frame == -2) {
@@ -7283,6 +7285,7 @@ void replay_begin_submit(Frame& f) {
                 NXLOG_I(kTag, "dispatches: %llu, %llu right after another with no barrier between but ours (%llu indirect)", (unsigned long long)g_disp_n,
                         (unsigned long long)g_disp_after, (unsigned long long)g_disp_after_ind);
                 NXLOG_I(kTag, "full barriers by site:%s", memory_barrier_sites(16).c_str());
+                if (hazard::enabled()) NXLOG_I(kTag, "%s", hazard::stats_line().c_str());
             }
             NXLOG_I(kTag, "graphics descriptor set binds: %llu made, %llu skipped as already bound (bind_skip)", (unsigned long long)g_bs_bound, (unsigned long long)g_bs_skipped);
             {

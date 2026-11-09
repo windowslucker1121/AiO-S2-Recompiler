@@ -27,6 +27,7 @@
 #include "nxrt/gaps.h"
 #include "vk_gauges.h"
 #include "nvn_capture.h"
+#include "nvn_hazard.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_impl.h"
 #include "nvn_pipeline.h"
@@ -232,6 +233,9 @@ void wait_serial_blocking(uint64_t serial) {
     read_completed();
 }
 
+// GPU time of the submissions (frame trace on: two timestamps per slot): span, and span less the waits between parts (paired windows).
+std::atomic<uint64_t> g_gpu_exec_ns{0}, g_gpu_busy_ns{0};
+
 Slot& acquire_slot() {
     NXFT_MIN("slot.acquire", 20000);
     Slot& s = g->slots[g->next_slot];
@@ -248,6 +252,8 @@ Slot& acquire_slot() {
             static const uint16_t z = ft::zone_id("gpu.exec");
             const double ns = static_cast<double>(ts[1] - ts[0]) * g->dev->properties().limits.timestampPeriod;
             ft::event(z, s.cpu_t0, s.cpu_t0 + static_cast<uint64_t>(ns), static_cast<uint32_t>(s.serial));
+            g_gpu_exec_ns.fetch_add(static_cast<uint64_t>(ns), std::memory_order_relaxed);
+            g_gpu_busy_ns.fetch_add(static_cast<uint64_t>(ns), std::memory_order_relaxed);   // less the waits for parts, below
             // The span above runs from the first part's start to the last part's end: with submission chunks it includes the time the GPU
             // waited for the render thread to send the next part. gpu.starve: the sum of those waits (a part that started before the one
             // before it ended counts 0); gpu.busy: the span without them.
@@ -263,6 +269,7 @@ Slot& acquire_slot() {
                 static const uint16_t zs = ft::zone_id("gpu.starve"), zb = ft::zone_id("gpu.busy");
                 ft::event(zs, s.cpu_t0, s.cpu_t0 + gap_ns, static_cast<uint32_t>(s.serial));
                 ft::event(zb, s.cpu_t0, s.cpu_t0 + (static_cast<uint64_t>(ns) > gap_ns ? static_cast<uint64_t>(ns) - gap_ns : 0), s.ck_n / 2);
+                g_gpu_busy_ns.fetch_sub(std::min<uint64_t>(gap_ns, static_cast<uint64_t>(ns)), std::memory_order_relaxed);
             }
         }
     }
@@ -625,6 +632,10 @@ std::string memory_barrier_sites(size_t top) {
     return s;
 }
 
+void count_tracked_barrier() { g_gauge_barriers_mem.add(1); }
+uint64_t barriers_mem_total() { return static_cast<uint64_t>(g_gauge_barriers_mem.get()); }
+void gpu_time_totals(uint64_t* exec_ns, uint64_t* busy_ns) { *exec_ns = g_gpu_exec_ns.load(std::memory_order_relaxed); *busy_ns = g_gpu_busy_ns.load(std::memory_order_relaxed); }
+
 thread_local uint64_t t_barriers = 0;
 uint64_t memory_barriers_here() { return t_barriers; }
 
@@ -636,6 +647,7 @@ void memory_barrier(VkCommandBuffer cb, std::source_location loc) {
     ++t_barriers;
     bar_site_count(loc);
     if (const int drop = g_exp_bar_drop.load(std::memory_order_relaxed); drop && (drop < 0 || static_cast<uint32_t>(drop) == loc.line())) return;
+    if (hazard::takes(cb)) { hazard::request(loc.line()); return; }   // [nvn] hazard: recorded only where a command needs it (nvn_hazard.cpp)
     g_gauge_barriers_mem.add(1);
     VkMemoryBarrier2 b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -782,6 +794,7 @@ bool frame_split(Frame& f) {
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(next, &bi);
+    hazard::switch_cb(f.cb, next);
     f.cb = next;
     g->ctr.submits.fetch_add(1);
     return r == VK_SUCCESS;
@@ -830,6 +843,7 @@ bool frame_chunk(Frame& f) {
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(next, &bi);
+    hazard::switch_cb(f.cb, next);
     if (ck) vkCmdWriteTimestamp(next, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g->cpool, ck_base + s.ck_n++);
     f.cb = next;
     g->ctr.submit_chunks.fetch_add(1, std::memory_order_relaxed);

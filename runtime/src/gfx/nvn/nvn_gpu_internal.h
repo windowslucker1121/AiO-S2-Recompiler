@@ -124,6 +124,8 @@ extern std::atomic<int> g_exp_bar_drop;   // measurement only: skip_fs_file "bar
 std::string memory_barrier_sites(size_t top);
 // Full memory barriers recorded by the calling thread so far (a later count equal to an earlier one: none in between).
 uint64_t memory_barriers_here();
+uint64_t barriers_mem_total();   // full memory barriers recorded so far (all threads)
+void gpu_time_totals(uint64_t* exec_ns, uint64_t* busy_ns);   // GPU time of the submissions so far (frame trace on, else 0)
 uint64_t thread_cpu_us();     // CPU time of the calling thread in microseconds (measurement: [nvn] cpuperf_ab)
 // [nvn] pass_barriers = tracked (S38): image_barrier derives its stage and access masks from the two layouts instead of all commands and
 // all memory. Set by the replay for each submission; any thread may record image barriers, so it is an atomic.

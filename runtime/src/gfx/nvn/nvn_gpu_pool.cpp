@@ -2499,8 +2499,11 @@ void out_ab_tick() {
     static uint64_t cur_w = ~0ull, p0 = 0;
     static std::chrono::steady_clock::time_point t0;
     static double r0 = 0, i0 = 0, s0 = 0;
-    static uint64_t lw0 = 0;
+    static uint64_t lw0 = 0, bar0 = 0, ge0 = 0, gb0 = 0;
     if (w == cur_w) return;
+    uint64_t ge = 0, gb = 0;
+    gpu_time_totals(&ge, &gb);
+    const uint64_t bar = barriers_mem_total();
     const auto now = std::chrono::steady_clock::now();
     const double r = nxrt::hitch_phase_seconds(nxrt::kHpRenderReplay), i = nxrt::hitch_phase_seconds(nxrt::kHpRenderIdle),
                  s = nxrt::hitch_phase_seconds(nxrt::kHpGameSyncWait);
@@ -2510,12 +2513,13 @@ void out_ab_tick() {
         const double fr = static_cast<double>(pres - p0);
         const nxrt::FrameTimeStats st = nxrt::frame_time_stats(secs);
         NXLOG_I(kTag, "ab window %s%s%s (presents %llu-%llu, %.1f s): %.1f fps, 1%% low %.1f, median %.2f ms, worst %.1f ms; per frame: render thread replay %.2f ms, "
-                      "idle %.2f ms, game GPU sync waits %.2f ms, waits for the compute-out lock %.3f ms", (cur_w & 1) ? "on" : "off", ab_i > 0 ? " [out_index]" : "",
+                      "idle %.2f ms, game GPU sync waits %.2f ms, waits for the compute-out lock %.3f ms, GPU exec %.2f ms, GPU busy %.2f ms, full barriers %.1f",
+                (cur_w & 1) ? "on" : "off", ab_i > 0 ? " [out_index]" : "",
                 ab_f > 0 ? " [out_fetch_unlocked]" : (ab_i <= 0 && ab_c > 0) ? " [cpuperf]" : "",
                 (unsigned long long)p0, (unsigned long long)pres, secs, fr / secs, st.low1_fps, st.median_ms, st.worst_ms, (r - r0) * 1000.0 / fr,
-                (i - i0) * 1000.0 / fr, (s - s0) * 1000.0 / fr, (lw - lw0) / 1e6 / fr);
+                (i - i0) * 1000.0 / fr, (s - s0) * 1000.0 / fr, (lw - lw0) / 1e6 / fr, (ge - ge0) / 1e6 / fr, (gb - gb0) / 1e6 / fr, (bar - bar0) / fr);
     }
-    cur_w = w; p0 = pres; t0 = now; r0 = r; i0 = i; s0 = s; lw0 = lw;
+    cur_w = w; p0 = pres; t0 = now; r0 = r; i0 = i; s0 = s; lw0 = lw; bar0 = bar; ge0 = ge; gb0 = gb;
 }
 
 void out_retire() {
