@@ -627,10 +627,26 @@ bool skip_fs_draw(const std::string& hash) {
     const auto now = std::chrono::steady_clock::now();
     if (last.time_since_epoch().count() == 0 || now - last > std::chrono::milliseconds(500)) {
         last = now;
-        g_skip_fs.clear();
+        std::vector<std::string> prev;
+        prev.swap(g_skip_fs);
         std::ifstream f(file);
         std::string w;
         while (f >> w) g_skip_fs.push_back(w);
+        // Measurement words: "bar" drops every full barrier, "bar:<line>" those of one source line (g_exp_bar_drop); "c:<prefix>" leaves out
+        // dispatches (do_dispatch). A change of the set is marked in the frame trace ("skip:<words>") for per-window GPU times.
+        int drop = 0;
+        for (const std::string& p : g_skip_fs)
+            if (p == "bar") drop = -1;
+            else if (p.compare(0, 4, "bar:") == 0 && drop >= 0) drop = std::atoi(p.c_str() + 4);
+        g_exp_bar_drop.store(drop, std::memory_order_relaxed);
+        static bool marked = false;
+        if (prev != g_skip_fs || !marked) {
+            marked = true;
+            std::string m = "skip:";
+            for (const std::string& p : g_skip_fs) m += p + "_";
+            if (m.size() > 120) m.resize(120);
+            ft::mark(m.c_str(), static_cast<uint32_t>(g_skip_fs.size()));
+        }
     }
     for (const std::string& p : g_skip_fs) {
         if (!p.empty() && p[0] == '#') {   // "#198" or "#198-210": the draw numbers of the frame (the first draw is #1, as in the trace)
@@ -5553,6 +5569,9 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     if (pass_copy_dispatch(cs ? cs->hash : g_cs_missing)) return;   // [nvn] pass_copy
     if (upscaler_dispatch(cs ? cs->hash : g_cs_missing)) return;   // [nvn] upscaler_replace: the game's upscaler, replaced
     if (g_cs_pending) { note_pending_skip(true); return; }
+    if (cs && !g_skip_fs.empty())   // measurement only: skip_fs_file words "c:<prefix>" leave out dispatches of that compute shader
+        for (const std::string& p : g_skip_fs)
+            if (p.size() > 2 && p.compare(0, 2, "c:") == 0 && cs->hash.compare(0, p.size() - 2, p, 2, std::string::npos) == 0) return;
     if (!cs) { if (!g_cs_missing.empty()) nxrt::gap("dispatch", "skipped: untranslated compute shader", g_cs_missing); return; }
     static const bool debug_skip = config_get_bool("nvn", "debug_skip_compute", false);   // diagnosis: no dispatch runs
     if (debug_skip) return;

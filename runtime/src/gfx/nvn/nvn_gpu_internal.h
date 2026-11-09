@@ -119,6 +119,7 @@ void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImag
                    uint32_t base_level, uint32_t level_count, uint32_t base_layer, uint32_t layer_count);
 // All commands before, all commands after, all memory (used after passes, dispatches, copies and fills).
 void memory_barrier(VkCommandBuffer cb, std::source_location loc = std::source_location::current());
+extern std::atomic<int> g_exp_bar_drop;   // measurement only: skip_fs_file "bar" (-1) / "bar:<line>"
 // Full memory barriers by call site since the start, most first ("file:line count ...", the 10 s statistics line).
 std::string memory_barrier_sites(size_t top);
 // Full memory barriers recorded by the calling thread so far (a later count equal to an earlier one: none in between).
