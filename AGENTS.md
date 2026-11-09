@@ -451,7 +451,7 @@ it back into +0x2c8 after every frame), so it advanced 1/60 s per presented fram
 (entry hook on the same function, before the calc) now writes scale = measured frame time * 60 and the nearest whole rate into +0x2c8
 (`timestep::Sites::apply_step`, OoT side `oot_core.cpp`). Movies: the movie player shows one decoded picture per frame, so while the game
 reads nn::codec pictures the step stays 1/60 (`Sites::fixed_step_during_movies`: the event timeline that starts the voice lines stays with the
-pictures, A11), and `fps_limit = auto` keeps 60 for OoT (`Sites::cap_at_display_rate = false`). OoT default `[time] min_rate = 10`: steps up
+pictures, A11), and `fps_limit = auto` follows the display rate for OoT since 2026-11-09 (`Sites::cap_at_display_rate = true`; movies stay at 60 through the movie cap; uncapped measured at 1080: Link's house 64 fps, 1% low 48-53, first scene 50-62, Kokiri ~36). OoT default `[time] min_rate = 10`: steps up
 to 1/10 s, slower frames slow the game down; hitches over 100 ms are clamped (in a 40 s walk with pipeline builds game time was 84% of real
 time, in steady play 100%). `game_main` reads `[time]` again after the game's config defaults. `[time] mode = off` restores the retail step;
 `[time] csv = <file>` logs per frame host time, step, game time and movie pictures. **Measured (RTX 4080):** W held 2 s from
