@@ -69,6 +69,7 @@ void reopen_staging();
 // Counters for the log line and the tests.
 struct Stats {
     uint64_t scheduled = 0, hits = 0, waited_hits = 0, stale = 0, stolen = 0, none = 0, mismatches = 0, verified = 0, crashes = 0, failed = 0, skipped_budget = 0, evicted = 0;
+    uint64_t jobs = 0, job_ns = 0, wait_ns = 0, peek_waits = 0, peek_wait_ns = 0;   // jobs run and their time; render thread waits in take / peek_entry_format
 };
 Stats stats();
 // Test aid: returns when no job is queued or running (at most 10 s).
