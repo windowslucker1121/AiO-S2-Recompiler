@@ -706,13 +706,14 @@ after the area load (none with set_keep off); kept sets now never enter the memo
 -1.2 ms, +0.7 fps, 14/16). One kept set in 5.5 M still differed once in verify (TerrainGround prepass, vs 88800016, set 0): **set_keep is
 default off until that is explained** (verify mode now logs the differing binding, kept vs fresh values and the dependency). Dropped: a cache of
 "servable by the copy" answers for bindings over held results (-0.55 ms replay, but verify found 2 wrong answers in 3.9 M).
-**Recorder thread (`[nvn] cmd_thread`, nvn_cmdq.cpp, default off):** the render thread no longer makes its vkCmd* calls; hooks on the volk
+**Recorder thread (`[nvn] cmd_thread`, nvn_cmdq.cpp, default on):** the render thread no longer makes its vkCmd* calls; hooks on the volk
 pointers copy each call (and its arrays: descriptor sets, vertex buffers, push data, viewports, barriers, rendering info, copies, labels)
 into a 16 MiB single-producer ring and the `nvn-recorder` thread makes the driver calls in order. Anything not copied, and every call on a
 command buffer, pool or queue as a whole, waits for the ring to empty first; the present path runs direct. Descriptor set updates stay
 immediate (before the recorder records the bind, as Vulkan requires). Kokiri 1080 paired: render replay 30.4 -> 25.4 ms per frame (-5.1 ms,
 15/17), but frame 33.0 -> 32.4 ms (+0.55 fps): Kokiri is now GPU-throughput bound (per frame #6 ~24.8 + #3 ~7.5 ms of GPU span ~ the frame).
 ctest gfx groups pass with it on (the whole gfx exe in one process crashes in gfx_nvn_scene_* with or without it: run groups separately).
+After the fp32-FMUL shader merge (warm-up runs first), paired on vs off: first scene replay -3.8 ms per frame (19/20), median frame -0.8 ms, fps +1.4 (15/20); Link's house replay -5.1 ms (17/17), fps +1.75 (15/17), 1% low +3.4. The drains left were mostly vkCmdSetFragmentShadingRateKHR (~370 per frame; now queued as well, statistics line names the top direct calls). set_keep verify after taking kept sets out of the memo: 0 differences in 11.8 M kept-set hits (Kokiri, 150 s).
 
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every

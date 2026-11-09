@@ -384,6 +384,20 @@ void VKAPI_PTR h_bdl(VkCommandBuffer cb, const VkDebugUtilsLabelEXT* l) {
     commit();
 }
 
+// vkCmdSetFragmentShadingRateKHR: the fragment size and the two combiner ops (set with the dynamic state of most draws).
+PFN_vkCmdSetFragmentShadingRateKHR o_fsr = nullptr;
+struct FsrArgs { VkCommandBuffer cb; VkExtent2D size; VkFragmentShadingRateCombinerOpKHR ops[2]; };
+void x_fsr(const uint8_t* p) { const FsrArgs& a = *reinterpret_cast<const FsrArgs*>(p); o_fsr(a.cb, &a.size, a.ops); }
+void VKAPI_PTR h_fsr(VkCommandBuffer cb, const VkExtent2D* size, const VkFragmentShadingRateCombinerOpKHR ops[2]) {
+    if (!queue_here()) return o_fsr(cb, size, ops);
+    FsrArgs* a = reinterpret_cast<FsrArgs*>(reserve(&x_fsr, sizeof(FsrArgs)));
+    a->cb = cb;
+    a->size = *size;
+    a->ops[0] = ops[0];
+    a->ops[1] = ops[1];
+    commit();
+}
+
 template <typename P> void hook(P& slot, P& orig, P fn) { if (slot && !orig) { orig = slot; slot = fn; } }
 
 void install_all() {
@@ -413,7 +427,7 @@ void install_all() {
     NXQ_DIRECT(vkCmdCopyBufferToImage2); NXQ_DIRECT(vkCmdCopyImage); NXQ_DIRECT(vkCmdBlitImage); NXQ_DIRECT(vkCmdResolveImage);
     NXQ_DIRECT(vkCmdClearColorImage); NXQ_DIRECT(vkCmdClearDepthStencilImage); NXQ_DIRECT(vkCmdBindVertexBuffers);
     NXQ_DIRECT(vkCmdBeginTransformFeedbackEXT); NXQ_DIRECT(vkCmdEndTransformFeedbackEXT); NXQ_DIRECT(vkCmdBindTransformFeedbackBuffersEXT);
-    hook(vkCmdBeginDebugUtilsLabelEXT, o_bdl, &h_bdl); NXQ_DIRECT(vkCmdSetFragmentShadingRateKHR); NXQ_DIRECT(vkCmdSetCheckpointNV);
+    hook(vkCmdBeginDebugUtilsLabelEXT, o_bdl, &h_bdl); hook(vkCmdSetFragmentShadingRateKHR, o_fsr, &h_fsr); NXQ_DIRECT(vkCmdSetCheckpointNV);
     NXQ_DIRECT(vkCmdPushDescriptorSetKHR); NXQ_DIRECT(vkCmdSetVertexInputEXT); NXQ_DIRECT(vkCmdSetSampleMaskEXT);
     NXQ_DIRECT(vkCmdSetColorBlendEnableEXT); NXQ_DIRECT(vkCmdSetColorBlendEquationEXT); NXQ_DIRECT(vkCmdSetColorWriteMaskEXT);
     NXQ_DIRECT(vkCmdSetPolygonModeEXT); NXQ_DIRECT(vkCmdSetDepthClampEnableEXT); NXQ_DIRECT(vkCmdSetLogicOpEnableEXT);
@@ -428,7 +442,7 @@ void install_all() {
 }  // namespace
 
 bool enabled() {
-    static const bool on = config_get_bool("nvn", "cmd_thread", false);
+    static const bool on = config_get_bool("nvn", "cmd_thread", true);
     return on;
 }
 
