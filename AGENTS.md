@@ -774,6 +774,55 @@ Next on the game side: per-site caches for indirect calls / imports resolved at 
 time), x9-x15 / v16-v31 as dead at calls and returns (same idea as the flags; riskier with hand-written SDK assembly), PGO of the lifted
 code; the HLE call counter could become per-thread.
 
+**Game side (G3, 2026-11-09): inline caches for indirect calls and imports.** Every indirect call site (BLR, BR out of a function,
+jump-table fallbacks; 178,970 in main) and every import stub now has a static `NxIc` of its own (ctx.h `NX_ICALL` / `NX_IIMPORT`,
+`GameConfig.inline_caches`, `NX_INLINE_CACHES=0` for a lift without): the fast path loads the cached immutable `{addr, fn}` target,
+compares the address and calls it, so every site has its own host indirect branch (predicted per site; before, all indirect calls of the
+game went through the one `call` in `dispatch_call`) and skips the call_indirect -> dispatch_call layers, the TLS cache and the epoch load.
+Misses go to the runtime (`nx_icall_miss` / `nx_iimport_miss`, abi_glue.cpp), which dispatches as before and fills the site only with a
+lifted function (import stubs: also a leaf HLE handler such as strlen/memcpy; never another HLE thunk, a longjmp landing or an override);
+a site whose target changed more than 8 times is frozen (no more writes to its shared line, misses dispatch). A replaced `fn_register`,
+`fn_clear` and the import cache invalidation empty every filled site (`ic_invalidate_all`). Imports to lifted functions skip the
+`in_import` bookkeeping (diagnostics only). Done at run time instead of resolving main->sdk imports at lift time: same speed (one load and
+an indirect call the host predicts perfectly) and it keeps the runtime's overrides. `[cpu] inline_caches = on | off | ab` (ab: 5 s windows,
+marks ic.on / ic.off). The ABI version stays 3 (two new runtime functions; an old runtime fails to link, an old library just has no caches).
+Measured with `ab` in one run (first scene, 1920x1080, 30-230 s, alone): **G p50 12.63 -> 11.56 ms (-8.5%), p90 14.87 -> 13.53**
+(window medians 12.81 / 11.64); fps 40.9 / 40.6 (GPU / render-thread bound). The off windows still run the inline check, so the gain over
+a library without caches is a little smaller. Tried and dropped: kernel waits sleeping in WaitOnAddress on the wake flag instead of
+SleepConditionVariableSRW (no user-mode spin): paired windows G p50 11.29 (cv) vs 11.70 (WaitOnAddress): worse, removed.
+**FRSQRTE and PGO (G3, same day).** An instrumented build (`NX_PGO=generate`) showed `recip_sqrt_estimate` (fpexact.h) with ~4% of all
+executed basic blocks: it ran the Arm pseudocode's loop (up to ~500 iterations per lane). It is now closed form (double square root, then
+an exact integer correction; identical for all 384 inputs, difftest identical). **PGO of the lifted code** works and is opt-in (never a
+default: profiles are generated from the game's code, stay in the git-ignored `work\pgo`, and players build without one): build the
+instrumented libraries into their own folder (`set NX_BUILD=work\build\oot_pgogen`, `set NX_CMAKE_ARGS=-DNX_PGO=generate`,
+`build_game.cmd oot`; ~35 min), link an exe against them with `-DGAME_LIB_DIR=<that folder>` and `-DGAME_LLVM_PROFILE_LIB=<llvm>\lib\clang\23\
+lib\windows\clang_rt.profile-x86_64.lib` (game-build CMake), run it with env `LLVM_PROFILE_FILE=<dir>\name-%p.profraw` and `[prof]
+llvm_profile_at_s = 45` (counters written every 45 s; the game is killed, never exits cleanly), merge with `llvm-profdata merge -o
+oot.profdata *.profraw`, then build with `-DNX_PGO_USE=<oot.profdata>` (a lifter change after the profile only leaves the changed functions
+unprofiled). The instrumented game runs at roughly half speed; 200 s of the first scene + 150 s of `kokiri_outside` gave 336 + 224 MB of
+raw profile, a 61 MB merged one.
+**Scratch registers as locals (G3).** x9..x17 (temporaries of the AArch64 procedure call standard) live in function locals like the
+flags (`GameConfig.scratch_locals`, `program.localize_scratch`, `NX_SCRATCH_LOCALS=0` for a lift without; needs `local_flags`): loaded at
+entry, written to the Ctx only at the flags' exit markers (tail branches, fall-through, sites, SVCs), not at BL/BLR/RET; after a call the
+locals keep the caller's values (preserving callees such as outline atomics and TLS descriptor resolvers stay right). **Safe rule for code
+outside the call standard** (hand-written SDK assembly): before the lift every function gets a backward liveness over its statements
+(`scratch_liveness`, `_worker_scratch`; ~110 s more for main): a function in which a scratch register may be read after a call before it is
+written keeps them in the Ctx (`scratch_optout`: main 193, sdk 54 functions, mostly code after noreturn calls); a function that may read one
+at entry (inputs outside the standard: e.g. sdk's crypto bignum and audio Vec* assembly) and every import/alias stub gets the caller's
+locals stored before the BL (`scratch_store`: main 1,344, sdk 10,148, nearly all stubs), and so does every BLR and host-override call
+(callee unknown). Only a callee that *returns* a value in x9..x17 through an indirect call or an import would still break (none known).
+The e2e oracle skips x9..x17 at the program's return like NZCV (dead there). IC + FRSQRTE + scratch locals (no PGO): G p50 10.22 ms
+(same batch: base 12.11, IC 11.53, IC + FRSQRTE + PGO 9.92).
+**Final numbers (G3, after the fp32-FMUL shader merge of 2026-11-09, one warm-up run first, 1920x1080, 30-200 s, alone):** first scene G
+p50 base (main checkout's libraries) 13.21 ms, IC + FRSQRTE + PGO 10.85, **IC + FRSQRTE + scratch locals + PGO 10.46 (-21%)**, p90 15.03 /
+12.67 / 12.22; Link's house (a scene the profile did not cover) base 11.12, final 9.69 (-13%). fps unchanged (41.1 / 47.7: GPU and render
+thread bound), so G now caps the game near ~95 fps. Default (no profile) is IC + FRSQRTE + scratch locals; PGO stays a local opt-in.
+Left on the game side: v16..v31 as locals (helpers take the destination by pointer and some read it, so the liveness needs per-helper
+read/write knowledge), a two-entry cache for polymorphic call sites (sites freeze after 8 target changes; how many is not measured: the
+`inline caches:` summary line only appears on a clean exit), the HLE call counter per thread. Measured (first scene, 1920x1080, 30-200 s, one run each, alone): **G p50 base 12.72 ms, inline caches
+11.67, inline caches + FRSQRTE + PGO 9.91 (-22% against base)**, p90 14.69 / 13.32 / 11.42; fps 37.9 / 39.8 / 40.3 (GPU / render-thread
+bound).
+
 **Render resolution pinned (WP7, 2026-11-08, `runtime/games/oot/oot_drs.cpp`, no lifted rebuild).** The game's dynamic resolution: renderer
 R = `[[main+0x4e30498] + 0x228]` (found by a pointer search from main's data at run time), its controller C = `[R + 0xb48]` (per-frame step
 main+0x805aa0, called from main+0x31d3ee0): a list of 10 levels (end node C+400, first C+408; node: scale float at -8, level u32 at -4, next

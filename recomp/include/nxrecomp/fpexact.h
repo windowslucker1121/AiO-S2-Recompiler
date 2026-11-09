@@ -27,9 +27,15 @@ static inline uint32_t recip_estimate(uint32_t a) {            /* a in 256..511 
 static inline uint32_t recip_sqrt_estimate(uint32_t a) {       /* a in 128..511 */
     if (a < 256) a = a * 2 + 1;
     else { a = (a >> 1) << 1; a = (a + 1) * 2; }
-    uint32_t b = 512;
-    while ((uint64_t)a * (b + 1) * (b + 1) < (1ull << 28)) b++;
-    return (b + 1) / 2;
+    /* The manual's loop (b = 512; while (a * (b + 1)^2 < 2^28) b++) ran up to ~500 times per lane: FRSQRTE-heavy vector code
+     * spent ~4% of all executed blocks in it. n = b + 1 is the smallest n >= 513 with a * n^2 >= 2^28: start from the double
+     * square root and correct it exactly (identical for every a in 128..511, checked exhaustively). */
+    const uint64_t lim = 1ull << 28;
+    uint64_t n = (uint64_t)sqrt((double)lim / (double)a);
+    while (n > 513 && (uint64_t)a * (n - 1) * (n - 1) >= lim) n--;
+    while ((uint64_t)a * n * n < lim) n++;
+    if (n < 513) n = 513;
+    return (uint32_t)(n / 2);
 }
 
 /* Generic implementations on (sign, biased exponent, fraction left-aligned to 52 bits). */

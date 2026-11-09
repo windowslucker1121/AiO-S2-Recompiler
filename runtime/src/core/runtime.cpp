@@ -103,6 +103,10 @@ std::string summary() {
         s += "lifted modules: " + std::to_string(nxmodules().size()) + ", imports through the registry: " + std::to_string(import_calls()) + ", site hooks: " +
              std::to_string(hook_count()) + " (calls: inline " + std::to_string(hook_site_calls(HookKind::Inline)) + ", mid " + std::to_string(hook_site_calls(HookKind::Mid)) +
              ", entry " + std::to_string(hook_site_calls(HookKind::Entry)) + ")\n";
+        const IcStats ic = ic_stats();
+        s += "inline caches: " + std::to_string(ic.sites) + " sites filled, " + std::to_string(ic.targets) + " targets, " + std::to_string(ic.fills) + " fills, " +
+             std::to_string(ic.refills) + " refills, " + std::to_string(ic.frozen) + " sites frozen (polymorphic), " + std::to_string(ic.invalidations) +
+             " invalidations\n";
         s += "c++ exceptions: " + std::to_string(e.raised) + " raised, " + std::to_string(e.resumed) + " resumed, " + std::to_string(e.caught) + " caught, " +
              std::to_string(e.cleanups) + " cleanup landings, " + std::to_string(e.uncaught) + " uncaught, " + std::to_string(e.frames_walked) + " frames walked\n";
     }

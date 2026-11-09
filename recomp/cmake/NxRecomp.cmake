@@ -39,6 +39,18 @@ if(NX_ISA STREQUAL "baseline")
 else()
   set(NX_ISA_FLAGS "-march=${NX_ISA}")
 endif()
+# Profile-guided optimisation of the lifted code (clang instrumentation PGO). NX_PGO=generate builds instrumented libraries (link
+# clang_rt.profile into the exe; the runtime writes the counters, see runtime/docs/CONFIG.md [prof] llvm_profile); NX_PGO_USE=<merged
+# .profdata> (llvm-profdata merge) builds optimised with that profile. Empty (default): neither.
+set(NX_PGO "" CACHE STRING "profile-guided optimisation of the lifted code: empty, or generate")
+set(NX_PGO_USE "" CACHE FILEPATH "a merged .profdata to optimise the lifted code with (empty: none)")
+set(NX_PGO_FLAGS "")
+if(NX_PGO STREQUAL "generate")
+  list(APPEND NX_PGO_FLAGS -fprofile-instr-generate)
+elseif(NX_PGO_USE)
+  # functions the profile never saw keep their normal optimisation; a mismatch (lifter changed since the profile) is not an error
+  list(APPEND NX_PGO_FLAGS "-fprofile-instr-use=${NX_PGO_USE}" -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled)
+endif()
 option(NX_USE_LAUNCHER "wrap lifted-code compiles in cmake/nx_cc_launcher.py (time-limit fallback to optnone / -O0)" OFF)
 
 file(GLOB NX_LIFTER_SOURCES CONFIGURE_DEPENDS
@@ -110,7 +122,7 @@ function(nxrecomp_add_module target)
     # /GS-: no stack cookies (the guest has its own stack; host frames of lifted code hold no buffers to protect);
     # -fno-math-errno: sqrtf of a negative number stays one sqrtss (no errno call; the lifted code never reads errno)
     target_compile_options(${target} PRIVATE ${NX_LIFT_OPT} ${NX_ISA_FLAGS} /w /EHs-c- /GR- /GS- -fno-strict-aliasing
-                           -ffp-contract=off -fno-math-errno -mcx16)
+                           -ffp-contract=off -fno-math-errno -mcx16 ${NX_PGO_FLAGS})
   else()
     target_compile_options(${target} PRIVATE -O2 ${NX_ISA_FLAGS} -w -fno-exceptions -fno-rtti -fno-strict-aliasing
                            -ffp-contract=off -fno-math-errno -mcx16)

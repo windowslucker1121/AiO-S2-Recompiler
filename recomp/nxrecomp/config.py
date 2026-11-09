@@ -47,6 +47,16 @@ class GameConfig:
     # variable NX_LOCAL_FLAGS=0 turns it off for a lift.
     local_flags = True
 
+    # inline caches (program.inline_caches_on, ctx.h NX_ICALL / NX_IIMPORT): every indirect call site (BLR, BR out of a
+    # function, unresolved jump tables) and every import stub keeps the last lifted target in a static of its own and calls it
+    # directly; misses go through the runtime as before. NX_INLINE_CACHES=0 turns it off for a lift.
+    inline_caches = True
+
+    # x9..x17 as function-local variables (program.localize_scratch, needs local_flags): written to the context only at tail
+    # branches, sites and SVCs, not at calls or returns (temporaries of the procedure call standard). NX_SCRATCH_LOCALS=0 turns
+    # it off for a lift.
+    scratch_locals = True
+
     # host function names to treat as noreturn-like terminators (none by default)
     noreturn_imports = ()
 
