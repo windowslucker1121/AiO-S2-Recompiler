@@ -231,14 +231,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCsGmemHeld = 134217728, kAbCsGmemFlush = 268435456, kAbRefillCompute = 536870912, kAbPreLayout = 1073741824 };
+enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCsGmemHeld = 134217728, kAbCsGmemFlush = 268435456, kAbRefillCompute = 536870912, kAbPreLayout = 1073741824, kAbOccDefer = 2147483648u };
 uint32_t ab_mask() {
     static const uint32_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}};
         uint32_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -495,6 +495,10 @@ bool occlusion_in_pass_on() {
     return on;
 }
 
+// [nvn] occ_defer (cpuperf_ab_what name occ_defer): the reports wait for the end of the submission (or a reset of their slots) instead of
+// the end of their pass: one barrier triple per submission instead of one per pass with reports (~45 per frame in Kokiri outside). Only the
+// CPU reads them, after the submission's serial; a GPU command of the same submission that read a report word would see the old value.
+bool occ_defer_on();
 // The reports of the pass that just ended (outside any pass now): their {0, timestamp} words, then the query results over the counters.
 void occ_flush_pending() {
     if (g_occ_pend.empty()) return;
@@ -811,7 +815,7 @@ void end_pass(bool to_pass = false, std::source_location loc = std::source_locat
     P.open = false;
     flush_deferred_writes();
     if (g_pass_draws) g_pass_size_draws[(uint64_t{P.extent.width} << 32) | P.extent.height] += g_pass_draws;
-    occ_flush_pending();
+    if (!occ_defer_on()) occ_flush_pending();
     if (g_occ_pool && g_occ_want) occ_reset_ahead();
     if (gpass_on()) {
         char b[112];
@@ -2087,6 +2091,10 @@ bool cs_gmem_held_on() {
 bool refill_compute_on() {
     static const bool on = nxrt::config_get_bool("nvn", "refill_compute", true);
     return on && ab_on(kAbRefillCompute);
+}
+bool occ_defer_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "occ_defer", true);
+    return on && ab_on(kAbOccDefer);
 }
 bool cs_gmem_flush_on() {
     static const bool on = nxrt::config_get_bool("nvn", "cs_gmem_flush", false);
@@ -6663,7 +6671,7 @@ void run_list(const CmdList& list, int depth) {
                         g_reports[p.address] = kReportUnknown;   // the query result lands on the GPU
                         gpu_wrote(p.address, sizeof rep, kWriteUpdate);
                         g_occ_pend.push_back({p.address, rep.timestamp, split ? -1 : slot, split ? kOccSplitCount : 0});
-                        if (!P.open) occ_flush_pending();
+                        if (!P.open && !occ_defer_on()) occ_flush_pending();
                     }
                     ++g_occ_fast;
                     break;
@@ -7407,6 +7415,7 @@ void replay_end_submit(Frame& f) {
         out_end_submit(F->cb, F->serial);
     }
     end_pass();
+    occ_flush_pending();   // [nvn] occ_defer: the reports of the whole submission, written here once
     g_prev_att.clear();   // pass_pre_layout: no references past the submission
     if ((f.serial & 127) == 0 && !g_fb_clone.empty()) fb_sweep(f.serial);
     if ((f.serial & 127) == 0 && !g_vol3d.empty()) {   // 3D copies of 2D textures no submission used for kFbIdleSubmits are released
