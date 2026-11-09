@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -136,6 +137,7 @@ void fn_register(uint64_t guest_addr, GuestFn fn) {
         if (a == guest_addr) {
             t->slots[h].fn.store(fn, std::memory_order_release);
             g_fn_epoch.fetch_add(1, std::memory_order_release);      // a replaced function: the per-thread caches may hold the old one
+            ic_invalidate_all();                                       // ... and so may the lifted code's inline caches
             return;
         }
         if (!a) break;
@@ -167,6 +169,7 @@ void fn_clear() {
     g_fn_epoch.fetch_add(1, std::memory_order_release);
     g_all_tables.clear();
     g_fn_count = 0;
+    ic_invalidate_all();
     std::lock_guard<std::mutex> l2(g_byhost_lock);
     g_byhost = {};
 }
@@ -192,6 +195,102 @@ uint64_t guest_function_of(uint64_t host_rip) {
     --it;
     if (host_rip - it->first > 0x400000) return 0;
     return it->second;
+}
+
+// ---- inline caches (ctx.h NxIc) --------------------------------------------------------------------------------------
+// Every indirect call site and import stub of the lifted code has a static NxIc. The sites are registered here at their first fill so
+// that a replaced registration (fn_register of an address that has a function already), a changed import resolution or an ab window
+// can empty them all. Targets are interned per (address, function) and never freed: a thread may still be calling through one while
+// another empties the caches. A site whose target changes more than kIcRefills times is left as it is (state 2): a polymorphic call
+// keeps the one target it holds and every other one goes through dispatch_call, without the shared cache line being rewritten.
+namespace {
+constexpr uint32_t kIcRefills = 8;
+std::mutex g_ic_lock;
+std::vector<NxIc*> g_ic_sites;
+std::unordered_map<uint64_t, NxIcTarget*> g_ic_targets;   // address -> current target (a replaced function gets a new one)
+std::atomic<uint64_t> g_ic_fills{0}, g_ic_refills{0}, g_ic_frozen{0}, g_ic_invalidations{0};
+std::atomic<bool> g_ic_on{true};
+
+struct IcCfg {
+    int mode = 1;          // 0 off, 1 on, 2 ab
+    int64_t ab_ms = 5000;
+};
+const IcCfg& ic_cfg() {
+    static const IcCfg cfg = [] {
+        IcCfg c;
+        const std::string m = config_get_str("cpu", "inline_caches", "on");
+        c.mode = m == "off" || m == "0" ? 0 : m == "ab" ? 2 : 1;
+        c.ab_ms = std::max<int64_t>(100, config_get_int("cpu", "ic_ab_ms", 5000));
+        if (c.mode != 1) NXLOG_I("dispatch", "inline caches of the lifted code: %s", c.mode == 0 ? "off" : "ab");
+        if (c.mode == 0) g_ic_on.store(false);
+        if (c.mode == 2) {
+            std::thread([ms = c.ab_ms] {
+                for (bool on = true;; on = !on) {
+                    g_ic_on.store(on, std::memory_order_relaxed);
+                    if (!on) ic_invalidate_all();
+                    ft::mark(on ? "ic.on" : "ic.off");
+                    Sleep(static_cast<DWORD>(ms));
+                }
+            }).detach();
+        }
+        return c;
+    }();
+    return cfg;
+}
+}  // namespace
+
+bool ic_enabled() {
+    (void)ic_cfg();
+    return g_ic_on.load(std::memory_order_relaxed);
+}
+
+void ic_fill(NxIc* ic, uint64_t addr, GuestFn fn) {
+    if (!fn || !ic_enabled()) return;
+    const uint32_t state = __atomic_load_n(&ic->state, __ATOMIC_RELAXED);
+    if (state == 2) return;
+    std::lock_guard<std::mutex> lk(g_ic_lock);
+    if (ic->state == 2) return;
+    if (ic->state == 0) {
+        g_ic_sites.push_back(ic);
+        __atomic_store_n(&ic->state, 1u, __ATOMIC_RELAXED);
+    }
+    if (ic->t) {
+        if (++ic->misses > kIcRefills) {
+            __atomic_store_n(&ic->state, 2u, __ATOMIC_RELAXED);
+            g_ic_frozen.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        g_ic_refills.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        g_ic_fills.fetch_add(1, std::memory_order_relaxed);
+    }
+    NxIcTarget*& t = g_ic_targets[addr];
+    if (!t || t->fn != fn) t = new NxIcTarget{addr, fn};
+    __atomic_store_n(&ic->t, static_cast<const NxIcTarget*>(t), __ATOMIC_RELEASE);
+}
+
+void ic_invalidate_all() {
+    std::lock_guard<std::mutex> lk(g_ic_lock);
+    for (NxIc* ic : g_ic_sites) {
+        __atomic_store_n(&ic->t, static_cast<const NxIcTarget*>(nullptr), __ATOMIC_RELEASE);
+        ic->misses = 0;
+        __atomic_store_n(&ic->state, 0u, __ATOMIC_RELAXED);
+    }
+    g_ic_sites.clear();
+    g_ic_targets.clear();        // the targets themselves stay allocated (see above)
+    g_ic_invalidations.fetch_add(1, std::memory_order_relaxed);
+}
+
+IcStats ic_stats() {
+    std::lock_guard<std::mutex> lk(g_ic_lock);
+    IcStats s;
+    s.sites = g_ic_sites.size();
+    s.targets = g_ic_targets.size();
+    s.fills = g_ic_fills.load();
+    s.refills = g_ic_refills.load();
+    s.frozen = g_ic_frozen.load();
+    s.invalidations = g_ic_invalidations.load();
+    return s;
 }
 
 // ---- HLE thunks -----------------------------------------------------------------------------------------------------

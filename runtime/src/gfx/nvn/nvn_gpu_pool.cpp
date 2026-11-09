@@ -773,8 +773,26 @@ struct Mirror {
     std::unique_ptr<std::atomic<uint64_t>[]> gpu_new, cpu_read;
     // pages mirror_fill copied in this submission without tracking them (hot): current in the copy until the submission ends (render thread)
     std::unique_ptr<std::atomic<uint64_t>[]> fresh;
+    // pages whose pool content is a copy-back of the copy (pool == copy there) and that neither the CPU nor a GPU write changed since
+    std::unique_ptr<std::atomic<uint64_t>[]> back;
     bool any_fresh = false;
+    std::vector<gfx::Buffer> snap_chunks;   // out_delta (below): the snapshots of results before their dispatch, per chunk of the copy
 };
+
+// Bits [first, last] of Mirror::back (any thread).
+void back_put(Mirror& m, uint64_t first, uint64_t last, bool on) {
+    if (!m.back || last < first) return;
+    last = std::min(last, m.npages - 1);
+    for (uint64_t p = first; p <= last;) {
+        const uint64_t lo = p & 63, hi = std::min<uint64_t>(63, lo + (last - p));
+        const uint64_t mask = (hi - lo == 63) ? ~uint64_t{0} : (((uint64_t{1} << (hi - lo + 1)) - 1) << lo);
+        if (on) m.back[static_cast<size_t>(p >> 6)].fetch_or(mask, std::memory_order_acq_rel);
+        else m.back[static_cast<size_t>(p >> 6)].fetch_and(~mask, std::memory_order_acq_rel);
+        p += hi - lo + 1;
+    }
+}
+bool back_get(const Mirror& m, uint64_t p) { return m.back && ((m.back[static_cast<size_t>(p >> 6)].load(std::memory_order_acquire) >> (p & 63)) & 1); }
+std::atomic<uint64_t> g_st_back_pages{0}, g_st_copyin_pages{0};   // copy-ins (pool -> copy) of pages the copy already holds (back) / all
 
 namespace {
 
@@ -822,7 +840,8 @@ bool arm_in_budget() {
     return false;
 }
 
-bool arm_timed(mem::ww::Region* r, uint64_t first, uint64_t count) {
+bool arm_timed(Mirror& m, uint64_t first, uint64_t count) {
+    mem::ww::Region* r = m.ww;
     const auto t0 = std::chrono::steady_clock::now();
     const bool ok = mem::ww::arm(r, first, count);
     g_arm_spent_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
@@ -932,10 +951,12 @@ Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
     m->gpu_new.reset(new std::atomic<uint64_t>[words]);
     m->cpu_read.reset(new std::atomic<uint64_t>[words]);
     m->fresh.reset(new std::atomic<uint64_t>[words]);
+    m->back.reset(new std::atomic<uint64_t>[words]);
     for (size_t i = 0; i < words; ++i) {
         m->gpu_new[i].store(0, std::memory_order_relaxed);
         m->cpu_read[i].store(0, std::memory_order_relaxed);
         m->fresh[i].store(0, std::memory_order_relaxed);
+        m->back[i].store(0, std::memory_order_relaxed);
     }
     out_register(m.get());
     NXLOG_I(kTag, "pool %p: device-local copy (%llu KiB in %zu chunks made on demand, pool flags 0x%x, %s)", static_cast<void*>(pg->base),
@@ -954,6 +975,7 @@ void absorb_writes(Mirror& m, uint32_t now) {
     m.st_written += static_cast<int64_t>(g_written_tmp.size());
     for (uint64_t p : g_written_tmp) {
         const size_t i = static_cast<size_t>(p);
+        back_put(m, p, p, false);
         bit_put(m.want, p, false);
         if (m.copied_at[i] == 0) continue;                     // never copied: nothing was wasted
         const bool soon = hot_used_on() && now - m.copied_at[i] <= kHotWindow;   // rewritten right after its copy: per-frame data
@@ -988,6 +1010,8 @@ void log_summary(uint32_t now) {
             valid += page_valid(*m, p) ? 1 : 0;
             hot += m->hot_until[static_cast<size_t>(p)] > now ? 1 : 0;
         }
+    NXLOG_I(kTag, "pool copy-ins: %llu pages, %llu of them copied back from the copy before and unchanged since (re-uploads of the GPU's own writes)",
+            (unsigned long long)g_st_copyin_pages.load(), (unsigned long long)g_st_back_pages.load());
     NXLOG_I(kTag, "pool mirrors: %zu, %llu MiB, valid %llu MiB, hot %llu KiB; binds to mirrors %lld, to pools %lld; copied %lld MiB; write faults %llu",
             g_mirrors.size(), static_cast<unsigned long long>(g_mirror_bytes >> 20), static_cast<unsigned long long>(valid * kPageBytes >> 20),
             static_cast<unsigned long long>(hot * kPageBytes >> 10), static_cast<long long>(g_st_dev_binds.load()), static_cast<long long>(g_st_host_binds.load()),
@@ -1111,6 +1135,7 @@ BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* d
     d = ReadDep();
     d.mirror_on = g_mirror_on;
     BufRef out = resolve_in_pool(gpu_address, size, &mp, &pg, &poff);
+    d.pool = mp;
     if (!g_mirror_on) return out;
     if (!out.ok || !pg || !size) { g_use_skip[use % 3]++; g_skip_why[0]++; return out; }
     const uint64_t first = poff / kPageBytes, last = (poff + size - 1) / kPageBytes;
@@ -1182,7 +1207,7 @@ void mirror_span_written(uint64_t gpu_address, uint64_t size) {
         if (skip(p)) { ++p; continue; }
         uint64_t q = p + 1;
         while (q < end && !skip(q)) ++q;
-        if (!arm_in_budget() || !arm_timed(m.ww, p, q - p)) return;   // not armed: the pages stay invalid and are read from the pool
+        if (!arm_in_budget() || !arm_timed(m, p, q - p)) return;   // not armed: the pages stay invalid and are read from the pool
         for (uint64_t i = p; i < q; ++i) {
             m.copied_at[static_cast<size_t>(i)] = now ? now : 1;
             bit_put(m.want, i, false);
@@ -1258,7 +1283,7 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
             for (uint64_t i = p; i < q; ++i) m.fresh[static_cast<size_t>(i >> 6)].fetch_or(uint64_t{1} << (i & 63), std::memory_order_acq_rel);
             if (!m.any_fresh) { m.any_fresh = true; g_fresh_mirrors.push_back(&m); }
             g_st_hot_fill.fetch_add(static_cast<int64_t>(q - p), std::memory_order_relaxed);
-        } else if (arm_in_budget() && arm_timed(m.ww, p, q - p)) {   // valid from now until the CPU writes a page; the copy below reads the pool when it runs
+        } else if (arm_in_budget() && arm_timed(m, p, q - p)) {   // valid from now until the CPU writes a page; the copy below reads the pool when it runs
             for (uint64_t i = p; i < q; ++i) {
                 m.copied_at[static_cast<size_t>(i)] = now ? now : 1;
                 bit_put(m.used, i, true);
@@ -1271,6 +1296,8 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
         }
         if (copy) {
             copies.push_back(VkBufferCopy{p * kPageBytes - src_base, p * kPageBytes - base, (q - p) * kPageBytes});
+            for (uint64_t i = p; i < q; ++i) g_st_back_pages.fetch_add(back_get(m, i) ? 1 : 0, std::memory_order_relaxed);
+            g_st_copyin_pages.fetch_add(q - p, std::memory_order_relaxed);
             m.st_copied += static_cast<int64_t>(q - p);
             g_st_copied.fetch_add(static_cast<int64_t>((q - p) * kPageBytes), std::memory_order_relaxed);
             if (bytes) *bytes += (q - p) * kPageBytes;
@@ -1315,6 +1342,7 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
     const uint64_t first = off / kPageBytes, last = std::min<uint64_t>((off + size - 1) / kPageBytes, m.npages - 1);
     g_wr_calls[use % 6]++;
     g_wr_pages[use % 6] += static_cast<int64_t>(last - first + 1);
+    back_put(m, first, last, false);
     bool stale = mem::ww::any_valid(m.ww, first, last - first + 1);
     mem::ww::invalidate(m.ww, first, last - first + 1);
     if (m.any_fresh) {             // the pool there is written: what fill copied is old now
@@ -1362,7 +1390,7 @@ void mirror_begin_submit(Frame& f, bool on) {
             if (!mirror_chunk(m, p) || !mirror_src(m, p, &src_base)) { bit_put(m.want, p, false); ++p; continue; }
             uint64_t q = p + 1;
             while (q < m.npages && q < chunk_end && copyable(m, q, now) && (q - p + 1) * kPageBytes <= budget) ++q;
-            const bool armed = arm_timed(m.ww, p, q - p);
+            const bool armed = arm_timed(m, p, q - p);
             for (uint64_t i = p; i < q; ++i) {
                 bit_put(m.want, i, false);
                 if (!armed) continue;
@@ -1370,6 +1398,8 @@ void mirror_begin_submit(Frame& f, bool on) {
                 bit_put(m.used, i, false);
             }
             if (armed) {
+                for (uint64_t i = p; i < q; ++i) g_st_back_pages.fetch_add(back_get(m, i) ? 1 : 0, std::memory_order_relaxed);
+                g_st_copyin_pages.fetch_add(q - p, std::memory_order_relaxed);
                 const uint64_t base = (p / chunk_pages) * kChunkBytes;
                 g_copy_tmp.push_back(VkBufferCopy{p * kPageBytes, p * kPageBytes - base, (q - p) * kPageBytes});
                 budget -= (q - p) * kPageBytes;
@@ -1410,10 +1440,13 @@ void mirror_begin_submit(Frame& f, bool on) {
     }
 }
 
+void snaps_forget_locked(Mirror* m);   // below
+
 void mirror_destroy(PoolGpu* p) {
     Mirror* m = p->mirror;
     if (!m) return;
     p->mirror = nullptr;
+    snaps_forget_locked(m);
     g_fresh_mirrors.erase(std::remove(g_fresh_mirrors.begin(), g_fresh_mirrors.end(), m), g_fresh_mirrors.end());
     out_unregister(m);
     g_mirrors.erase(std::remove(g_mirrors.begin(), g_mirrors.end(), m), g_mirrors.end());
@@ -1456,6 +1489,7 @@ struct OutEntry {
     uint64_t id = 0;                    // unique, so out_fetch finds it again after the lock was free
     uint64_t gen = 0;                   // moves when a later write takes it over again (out_add): the result out_fetch copied is no longer the newest
     bool fetching = false;              // out_fetch copies it back with the lock free: other fetches wait (g_out_cv), retire and unregister leave it
+    bool snapped = false;               // out_delta: the snapshot chunk holds the range as it was before its first write (delta copy-back)
 };
 
 std::mutex g_out_mu;                    // g_out, g_out_mirrors; never held while touching guest memory
@@ -1788,12 +1822,176 @@ uint64_t record_jobs(VkCommandBuffer cb, const std::vector<CopyJob>& jobs) {
     return bytes;
 }
 
+// ---- delta copy-backs ([nvn] out_delta, default on) -----------------------------------------------------------------------------------
+// The copy-backs of held results sent ~1.9 GB/s over PCIe at 1920x1080 (first scene): OoT's GPU culling buffers (2-15 MB each) go back
+// whole every frame because the CPU reads and clears the counters in their first page, while the dispatches change a small part of them.
+// Before a dispatch writes a range in the pool copy that holds no unsent result (the copy is what the pool holds there), the range is
+// copied into a device-local snapshot (out_presnap, per 64 MiB chunk of the copy, at the same offset). The copy-back of that result then
+// runs a compute shader (nvn_delta_shader.inc) that compares the copy with the snapshot 16 bytes at a time and writes the pool only where
+// the GPU changed something: the reads stay in video memory, only changed bytes cross PCIe, and what the CPU wrote into the pool meanwhile
+// (the counter resets) survives wherever the GPU did not write. A result without a snapshot (written first by a draw, retaken while an
+// unsent result was in the copy, a shadow buffer) goes back whole as before.
+#include "nvn_delta_shader.inc"
+uint64_t g_snap_bytes = 0, g_snap_n = 0;   // snapshot chunks (Mirror::snap_chunks), g_out_mu held
+struct DeltaPipe { bool tried = false, ok = false; VkDescriptorSetLayout dsl = VK_NULL_HANDLE; VkPipelineLayout layout = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE; VkDeviceSize align = 256; };
+DeltaPipe g_delta;
+bool g_delta_blocked = false;                   // render thread: a dispatch's compute state is bound (the delta shader would replace it)
+std::atomic<uint64_t> g_dl_n{0}, g_dl_scanned{0}, g_dl_plain{0}, g_dl_snaps{0}, g_dl_snap_bytes{0};   // statistics (the 10 s line)
+struct PreSnap { uint64_t addr, size; };
+std::vector<PreSnap> g_presnap;                 // snapshots recorded for the dispatch being set up (g_out_mu held), taken by out_add
+
+bool delta_on() {
+    static const bool on = config_get_bool("nvn", "out_delta", true);
+    return on && ab_out_delta_on();
+}
+uint64_t delta_cap() {
+    static const uint64_t b = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "out_delta_mb", 512))) << 20;
+    return b;
+}
+
+bool delta_init() {
+    DeltaPipe& d = g_delta;
+    if (d.tried) return d.ok;
+    d.tried = true;
+    if (!device().features().push_descriptor || !vkCmdPushDescriptorSetKHR) {
+        NXLOG_I(kTag, "delta copy-backs: off (no VK_KHR_push_descriptor)");
+        return false;
+    }
+    VkDevice dv = vkdev();
+    VkPhysicalDeviceProperties props = {};
+    vkGetPhysicalDeviceProperties(device().physical(), &props);
+    d.align = std::max<VkDeviceSize>(16, props.limits.minStorageBufferOffsetAlignment);
+    VkDescriptorSetLayoutBinding b[3] = {};
+    for (uint32_t i = 0; i < 3; ++i) b[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo sli = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    sli.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    sli.bindingCount = 3;
+    sli.pBindings = b;
+    if (vkCreateDescriptorSetLayout(dv, &sli, nullptr, &d.dsl) != VK_SUCCESS) return false;
+    VkPipelineLayoutCreateInfo pli = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &d.dsl;
+    if (vkCreatePipelineLayout(dv, &pli, nullptr, &d.layout) != VK_SUCCESS) return false;
+    VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    mi.codeSize = sizeof kDeltaComp;
+    mi.pCode = kDeltaComp;
+    VkShaderModule sm = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(dv, &mi, nullptr, &sm) != VK_SUCCESS) return false;
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, sm, "main", nullptr};
+    ci.layout = d.layout;
+    const VkResult r = vkCreateComputePipelines(dv, VK_NULL_HANDLE, 1, &ci, nullptr, &d.pipe);
+    vkDestroyShaderModule(dv, sm, nullptr);
+    if (r != VK_SUCCESS) {
+        NXLOG_W(kTag, "delta copy-backs: off (the compute pipeline failed: %d)", static_cast<int>(r));
+        return false;
+    }
+    d.ok = true;
+    NXLOG_I(kTag, "delta copy-backs: on (snapshots up to %llu MiB)", static_cast<unsigned long long>(delta_cap() >> 20));
+    return true;
+}
+
+// The snapshot chunk of the copy chunk that holds [addr, +size) at moff of mbuf (null: not eligible). Lock held.
+VkBuffer snap_chunk_for(Mirror& m, uint64_t addr, uint64_t size, VkBuffer mbuf, VkDeviceSize moff) {
+    if (!delta_init()) return VK_NULL_HANDLE;
+    const DeltaPipe& d = g_delta;
+    if (size < (64u << 10) || (size % 16) || (moff % d.align) || (addr % d.align)) return VK_NULL_HANDLE;
+    const uint64_t base = reinterpret_cast<uint64_t>(m.pg->base);
+    const size_t ci = static_cast<size_t>((addr - base) / kChunkBytes);
+    if (ci >= m.chunks.size() || m.chunks[ci].buffer != mbuf) return VK_NULL_HANDLE;
+    if (m.snap_chunks.size() < m.chunks.size()) m.snap_chunks.resize(m.chunks.size());
+    gfx::Buffer& sb = m.snap_chunks[ci];
+    if (!sb.buffer) {
+        const uint64_t sz = m.chunks[ci].size;
+        if (g_snap_bytes + sz > delta_cap()) return VK_NULL_HANDLE;
+        if (device().create_buffer(sz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                   gfx::MemoryUse::GpuOnly, &sb, "nvn delta snapshot") != VK_SUCCESS) {
+            sb = gfx::Buffer{};
+            return VK_NULL_HANDLE;
+        }
+        g_snap_bytes += sz;
+        ++g_snap_n;
+    }
+    return sb.buffer;
+}
+
+// Lock held. Records the copy-back of e as a delta copy-back; false: not eligible (the caller copies it whole).
+bool record_delta(VkCommandBuffer cb, const OutEntry& e, uint64_t* bytes, bool* dispatched) {
+    if (!e.snapped || !e.m || g_delta_blocked || !delta_on()) return false;
+    const VkBuffer sb = snap_chunk_for(*e.m, e.addr, e.size, e.mbuf, e.moff);
+    if (!sb || (e.hoff % g_delta.align)) return false;
+    Mirror& m = *e.m;
+    const uint64_t base = reinterpret_cast<uint64_t>(m.pg->base);
+    auto newer = [&](uint64_t p) { return ((m.gpu_new[static_cast<size_t>(p >> 6)].load(std::memory_order_relaxed) >> (p & 63)) & 1) != 0; };
+    for (uint64_t p = e.first; p <= e.last;) {   // a split result: only the runs of pages still newer in the copy
+        const bool take = !e.partial || newer(p);
+        uint64_t q = p + 1;
+        while (q <= e.last && (!e.partial || newer(q)) == take) ++q;
+        if (take) {
+            const uint64_t lo = std::max(e.addr, base + p * kPageBytes), hi = std::min(e.addr + e.size, base + q * kPageBytes);
+            const uint64_t off = lo - e.addr, len = hi - lo;
+            if (!*dispatched) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_delta.pipe);
+            *dispatched = true;
+            const VkDescriptorBufferInfo bi[3] = {{e.mbuf, e.moff + off, len}, {e.hbuf, e.hoff + off, len}, {sb, e.moff + off, len}};
+            VkWriteDescriptorSet w[3] = {};
+            for (uint32_t k = 0; k < 3; ++k) {
+                w[k] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                w[k].dstBinding = k;
+                w[k].descriptorCount = 1;
+                w[k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                w[k].pBufferInfo = &bi[k];
+            }
+            vkCmdPushDescriptorSetKHR(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_delta.layout, 0, 3, w);
+            vkCmdDispatch(cb, static_cast<uint32_t>((len / 16 + 255) / 256), 1, 1);
+            g_dl_scanned.fetch_add(len, std::memory_order_relaxed);
+        }
+        p = q;
+    }
+    g_dl_n.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+void snaps_forget(Mirror* m) {   // lock held
+    for (gfx::Buffer& b : m->snap_chunks) {
+        if (!b.buffer) continue;
+        gfx::Buffer old = b;
+        g_snap_bytes -= std::min<uint64_t>(g_snap_bytes, b.size);
+        --g_snap_n;
+        defer_destroy([old]() mutable { device().destroy_buffer(old); });
+        b = gfx::Buffer{};
+    }
+}
+
+bool presnap_take(uint64_t addr, uint64_t size) {   // lock held
+    for (size_t i = 0; i < g_presnap.size(); ++i)
+        if (g_presnap[i].addr == addr && g_presnap[i].size == size) {
+            g_presnap.erase(g_presnap.begin() + static_cast<std::ptrdiff_t>(i));
+            return true;
+        }
+    return false;
+}
+
+void delta_log(double secs) {
+    static uint64_t p[5] = {};
+    const uint64_t v[5] = {g_dl_n.load(), g_dl_scanned.load(), g_dl_plain.load(), g_dl_snaps.load(), g_dl_snap_bytes.load()};
+    if (v[0] == p[0] && v[2] == p[2] && v[3] == p[3]) return;
+    NXLOG_I(kTag, "delta copy-backs over %.1f s: %llu results, %llu MiB compared on the GPU; %llu MiB copied back whole (no snapshot); %llu snapshots "
+                  "before dispatches (%llu MiB); snapshot chunks %llu, %llu MiB",
+            secs, (unsigned long long)(v[0] - p[0]), (unsigned long long)((v[1] - p[1]) >> 20), (unsigned long long)((v[2] - p[2]) >> 20),
+            (unsigned long long)(v[3] - p[3]), (unsigned long long)((v[4] - p[4]) >> 20), (unsigned long long)g_snap_n, (unsigned long long)(g_snap_bytes >> 20));
+    std::copy(v, v + 5, p);
+}
+
 uint64_t record_copies(VkCommandBuffer cb, const std::vector<size_t>& idx) {
     if (idx.empty()) return 0;
     copy_barrier_in(cb);
     uint64_t bytes = 0;
+    bool dispatched = false;
     for (size_t i : idx) {
         const OutEntry& e = g_out[i];
+        if (e.m) back_put(*e.m, e.first, e.last, true);   // the pool holds what the copy holds there once the copy-back has run
+        if (record_delta(cb, e, &bytes, &dispatched)) continue;
+        if (e.m) g_dl_plain.fetch_add(e.size, std::memory_order_relaxed);
         if (e.partial && e.m) {                 // only the pages still newer in the copy
             const uint64_t base = reinterpret_cast<uint64_t>(e.m->pg->base);
             auto newer = [&](uint64_t p) { return ((e.m->gpu_new[static_cast<size_t>(p >> 6)].load(std::memory_order_relaxed) >> (p & 63)) & 1) != 0; };
@@ -1813,7 +2011,19 @@ uint64_t record_copies(VkCommandBuffer cb, const std::vector<size_t>& idx) {
         vkCmdCopyBuffer(cb, e.mbuf, e.hbuf, 1, &c);
         bytes += e.size;
     }
-    copy_barrier_host(cb);
+    if (dispatched) {   // the delta shader's writes too, and the next dispatch binds its own pipeline and sets anyway
+        VkMemoryBarrier2 b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        b.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_2_HOST_BIT;
+        b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_HOST_READ_BIT;
+        VkDependencyInfo di = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.memoryBarrierCount = 1;
+        di.pMemoryBarriers = &b;
+        vkCmdPipelineBarrier2(cb, &di);
+    } else {
+        copy_barrier_host(cb);
+    }
     return bytes;
 }
 
@@ -1837,6 +2047,34 @@ void remove_entries(std::vector<size_t> idx) {
 uint64_t page_size_kb(uint64_t bytes) { return bytes >> 10; }
 
 }  // namespace
+
+void snaps_forget_locked(Mirror* m) {
+    OutLock ol;
+    snaps_forget(m);
+}
+void out_delta_block(bool on) { g_delta_blocked = on; }
+
+void out_presnap_end() { OutLock ol; g_presnap.clear(); }
+
+bool out_presnap(uint64_t addr, uint64_t size, VkBuffer mbuf, VkDeviceSize moff, VkCommandBuffer cb) {
+    if (!size || !out_lazy() || !delta_on()) return false;
+    const PoolHit hit = pool_lookup(addr);
+    Mirror* m = hit.pool && hit.pool->gpu ? hit.pool->gpu->mirror : nullptr;
+    if (!m) return false;
+    OutLock ol;
+    for (const OutEntry& e : g_out)   // an unsent result there: the copy is not what the pool holds (the entry keeps its snapshot, if any)
+        if (live(e) && e.addr < addr + size && addr < e.addr + e.size) return false;
+    const VkBuffer sb = snap_chunk_for(*m, addr, size, mbuf, moff);
+    if (!sb) return false;
+    memory_barrier(cb);                  // the fills of the copy before the snapshot reads it (the dispatch waits for the snapshot: g_sh_copied)
+    const VkBufferCopy c = {moff, moff, size};
+    vkCmdCopyBuffer(cb, mbuf, sb, 1, &c);
+    if (g_presnap.size() > 64) g_presnap.erase(g_presnap.begin());
+    g_presnap.push_back({addr, size});
+    g_dl_snaps.fetch_add(1, std::memory_order_relaxed);
+    g_dl_snap_bytes.fetch_add(size, std::memory_order_relaxed);
+    return true;
+}
 
 bool out_lazy() {
     static const bool on = config_get_bool("nvn", "compute_out_lazy", true);
@@ -1864,6 +2102,8 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
         if (e.addr == addr && e.size == size && e.m == m) {
             const uint64_t v0 = g_out_ver.load(std::memory_order_acquire);
             const bool was_live = live(e), was_pending = e.pending;
+            const bool snap = presnap_take(addr, size);
+            if (!live(e)) e.snapped = snap;         // sent back already: the copy was the pool again when the new snapshot was taken
             if (!e.pending) out_changed();          // live and pending again
             if (e.flushed && !e.pending) g_out_grow.fetch_add(1, std::memory_order_acq_rel);   // was not live: its pages are live again
             ++e.gen;                                // a newer result than one a fetch may be copying back
@@ -1878,6 +2118,7 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
     e.addr = addr; e.size = size; e.m = m;
     e.mbuf = mbuf; e.moff = moff; e.hbuf = host.buffer; e.hoff = host.offset;
     e.pending = true;
+    e.snapped = presnap_take(addr, size);
     e.id = g_out_next_id++;
     if (m) {
         const uint64_t base = reinterpret_cast<uint64_t>(m->pg->base);
@@ -2394,6 +2635,10 @@ void out_log() {
     const double secs = std::chrono::duration<double>(now - last).count();
     if (secs < 10.0) return;
     last = now;
+    {
+        OutLock ol;
+        delta_log(secs);
+    }
     const uint64_t end = g_ob_end.load(), gpu = g_ob_gpu.load(), fault = g_ob_fault.load(), inval = g_ob_inval.load();
     const uint64_t nf = g_on_fault.load(), ni = g_on_inval.load(), nd = g_on_deferred.load(), nr = g_on_eager_read.load(), ng = g_on_eager_noguard.load(),
                    ngf = g_on_gpu_flush.load(), gfaults = mem::ww::guard_faults();

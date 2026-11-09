@@ -414,6 +414,22 @@ DWORD WINAPI shot_thread(LPVOID) {
     return 0;
 }
 
+// [prof] llvm_profile_at_s = N: for an exe linked with lifted libraries built with NX_PGO=generate (recomp/cmake/NxRecomp.cmake),
+// writes the instrumentation counters every N seconds (file: LLVM_PROFILE_FILE, default default.profraw in the working folder;
+// each write replaces the previous one). Without the profile runtime the call resolves to a stand-in that says so.
+extern "C" int __llvm_profile_write_file(void);
+extern "C" int nx_llvm_profile_absent(void) { return -1; }
+#pragma comment(linker, "/alternatename:__llvm_profile_write_file=nx_llvm_profile_absent")
+DWORD WINAPI llvm_profile_thread(LPVOID p) {
+    const DWORD s = static_cast<DWORD>(reinterpret_cast<uintptr_t>(p));
+    for (int n = 1;; ++n) {
+        Sleep(s * 1000);
+        const int r = __llvm_profile_write_file();
+        NXLOG_I("boot", "llvm profile write %d: %s", n, r == 0 ? "ok" : "failed or no profile runtime linked");
+        if (r != 0) return 0;
+    }
+}
+
 DWORD WINAPI deadline_thread(LPVOID p) {
     const DWORD ms = static_cast<DWORD>(reinterpret_cast<uintptr_t>(p));
     Sleep(ms);
@@ -806,6 +822,8 @@ int main(int argc, char** argv) {
     if (nxrt::config_get_int("boot", "screenshot_at", 0) > 0) CreateThread(nullptr, 0, shot_thread, nullptr, 0, nullptr);
     if (const int64_t s = nxrt::config_get_int("boot", "max_seconds", 0); s > 0)
         CreateThread(nullptr, 0, deadline_thread, reinterpret_cast<void*>(static_cast<uintptr_t>(s * 1000)), 0, nullptr);
+    if (const int64_t s = nxrt::config_get_int("prof", "llvm_profile_at_s", 0); s > 0)
+        CreateThread(nullptr, 0, llvm_profile_thread, reinterpret_cast<void*>(static_cast<uintptr_t>(s)), 0, nullptr);
 
     // 4. the main thread: the npdm of main says 1 MiB of stack, priority 44, core 0
     const uint64_t stack = static_cast<uint64_t>(nxrt::config_get_int("boot", "main_stack_kb", 1024)) << 10;

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <algorithm>
 #include <bit>
+#include <source_location>
 #include <filesystem>
 #include "nxrt/instance.h"
 #include <cstdio>
@@ -224,14 +225,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbSetKeep = 262144, kAbOdbInc = 524288, kAbChunkTime = 1048576, kAbKeepWrites = 2097152, kAbCmdThread = 4194304 };
+enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216 };
 uint32_t ab_mask() {
     static const uint32_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}};
         uint32_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -758,7 +759,35 @@ bool same_image(Texture* a, Texture* b) { return a == b || (a && b && a->gpu && 
 // to_pass: the caller only starts another pass or changes image layouts next (ensure_pass, prepare_textures); with tracked barriers the pass
 // then ends without a barrier when it only wrote its attachments. Any other caller gets a full barrier, also for passes ended earlier
 // without one.
-void end_pass(bool to_pass = false) {
+// [nvn] write_defer (default on): GPU-ordered memory writes (do_write_memory: counter reports, report values, events) recorded while a
+// render pass is open used to end the pass (vkCmdUpdateBuffer is not allowed inside one): ~34 per frame in OoT's first scene, each splitting
+// a 1920x1080 pass and draining the GPU twice. They wait until the pass ends instead, with one pair of barriers for all of them. What reads
+// them is the CPU after the submission (or the replay's own report bookkeeping, which is kept at record time); a draw of the same pass that
+// read such a word in game memory would see the old value.
+struct DeferredWrite { VkBuffer buf; VkDeviceSize off; uint32_t size; size_t data; };
+std::vector<DeferredWrite> g_wdefer;
+std::vector<uint8_t> g_wdefer_data;
+uint64_t g_wdefer_n = 0, g_wdefer_flushes = 0;
+void flush_deferred_writes() {
+    if (g_wdefer.empty()) return;
+    memory_barrier(F->cb);
+    for (const DeferredWrite& w : g_wdefer) vkCmdUpdateBuffer(F->cb, w.buf, w.off, w.size, g_wdefer_data.data() + w.data);
+    memory_barrier(F->cb);
+    g_wdefer.clear();
+    g_wdefer_data.clear();
+    ++g_wdefer_flushes;
+    gstamp("write memory");
+}
+
+// Which call sites end passes (the 10 s line "passes ended by": source line and the draws the pass had). Render thread.
+uint64_t g_pass_end_line[8192] = {};
+uint64_t g_pass_end_draws[8192] = {};
+void end_pass(bool to_pass = false, std::source_location loc = std::source_location::current()) {
+    if (P.open) {
+        const uint32_t ln = loc.line() & 8191;
+        ++g_pass_end_line[ln];
+        g_pass_end_draws[ln] += g_pass_draws;
+    }
     if (!P.open) {
         if (!to_pass && !g_pending.empty()) {
             memory_barrier(F->cb);
@@ -774,6 +803,7 @@ void end_pass(bool to_pass = false) {
     }
     vkCmdEndRendering(F->cb);
     P.open = false;
+    flush_deferred_writes();
     if (g_pass_draws) g_pass_size_draws[(uint64_t{P.extent.width} << 32) | P.extent.height] += g_pass_draws;
     occ_flush_pending();
     if (g_occ_pool && g_occ_want) occ_reset_ahead();
@@ -2537,6 +2567,7 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
         if (out_exact(addr, size, &ob, &oo, &in_mirror)) {
             ++g_sh_uses;
             ++(in_mirror ? g_sh_direct : g_sh_held);
+            if (writes && in_mirror && out_presnap(addr, size, ob, oo, F->cb)) g_sh_copied = true;   // a result sent back already: snapshot again
             g_shadow_uses.push_back({addr, size, host, ob, oo, writes, true, MirrorSpan{ob, oo, true}, !in_mirror});
             BufRef r = host; r.buffer = ob; r.offset = oo; r.avail = size;
             return r;
@@ -2558,6 +2589,7 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
         if (ok) {
             ++g_sh_uses;
             ++g_sh_direct;
+            if (writes && out_presnap(addr, size, ms.buf, ms.offset, F->cb)) g_sh_copied = true;   // out_delta: the range before the dispatch
             g_shadow_uses.push_back({addr, size, host, ms.buf, ms.offset, writes, true, ms});
             BufRef r = host; r.buffer = ms.buf; r.offset = ms.offset; r.avail = size;
             return r;
@@ -2844,6 +2876,7 @@ struct KDep {
     ReadDep rd;
     uint64_t addr = 0, range = 0, note = 0;   // kinds 2 and 3 (texel): the range bound (held-result check) and the bytes upd_note_read is told
     const BindingDesc* d = nullptr;           // kind 3
+    const void* pool = nullptr;               // kinds 2 and 3 (texel): the pool the address resolved in (kind 1: rd.pool)
     Texture* tex = nullptr;
     uint32_t tex_id = 0;
     uint64_t stamp = 0, vh = 0, sh = 0;       // view stamp of the image, hashes of the view info and the sampler info
@@ -2852,6 +2885,7 @@ struct KDep {
 struct BVal { uint64_t binding, a, b, c; };   // set_reuse = verify: what build_set wrote for each binding (keep verify names the one that differs)
 std::vector<BVal> g_bvals;
 bool g_bvals_on = false;
+std::unordered_map<VkDescriptorSet, std::vector<BVal>> g_ds_bvals;   // set_reuse = verify: what each set of the submission was built with
 struct KeepRec {
     std::vector<KDep> deps;
     const char* bad = nullptr;  // why the set cannot be kept (null: it can)
@@ -3037,6 +3071,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             kd->addr = bind.addr;
                             kd->range = bi.range;
                             kd->note = bind.size ? bind.size : br.avail;
+                            kd->pool = pool_lookup(bind.addr).pool;
                             kd->writes = writes;
                             if (g_shadowing) kbad("storage buffer of a shadowed dispatch");
                             if (!br.ok) kbad("storage buffer outside a pool");   // a pool registered later may cover it
@@ -3236,6 +3271,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                 kd->stamp = tex_view_stamp(r.tex);
                 kd->addr = addr;
                 kd->range = bytes;
+                kd->pool = addr ? pool_lookup(addr).pool : nullptr;
             }
             if (v && storage) { g_gw_site = 6; gpu_wrote(addr, bytes, kWriteStorage); g_gw_site = 0; }   // an image buffer may be written by the shader
             if (!v) {
@@ -3282,6 +3318,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
     for (auto& w : writes) w.dstSet = ds;
     vkUpdateDescriptorSets(vkdev(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     g_set_cache.put(key, ds);
+    if (g_bvals_on) g_ds_bvals[ds] = g_bvals;
     return ds;
 }
 
@@ -3530,6 +3567,7 @@ struct KeepEntry {
     const ProgLayout* pl = nullptr;
     uint32_t set = 0;
     uint64_t pool_gen = 0, grow = 0, content = 0;
+    uint64_t reg_gen = 0;       // pool registry generation at the last check: a pool registered since may now hold the bound addresses
     uint32_t last_used = 0, last_fail = 0;
     uint16_t fails = 0;
     uint64_t smp_tune = 0;      // anisotropy and LOD bias of the samplers when it was built (sampler_for)
@@ -3559,7 +3597,7 @@ uint64_t g_keep_first = 0;   // statistics: signatures seen for the first time (
 uint64_t g_set_paths[4] = {};   // statistics: sets built outside the memo and the kept sets: compute, reuse off for the draw, a set that may not be reused, other
 
 bool set_keep_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "set_keep", false);
+    static const bool on = nxrt::config_get_bool("nvn", "set_keep", true);
     return on && ab_on(kAbSetKeep) && out_lazy() && memo_pass_keep();
 }
 
@@ -3623,6 +3661,14 @@ void keep_begin_submit() {
 int keep_valid(KeepEntry& e) {
     if (e.pool_gen != pool_unregister_generation()) return 1;
     if (e.smp_tune != smp_tune_now()) return 5;
+    if (const uint64_t rg = pool_registry_generation(); rg != e.reg_gen) {   // a pool registered over an address (aliasing pools): resolved elsewhere now
+        for (const KDep& k : e.deps) {
+            const void* p = k.kind == 1 ? k.rd.pool : (k.kind == 2 || (k.kind == 3 && k.texel)) ? k.pool : nullptr;
+            const uint64_t a = k.addr;
+            if ((k.kind == 1 || k.kind == 2 || (k.kind == 3 && k.texel)) && a && pool_lookup(a).pool != p) return 1;
+        }
+        e.reg_gen = rg;
+    }
     const uint64_t grow = out_grow_version();
     const bool ask_held = grow != e.grow;
     for (const KDep& k : e.deps) {
@@ -3756,6 +3802,7 @@ VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_
     e.set = set;
     e.pool_gen = pool_unregister_generation();
     e.smp_tune = smp_tune_now();
+    e.reg_gen = pool_registry_generation();
     e.grow = out_grow_version();
     e.content = rec.content;
     e.last_used = now;
@@ -3794,7 +3841,8 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
     if (reusable_ok) {
         reusable = set_reuse_mask(pl);
         const uint64_t tg = memo_pass_keep() ? g_tex_image_gen.load(std::memory_order_relaxed) ^ 0x5bd1e995ull : g_tex_state_gen.load(std::memory_order_relaxed), ob = out_bytes_total();
-        const uint64_t epoch = g_desc_epoch * 0x100000001b3ull ^ tg * 0x9e3779b97f4a7c15ull ^ ob ^ out_version() * 0xc2b2ae3d27d4eb4full;
+        // the pool registry: a pool registered over bound addresses (aliasing pools) resolves them elsewhere (set_reuse = verify found such stale hits)
+        const uint64_t epoch = (g_desc_epoch * 0x100000001b3ull ^ tg * 0x9e3779b97f4a7c15ull ^ ob ^ out_version() * 0xc2b2ae3d27d4eb4full) * 31 + pool_registry_generation();
         if (epoch != g_set_memo_epoch) {
             if (!g_set_memo.empty()) {   // statistics: what cleared a memo that held sets
                 if (g_desc_epoch != g_memo_last[0]) ++g_memo_clr[0];
@@ -3826,6 +3874,17 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
                             NXLOG_W(kTag, "set_reuse verify: set %u of vs %s fs %s differs from the reused one (%llu so far)", set,
                                     S.stage[kVertex] ? S.stage[kVertex]->hash.c_str() : "-", S.stage[kFragment] ? S.stage[kFragment]->hash.c_str() : "-",
                                     static_cast<unsigned long long>(g_sets_verify_bad));
+                        if (g_sets_verify_bad < 20) {   // which binding: what the reused set was built with against what resolves now
+                            const auto ob = g_ds_bvals.find(ds);
+                            if (ob != g_ds_bvals.end())
+                                for (size_t i = 0; i < g_bvals.size() && i < ob->second.size(); ++i) {
+                                    const BVal& x = ob->second[i];
+                                    const BVal& y = g_bvals[i];
+                                    if (x.a == y.a && x.b == y.b && x.c == y.c) continue;
+                                    NXLOG_W(kTag, "  binding %llu: reused %llx %llx %llx, now %llx %llx %llx", (unsigned long long)x.binding, (unsigned long long)x.a,
+                                            (unsigned long long)x.b, (unsigned long long)x.c, (unsigned long long)y.a, (unsigned long long)y.b, (unsigned long long)y.c);
+                                }
+                        }
                         ds = fresh;
                     }
                 }
@@ -5314,6 +5373,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     }
     VkPipeline pipe = compute_pipeline(cs, *pl);
     if (!pipe) return;
+    out_delta_block(true);   // copy-backs recorded until the dispatch must not bind the delta shader over this pipeline and its sets
     vkCmdBindPipeline(F->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     g_bound_pipeline = VK_NULL_HANDLE;
     support_for_draw(*pl, true);
@@ -5364,7 +5424,9 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
         vkCmdDispatch(F->cb, x, y, z);
         if (gpass_on()) gstamp(("cs " + cs->hash.substr(0, 8)).c_str());
     }
+    out_delta_block(false);
     shadows_after_dispatch();
+    out_presnap_end();
     memory_barrier(F->cb);
     ++g_chunk_work;
     if (g_trace) {
@@ -5844,6 +5906,17 @@ void do_evaluate_dlss(const P_EvaluateDlss& p) {
 
 void do_write_memory(uint64_t gpu_addr, const void* data, uint32_t size) {
     // a GPU-ordered write of up to 64 KiB into pool memory (UpdateUniformBuffer, counters, events)
+    static const bool defer = nxrt::config_get_bool("nvn", "write_defer", true);
+    if (P.open && defer && ab_on(kAbWriteDefer) && size <= 4096) {   // at the end of the pass (flush_deferred_writes)
+        BufRef b = resolve_buffer(gpu_addr, size);
+        if (!b.ok) return;
+        gpu_wrote(gpu_addr, size, kWriteUpdate);
+        const size_t at = g_wdefer_data.size();
+        g_wdefer_data.insert(g_wdefer_data.end(), static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
+        g_wdefer.push_back({b.buffer, b.offset, size, at});
+        ++g_wdefer_n;
+        return;
+    }
     end_pass();
     memory_barrier(F->cb);
     BufRef b = resolve_buffer(gpu_addr, size);
@@ -5955,6 +6028,7 @@ bool split_for_read(uint64_t addr, uint64_t size) {
     P = Pass();
     g_pending.clear();                             // everything before the split has completed: no barrier is owed for it
     g_set_cache.clear();
+    g_ds_bvals.clear();
     g_bound_pipeline = VK_NULL_HANDLE;
     g_dirty = kAllDirty;
     g_pl = nullptr;
@@ -6554,6 +6628,7 @@ void run_list(const CmdList& list, int depth) {
 bool ab_tex_park_on() { return ab_on(kAbTexPark); }   // [nvn] cpuperf_ab_what tex_park (nvn_gpu_texture.cpp)
 bool ab_overlap_grow_on() { return ab_on(kAbOverlapGrow); }
 bool ab_index_inc_on() { return ab_on(kAbIndexInc); }   // [nvn] cpuperf_ab_what index_inc (nvn_gpu_pool.cpp)   // [nvn] cpuperf_ab_what overlap_grow (nvn_gpu_pool.cpp)
+bool ab_out_delta_on() { return ab_on(kAbOutDelta); }  // out_delta (nvn_gpu_pool.cpp delta copy-backs)
 
 // [display] unpaced_loading (default on): the limiter stops waiting while the game loads, since its loading code advances once per
 // presented frame. Loading = presented frames with fewer than 16 draws (boot's black screen draws 3: exposure, bloom, tone map; the
@@ -6697,6 +6772,7 @@ void replay_begin_submit(Frame& f) {
     g_chunk_t0 = ft::now_ns();
     P = Pass();
     g_set_cache.clear();
+    g_ds_bvals.clear();
     g_bound_pipeline = VK_NULL_HANDLE;
     g_dirty = kAllDirty;
     g_pl = nullptr;
@@ -6726,6 +6802,19 @@ void replay_begin_submit(Frame& f) {
             NXLOG_I(kTag, "draw reads over held results not served by the copy: copy not allowed %llu (%llu KiB), no copy span %llu (%llu KiB), fill failed %llu (%llu KiB)",
                     (unsigned long long)g_dr_fail[0], (unsigned long long)(g_dr_fail_bytes[0] >> 10), (unsigned long long)g_dr_fail[1],
                     (unsigned long long)(g_dr_fail_bytes[1] >> 10), (unsigned long long)g_dr_fail[2], (unsigned long long)(g_dr_fail_bytes[2] >> 10));
+            {   // the call sites that end passes, most first (cumulative): nvn_replay.cpp line, passes, draws in them
+                std::vector<std::pair<uint64_t, uint32_t>> v;
+                for (uint32_t i = 0; i < 8192; ++i) if (g_pass_end_line[i]) v.emplace_back(g_pass_end_line[i], i);
+                std::sort(v.rbegin(), v.rend());
+                std::string s;
+                for (size_t i = 0; i < v.size() && i < 14; ++i) {
+                    char b[64];
+                    std::snprintf(b, sizeof b, " L%u %llu (%llu draws)", v[i].second, (unsigned long long)v[i].first, (unsigned long long)g_pass_end_draws[v[i].second]);
+                    s += b;
+                }
+                NXLOG_I(kTag, "passes ended by:%s; memory writes kept to the pass end %llu (%llu flushes)", s.c_str(), (unsigned long long)g_wdefer_n,
+                        (unsigned long long)g_wdefer_flushes);
+            }
             NXLOG_I(kTag, "occlusion reports: %llu in their pass, %llu with a pass break; %llu queries ended early by a pass break (split)",
                     (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
             NXLOG_I(kTag, "game barriers: %llu, %llu in an open pass: %llu kept the pass (barrier_keep_pass, bits seen %x), %llu ended it after storage or stream-out writes (bits of all %x)",

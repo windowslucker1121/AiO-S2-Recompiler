@@ -172,7 +172,7 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use);
 // 1: the copy; 2: the pool, but the copy could serve it once its pages are current. keep false: the decision depends on something the check
 // cannot see (no copy chunk yet): the set is not kept.
 struct Mirror;
-struct ReadDep { Mirror* m = nullptr; uint64_t first = 0, last = 0; uint8_t state = 0; bool mirror_on = false; bool keep = true; };
+struct ReadDep { Mirror* m = nullptr; const void* pool = nullptr; uint64_t first = 0, last = 0; uint8_t state = 0; bool mirror_on = false; bool keep = true; };
 BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* dep);
 // True when resolve_read would decide the same now (and then does what it would do besides: marks the pages used or wanted).
 bool read_dep_check(const ReadDep& dep, int use);
@@ -220,6 +220,10 @@ uint64_t out_grow_version();   // moves only when held results may cover more pa
 bool ab_tex_park_on();   // false in an off window of [nvn] cpuperf_ab with tex_park
 bool ab_overlap_grow_on();   // false in an off window of [nvn] cpuperf_ab with overlap_grow
 bool ab_index_inc_on();      // false in an off window of [nvn] cpuperf_ab with index_inc
+bool ab_out_delta_on();  // ... with out_delta (delta copy-backs, nvn_gpu_pool.cpp)
+void out_delta_block(bool on);   // render thread: true while a dispatch's compute pipeline and sets are bound (no delta copy-back then)
+void out_presnap_end();   // after the dispatch: snapshots no out_add took are dropped
+bool out_presnap(uint64_t addr, uint64_t size, VkBuffer mbuf, VkDeviceSize moff, VkCommandBuffer cb);   // a dispatch is about to write [addr, +size) in the copy (out_delta)
 void park_stats(uint64_t* parked, uint64_t* taken, uint64_t* stale, uint64_t* expired);   // [nvn] tex_park (nvn_gpu_texture.cpp)   // moves whenever the set of held results changes (an entry added, pending again, or taken out)
 // out_overlaps for a pointer window (gmem_before_op): render thread; "no overlap" answers are remembered until the held results change.
 bool out_overlaps_window(uint64_t page, uint64_t size);
