@@ -640,7 +640,8 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
 
 // ---- parked images ([nvn] tex_park, nvn_gpu.h) ------------------------------------------------------------------------------------
 struct ParkKey {
-    uint64_t mem, size;
+    uint64_t mem, size;   // mem: the storage, or for a texture of a virtual pool the pool object (voff: the offset there)
+    uint64_t voff;
     const FormatInfo* fmt;
     uint32_t levels, layers, w, h, d, target, samples, bh;
     bool bl;
@@ -649,7 +650,7 @@ struct ParkKey {
 ParkKey park_key(const Texture& t) {
     ParkKey k;
     std::memset(&k, 0, sizeof k);   // padding too: compared with memcmp
-    k.mem = reinterpret_cast<uint64_t>(t.mem); k.size = t.storage_size; k.fmt = t.fmt; k.levels = t.levels; k.layers = t.layers;
+    k.mem = t.vpool ? reinterpret_cast<uint64_t>(t.vpool.get()) : reinterpret_cast<uint64_t>(t.mem); k.voff = t.vpool ? t.voffset : 0; k.size = t.storage_size; k.fmt = t.fmt; k.levels = t.levels; k.layers = t.layers;
     k.w = static_cast<uint32_t>(t.b.width); k.h = static_cast<uint32_t>(t.b.height); k.d = static_cast<uint32_t>(t.b.depth);
     k.target = static_cast<uint32_t>(t.b.target); k.samples = static_cast<uint32_t>(t.b.samples); k.bh = static_cast<uint32_t>(t.block_height_gobs);
     k.bl = t.block_linear;
@@ -658,12 +659,13 @@ ParkKey park_key(const Texture& t) {
 // A sampled hash of the storage (256 words spread over it): a CPU rewrite of the memory between park and take that no flush reported
 // (coherent pools) shows up as another hash, and the image is then uploaded again.
 uint64_t park_sample(const Texture& t) {
-    if (!t.mem || t.storage_size < 8) return 0;
+    if ((!t.mem && !t.vpool) || t.storage_size < 8) return 0;
     uint64_t h = 0x9e3779b97f4a7c15ull;
     const uint64_t n = 256, step = std::max<uint64_t>(8, (t.storage_size / n) & ~7ull);
     for (uint64_t off = 0; off + 8 <= t.storage_size; off += step) {
-        uint64_t v;
-        std::memcpy(&v, t.mem + off, 8);
+        uint64_t v = 0;
+        if (t.mem) std::memcpy(&v, t.mem + off, 8);
+        else texture_read_virtual(t, off, 8, reinterpret_cast<uint8_t*>(&v));
         h = (h ^ v) * 0x100000001b3ull;
     }
     return h;
@@ -676,7 +678,7 @@ constexpr uint64_t kParkPresents = 8;
 constexpr size_t kParkMax = 64;
 bool tex_park_on() {
     static const bool on = nxrt::config_get_bool("nvn", "tex_park", true);
-    return on;
+    return on && ab_tex_park_on();
 }
 // Destroys parked images older than kParkPresents (or the oldest over kParkMax). Lock held.
 void park_sweep_locked(uint64_t now) {
@@ -692,7 +694,7 @@ void park_sweep_locked(uint64_t now) {
 }
 // Takes back a parked image for t (render thread). Null: none.
 TexGpu* tex_unpark(Texture* t) {
-    if (!t->mem || t->vpool || t->is_display || !tex_park_on()) return nullptr;
+    if ((!t->mem && !t->vpool) || t->is_display || !tex_park_on()) return nullptr;
     const ParkKey k = park_key(*t);
     std::lock_guard<std::mutex> lk(g_park_mu);
     if (g_parked.empty()) return nullptr;
@@ -713,7 +715,7 @@ TexGpu* tex_unpark(Texture* t) {
 }  // namespace
 
 bool tex_park(const Texture& t, TexGpu* g) {
-    if (!g || g->failed || !g->gpu_written || g->refs != 1 || g->sparse || g->streamed || !t.mem || t.vpool || t.is_display || !tex_park_on()) return false;
+    if (!g || g->failed || !g->gpu_written || g->refs != 1 || g->sparse || g->streamed || (!t.mem && !t.vpool) || t.is_display || !tex_park_on()) return false;
     Parked p{park_key(t), g, counters().presents.load(std::memory_order_relaxed), park_sample(t), false};
     std::lock_guard<std::mutex> lk(g_park_mu);
     for (Parked& o : g_parked)
@@ -732,7 +734,7 @@ bool tex_park(const Texture& t, TexGpu* g) {
 void parked_cpu_wrote(uint64_t lo, uint64_t hi) {
     std::lock_guard<std::mutex> lk(g_park_mu);
     for (Parked& p : g_parked)
-        if (p.key.mem < hi && p.key.mem + std::max<uint64_t>(p.key.size, 1) > lo) p.dirty = true;
+        if (!p.key.voff && p.key.mem < hi && p.key.mem + std::max<uint64_t>(p.key.size, 1) > lo) p.dirty = true;   // virtual-pool images: the sample hash
 }
 
 void park_stats(uint64_t* parked, uint64_t* taken, uint64_t* stale, uint64_t* expired) {

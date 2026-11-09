@@ -204,6 +204,7 @@ bool out_overlaps_shadow(uint64_t addr, uint64_t size);
 // Some page of [addr, +size) holds a result that is newer in the copy than in the pool.
 bool out_overlaps(uint64_t addr, uint64_t size);
 uint64_t out_version();
+bool ab_tex_park_on();   // false in an off window of [nvn] cpuperf_ab with tex_park
 void park_stats(uint64_t* parked, uint64_t* taken, uint64_t* stale, uint64_t* expired);   // [nvn] tex_park (nvn_gpu_texture.cpp)   // moves whenever the set of held results changes (an entry added, pending again, or taken out)
 // out_overlaps for a pointer window (gmem_before_op): render thread; "no overlap" answers are remembered until the held results change.
 bool out_overlaps_window(uint64_t page, uint64_t size);
