@@ -182,6 +182,7 @@ bool texture_hash_virtual(const Texture& t, uint64_t& hash) {
 
 void textures_cpu_wrote(const void* lo, uint64_t size) {
     const uint64_t a = reinterpret_cast<uint64_t>(lo), b = a + size;
+    gpu::parked_cpu_wrote(a, b);   // parked images of finalized textures there are stale now
     std::vector<Ref<Texture>> hit;
     {
         std::lock_guard<std::mutex> lk(g_mu);
@@ -231,6 +232,7 @@ void texture_registry_detach_gpu() {
     std::lock_guard<std::mutex> lk(g_mu);
     for (auto& kv : g_by_start) kv.second->gpu = nullptr;
     for (Texture* t : g_virtual) t->gpu = nullptr;
+    g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
 }
 
 Ref<Texture> texture_registry_find_alias(const Texture* t) {

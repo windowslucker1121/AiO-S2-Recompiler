@@ -145,6 +145,9 @@ struct TexGpu;    // Vulkan side of a texture (nvn_gpu_texture.cpp)
 // Counts every change that can make a sampled texture need work before a draw: a texture marked CPU-dirty, a layout change of a texture's image
 // (nvn_gpu_texture.cpp). The replay skips its per-draw walk over the pool arrays' textures while it has not moved (prepare_textures).
 inline std::atomic<uint64_t> g_tex_state_gen{0};
+// Counts changes of which image (and so which views) a texture object has: an image made, shared, replaced (rescale) or released. The descriptor
+// set memo ([nvn] set_reuse) holds views: it is valid only while this has not moved (layout changes and CPU writes do not change a view).
+inline std::atomic<uint64_t> g_tex_image_gen{0};
 // Texture::cpu_dirty: an atomic flag whose setting counts in g_tex_state_gen.
 struct DirtyFlag {
     std::atomic<bool> v{true};

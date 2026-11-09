@@ -958,7 +958,8 @@ void release_texture_gpu(Texture* t) {
             if (!x->destroyed.load() || !x->gpu) return;   // initialized again meanwhile, or never got an image
             TexGpu* img = x->gpu;
             x->gpu = nullptr;
-            destroy_texture_gpu(img);
+            g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
+            if (!tex_park(*x, img)) destroy_texture_gpu(img);
         });
         g_gauge_render_queue.add(1);
     }

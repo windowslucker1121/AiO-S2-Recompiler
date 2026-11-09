@@ -103,7 +103,7 @@ struct SparseState {
 };
 
 Texture::~Texture() {
-    if (gpu) gpu::destroy_texture_gpu(gpu);
+    if (gpu && !gpu::tex_park(*this, gpu)) gpu::destroy_texture_gpu(gpu);
     gpu = nullptr;
 }
 
@@ -512,6 +512,7 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
     { std::lock_guard<std::mutex> lk(g_live_mu); g_live_set.insert(g); }
     g_gauge_textures_live.add(1);
     t->gpu = g;
+    g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
     const Shape s = shape_of(*t);
     g->fmt = t->fmt;
     g->type = s.type;
@@ -637,6 +638,110 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
     return g;
 }
 
+// ---- parked images ([nvn] tex_park, nvn_gpu.h) ------------------------------------------------------------------------------------
+struct ParkKey {
+    uint64_t mem, size;   // mem: the storage, or for a texture of a virtual pool the pool object (voff: the offset there)
+    uint64_t voff;
+    const FormatInfo* fmt;
+    uint32_t levels, layers, w, h, d, target, samples, bh;
+    bool bl;
+    bool operator==(const ParkKey& o) const { return std::memcmp(this, &o, sizeof *this) == 0; }
+};
+ParkKey park_key(const Texture& t) {
+    ParkKey k;
+    std::memset(&k, 0, sizeof k);   // padding too: compared with memcmp
+    k.mem = t.vpool ? reinterpret_cast<uint64_t>(t.vpool.get()) : reinterpret_cast<uint64_t>(t.mem); k.voff = t.vpool ? t.voffset : 0; k.size = t.storage_size; k.fmt = t.fmt; k.levels = t.levels; k.layers = t.layers;
+    k.w = static_cast<uint32_t>(t.b.width); k.h = static_cast<uint32_t>(t.b.height); k.d = static_cast<uint32_t>(t.b.depth);
+    k.target = static_cast<uint32_t>(t.b.target); k.samples = static_cast<uint32_t>(t.b.samples); k.bh = static_cast<uint32_t>(t.block_height_gobs);
+    k.bl = t.block_linear;
+    return k;
+}
+// A sampled hash of the storage (256 words spread over it): a CPU rewrite of the memory between park and take that no flush reported
+// (coherent pools) shows up as another hash, and the image is then uploaded again.
+uint64_t park_sample(const Texture& t) {
+    if ((!t.mem && !t.vpool) || t.storage_size < 8) return 0;
+    uint64_t h = 0x9e3779b97f4a7c15ull;
+    const uint64_t n = 256, step = std::max<uint64_t>(8, (t.storage_size / n) & ~7ull);
+    for (uint64_t off = 0; off + 8 <= t.storage_size; off += step) {
+        uint64_t v = 0;
+        if (t.mem) std::memcpy(&v, t.mem + off, 8);
+        else texture_read_virtual(t, off, 8, reinterpret_cast<uint8_t*>(&v));
+        h = (h ^ v) * 0x100000001b3ull;
+    }
+    return h;
+}
+struct Parked { ParkKey key; TexGpu* g; uint64_t at; uint64_t sample; bool dirty; };
+std::mutex g_park_mu;
+std::vector<Parked> g_parked;
+std::atomic<uint64_t> g_park_n{0}, g_park_taken{0}, g_park_stale{0}, g_park_expired{0};   // statistics
+constexpr uint64_t kParkPresents = 8;
+constexpr size_t kParkMax = 64;
+bool tex_park_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "tex_park", true);
+    return on && ab_tex_park_on();
+}
+// Destroys parked images older than kParkPresents (or the oldest over kParkMax). Lock held.
+void park_sweep_locked(uint64_t now) {
+    for (size_t i = 0; i < g_parked.size();) {
+        if (now - g_parked[i].at > kParkPresents || g_parked.size() > kParkMax) {
+            destroy_texture_gpu(g_parked[i].g);
+            g_park_expired.fetch_add(1, std::memory_order_relaxed);
+            g_parked.erase(g_parked.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
+}
+// Takes back a parked image for t (render thread). Null: none.
+TexGpu* tex_unpark(Texture* t) {
+    if ((!t->mem && !t->vpool) || t->is_display || !tex_park_on()) return nullptr;
+    const ParkKey k = park_key(*t);
+    std::lock_guard<std::mutex> lk(g_park_mu);
+    if (g_parked.empty()) return nullptr;
+    park_sweep_locked(counters().presents.load(std::memory_order_relaxed));
+    for (size_t i = 0; i < g_parked.size(); ++i) {
+        if (!(g_parked[i].key == k)) continue;
+        Parked p = g_parked[i];
+        g_parked.erase(g_parked.begin() + static_cast<std::ptrdiff_t>(i));
+        t->gpu = p.g;
+        g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
+        if (!p.dirty && park_sample(*t) == p.sample) t->cpu_dirty.store(false);   // the image holds what the GPU wrote there last, as the memory would on the console
+        else { p.g->gpu_written = false; g_park_stale.fetch_add(1, std::memory_order_relaxed); }
+        g_park_taken.fetch_add(1, std::memory_order_relaxed);
+        return p.g;
+    }
+    return nullptr;
+}
+}  // namespace
+
+bool tex_park(const Texture& t, TexGpu* g) {
+    if (!g || g->failed || !g->gpu_written || g->refs != 1 || g->sparse || g->streamed || (!t.mem && !t.vpool) || t.is_display || !tex_park_on()) return false;
+    Parked p{park_key(t), g, counters().presents.load(std::memory_order_relaxed), park_sample(t), false};
+    std::lock_guard<std::mutex> lk(g_park_mu);
+    for (Parked& o : g_parked)
+        if (o.key == p.key) {          // an older image of the same storage: the newer one wins
+            destroy_texture_gpu(o.g);
+            o = p;
+            g_park_n.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+    g_parked.push_back(p);
+    g_park_n.fetch_add(1, std::memory_order_relaxed);
+    park_sweep_locked(p.at);
+    return true;
+}
+
+void parked_cpu_wrote(uint64_t lo, uint64_t hi) {
+    std::lock_guard<std::mutex> lk(g_park_mu);
+    for (Parked& p : g_parked)
+        if (!p.key.voff && p.key.mem < hi && p.key.mem + std::max<uint64_t>(p.key.size, 1) > lo) p.dirty = true;   // virtual-pool images: the sample hash
+}
+
+void park_stats(uint64_t* parked, uint64_t* taken, uint64_t* stale, uint64_t* expired) {
+    *parked = g_park_n.load(); *taken = g_park_taken.load(); *stale = g_park_stale.load(); *expired = g_park_expired.load();
+}
+
+namespace {
 // The texture's image, created on first use. Null when the texture has no usable image (the failure is counted and logged once).
 TexGpu* tex_or_null(Texture* t, float want_scale = 1.0f) {
     if (!t || !active()) return nullptr;
@@ -647,6 +752,7 @@ TexGpu* tex_or_null(Texture* t, float want_scale = 1.0f) {
             // the same bytes under another texture object: one image (the object rendered to and the one that is sampled are not the same
             // object); what the image holds is as current for this object as for the one it was made for
             t->gpu = ag;
+            g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
             ++ag->refs;
             if (ag->uploaded || ag->gpu_written) t->cpu_dirty.store(false);
             static int logged = 0;
@@ -654,6 +760,7 @@ TexGpu* tex_or_null(Texture* t, float want_scale = 1.0f) {
             return ag;
         }
     }
+    if (want_scale == 1.0f) if (TexGpu* pg = tex_unpark(t)) return pg;   // a parked image of the same storage and layout
     NXFT_MIN("tex.create", 30000);
     TexGpu* g = create_texture_gpu(t, want_scale);
     return g->failed ? nullptr : g;
@@ -1445,6 +1552,7 @@ bool tex_rescale(Texture* t, Frame& f, float to, const char* why) {
     g->base = s.base;
     g->layout = nl;
     g_tex_state_gen.fetch_add(1, std::memory_order_acq_rel);
+    g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
     g->scale = to;
     if (to == 1.0f) g->scale_blocked = true;
     return true;

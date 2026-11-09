@@ -1500,16 +1500,23 @@ std::unordered_map<uint64_t, FlushDiag> g_flush_diag;   // GPU-reader copy-backs
 std::atomic<uint64_t> g_on_inval_skipped{0};   // invalidates left to the guards (out_invalidate_by_guard)
 std::atomic<uint64_t> g_on_fault{0}, g_on_inval{0}, g_on_deferred{0}, g_on_eager_read{0}, g_on_eager_noguard{0}, g_on_gpu_flush{0};
 
+// Bits [first, last] of a page bitmap, a 64-bit word at a time (one atomic per word, not per page: held results span thousands of pages).
+inline uint64_t word_mask(uint64_t w, uint64_t first, uint64_t last) {
+    const uint64_t lo = w == (first >> 6) ? (first & 63) : 0, hi = w == (last >> 6) ? (last & 63) : 63;
+    return (hi == 63 ? ~uint64_t{0} : ((uint64_t{1} << (hi + 1)) - 1)) & (~uint64_t{0} << lo);
+}
 void bits_set(std::atomic<uint64_t>* bm, uint64_t first, uint64_t last, bool on) {
-    for (uint64_t p = first; p <= last; ++p) {
-        const uint64_t b = uint64_t{1} << (p & 63);
-        if (on) bm[p >> 6].fetch_or(b, std::memory_order_acq_rel);
-        else bm[p >> 6].fetch_and(~b, std::memory_order_acq_rel);
+    if (last < first) return;
+    for (uint64_t w = first >> 6; w <= (last >> 6); ++w) {
+        const uint64_t m = word_mask(w, first, last);
+        if (on) bm[w].fetch_or(m, std::memory_order_acq_rel);
+        else bm[w].fetch_and(~m, std::memory_order_acq_rel);
     }
 }
 bool bits_any(const std::atomic<uint64_t>* bm, uint64_t first, uint64_t last) {
-    for (uint64_t p = first; p <= last; ++p)
-        if ((bm[p >> 6].load(std::memory_order_acquire) >> (p & 63)) & 1) return true;
+    if (last < first) return false;
+    for (uint64_t w = first >> 6; w <= (last >> 6); ++w)
+        if (bm[w].load(std::memory_order_acquire) & word_mask(w, first, last)) return true;
     return false;
 }
 
@@ -1764,6 +1771,7 @@ bool out_lazy() {
 }
 
 bool out_any() { return g_out_n.load(std::memory_order_acquire) != 0; }
+uint64_t out_version() { return g_out_ver.load(std::memory_order_acquire); }
 
 uint64_t out_bytes_total() {
     return g_ob_end.load(std::memory_order_relaxed) + g_ob_gpu.load(std::memory_order_relaxed) + g_ob_fault.load(std::memory_order_relaxed) +
@@ -2075,8 +2083,8 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
 // Paired measurement windows of [nvn] out_index_ab / out_fetch_ab (N presents each, the feature off in even windows): one line per window with
 // fps, 1% low, the median frame and the render thread's replay / idle time per frame, so a single run gives back-to-back pairs of one scene.
 void out_ab_tick() {
-    static const int64_t ab_i = config_get_int("nvn", "out_index_ab", 0), ab_f = config_get_int("nvn", "out_fetch_ab", 0);
-    const int64_t ab = ab_i > 0 ? ab_i : ab_f;
+    static const int64_t ab_i = config_get_int("nvn", "out_index_ab", 0), ab_f = config_get_int("nvn", "out_fetch_ab", 0), ab_c = config_get_int("nvn", "cpuperf_ab", 0);
+    const int64_t ab = ab_i > 0 ? ab_i : ab_f > 0 ? ab_f : ab_c;   // cpuperf_ab (nvn_replay.cpp): the same windows (on when presents / N is odd)
     if (ab <= 0) return;
     const uint64_t pres = counters().presents.load(std::memory_order_relaxed);
     const uint64_t w = pres / static_cast<uint64_t>(ab);
@@ -2094,7 +2102,8 @@ void out_ab_tick() {
         const double fr = static_cast<double>(pres - p0);
         const nxrt::FrameTimeStats st = nxrt::frame_time_stats(secs);
         NXLOG_I(kTag, "ab window %s%s%s (presents %llu-%llu, %.1f s): %.1f fps, 1%% low %.1f, median %.2f ms, worst %.1f ms; per frame: render thread replay %.2f ms, "
-                      "idle %.2f ms, game GPU sync waits %.2f ms, waits for the compute-out lock %.3f ms", (cur_w & 1) ? "on" : "off", ab_i > 0 ? " [out_index]" : "", ab_f > 0 ? " [out_fetch_unlocked]" : "",
+                      "idle %.2f ms, game GPU sync waits %.2f ms, waits for the compute-out lock %.3f ms", (cur_w & 1) ? "on" : "off", ab_i > 0 ? " [out_index]" : "",
+                ab_f > 0 ? " [out_fetch_unlocked]" : (ab_i <= 0 && ab_c > 0) ? " [cpuperf]" : "",
                 (unsigned long long)p0, (unsigned long long)pres, secs, fr / secs, st.low1_fps, st.median_ms, st.worst_ms, (r - r0) * 1000.0 / fr,
                 (i - i0) * 1000.0 / fr, (s - s0) * 1000.0 / fr, (lw - lw0) / 1e6 / fr);
     }
