@@ -9,6 +9,8 @@ Usage (venv python, -I):
          (--token gpt | --hashes FILE | PREFIX ...) [--dumps DIR] [--harness PATH] [--env NAME=VALUE ...] [--jobs 12]
   --dumps DIR   code_<hash>.bin / ctrl_<hash>.bin of "runtime" blocks (not in the corpus) to translate too (single mode)
   --refresh     DEST exists: only translate again and replace (the links stay)
+  --batch-out DIR  use the rows of a finished --batch output (e.g. a full corpus run with NXRT_HARNESS_CFG_CHECK) instead of translating
+                (only the selected blocks' ok rows are taken)
 Prints the changed blocks (SPIR-V differs from CACHE) into DEST/changed.txt.
 """
 import argparse
@@ -49,6 +51,7 @@ def main():
     ap.add_argument('--env', action='append', default=[])
     ap.add_argument('--jobs', type=int, default=12)
     ap.add_argument('--refresh', action='store_true')
+    ap.add_argument('--batch-out', help='take the corpus rows from this finished --batch output folder instead of translating')
     a = ap.parse_args()
     cache, dest, corpus = (os.path.abspath(x) for x in (a.cache, a.dest, a.corpus))
     if os.path.normcase(cache) == os.path.normcase(dest):
@@ -95,8 +98,11 @@ def main():
                     link = os.path.join(sub, d)
                     subprocess.run(['cmd', '/c', 'mklink', '/J', link, os.path.join(corpus, d)], check=True, stdout=subprocess.DEVNULL)
                     links.append(link)
-            subprocess.run([os.path.abspath(a.harness), '--batch', sub, '--out', out, '--jobs', str(a.jobs), '--no-val'], check=True, env=env,
-                           stdout=subprocess.DEVNULL)
+            if a.batch_out:
+                out = os.path.abspath(a.batch_out)
+            else:
+                subprocess.run([os.path.abspath(a.harness), '--batch', sub, '--out', out, '--jobs', str(a.jobs), '--no-val'], check=True,
+                               env=env, stdout=subprocess.DEVNULL)
             ohead, orows = rows(os.path.join(out, 'results.tsv'))
             for r in orows:
                 c = r.split('\t')

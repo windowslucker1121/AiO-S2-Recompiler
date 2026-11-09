@@ -132,6 +132,30 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   (one compute block branches on an undefined value and is not checked). The fix changes the SPIR-V of 14,692 blocks (the 8 more
   fail before it after 100-107 walks); 17,094 corpus blocks contain a BRX/BRXU or CALL.REL.NOINC.
 
+## Structurizer for reducible graphs (register pressure, 2026-11-09)
+
+- Ryujinx's structurizer (`StructuredProgramContext` + `GotoElimination`) makes a goto of every branch that does not land inside the
+  current `if` and then removes the gotos with the "Taming Control Flow" moves. OoT's material fragment shaders (a light loop with a
+  BRX switch whose cases leave to a common merge from different depths) came out with five `do { } while (flag)` loops nested in the
+  light loop plus many `if (!flag)` guards, and NVIDIA's compiler (610.88) needed 235-255 registers (or capped at 168 and spilled) for
+  code whose SASS uses 75-112.
+- `harness/translator/CfgStructurizer.cs` (+ `.Lowering.cs`; hooks `structured-program-cfg-structurizer.patch`,
+  `structured-context-cfg-structurizer.patch`, applied through the csproj's new `Then2` metadata) structures every function whose block
+  graph is reducible after Ramsey, "Beyond Relooper" (ICFP 2022): dominator tree, merge nodes (two or more forward in-edges, or entered
+  by an edge leaving a loop) after the code they follow, branches to a node dominated alone inlined, back edges as `continue`. A branch
+  to a merge node from the end of an if/else chain needs nothing; from further inside it sets a flag that guards the statements up to
+  the merge (`if (!flag)`), and across a loop it breaks (`flag = true; break;`, `if (flag) break;`). Loops are `do { ...; break; }
+  while (true)` or `do { } while (c)` when the body ends with its only continue. `if (c) { ...; return/discard/break/continue; }` takes
+  the else part after it, not in an else block. Flags nobody reads are removed. Irreducible graphs keep Ryujinx's path.
+  Off: `NXRT_HARNESS_STRUCTURIZER=ryujinx`; `=log` prints fallbacks. `NXRT_HARNESS_STRUCT_FLAT_ELSE=0` keeps else blocks.
+- Only real loops are loops now, so the vertex/fragment loop cap (`NXRT_HARNESS_LOOP_CAP`) counts real back edges only. Ballots and
+  votes stay where the IR has them (`structured-subgroup-propagation.patch` works on the AST afterwards as before).
+- Checked: the OoT corpus with `NXRT_HARNESS_CFG_CHECK=100` (47,202 blocks, 56,594 functions): 0 exceptions (the 7
+  GotoElimination NullReferenceExceptions of the old path translate now), 46,995 ok as before.
+- `BlockOrder.cs` (`cfg-block-order.patch`, a first guess: blocks in a loop-contiguous topological order before structuring) changes
+  nothing for OoT (the IR is already in such an order) and is kept as a guard for code laid out otherwise; `NXRT_HARNESS_BLOCK_ORDER=0`
+  turns it off, `=log` prints each function's block graph.
+
 ## Pool arrays: texture handles computed per pixel (OoT A7)
 
 - A bindless sample whose handle neither the bindless-handle patch nor Ryujinx's `TryConvertBindless` can tie to something fixed per

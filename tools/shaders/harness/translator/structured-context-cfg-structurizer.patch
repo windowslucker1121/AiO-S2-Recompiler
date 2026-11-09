@@ -1,0 +1,21 @@
+Ryujinx StructuredProgramContext: access for translator/CfgStructurizer.cs (the AST block new nodes go to, the basic block the CFG
+check attributes them to). Applied after structured-context-node-blocks.patch (csproj `Then`). The Ryujinx code in the context
+lines is MIT.
+--- a/StructuredIr/StructuredProgramContext.cs
++++ b/StructuredIr/StructuredProgramContext.cs
+@@ -35,6 +35,15 @@
+         // CFG check (StructuredCfgCheck, off unless NXRT_HARNESS_CFG_CHECK is set): the basic block each AST node was made for.
+         public List<(IAstNode Node, int Block)> NodeBlocks { get; set; }
+
++        // CfgStructurizer: the AST block AddNode adds to, and the basic block the nodes are attributed to.
++        public AstBlock CurrentAstBlock
++        {
++            get => _currBlock;
++            set => _currBlock = value;
++        }
++
++        public void SetNodeBlock(int index) => _nodeBlockIndex = index;
++
+         private int _nodeBlockIndex;
+
+         public StructuredProgramContext(

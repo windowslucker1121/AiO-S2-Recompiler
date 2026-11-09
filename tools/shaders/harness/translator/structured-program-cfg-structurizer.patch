@@ -1,0 +1,28 @@
+Ryujinx StructuredProgram: a function whose block graph is reducible is structured by translator/CfgStructurizer.cs instead of
+the block-by-block walk and goto elimination (NXRT_HARNESS_STRUCTURIZER=ryujinx keeps the old path). Applied after
+structured-program-cfg-check.patch and structured-coopmat-vector-dest.patch (csproj `Then2`). The Ryujinx code in the context
+lines is MIT.
+--- a/StructuredIr/StructuredProgram.cs
++++ b/StructuredIr/StructuredProgram.cs
+@@ -49,6 +49,9 @@
+
+                 PhiFunctions.Remove(blocks);
+
++                bool structured = CfgStructurizer.TryEmit(blocks, context, op => AddOperation(context, op, targetLanguage, functions));
++
++                if (!structured)
+                 for (int blkIndex = 0; blkIndex < blocks.Length; blkIndex++)
+                 {
+                     BasicBlock block = blocks[blkIndex];
+@@ -70,7 +73,10 @@
+                     }
+                 }
+
+-                GotoElimination.Eliminate(context.GetGotos(), context.NewTemp);
++                if (!structured)
++                {
++                    GotoElimination.Eliminate(context.GetGotos(), context.NewTemp);
++                }
+
+                 if (context.NodeBlocks != null)
+                 {

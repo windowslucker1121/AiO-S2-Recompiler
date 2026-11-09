@@ -267,8 +267,29 @@ void print_stats(Ctx& c, VkPipeline p, const std::string& label, double ms) {
             }
         }
         std::printf("\n");
+        // PIPESTAT_IR=<folder>: the driver's internal representations (if it offers any) as text files
+        if (const char* dir = std::getenv("PIPESTAT_IR")) {
+            uint32_t nr = 0;
+            vkGetPipelineExecutableInternalRepresentationsKHR(c.dev, &ei, &nr, nullptr);
+            std::vector<VkPipelineExecutableInternalRepresentationKHR> ir(nr, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INTERNAL_REPRESENTATION_KHR});
+            vkGetPipelineExecutableInternalRepresentationsKHR(c.dev, &ei, &nr, ir.data());
+            std::vector<std::vector<char>> buf(nr);
+            for (uint32_t r = 0; r < nr; r++) { buf[r].resize(ir[r].dataSize); ir[r].pData = buf[r].data(); }
+            vkGetPipelineExecutableInternalRepresentationsKHR(c.dev, &ei, &nr, ir.data());
+            for (uint32_t r = 0; r < nr; r++) {
+                std::string fn = std::string(dir) + "/" + ex[e].name + "_" + std::to_string(r) + (ir[r].isText ? ".txt" : ".bin");
+                for (auto& ch : fn) if (ch == ' ') ch = '_';
+                if (FILE* f = std::fopen(fn.c_str(), "wb")) { std::fwrite(buf[r].data(), 1, buf[r].size(), f); std::fclose(f); }
+                std::printf("  ir %s: %s (%zu bytes)\n", ir[r].name, fn.c_str(), buf[r].size());
+            }
+        }
     }
     std::fflush(stdout);
+}
+
+VkPipelineCreateFlags capture_flags() {
+    return VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR |
+           (std::getenv("PIPESTAT_IR") ? VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR : 0);
 }
 
 bool run(Ctx& c, const std::string& arg, Module* frag) {
@@ -303,7 +324,7 @@ bool run(Ctx& c, const std::string& arg, Module* frag) {
     auto t0 = std::chrono::steady_clock::now();
     if (ms[0].stage == VK_SHADER_STAGE_COMPUTE_BIT) {
         VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        ci.flags = VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+        ci.flags = capture_flags();
         ci.stage = st[0];
         ci.layout = layout;
         CK(vkCreateComputePipelines(c.dev, VK_NULL_HANDLE, 1, &ci, nullptr, &p));
@@ -332,7 +353,7 @@ bool run(Ctx& c, const std::string& arg, Module* frag) {
         dy.dynamicStateCount = 2;
         dy.pDynamicStates = dyn;
         VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rci};
-        ci.flags = VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+        ci.flags = capture_flags();
         ci.stageCount = static_cast<uint32_t>(st.size());
         ci.pStages = st.data();
         ci.pVertexInputState = meshp ? nullptr : &vi;
