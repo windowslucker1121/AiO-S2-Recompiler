@@ -109,12 +109,14 @@ bool load_game_def(const std::wstring& manifest, GameDef* g, std::string* error)
     g->main_build_id = t.get("dump", "main_build_id");
     g->shader_extractor = t.get("shaders", "extractor", "generic");
     for (const TomlTable* m : t.all("module")) g->modules.push_back(m->get("name"));
+    g->generic = t.get("game", "generic") == "true";
+    g->is_template = t.get("game", "template") == "true";
     return true;
 }
 
 std::vector<GameDef> find_game_defs(const std::wstring& exe_dir, const std::wstring& dev_root) {
     std::vector<GameDef> out;
-    std::vector<std::wstring> roots = {join(exe_dir, L"games")};
+    std::vector<std::wstring> roots = {join(exe_dir, L"games"), join(exe_dir, L"experimental")};
     if (!dev_root.empty()) roots.push_back(join(dev_root, L"recomp\\games"));
     for (const std::wstring& r : roots) {
         WIN32_FIND_DATAW fd;
@@ -124,7 +126,7 @@ std::vector<GameDef> find_game_defs(const std::wstring& exe_dir, const std::wstr
             if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
             const std::wstring m = join(join(r, fd.cFileName), L"game.toml");
             GameDef g;
-            if (!file_exists(m) || !load_game_def(m, &g, nullptr)) continue;
+            if (!file_exists(m) || !load_game_def(m, &g, nullptr) || g.is_template) continue;
             if (std::none_of(out.begin(), out.end(), [&](const GameDef& o) { return o.id == g.id; })) out.push_back(g);
         } while (FindNextFileW(h, &fd));
         FindClose(h);
@@ -241,6 +243,12 @@ LibraryEntry* Library::find(const std::string& id) {
 
 std::wstring library_path() { return join(exe_dir(), L"library.ini"); }
 std::wstring default_data_dir(const std::string& id) { return join(join(exe_dir(), L"game_data"), widen(id)); }
+std::wstring experimental_dir() { return join(exe_dir(), L"experimental"); }
+std::string experimental_id(const std::string& title_id) {
+    std::string id = "t" + title_id;
+    std::transform(id.begin(), id.end(), id.begin(), [](char c) { return static_cast<char>(tolower(static_cast<unsigned char>(c))); });
+    return id;
+}
 
 Library load_library(const std::vector<GameDef>& defs) {
     // [library] selected = <id>;  [game <id>] title_id / source / data_dir / dump_version

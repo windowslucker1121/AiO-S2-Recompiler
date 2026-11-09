@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Template manifest of the generic runtime (runtime/games/generic): the runtime DLL of experimental builds, for titles without a port of their
+# own. It names no game. The DLL takes the game's identity, modules and title facts at start from the manifest the library writes from the
+# player's own dump (tools/extract/make_manifest.py), not from this file; the values below only satisfy the build (GameManifest.cmake).
+#   powershell -File game-build\scripts\build.ps1 -Manifest %CD%\recomp\games\generic\game.toml   (with -DGAME_BUILD_RT_DLL=ON: generic_rt.dll)
+# The library never lists this file as a game (`template = true`).
+schema = 1
+
+[game]
+id = "generic"
+title = "Experimental build"
+short_title = "Experimental build"
+product = "Recomp runtime: generic"
+window_title = "Experimental build (unofficial recompilation)"
+title_id = "0000000000000000"
+version = "0.0.0"
+platform = "switch2"
+languages = 0x1ffff
+generic = true
+template = true
+
+[files]
+exe = "generic.exe"
+runtime_dll = "generic_rt.dll"
+ini = "generic.ini"
+log = "generic.log"
+setup_exe = "generic_setup.exe"
+launcher_ini = "generic_launcher.ini"
+shader_pack = "shader_cache.genshc"
+save_folder = "generic-recomp"
+
+[dump]
+version = "0.0.0"
+display_version = "0.0.0"
+main_build_id = "0000000000000000000000000000000000000000"
+
+# Placeholder module list (the build needs one); the DLL uses the list the game exe passes (game-build/src/rt_api.h).
+[[module]]
+name = "main"
+file = "main"
+base = 0x7100000000
+index = 0
+units = 1
+[[module]]
+name = "sdk"
+file = "sdk"
+base = 0x7500000000
+index = 1
+units = 1
+[[module]]
+name = "rtld"
+file = "rtld"
+base = 0x7700000000
+index = 2
+units = 1
+entry = true
+
+[shaders]
+extractor = "generic"
+extractor_script = "tools/shaders/scripts/extract_generic.py"
+
+[launcher]
+name = "Recomp Launcher"
+window_title = "Recomp Launcher (generic)"
+product_name = "generic_launcher"
+identifier = "org.recomp.generic"
+package_name = "generic-recomp"
+disclaimer = "Nintendo"

@@ -32,6 +32,7 @@
 
 #include "nxrt/extras.h"
 #include "nxrt/game.h"
+#include "nxrt/play.h"
 #include "nvn_arch_exp.h"
 #include "nvn_cmd.h"
 #include "nvn_gpu.h"
@@ -359,6 +360,7 @@ void nvnQueuePresentTexture(NVNqueue* queue, NVNwindow* window, int index) {
         return;
     }
     be::archexp::game_present();
+    play::present_frame();       // games without a frame-update hook: events, pads and pacing once per present
     be::gpu::present(w, index);
 }
 

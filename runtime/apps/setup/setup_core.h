@@ -39,6 +39,7 @@ struct Tools {
     std::wstring python;           // python.exe found, or empty
     std::wstring python_args;      // "-3" for the py.exe launcher
     std::wstring game_build;       // tools\build\game_build.py of a release (with its Zig and lifter), else empty
+    std::wstring make_manifest;    // make_manifest.py (tools\scripts in a release, tools\extract in the checkout)
 };
 Tools find_tools();
 // The game's exe: <exe dir>\<files.exe>; a development build also looks in the checkout's game-build\build\release.
@@ -52,6 +53,9 @@ struct GameBuild {
     std::string stamp;             // names, sizes and times of the sdk and runtime files: a new release builds the exe again
 };
 GameBuild game_build_of(const Tools& t, const GameDef& g);
+// An experimental build of a title without a port can be made here: the game build, make_manifest.py and the generic runtime
+// (games\generic\sdk + runtime) are all in this release.
+bool experimental_possible(const Tools& t);
 
 // ---- one game's choices (from the library, setup_games.h) ----------------------------------------------------------------------
 struct Config {

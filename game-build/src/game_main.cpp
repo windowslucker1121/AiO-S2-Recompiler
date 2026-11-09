@@ -101,7 +101,9 @@ struct GameModule {
 };
 
 // Load order = the order the console maps them: the entry module first.
-#ifdef GAME_AS_DLL
+#if defined(GAME_GENERIC)
+std::vector<GameModule> kModules;   // the generic runtime: filled by game_rt_main from the game exe's table (whatever modules the dump has)
+#elif defined(GAME_AS_DLL)
 GameModule kModules[] = {      // filled by game_rt_main from the tables the game exe passes
 #define X(name, file, base) {file, nullptr, nullptr, base},
     GAME_MODULES(X)
@@ -122,7 +124,7 @@ std::unique_ptr<nxrt::gfx::Renderer> g_gfx_renderer;
 [[noreturn]] void die_code(int code, const char* fmt, const char* a = "", const char* b = "") {
     NXLOG_E("boot", fmt, a, b);
     nxrt::log_flush();
-    std::fprintf(stderr, GAME_ID ": ");
+    std::fprintf(stderr, "%s: ", nxrt::game::info().id);
     std::fprintf(stderr, fmt, a, b);
     std::fprintf(stderr, "\n");
 #ifdef GAME_GUI_SUBSYSTEM
@@ -134,6 +136,15 @@ std::unique_ptr<nxrt::gfx::Renderer> g_gfx_renderer;
     for (;;) {}
 }
 [[noreturn]] void die(const char* fmt, const char* a = "", const char* b = "") { die_code(1, fmt, a, b); }
+// The log file's name: the manifest's (the generic runtime reads the player's manifest at start, so it is not known at build time).
+const char* game_log_name() {
+#ifdef GAME_GENERIC
+    static const std::string n = std::string(nxrt::game::info().id) + ".log";
+    return n.c_str();
+#else
+    return GAME_LOG;
+#endif
+}
 constexpr int kExitRefused = 7;
 
 std::wstring widen_utf8(const std::string& s) {
@@ -172,14 +183,14 @@ std::wstring full_path(const std::wstring& p) {
 bool take_folder_mutex(const wchar_t* kind, const std::wstring& folder) {
     unsigned long long h = 1469598103934665603ull;
     for (wchar_t ch : full_path(folder)) h = (h ^ static_cast<unsigned long long>(std::towlower(ch))) * 1099511628211ull;
-    const std::wstring name = L"Local\\" + widen_utf8(GAME_SAVE_FOLDER) + kind + std::to_wstring(h);
+    const std::wstring name = L"Local\\" + widen_utf8(nxrt::game::info().save_folder) + kind + std::to_wstring(h);
     return !(CreateMutexW(nullptr, FALSE, name.c_str()) && GetLastError() == ERROR_ALREADY_EXISTS);
 }
 // Whether a run holds the mutex take_folder_mutex(kind, folder) took (without creating it, so a run starting meanwhile is not refused).
 bool folder_mutex_held(const wchar_t* kind, const std::wstring& folder) {
     unsigned long long h = 1469598103934665603ull;
     for (wchar_t ch : full_path(folder)) h = (h ^ static_cast<unsigned long long>(std::towlower(ch))) * 1099511628211ull;
-    const std::wstring name = L"Local\\" + widen_utf8(GAME_SAVE_FOLDER) + kind + std::to_wstring(h);
+    const std::wstring name = L"Local\\" + widen_utf8(nxrt::game::info().save_folder) + kind + std::to_wstring(h);
     HANDLE m = OpenMutexW(SYNCHRONIZE, FALSE, name.c_str());
     if (!m) return false;
     CloseHandle(m);
@@ -540,15 +551,33 @@ int translate_shaders_main() {
 
 #ifdef GAME_AS_DLL
 extern "C" int game_rt_main(int argc, char** argv, const GameRtModules* mods) {
+#ifdef GAME_GENERIC
+    if (!mods || mods->size != sizeof(GameRtModules) || mods->api != GAME_RT_API || !mods->count) {
+        MessageBoxA(nullptr, "The game program and " GAME_RT_DLL " come from different releases. Build the game again in the library.", "Experimental build", MB_OK | MB_ICONERROR);
+        return 3;
+    }
+    for (uint32_t i = 0; i < mods->count; i++) {
+        const NxModule* nx = mods->mods[i];
+        kModules.push_back({nx && nx->name ? nx->name : "", nx, mods->abis[i], nx ? nx->base : 0});   // the NSO's file name is the module's name
+    }
+#else
     if (!mods || mods->size != sizeof(GameRtModules) || mods->api != GAME_RT_API || mods->count != sizeof(kModules) / sizeof(kModules[0])) {
         MessageBoxA(nullptr, GAME_EXE " and " GAME_RT_DLL " come from different releases. Run the launcher's Set up again.", GAME_SHORT_TITLE, MB_OK | MB_ICONERROR);
         return 3;
     }
     for (uint32_t i = 0; i < mods->count; i++) { kModules[i].nx = mods->mods[i]; kModules[i].abi = mods->abis[i]; }
+#endif
 #else
 int main(int argc, char** argv) {
 #endif
     GAME_REGISTER();      // before anything reads it (nxrt::init, play mode, the services, the test tooling): docs/GAME_BOUNDARY.md
+#ifdef GAME_GENERIC
+    if (!nxrt::games::generic::manifest().loaded) {
+        MessageBoxA(nullptr, ("The game manifest is missing or damaged: " + nxrt::games::generic::manifest().error + ". Build the game again in the library.").c_str(),
+                    "Experimental build", MB_OK | MB_ICONERROR);
+        return 3;
+    }
+#endif
 #ifdef GAME_GUI_SUBSYSTEM
     // Started from a terminal: show the output there. When the output is redirected to a file or a pipe (<game> --version > v.txt), leave it alone.
     const HANDLE out_handle = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -580,7 +609,7 @@ int main(int argc, char** argv) {
         else if (arg("--log")) logp = argv[++i];
         else if (arg("--max-seconds")) boot_opts.emplace_back("max_seconds", argv[++i]);
         else if (arg("--link")) boot_opts.emplace_back("link", argv[++i]);
-        else if (!std::strcmp(argv[i], "--version")) { std::printf(GAME_ID " %s\n", GAME_RELEASE_VERSION); return 0; }
+        else if (!std::strcmp(argv[i], "--version")) { std::printf("%s %s\n", nxrt::game::info().id, GAME_RELEASE_VERSION); return 0; }
         else if (!std::strcmp(argv[i], "--prepare-shaders")) { prepare = true; _putenv("NXRT_DIAG_WATCHDOG_SECONDS=0"); }
         else if (!std::strcmp(argv[i], "--if-needed")) prepare_if_needed = true;
         else if (!std::strcmp(argv[i], "--check")) prepare_check = true;
@@ -595,15 +624,15 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--no-nvn")) boot_opts.emplace_back("nvn", "0");
         else if (!std::strcmp(argv[i], "--headless")) boot_opts.emplace_back("gfx", "headless");
         else if (!std::strcmp(argv[i], "--window")) boot_opts.emplace_back("gfx", "window");
-        else { std::fprintf(stderr, GAME_ID ": unknown argument %s\n", argv[i]); return 2; }
+        else { std::fprintf(stderr, "%s: unknown argument %s\n", nxrt::game::info().id, argv[i]); return 2; }
     }
     if (!instance.empty() && !valid_instance_name(instance)) {
-        std::fprintf(stderr, GAME_ID ": instance name '%s': use 1-40 letters, digits, '-', '_' or '.' (not \"default\")\n", instance.c_str());
+        std::fprintf(stderr, "%s: instance name '%s': use 1-40 letters, digits, '-', '_' or '.' (not \"default\")\n", nxrt::game::info().id, instance.c_str());
         return 2;
     }
-    if (instance.empty() && !instance_dir.empty()) { std::fprintf(stderr, GAME_ID ": --instance-dir needs --instance NAME\n"); return 2; }
+    if (instance.empty() && !instance_dir.empty()) { std::fprintf(stderr, "%s: --instance-dir needs --instance NAME\n", nxrt::game::info().id); return 2; }
     if (!instance.empty() && prepare) {
-        std::fprintf(stderr, GAME_ID ": --prepare-shaders writes the shared shader data (pipeline cache, prepare.state): run it without --instance\n");
+        std::fprintf(stderr, "%s: --prepare-shaders writes the shared shader data (pipeline cache, prepare.state): run it without --instance\n", nxrt::game::info().id);
         return 2;
     }
     if (!instance_dir.empty()) instance_dir = absolute_utf8(instance_dir);     // against the folder the exe was started from
@@ -634,7 +663,7 @@ int main(int argc, char** argv) {
             if (instance.empty() && !std::getenv("NXRT_ALLOW_MULTIPLE") && !take_folder_mutex(L"_", base))
                 die_code(kExitRefused, "The game is already running from this folder (or its shaders are being prepared). Close that one first, "
                                        "or start another run beside it with --instance NAME.");
-            if (!logp && instance.empty()) logp = GAME_LOG;
+            if (!logp && instance.empty()) logp = game_log_name();
             const char* game_ini = nxrt::game::info().game_ini;     // the manifest's ini, written by setup
             if (!ini && !std::getenv("NXRT_INI") && *game_ini && file_exists(std::wstring(game_ini, game_ini + std::strlen(game_ini)))) ini = game_ini;
         }
@@ -652,7 +681,7 @@ int main(int argc, char** argv) {
             die_code(kExitRefused, "Instance '%s' is already running (its folder is %s). Close it first, or choose another --instance name.", instance.c_str(),
                      instance_dir.c_str());
         nxrt::instance_set(instance, instance_dir);       // before init: the crash handler and the watchdog take their report files from it
-        if (!logp) logp = (instance_log = nxrt::instance_file(GAME_LOG)).c_str();
+        if (!logp) logp = (instance_log = nxrt::instance_file(game_log_name())).c_str();
     }
 
     nxrt::InitOptions opt;
@@ -664,7 +693,11 @@ int main(int argc, char** argv) {
     // [fs] exefs (the game ini, or NXRT_FS_EXEFS) names the ExeFS when neither --exefs nor <ID>_EXEFS does; installed: relative to the game folder.
     if (!exefs_given) exefs = nxrt::config_get_str("fs", "exefs", installed ? "exefs" : exefs.c_str());
     nxrt::config_set("fs", "exefs", exefs.c_str());     // the one in use, for the About page
-    nxrt::config_set("process", "program_id", "0x" GAME_TITLE_ID);     // GetInfo(ProgramId); an ini value or the environment still wins
+    {   // GetInfo(ProgramId); an ini value or the environment still wins
+        char pid[24];
+        std::snprintf(pid, sizeof pid, "0x%016llX", static_cast<unsigned long long>(nxrt::game::info().program_id));
+        nxrt::config_set("process", "program_id", pid);
+    }
     apply_game_config_defaults(nxrt::game::info().config_defaults);   // the title's own setting defaults (runtime/games/<id>)
     // nxrt::init installed the frame step before these defaults existed: read [time] again (no frame has run yet).
     if (nxrt::timestep::installed()) {
@@ -683,8 +716,8 @@ int main(int argc, char** argv) {
 #endif
     nxrt::bug::set_build_info(GAME_BUILD_COMMIT, GAME_BUILD_DIRTY != 0);
     NXLOG_I("boot", "built from commit %s%s", *GAME_BUILD_COMMIT ? GAME_BUILD_COMMIT : "(unknown)", GAME_BUILD_DIRTY ? " with uncommitted changes" : "");
-    NXLOG_I("boot", GAME_ID " %s (%s PC port)", GAME_RELEASE_VERSION, GAME_TITLE);
-    NXLOG_I("boot", "%s %s: exefs '%s'", GAME_TITLE, nxrt::game::info().version, exefs.c_str());
+    NXLOG_I("boot", "%s %s (%s PC port)", nxrt::game::info().id, GAME_RELEASE_VERSION, nxrt::game::info().title);
+    NXLOG_I("boot", "%s %s: exefs '%s'", nxrt::game::info().title, nxrt::game::info().version, exefs.c_str());
     if (!prepare && !translate) check_memory();             // beside other runs of the game: refuse when the memory would not hold one more
     nxrt::instance_link_pipeline_cache();     // a named instance: its own pipeline cache file, linked to the shared one (needs [nvn] shader_cache)
     if (nxrt::instance_active()) sweep_instance_pipeline_caches(nxrt::instance_dir());
@@ -730,7 +763,7 @@ int main(int argc, char** argv) {
                 wd.title = title.c_str();
                 wd.width = disp.width;
                 wd.height = disp.height;
-                if (!nxrt::platform::create_window(wd)) die("cannot create the game window. The game needs a graphics driver with Vulkan 1.3: update the driver for your graphics card and try again. The reason is in " GAME_LOG ".");
+                if (!nxrt::platform::create_window(wd)) die("cannot create the game window. The game needs a graphics driver with Vulkan 1.3: update the driver for your graphics card and try again. The reason is in %s.", game_log_name());
             }
             nxrt::gfx::DeviceDesc dd;
             dd.headless = headless ? 1 : 0;
@@ -781,8 +814,10 @@ int main(int argc, char** argv) {
         lo.base = g.base;
         std::string err;
         const std::string path = exefs + "\\" + g.file;
-        if (!file_exists(widen_utf8(path)))
-            die("The game files were not found (%s). Choose your game files in the " GAME_SHORT_TITLE " launcher (or set [fs] exefs in " GAME_INI "), then start the game again.", path.c_str());
+        if (!file_exists(widen_utf8(path))) {
+            const std::string where = std::string(nxrt::game::info().short_title) + " launcher (or set [fs] exefs in " + nxrt::game::info().game_ini + ")";
+            die("The game files were not found (%s). Choose your game files in the %s, then start the game again.", path.c_str(), where.c_str());
+        }
         nxrt::Module* m = nxrt::module_load_nso_file(path.c_str(), lo, &err);
         if (!m) die("cannot load %s: %s", path.c_str(), err.c_str());
         if (m->base() != g.nx->base) die("module %s is mapped at a base different from the one the library was lifted for", g.file);

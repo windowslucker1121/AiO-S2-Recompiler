@@ -9,6 +9,7 @@ package (a community container of decrypted dumps, https://github.com/a55uka/nup
 | Tool | What it does |
 |---|---|
 | `nup_extract.py <package>.nup <out> [--exefs-only]` | unpacks a `.nup` into `<out>/base/{exefs,romfs}` and `<out>/updates/<version>/{exefs,romfs}` (hash-checked; files whose size already matches are kept) |
+| `make_manifest.py <dump or exefs folder> --out game.toml [--name ...]` | writes an experimental game manifest (runtime/games/generic) for a title without a port from the dump's ExeFS: modules, bases, hashes, build id, main.npdm facts, platform. The result describes the player's own dump: never commit one. Test: `tests/test_make_manifest.py` |
 | `nx_plain_nso <exefs folder> <out folder>` | copies an ExeFS folder and writes ZBIC-compressed NSOs as plain NSOs (segments stored, compressed sizes = sizes, bits 0-2 and 7 cleared, hash bits and hashes kept); each decoded segment is checked against its hash in the NSO header. Exit codes: 0 done, 1 error, 2 damaged NSO, 4 disk |
 
 ZBIC: runtime/src/loader/zbic.cpp, format in runtime/docs/zbic.md.

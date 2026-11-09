@@ -71,12 +71,16 @@ namespace {
 // Keep-alive pump: the window's events are normally pumped at the frame boundary. While the game boots or loads it can go ten seconds and
 // more without one, and Windows then calls the window "Not Responding". busy_pump runs before every SVC (svc_set_busy_hook); on the
 // thread that owns the window it pumps the events when the last pump is 100 ms old. Elsewhere it costs a thread-id compare.
+// A game whose frames come from another thread (play driven from presents, present_frame) asks for a pump at every frame (g_pump_wanted):
+// the window thread then pumps at its next SVC, so input reaches the next frame.
 std::atomic<DWORD> g_pump_tid{0};
 std::atomic<uint64_t> g_last_pump_ms{0};
+std::atomic<bool> g_pump_wanted{false};
 void busy_pump() {
     if (GetCurrentThreadId() != g_pump_tid.load(std::memory_order_relaxed)) return;
     const uint64_t t = SDL_GetTicks();
-    if (t - g_last_pump_ms.load(std::memory_order_relaxed) < 100) return;
+    const bool wanted = g_pump_wanted.load(std::memory_order_relaxed) && g_pump_wanted.exchange(false, std::memory_order_relaxed);
+    if (!wanted && t - g_last_pump_ms.load(std::memory_order_relaxed) < 100) return;
     g_last_pump_ms.store(t, std::memory_order_relaxed);
     platform::pump_events();
 }
@@ -833,8 +837,9 @@ int update_hook(::Ctx*, uint64_t, void*) {
     if (!on_pump_thread && !st.warned_thread) {
         st.warned_thread = true;
         st.thread_mismatch.store(true);
-        NXLOG_W(kTag, "the frame-boundary hook runs on another thread than the one that started play mode: SDL events are not pumped");
+        NXLOG_W(kTag, "the frame boundary runs on another thread than the one that started play mode: the window's events are pumped there at its next SVC");
     }
+    if (!on_pump_thread) g_pump_wanted.store(true, std::memory_order_relaxed);
     if (st.window && on_pump_thread) platform::pump_events();
 
     // settings queued by the page
@@ -1527,12 +1532,25 @@ bool start(const StartOptions& opt) {
     }
     // the frame boundary, then the game's input, camera, lock-on and menu hooks (hooks of one address run in registration order)
     if (gp && gp->frame_update) st.hook_update = hook_add_entry(st.base + gp->frame_update, &update_hook);
-    else NXLOG_W(kTag, "the game (%s) names no frame update: play mode is not pumped", game::info().id);
+    else NXLOG_W(kTag, "the game (%s) names no frame update: play mode runs from its presents (present_frame)", game::info().id);
     if (gp && gp->install) gp->install(st.base, &g_game_host, st.settings);
     st.started = true;
     NXLOG_I(kTag, "play mode started (%s, overlay %s, base 0x%llx, game %s, frame hook %u)", st.window ? "window" : "no window", st.overlay ? "on" : "off",
             static_cast<unsigned long long>(st.base), game::info().id, st.hook_update);
     return true;
+}
+
+void present_frame() {
+    G& st = g();
+    if (!st.started || st.hook_update) return;
+    static const bool on = config_get_bool("play", "frame_from_present", true);
+    if (!on) return;
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        NXLOG_I(kTag, "no frame-update hook: play mode runs once per present");
+    }
+    update_hook(nullptr, 0, nullptr);
 }
 
 void stop() {

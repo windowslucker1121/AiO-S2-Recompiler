@@ -2,8 +2,9 @@
 # Builds the game library release package (recomp_library.exe and everything it runs) into a folder and a zip.
 # The layout is the one runtime/apps/setup/setup_core.cpp (find_tools) and setup_games.cpp (find_game_defs) look for next to the exe:
 #   recomp_library.exe
-#   games\<id>\game.toml            manifests of the games in -RtGames (facts only: ids, hashes, names)
-#   tools\scripts\*.py              nup_extract.py, extract_generic.py, bnsh_programs.py
+#   games\<id>\game.toml            manifests of the games in -RtGames (facts only: ids, hashes, names); games\generic is the generic
+#                                   runtime (experimental builds of titles without a port: the library writes their manifest from the dump)
+#   tools\scripts\*.py              nup_extract.py, make_manifest.py, extract_generic.py, bnsh_programs.py
 #   tools\spirv_harness\            the shader translator, self-contained (.NET runtime included)
 #   tools\python\                   python.org's embeddable Python with zstandard, lz4 and capstone
 #   tools\build\                    the player-side game build: game_build.py, the lifter (recomp\), Zig (zig\), nx_plain_nso.exe
@@ -13,8 +14,8 @@
 # No game data and no lifted code: the package holds this repository's own programs only (LEGAL.md). A game exe is never part of
 # it: the library builds it on the player's PC from their own dump (tools\build\game_build.py).
 #
-#   powershell -ExecutionPolicy Bypass -File tools\release\package.ps1 -Version 0.1.0 [-Out work\release] [-RtGames oot]
-#              [-RtBuildDir <existing runtime DLL build of the one game>] [-SkipTranslator] [-SkipPython] [-SkipRuntime]
+#   powershell -ExecutionPolicy Bypass -File tools\release\package.ps1 -Version 0.1.0 [-Out work\release] [-RtGames oot,generic]
+#              [-RtBuildDir <existing runtime DLL build of the first game>] [-SkipTranslator] [-SkipPython] [-SkipRuntime]
 # Needs, on PATH or in the environment: a VS x64 developer environment (rc.exe, the Windows SDK), clang-cl, cmake, ninja, the .NET 10
 # SDK, and a Python 3.13 with pip (it fetches the wheels for the bundled Python). The Ryujinx submodule (refs\ryubing) must be checked out.
 # The runtime DLL also needs the ASTC transcoder (tools\textures\build\release, tools\textures\scripts\build.ps1) and the vcpkg media
@@ -22,7 +23,7 @@
 param(
     [string]$Version = 'dev',
     [string]$Out = '',
-    [string[]]$RtGames = @('oot'),
+    [string[]]$RtGames = @('oot', 'generic'),
     [string]$RtBuildDir = '',
     [switch]$SkipTranslator,
     [switch]$SkipPython,
@@ -87,6 +88,7 @@ foreach ($id in $RtGames) {
 $sd = Join-Path $pkg 'tools\scripts'
 New-Item -ItemType Directory -Force $sd | Out-Null
 Copy-Item (Join-Path $repo 'tools\extract\nup_extract.py') $sd
+Copy-Item (Join-Path $repo 'tools\extract\make_manifest.py') $sd
 Copy-Item (Join-Path $repo 'tools\shaders\scripts\extract_generic.py') $sd
 Copy-Item (Join-Path $repo 'tools\shaders\scripts\bnsh_programs.py') $sd
 
@@ -123,8 +125,9 @@ if (-not $SkipRuntime) {
         $man = Join-Path $repo "recomp\games\$id\game.toml"
         $rtdll = ((Get-Content $man -Raw) | Select-String '(?m)^runtime_dll\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
         $stem = [IO.Path]::GetFileNameWithoutExtension($rtdll)
-        $rb = if ($RtBuildDir) { $RtBuildDir } else { Join-Path $tmp "rt_$id" }
-        if (-not $RtBuildDir -or -not (Test-Path (Join-Path $rb 'CMakeCache.txt'))) {
+        $useRb = $RtBuildDir -and $id -eq $RtGames[0]     # an existing build folder holds one game's runtime
+        $rb = if ($useRb) { $RtBuildDir } else { Join-Path $tmp "rt_$id" }
+        if (-not $useRb -or -not (Test-Path (Join-Path $rb 'CMakeCache.txt'))) {
             Run cmake @('-S', (Join-Path $repo 'game-build'), '-B', $rb, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
                         '-DCMAKE_C_COMPILER=clang-cl', '-DCMAKE_CXX_COMPILER=clang-cl', "-DGAME_VERSION=$Version",
                         "-DGAME_MANIFEST=$man", '-DGAME_RELEASE=ON', '-DGAME_BUILD_RT_DLL=ON')

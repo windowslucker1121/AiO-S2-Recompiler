@@ -65,10 +65,17 @@ class GameConfig:
         return None
 
 
+class GenericConfig(GameConfig):
+    """The neutral config of a title without a port (experimental builds, runtime/games/generic): nothing about the game, only what every
+    Switch program has in common."""
+    # rtld's process entry (offset 0) has no FDE, symbol or direct branch, so discovery never roots it (as the oot and pkp configs say)
+    extra_entries = {'rtld': [0x0]}
+
+
 def load_game(name):
-    """The GameConfig instance of recomp/games/<name>/config.py (class `Config`)."""
+    """The GameConfig instance of recomp/games/<name>/config.py (class `Config`); 'generic' (or none): GenericConfig."""
     if not name or name == 'generic':
-        return GameConfig()
+        return GenericConfig()
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     path = os.path.join(here, 'games', name, 'config.py')
     spec = importlib.util.spec_from_file_location('nxrecomp_game_' + name, path)

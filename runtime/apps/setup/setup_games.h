@@ -36,11 +36,14 @@ struct GameDef {
     std::string dump_version, display_version, main_build_id;   // [dump]
     std::string shader_extractor;                 // [shaders] extractor
     std::vector<std::string> modules;             // [[module]] names
+    bool generic = false;                         // [game] generic: an experimental build on the generic runtime (games\generic\sdk + runtime)
+    bool is_template = false;                     // [game] template: the generic runtime's own manifest, never a game
 };
 bool load_game_def(const std::wstring& manifest, GameDef* out, std::string* error);
 
-// Every manifest found: <exe dir>\games\<id>\game.toml (release folder) and, in a development build, <checkout>\recomp\games\<id>\game.toml.
-// The first one per id wins.
+// Every manifest found: <exe dir>\games\<id>\game.toml (release folder), <exe dir>\experimental\<id>\game.toml (manifests the library
+// wrote from a player's dump of a title without a port: make_manifest.py) and, in a development build, <checkout>\recomp\games\<id>\game.toml.
+// The first one per id wins; templates are skipped.
 std::vector<GameDef> find_game_defs(const std::wstring& exe_dir, const std::wstring& dev_root);
 
 // ---- what a dump is -----------------------------------------------------------------------------------------------------------------------
@@ -82,5 +85,7 @@ std::wstring library_path();
 Library load_library(const std::vector<GameDef>& defs);   // also takes over an old <id>_setup.ini of a known game
 bool save_library(const Library& lib);
 std::wstring default_data_dir(const std::string& id);     // <exe dir>\game_data\<id>
+std::wstring experimental_dir();                         // <exe dir>\experimental: the manifests of experimental builds
+std::string experimental_id(const std::string& title_id); // the id make_manifest.py gives a title: "t" + the title id in lower case
 
 }  // namespace setup

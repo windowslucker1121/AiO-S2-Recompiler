@@ -51,6 +51,10 @@ struct StartOptions {
 };
 bool start(const StartOptions& opt);        // after nxrt::init, the renderer and the NVN back end; installs the hid input source and the hooks
 void stop();                                // saves changed settings, removes the hooks and the input source
+// The game presents a frame (nvnQueuePresentTexture, before it is shown). A game without a frame-update hook (GamePlay::frame_update 0, e.g.
+// the generic runtime's experimental builds) is driven from here instead: events, pads, the frame limiter and the menu run once per present.
+// [play] frame_from_present = false turns it off. No effect while the hook is installed.
+void present_frame();
 
 // Counters for the tests and the log.
 struct Stats {

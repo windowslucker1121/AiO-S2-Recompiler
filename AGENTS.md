@@ -141,10 +141,28 @@ took 25 min for 117,981 parts (both raster sets); a forced second one loads the 
 **Multi-game goal and the game library (2026-11-08; user: one app "to rule it all", for every Switch 2 game).**
 - Static recompilation stays one build per game (and per game update): module bases are baked into the lifted code and the runtime is
   process-global. The front end hides that. The game boundary is mostly data; what a new game really needs is hook sites (frame update)
-  and whatever the lifter, services or shader translator do not cover yet. Gaps for a generic pipeline: nothing parses `main.npdm` /
-  `control.nacp` (OoT's values are hand-copied); `Info::platform` defaults to Switch 1; without a frame hook pads are never polled
-  (`play.cpp:880` is the only `poll_pads`); untranslated instructions do not fail a build (`guest_unimpl` at run time); no NRO loader;
-  A57 CPU constants in `a64.py`; `release_b/game_build.py` (Zig) is the only path that compiles on a player's PC.
+  and whatever the lifter, services or shader translator do not cover yet. Gaps left for a generic pipeline: untranslated instructions
+  do not fail a build (`guest_unimpl` at run time); no NRO loader; A57 CPU constants in `a64.py`; `release_b/game_build.py` (Zig) is
+  the only path that compiles on a player's PC; control.nacp is read only when the dump has one (NUP packages carry none).
+- **Experimental builds of titles without a port (2026-11-09, the generic path).** `tools/extract/make_manifest.py <dump> --out
+  game.toml` writes a manifest from the dump alone: modules (main, sdk, subsdk0..9, rtld; bases as OoT/pkp, subsdk1+ from
+  0x7800000000), units from the text size, sha256 + build id, main.npdm facts in a `[title]` table, platform (sdk's `NintendoSdk_nnSdk`
+  major >= 20 or ZBIC main = Switch 2; Mario Wonder reads as Switch 1), id `t<title id>`, `generic = true`, `runtime_dll =
+  generic_rt.dll`. For OoT it reproduces the hand-written facts exactly (test: `tools/extract/tests/test_make_manifest.py`, synthetic).
+  **Generic runtime** `runtime/games/generic` + template manifest `recomp/games/generic/game.toml` (`template = true`, never listed as a
+  game): built only as the runtime DLL (`-DGAME_MANIFEST=recomp\games\generic\game.toml -DGAME_RELEASE=ON -DGAME_BUILD_RT_DLL=ON`,
+  `GAME_GENERIC` in game_main.cpp: the module list comes from the exe's table, identity from `game::info()`); it reads the manifest at
+  start from `NXRT_GAME_MANIFEST` or `game.toml` next to the exe (game_build.py copies it there for generic manifests; the lifter
+  runs with `--game generic` = `GenericConfig`, rtld entry 0). **Play mode without a frame hook** runs from the presents
+  (`play::present_frame`, called in nvnQueuePresentTexture; `[play] frame_from_present`); when the presenting thread is not the
+  window thread (OoT presents from guest-82), it asks the window thread's SVC pump for a pump each frame. Library: an unknown dump shows
+  **Try experimental build** (when the release has `games\generic\{sdk,runtime}`, `tools\scripts\make_manifest.py` and the game
+  build): exefs-only extraction, manifest into `<exe dir>\experimental\<id>\game.toml`, then the normal queue (build, shaders, Play);
+  status "(experimental)". The package carries `-RtGames oot,generic`. **Checked 2026-11-09:** OoT's lifted libraries linked
+  (clang-cl) against `generic_rt.dll` with a make_manifest manifest: boots, title movie, Enter posted at the title starts the intro,
+  window never hung (work/gtest, deleted). Not checked: the library flow end to end (needs a release package), a title nobody ported.
+  Also fixed on the way: `rt.def.in` lacked `nx_icall_miss` / `nx_iimport_miss` (inline caches, G3), so every player-side build since
+  G3 would have failed to link.
 - Dumps in the repo root (static analysis only): **Mario Wonder** `.nup` (title 010015100B514000, update 5.0.0, addon with content
   only) is a **Switch 1 binary** (SDK 16.2.12, NVN1, Maxwell bnsh/bfsha, no subsdk; it calls `nn::pl::IsRunningOnOunce`): the runtime's
   untested Switch 1 path; its ExeFS is in `game\smbw`. **Pokopia** folder (update 655360 = 2.0.1, build id matches `recomp/games/pkp`):

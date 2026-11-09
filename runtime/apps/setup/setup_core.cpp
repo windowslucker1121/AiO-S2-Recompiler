@@ -145,6 +145,7 @@ Tools find_tools() {
     // The game's own default for the translator is <exe dir>\tools\spirv_harness\spirv_harness.exe (nvn_shaders.cpp start_translator).
     t.translator = pick({join(rel, L"spirv_harness\\spirv_harness.exe"),
                          dev.empty() ? L"" : join(dev, L"tools\\shaders\\build\\bin\\Release\\net10.0\\spirv_harness.exe")});
+    t.make_manifest = pick({join(rel, L"scripts\\make_manifest.py"), dev.empty() ? L"" : join(dev, L"tools\\extract\\make_manifest.py")});
     if (file_exists(join(rel, L"build\\zig\\zig.exe"))) t.game_build = pick({join(rel, L"build\\game_build.py")});
     t.python = pick({join(rel, L"python\\python.exe"), dev.empty() ? L"" : join(dev, L"tools\\.venv\\Scripts\\python.exe")});
     if (t.python.empty()) {
@@ -168,7 +169,8 @@ std::wstring game_exe_path(const Tools& t, const GameDef& g) {
 GameBuild game_build_of(const Tools& t, const GameDef& g) {
     GameBuild b;
     if (t.game_build.empty() || g.manifest.empty()) return b;
-    const std::wstring dir = parent_of(g.manifest);
+    // an experimental build links the generic runtime of this release, whatever the game
+    const std::wstring dir = g.generic ? join(t.exe_dir, L"games\\generic") : parent_of(g.manifest);
     b.sdk = join(dir, L"sdk");
     b.runtime = join(dir, L"runtime");
     std::string rt = g.runtime_dll.empty() ? g.id + "_rt.dll" : g.runtime_dll;
@@ -196,6 +198,16 @@ GameBuild game_build_of(const Tools& t, const GameDef& g) {
     b.stamp = hex;
     b.ok = true;
     return b;
+}
+
+bool experimental_possible(const Tools& t) {
+    if (t.game_build.empty() || t.make_manifest.empty() || t.python.empty()) return false;
+    GameDef g;
+    g.id = "generic";
+    g.generic = true;
+    g.runtime_dll = "generic_rt.dll";
+    g.manifest = join(t.exe_dir, L"games\\generic\\game.toml");
+    return game_build_of(t, g).ok;
 }
 
 std::wstring game_exe_for(const Tools& t, const GameDef& g, const Config& c) {

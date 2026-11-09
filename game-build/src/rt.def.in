@@ -15,3 +15,5 @@ EXPORTS
     nx_hook_entry
     stx_diag
     nx_catch_call
+    nx_icall_miss
+    nx_iimport_miss

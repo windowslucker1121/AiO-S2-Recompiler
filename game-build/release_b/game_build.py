@@ -41,19 +41,24 @@ FORMAT = 2          # bump when the build layout or the runtime API (sdk/rt_api.
                     # (the launcher also treats an exe whose done.json has another format as not built: gamebuild.rs BUILD_FORMAT)
 
 MANIFEST = {}       # the game manifest (load_manifest)
+MANIFEST_PATH = ''
 GAME_ID = ''
 EXE_NAME = ''
 RT_LIB = ''
 MODULES = []        # (name, NSO file, guest base, NxModule.index, translation units, sites file or None), in lifter order
+GENERIC = False     # the manifest says generic = true: an experimental build of a title without a port (make_manifest.py wrote it from the
+                    # player's dump; the generic runtime DLL reads it next to the exe at start, the lifter uses its neutral config)
 
 
 def load_manifest(path):
-    global MANIFEST, GAME_ID, EXE_NAME, RT_LIB, MODULES
+    global MANIFEST, GAME_ID, EXE_NAME, RT_LIB, MODULES, GENERIC, MANIFEST_PATH
     import tomllib
     with open(path, 'rb') as f:
         MANIFEST = tomllib.load(f)
+    MANIFEST_PATH = os.path.abspath(path)
     g = MANIFEST['game']
     GAME_ID = g['id']
+    GENERIC = bool(g.get('generic'))
     EXE_NAME = MANIFEST['files']['exe']
     RT_LIB = os.path.splitext(MANIFEST['files']['runtime_dll'])[0] + '.lib'
     MODULES = [(m['name'], m['file'], m['base'], m['index'], m['units'], m.get('sites')) for m in MANIFEST['module']]
@@ -217,8 +222,8 @@ def lift(runner, exefs, gen, jobs):
             shutil.rmtree(out)
         os.makedirs(out)
         args = ['lift', os.path.join(exefs, nso), out, '--name', name, '--base', hex(base), '--shards', str(shards),
-                '--jobs', str(jobs), '--game', GAME_ID, '--index', str(index)]
-        if sites:
+                '--jobs', str(jobs), '--game', 'generic' if GENERIC else GAME_ID, '--index', str(index)]
+        if sites and not GENERIC:
             args += ['--sites', os.path.join(RECOMP, 'games', GAME_ID, sites)]
         cmd = [sys.executable, '-I', os.path.abspath(__file__), '--lift-one', json.dumps(args)]
         rc, tail = runner.run(cmd, cwd=RECOMP)
@@ -398,6 +403,8 @@ def main():
         t = time.time()
         exe = link(runner, obj, game, env, write_gen(build))
         copy_runtime(game)
+        if GENERIC:          # the generic runtime takes the game's identity and title facts from it at start
+            shutil.copyfile(MANIFEST_PATH, os.path.join(game, 'game.toml'))
         times['link'] = round(time.time() - t, 1)
         if not a.keep:
             progress('finish', 0, 1, 'Removing the build files')

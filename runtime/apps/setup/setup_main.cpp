@@ -201,6 +201,7 @@ private:
     void report(GameItem* g);
     void more_menu();
     void primary(GameItem& g);           // the one button: add the dump, set up, or play
+    void try_experimental(GameItem& g);  // a title without a port: write its manifest from the dump (make_manifest.py), then set up as usual
     std::wstring primary_label(const GameItem& g, bool* enabled) const;
     void refresh();                       // texts and enabled states of the controls of the current page
     void update_settings();               // the settings panel shows the selected game
@@ -402,6 +403,7 @@ Status App::status_of(const GameItem& g) const {
     Status s;
     if (!g.def) { s.text = L"No port yet"; s.color = kMuted; return s; }
     if (!g.in_library()) { s.text = L"Add your dump"; s.color = kAccentHi; return s; }
+    const bool exp = g.def->generic;
     if (g.running) {
         s.color = kAccentHi;
         s.text = g.cancel_requested ? L"Stopping" : L"Setting up";
@@ -419,15 +421,18 @@ Status App::status_of(const GameItem& g) const {
     if (g.queued) { s.text = L"Waiting"; s.color = kAccentHi; s.progress = 0; return s; }
     if (!g.error.empty()) { s.text = L"Problem"; s.color = kBad; return s; }
     if (!g.exe_ok() && !g.build.ok) { s.text = L"Not built yet"; s.color = kWarn; return s; }
-    if (g.ready()) { s.text = L"Ready"; s.color = kOk; return s; }
-    s.text = L"Setup needed";
+    if (g.ready()) { s.text = exp ? L"Ready (experimental)" : L"Ready"; s.color = kOk; return s; }
+    s.text = exp ? L"Setup needed (experimental)" : L"Setup needed";
     s.color = kWarn;
     return s;
 }
 
 std::wstring App::primary_label(const GameItem& g, bool* enabled) const {
     *enabled = true;
-    if (!g.def) { *enabled = false; return L"No port yet"; }
+    if (!g.def) {
+        *enabled = g.in_library() && experimental_possible(tools_);
+        return *enabled ? L"Try experimental build" : L"No port yet";
+    }
     if (!g.in_library()) return L"Add dump";
     if (g.running || g.queued) { *enabled = false; return L"Setting up"; }
     if (!g.exe_ok() && !g.build.ok) { *enabled = false; return L"Not built yet"; }
@@ -438,10 +443,58 @@ void App::primary(GameItem& g) {
     bool en = false;
     const std::wstring l = primary_label(g, &en);
     if (!en) return;
+    if (!g.def) { try_experimental(g); return; }
     if (!g.in_library()) { choose_source(g, false); return; }
     if (g.ready()) { play(g); return; }
     g.play_after = true;   // set up once, then the game starts
     enqueue(g, false);
+}
+
+void App::try_experimental(GameItem& g) {
+    if (g.def || !g.in_library() || !experimental_possible(tools_)) return;
+    const std::wstring ask = L"There is no port of " + g.title + L" yet.\r\n\r\n"
+        L"An experimental build translates the game with nothing made for it: it may not start, may show a black window or may crash. "
+        L"Building it takes 15-40 minutes and about 4 GB of disk space while it runs.\r\n\r\nTry it?";
+    if (MessageBoxW(wnd_, ask.c_str(), kAppName, MB_OKCANCEL | MB_ICONQUESTION) != IDOK) return;
+    SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    const std::wstring source = g.cfg.source;
+    const std::string old_id = g.id, title_id = g.title_id, name = narrow(g.title);
+    // the ExeFS is all the manifest needs: a .nup gives it in seconds (--exefs-only), a folder has it already
+    std::wstring dump = source;
+    const std::wstring scratch = join(g.cfg.data_dir, L"manifest_exefs");
+    std::string out;
+    DWORD code = 1;
+    if (source_kind(source) == SourceKind::nup) {
+        dump = scratch;
+        if (!run_capture(tools_.python, py_args(tools_.nup_extract, quote(source) + L" " + quote(scratch) + L" --exefs-only"), 600000, &out, &code) || code != 0) {
+            MessageBoxW(wnd_, (L"Reading the game files failed.\r\n\r\n" + widen(out.substr(0, 600))).c_str(), kAppName, MB_OK | MB_ICONWARNING);
+            return;
+        }
+    }
+    const std::string id = experimental_id(title_id);
+    const std::wstring manifest = join(join(experimental_dir(), widen(id)), L"game.toml");
+    const bool ok = run_capture(tools_.python, py_args(tools_.make_manifest, quote(dump) + L" --out " + quote(manifest) + L" --name " + quote(widen(name))), 120000, &out, &code) &&
+                    code == 0;
+    if (dump == scratch) { std::error_code ec; std::filesystem::remove_all(scratch, ec); }
+    if (!ok) {
+        MessageBoxW(wnd_, (L"This dump cannot be built.\r\n\r\n" + widen(out.substr(0, 600))).c_str(), kAppName, MB_OK | MB_ICONWARNING);
+        return;
+    }
+    // the manifest makes it a known game: drop the unknown entry and add the dump again under the new id
+    g.cfg.source.clear();
+    save_lib();
+    games_.erase(std::remove_if(games_.begin(), games_.end(), [&](const auto& p) { return p->id == old_id; }), games_.end());
+    load_games();
+    add_dump(source, true);
+    if (GameItem* n = item(id); n && n->def) {
+        select(id);
+        show_page(P_GAME);
+        primary(*n);                 // set up (build, shaders) and start, as Play does
+    } else {
+        MessageBoxW(wnd_, L"The manifest was written, but the library cannot read it.", kAppName, MB_OK | MB_ICONWARNING);
+    }
+    refresh();
+    InvalidateRect(wnd_, nullptr, FALSE);
 }
 
 void App::add_game() {
@@ -530,7 +583,10 @@ void App::add_dump(const std::wstring& path, bool quiet) {
     std::wstring note;
     if (quiet) return;
     if (!def) {
-        MessageBoxW(wnd_, L"There is no port of this game yet. It stays in your library.", kAppName, MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(wnd_, experimental_possible(tools_) ? L"There is no port of this game yet. It stays in your library; Try experimental build "
+                                                          L"translates it without any game-specific work (it may not start)."
+                                                        : L"There is no port of this game yet. It stays in your library.",
+                    kAppName, MB_OK | MB_ICONINFORMATION);
     } else if (!info.build_id.empty() && !def->main_build_id.empty() && _stricmp(info.build_id.c_str(), def->main_build_id.c_str()) != 0) {
         note = L"Your dump is another version than " + widen(def->dump_version) + L". The game may not start.";
         MessageBoxW(wnd_, note.c_str(), kAppName, MB_OK | MB_ICONWARNING);
@@ -1333,7 +1389,8 @@ void App::paint_game_header(gp::Graphics& g, const RECT& rc) {
     g.FillRectangle(&fade, x0, Sf(110), w, Sf(87));
     const float x = x0 + Sf(32);
     text(g, s->title, big, gp::RectF(x, Sf(80), w - Sf(64), Sf(48)), RGB(255, 255, 255));
-    std::wstring sub = s->def ? widen(s->def->platform == "switch2" ? "Switch 2" : "Switch") + L"  ·  version " + widen(s->def->display_version)
+    std::wstring sub = s->def ? widen(s->def->platform == "switch2" ? "Switch 2" : "Switch") + L"  ·  version " + widen(s->def->display_version) +
+                                    (s->def->generic ? L"  ·  experimental" : L"")
                               : std::wstring(L"No port yet");
     text(g, sub, normal, gp::RectF(x, Sf(130), w - Sf(64), Sf(20)), RGB(0xD8, 0xDC, 0xE4));
     const Status st = status_of(*s);
