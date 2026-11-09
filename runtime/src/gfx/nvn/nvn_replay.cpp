@@ -231,14 +231,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912 };
+enum AbFeat : uint32_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsSlots = 1073741824u };
 uint32_t ab_mask() {
     static const uint32_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint32_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_slots", kAbCsSlots}};
         uint32_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -2051,6 +2051,7 @@ std::vector<ShadowUse> g_shadow_uses;                       // this dispatch
 bool g_shadowing = false;
 bool g_sh_barrier = false, g_sh_copied = false;             // this dispatch: the barrier before the copies in is recorded / some copy in is
 uint64_t g_sh_uses = 0, g_sh_from_mirror = 0, g_sh_bytes_mirror = 0, g_sh_bytes_pool = 0, g_sh_bytes_out = 0, g_sh_no_span = 0;   // summary line
+uint64_t g_cs_slots_bound = 0, g_cs_slots_marked = 0, g_cs_slot_dispatches = 0;   // statistics (gmem compute dispatches)
 uint64_t g_sh_held = 0;   // bound from a shadow that holds an earlier dispatch's result
 uint64_t g_sh_direct = 0, g_sh_direct_filled = 0, g_sh_bytes_fill = 0, g_sh_bytes_dout = 0, g_sh_merged = 0, g_sh_flushes = 0;
 constexpr VkDeviceSize kShadowMax = 16ull << 20;
@@ -2756,6 +2757,9 @@ void shadows_after_dispatch() {
         page_table_stats(&spans, &pages);
         NXLOG_I("nvn.replay", "global memory: %llu held-result flushes for pointer shaders, %llu write windows marked; page table %llu spans of 2 MiB, %llu pages",
                 (unsigned long long)g_gmem_flushes, (unsigned long long)g_gmem_windows, (unsigned long long)spans, (unsigned long long)pages);
+        if (g_cs_slot_dispatches)
+            NXLOG_I("nvn.replay", "compute pointer shaders: %llu dispatches, %llu bound storage slots, %llu of them checked before the page table (gmem_compute_slots)",
+                    (unsigned long long)g_cs_slot_dispatches, (unsigned long long)g_cs_slots_bound, (unsigned long long)g_cs_slots_marked);
         for (auto it = g_shadows.begin(); it != g_shadows.end();) {
             if (F->serial - it->second.last > 600) {
                 gfx::Buffer old = it->second.buf;
@@ -2851,7 +2855,49 @@ void pool_table_words(uint8_t* c0, bool old_table) {
 }
 
 constexpr VkDeviceSize kComputeC0Bytes = 0x1000;
-bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_table = true) {
+// [nvn] gmem_compute_slots: which bound storage slots a compute pointer shader (A17 gmem) checks before the page table (the c[0] slot mask).
+//  all: every bound slot (as before 2026-11-10). A compute binding is the pool copy or a shadow, not the pool, so the slots were all marked.
+//  changed (default): only slots whose binding may hold other bytes than the pool at that address while the dispatch runs: the dispatch may
+//    write the slot (its own stores land in the copy or shadow), a held compute result overlaps it (the copy is newer than the pool), it lies
+//    in a virtual pool or in no pool (the page table cannot map it), or the shader stores through pointers (gmemw: its stores reach the pool,
+//    bound copies would miss them). A read-only slot whose copy equals the pool reads the same bytes through the page table.
+//  none: measurement only (wrong for written or held slots).
+// cpuperf_ab_what cs_slots: "all" in the off windows.
+enum class CsSlots { All, Changed, None };
+CsSlots cs_slots_mode() {
+    static const CsSlots m = [] {
+        const std::string v = nxrt::config_get_str("nvn", "gmem_compute_slots", "changed");
+        return v == "all" ? CsSlots::All : v == "none" ? CsSlots::None : CsSlots::Changed;
+    }();
+    return ab_on(kAbCsSlots) ? m : CsSlots::All;
+}
+uint32_t compute_slot_mask(const ShaderInfo* s) {
+    const CsSlots mode = cs_slots_mode();
+    if (mode == CsSlots::All || !s) return ~0u;
+    if (mode == CsSlots::None) return 0;
+    if (s->refl.global_writes) return ~0u;
+    uint32_t written = 0;
+    for (const DescriptorBinding& b : s->refl.bindings) {
+        if (b.nvn.source != NvnSource::StorageBuffer) continue;
+        const int slot = b.nvn.index >= 0 ? b.nvn.index : storage_slot_for(kCompute, b.nvn.c0_offset);
+        if (slot < 0 || slot >= 16) return ~0u;
+        if (storage_binding_writes(b, s)) written |= 1u << slot;
+    }
+    uint32_t m = 0;
+    for (int k = 0; k < 16; ++k) {
+        const GState::Bind& b = S.ssbo[kCompute][k];
+        if (!b.addr) continue;
+        ++g_cs_slots_bound;
+        const PoolHit hit = pool_lookup(b.addr);
+        if ((written >> k & 1) || !hit.pool || hit.pool->is_virtual || !hit.pool->base || out_overlaps(b.addr, b.size ? b.size : 1)) {
+            m |= 1u << k;
+            ++g_cs_slots_marked;
+        }
+    }
+    ++g_cs_slot_dispatches;
+    return m;
+}
+bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_table = true, const ShaderInfo* s = nullptr) {
     if (!c.nvn2 || c.stage != 5 || c.c0_table > n) return false;
     std::memset(p, 0, n);
     std::memcpy(p + 4, g_dispatch_groups, 12);
@@ -2869,9 +2915,9 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_tabl
     for (int i = 0; i < c.c0_textures; ++i, off += 8) put64(i < 64 ? S.tex[kCompute][i] : 0);
     for (int i = 0; i < c.c0_images; ++i, off += 8) put64(i < 16 ? S.img[kCompute][i] : 0);
     if (n >= kPoolTableC0 + 8 && off <= kGmemSlotMaskC0) {
-        // compute: every bound storage descriptor before the page table (compute shadows and virtual pools are bound, not in the table)
-        const uint32_t all = ~0u;
-        std::memcpy(p + kGmemSlotMaskC0, &all, 4);
+        // compute: the bound storage descriptors whose binding may differ from the pool (gmem_compute_slots), before the page table
+        const uint32_t m = s && s->refl.global_fallback ? compute_slot_mask(s) : ~0u;
+        std::memcpy(p + kGmemSlotMaskC0, &m, 4);
     }
     if (n >= kPoolTableC0 + 8 && off <= kPageTableC0) pool_table_words(p, old_table);
     return true;
@@ -3036,7 +3082,7 @@ bool compute_c0(const ShaderInfo& s, VkDescriptorBufferInfo& bi) {
     if (!s.control.nvn2 || s.control.stage != 5) return false;
     const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
     UploadAlloc u = F->upload(kComputeC0Bytes, std::max<VkDeviceSize>(align, 256));
-    if (!u || !fill_compute_c0(s.control, u.ptr, static_cast<size_t>(kComputeC0Bytes), s.refl.global_fallback && !s.refl.global_pt)) return false;
+    if (!u || !fill_compute_c0(s.control, u.ptr, static_cast<size_t>(kComputeC0Bytes), s.refl.global_fallback && !s.refl.global_pt, &s)) return false;
     bi = {u.buffer, u.offset, kComputeC0Bytes};
     g_c0_made = bi;   // do_dispatch: an indirect dispatch's GPU-written counts are copied into words 1-3 of this header
     return true;
