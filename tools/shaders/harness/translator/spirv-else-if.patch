@@ -48,7 +48,7 @@ the epilogue at the end of main, every global in the entry point).
              byte[] result = context.Generate();
  
              lock (_poolLock)
-@@ -166,11 +173,15 @@
+@@ -166,11 +173,16 @@
              context.AddFunction(spvFunc);
              context.StartFunction(isMainFunction: funcIndex == 0);
  
@@ -62,6 +62,7 @@ the epilogue at the end of main, every global in the entry point).
  
              Declarations.DeclareLocals(context, function);
 +            AmpereGlobal.StoreHelperParameters(context, function);
++            if (funcIndex == 0) AmpereMesh.BeginMain(context);   // mesh with direct outputs: the output counts first (AmpereMesh.cs)
  
              Generate(context, function.MainBlock);
  

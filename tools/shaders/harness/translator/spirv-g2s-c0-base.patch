@@ -39,7 +39,7 @@ Also: an access no descriptor can be traced for is resolved at run time instead 
 +
 +        private static LinkedListNode<INode> GenerateFastCallStorageOp(ResourceManager resourceManager, LinkedListNode<INode> node, Operation operation, int functionId)
 +        {
-+            Operand[] fast = AmpereGlobal.EmitFastOperands();
++            Operand[] fast = AmpereGlobal.EmitFastOperands(operation);
 +            Operand returnValue = Local();
 +            Operand[] outs = new Operand[AmpereGlobal.FastOuts];
 +            Operand[] dests = new Operand[1 + outs.Length];

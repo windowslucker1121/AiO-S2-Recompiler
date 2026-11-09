@@ -64,6 +64,9 @@ namespace Ryujinx.Graphics.Shader.Translation
             _deviceOps = null;
             _mainEntry = null;
             _cacheId = -1;
+            _vectorTags = null;
+            _vectorGroups = 0;
+            _vectorDone = null;
         }
 
         /// GlobalToStorage.RunPass of each function (main first): remembers main's entry block, where the page cache is cleared.
@@ -388,7 +391,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         // Fast-path helpers: one extra in argument (the stage's slot mask word, c[0] SlotMaskC0), out arguments {the five cache words of
         // the span the walk ended in}. The page cache is read and written only by main's inline code (so the driver keeps it in registers:
         // a cache the out-of-line helper touched lived in local memory); in SPIR-V the helper returns {value, span} as a struct.
-        public const int FastArguments = 1, FastOuts = CacheWords;
+        public const int FastArguments = 2, FastOuts = CacheWords;
         [ThreadStatic] static bool _lastFallback;
         [ThreadStatic] static int _helperInArgs;
         [ThreadStatic] static bool _helperFast;
@@ -411,8 +414,32 @@ namespace Ryujinx.Graphics.Shader.Translation
             for (int i = 0; i < FastOuts; i++) c.Copy(Argument(inArgs + i), Const(none[i]));
         }
 
-        /// The fast path's extra call argument: the slot mask word (the cache test itself is SPIR-V at the call, TryGenerateHelperCall).
-        internal static Operand[] EmitFastOperands() => new[] { Cbuf(0, SlotMaskWord(_candidates)) };
+        /// The fast path's extra call arguments: the slot mask word (the cache test itself is SPIR-V at the call, TryGenerateHelperCall) and
+        /// the load's vector tag (VectorTag; the helper does not read it).
+        internal static Operand[] EmitFastOperands(Operation op) =>
+            new[] { Cbuf(0, SlotMaskWord(_candidates)), Const(_vectorTags != null && _vectorTags.TryGetValue(op, out int t) ? t : 0) };
+
+        // ---- Vector loads (LDG.64 / LDG.128) --------------------------------------------------------------------------------------------
+        // The front end splits a vector load into 32-bit loads (the IR is scalar). Through the fast path each word then made its own
+        // cache test and its own 32-bit load: four load instructions where the SASS has one (OoT's gpt mesh blocks: 66 LDG.128 of light
+        // probe records per lane, scattered over memory). The words of one load carry a tag {group, word count, word}; at word 0 the back
+        // end loads the whole vector through the cached span (an aligned LDG.128 / .64 never crosses a 4 KiB page) and the other words take
+        // their lane from it when word 0 hit; after a miss they go their own way as before.
+        [ThreadStatic] static Dictionary<Operation, int> _vectorTags;
+        [ThreadStatic] static int _vectorGroups;
+        /// NXRT_HARNESS_GMEM_VECTOR=0: every word loads on its own (as before 2026-11-10).
+        static readonly bool VectorLoads = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_VECTOR") != "0";
+
+        /// Front end: the n-th 32-bit load of a vector load of `count` words (2 or 4).
+        internal static void NoteVectorWord(Operation op, int group, int count, int n)
+        {
+            if (!VectorLoads || op == null || count is not (2 or 4)) return;
+            (_vectorTags ??= new Dictionary<Operation, int>())[op] = group * 64 + count * 8 + n;
+        }
+        internal static int NewVectorGroup() => ++_vectorGroups;
+
+        // back end: word 0's results per group (hit flag and every word), for the later words of the same load
+        [ThreadStatic] static Dictionary<int, (SpvInstruction Hit, SpvInstruction[] Words)> _vectorDone;
         // The helpers' calling convention in SPIR-V. Ryujinx passes every argument as a pointer to a Function variable of the caller; with
         // the helper out of line (DontInline) each call site's argument temporaries are then address-taken and live in local memory (fbb731e2:
         // 13 KB of local memory). The global-memory helpers take their in arguments by value instead, and a fast-path helper returns a
@@ -513,35 +540,131 @@ namespace Ryujinx.Graphics.Shader.Translation
             SpvInstruction C(uint v) => ctx.Constant(u32, v);
             SpvInstruction aLo = ctx.Get(AggregateType.U32, operation.GetSource(1)), aHi = ctx.Get(AggregateType.U32, operation.GetSource(2));
             SpvInstruction slots = ctx.Get(AggregateType.U32, operation.GetSource(3));
-            SpvInstruction[] w = new SpvInstruction[CacheWords];
-            for (int i = 0; i < CacheWords; i++) w[i] = ctx.Load(u32, ctx.AccessChain(pw, cacheVar, C((uint)i)));
-            // hit: no marked slot, and the address in the cached span: (a & ~mask) == tag low, a.hi == tag high
-            SpvInstruction hit = ctx.LogicalAnd(bt, ctx.LogicalAnd(bt, ctx.IEqual(bt, ctx.BitwiseAnd(u32, aLo, ctx.Not(u32, w[2])), w[0]), ctx.IEqual(bt, aHi, w[1])),
-                                                ctx.IEqual(bt, slots, C(0)));
-            SpvInstruction lFast = ctx.Label(), lSlow = ctx.Label(), lMerge = ctx.Label();
-            ctx.SelectionMerge(lMerge, SelectionControlMask.MaskNone);   // right before the branch
-            ctx.BranchConditional(hit, lFast, lSlow);
-            ctx.AddLabel(lFast);
-            SpvInstruction lo = ctx.IAdd(u32, w[3], ctx.BitwiseAnd(u32, aLo, w[2]));
-            SpvInstruction hi = ctx.IAdd(u32, w[4], ctx.Select(u32, ctx.ULessThan(bt, lo, w[3]), C(1), C(0)));
-            SpvInstruction addr = ctx.BitwiseOr(u64, ctx.UConvert(u64, lo), ctx.ShiftLeftLogical(u64, ctx.UConvert(u64, hi), C(32)));
-            SpvInstruction v = ctx.Load(u32, ctx.ConvertUToPtr(ctx.TypePointer((StorageClass)5349, u32), addr), MemoryAccessMask.Aligned);
-            v.AddOperand((Spv.Generator.LiteralInteger)4);
-            SpvInstruction fastValue = function.ReturnType == AggregateType.U32 ? v : ctx.Bitcast(retType, v);
-            ctx.Branch(lMerge);
-            ctx.AddLabel(lSlow);
-            // the helper: value and the span its walk ended in, which becomes the page cache
-            SpvInstruction r = ctx.FunctionCall(HelperReturnType(ctx, function), spvFunc, vals);
-            SpvInstruction slowValue = ctx.CompositeExtract(retType, r, (Spv.Generator.LiteralInteger)0);
-            for (int i = 0; i < CacheWords; i++)
+            int tag = operation.SourcesCount > 4 ? ConstantOf(operation.GetSource(4)) : 0;
+            int vGroup = tag / 64, vCount = tag / 8 % 8, vWord = tag % 8;
+            // the scalar fast path: the page cache test, the load through it, else the helper (vector: word 0 loads them all)
+            (SpvInstruction, SpvInstruction) Regular(bool vectorHead)
             {
-                SpvInstruction word = ctx.CompositeExtract(ctx.GetType(function.OutArguments[i]), r, (Spv.Generator.LiteralInteger)(1 + i));
-                ctx.Store(ctx.AccessChain(pw, cacheVar, C((uint)i)), ctx.BitcastIfNeeded(AggregateType.U32, function.OutArguments[i], word));
+                SpvInstruction[] w = new SpvInstruction[CacheWords];
+                for (int i = 0; i < CacheWords; i++) w[i] = ctx.Load(u32, ctx.AccessChain(pw, cacheVar, C((uint)i)));
+                // hit: no marked slot, and the address in the cached span: (a & ~mask) == tag low, a.hi == tag high
+                SpvInstruction hit = ctx.LogicalAnd(bt, ctx.LogicalAnd(bt, ctx.IEqual(bt, ctx.BitwiseAnd(u32, aLo, ctx.Not(u32, w[2])), w[0]), ctx.IEqual(bt, aHi, w[1])),
+                                                    ctx.IEqual(bt, slots, C(0)));
+                SpvInstruction lFast = ctx.Label(), lSlow = ctx.Label(), lMerge = ctx.Label();
+                ctx.SelectionMerge(lMerge, SelectionControlMask.MaskNone);   // right before the branch
+                ctx.BranchConditional(hit, lFast, lSlow);
+                ctx.AddLabel(lFast);
+                SpvInstruction Address(SpvInstruction[] s)
+                {
+                    SpvInstruction lo = ctx.IAdd(u32, s[3], ctx.BitwiseAnd(u32, aLo, s[2]));
+                    SpvInstruction hi = ctx.IAdd(u32, s[4], ctx.Select(u32, ctx.ULessThan(bt, lo, s[3]), C(1), C(0)));
+                    return ctx.BitwiseOr(u64, ctx.UConvert(u64, lo), ctx.ShiftLeftLogical(u64, ctx.UConvert(u64, hi), C(32)));
+                }
+                SpvInstruction[] LoadVector(SpvInstruction[] s)
+                {
+                    SpvInstruction vt = ctx.TypeVector(u32, vCount);
+                    SpvInstruction vec = ctx.Load(vt, ctx.ConvertUToPtr(ctx.TypePointer((StorageClass)5349, vt), Address(s)), MemoryAccessMask.Aligned);
+                    vec.AddOperand((Spv.Generator.LiteralInteger)(4 * vCount));
+                    SpvInstruction[] ws = new SpvInstruction[vCount];
+                    for (int i = 0; i < vCount; i++) ws[i] = ctx.CompositeExtract(u32, vec, (Spv.Generator.LiteralInteger)i);
+                    return ws;
+                }
+                SpvInstruction[] span = new SpvInstruction[CacheWords];
+                SpvInstruction addr = Address(w);
+                SpvInstruction v;
+                SpvInstruction[] fastWords = null;
+                if (vectorHead)
+                {
+                    fastWords = LoadVector(w);
+                    v = fastWords[0];
+                }
+                else
+                {
+                    v = ctx.Load(u32, ctx.ConvertUToPtr(ctx.TypePointer((StorageClass)5349, u32), addr), MemoryAccessMask.Aligned);
+                    v.AddOperand((Spv.Generator.LiteralInteger)4);
+                }
+                SpvInstruction fastValue = function.ReturnType == AggregateType.U32 ? v : ctx.Bitcast(retType, v);
+                ctx.Branch(lMerge);
+                ctx.AddLabel(lSlow);
+                // the helper: value and the span its walk ended in, which becomes the page cache
+                SpvInstruction r = ctx.FunctionCall(HelperReturnType(ctx, function), spvFunc, vals);
+                SpvInstruction slowValue = ctx.CompositeExtract(retType, r, (Spv.Generator.LiteralInteger)0);
+                for (int i = 0; i < CacheWords; i++)
+                {
+                    SpvInstruction word = ctx.CompositeExtract(ctx.GetType(function.OutArguments[i]), r, (Spv.Generator.LiteralInteger)(1 + i));
+                    ctx.Store(ctx.AccessChain(pw, cacheVar, C((uint)i)), ctx.BitcastIfNeeded(AggregateType.U32, function.OutArguments[i], word));
+                    span[i] = ctx.BitcastIfNeeded(AggregateType.U32, function.OutArguments[i], word);
+                }
+                SpvInstruction slowEnd = lSlow, slowFlag = null;
+                SpvInstruction[] slowWords = null;
+                if (vectorHead)
+                {
+                    // the span the walk ended in holds the whole vector unless a bound slot answered (no span): load the other words
+                    // through it as on the fast path
+                    SpvInstruction covers = ctx.LogicalAnd(bt, ctx.IEqual(bt, ctx.BitwiseAnd(u32, aLo, ctx.Not(u32, span[2])), span[0]), ctx.IEqual(bt, aHi, span[1]));
+                    SpvInstruction lVec = ctx.Label(), lNoVec = ctx.Label(), lVecEnd = ctx.Label();
+                    ctx.SelectionMerge(lVecEnd, SelectionControlMask.MaskNone);
+                    ctx.BranchConditional(covers, lVec, lNoVec);
+                    ctx.AddLabel(lVec);
+                    SpvInstruction[] got = LoadVector(span);
+                    ctx.Branch(lVecEnd);
+                    ctx.AddLabel(lNoVec);
+                    ctx.Branch(lVecEnd);
+                    ctx.AddLabel(lVecEnd);
+                    slowWords = new SpvInstruction[vCount];
+                    for (int i = 1; i < vCount; i++) slowWords[i] = ctx.Phi(u32, got[i], lVec, C(0), lNoVec);
+                    slowFlag = ctx.Phi(bt, ctx.ConstantTrue(bt), lVec, ctx.ConstantFalse(bt), lNoVec);
+                    slowEnd = lVecEnd;
+                }
+                ctx.Branch(lMerge);
+                ctx.AddLabel(lMerge);
+                SpvInstruction res = ctx.Phi(retType, fastValue, lFast, slowValue, slowEnd);
+                if (vectorHead)
+                {
+                    SpvInstruction[] words = new SpvInstruction[vCount];
+                    for (int i = 1; i < vCount; i++) words[i] = ctx.Phi(u32, fastWords[i], lFast, slowWords[i], slowEnd);
+                    SpvInstruction hitFlag = ctx.Phi(bt, ctx.ConstantTrue(bt), lFast, slowFlag, slowEnd);
+                    (_vectorDone ??= new())[vGroup] = (hitFlag, words);
+                }
+                return (res, lMerge);
             }
-            ctx.Branch(lMerge);
-            ctx.AddLabel(lMerge);
-            result = ctx.Phi(retType, fastValue, lFast, slowValue, lSlow);
+
+            if (vGroup != 0 && vWord != 0 && _vectorDone != null && _vectorDone.TryGetValue(vGroup, out var done))
+            {
+                // a later word of a vector load: word 0 loaded the whole vector (through the page cache or the span its walk ended in);
+                // only when a bound slot answered word 0 does this word call the helper itself
+                SpvInstruction lHave = ctx.Label(), lReg = ctx.Label(), lEnd = ctx.Label();
+                ctx.SelectionMerge(lEnd, SelectionControlMask.MaskNone);
+                ctx.BranchConditional(done.Hit, lHave, lReg);
+                ctx.AddLabel(lHave);
+                SpvInstruction have = function.ReturnType == AggregateType.U32 ? done.Words[vWord] : ctx.Bitcast(retType, done.Words[vWord]);
+                ctx.Branch(lEnd);
+                ctx.AddLabel(lReg);
+                SpvInstruction rc = ctx.FunctionCall(HelperReturnType(ctx, function), spvFunc, vals);
+                SpvInstruction regValue = ctx.CompositeExtract(retType, rc, (Spv.Generator.LiteralInteger)0), regEnd = lReg;
+                ctx.Branch(lEnd);
+                ctx.AddLabel(lEnd);
+                result = ctx.Phi(retType, have, lHave, regValue, regEnd);
+                return true;
+            }
+            (result, _) = Regular(vGroup != 0 && vWord == 0 && vCount is 2 or 4);
             return true;
+        }
+        /// The constant an AST source holds: a constant, or a local whose single assignment is one (call arguments stay locals,
+        /// spirv-call-args.patch); 0 otherwise.
+        static int ConstantOf(IAstNode node)
+        {
+            for (int depth = 0; depth < 8; depth++)
+            {
+                if (node is not AstOperand o) return 0;
+                if (o.Type == Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandType.Constant) return o.Value;
+                if (o.Type != Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandType.LocalVariable || o.Defs.Count != 1) return 0;
+                IAstNode def = null;
+                foreach (IAstNode d in o.Defs) def = d;
+                if (def is not AstAssignment a) return 0;
+                node = a.Source is AstOperation { Inst: Ryujinx.Graphics.Shader.IntermediateRepresentation.Instruction.Copy } cp ? cp.GetSource(0) : a.Source;
+            }
+            return 0;
         }
         /// The function control of a helper: DontInline for the fallback helpers (NoInline).
         internal static FunctionControlMask FunctionControl(StructuredFunction function) =>

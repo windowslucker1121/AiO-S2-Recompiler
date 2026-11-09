@@ -832,6 +832,25 @@ writing through hard links); only if no shared-cache row changed since 2026-11-0
 `retranslate_subset.py` with all corpus hashes, then the runtime blocks with `private_cache.py --dumps` style single-mode translation).
 Then the pipelines of ~42k blocks rebuild on demand (fragment pipelines ~1.4 s each) until a preparation runs.
 
+**Session 2026-11-10 (F1: gpt pre-raster stages, vector loads).** Goal: the ~6.9 ms of the gpt vertex/mesh stages in Kokiri outside at
+1080. **Registers were the wrong lead:** the original SASS of most hot gpt blocks already uses R247-R252 (40953571, 5332b131, a5bfd19f,
+b8b873e5, a873d795, e41230f8, 8fb97d28; sassdecode `--dump` + max register); only fbb731e2 / 6ec65625 are R125 (control +0x4c = 128).
+Two causes of their 255 found with pipestat (tools/shaders/README.md "Register pressure of the gpt pre-raster stages"): AstOptimizer
+sinking single-use values to far uses (`NXRT_HARNESS_PROPAGATE=near:16`: fbb731e2 255 + spills -> 174, fragment sample mean 81 -> 72) and
+NVIDIA hoisting all loads of straight-line code. Neither paid in game (propagation limit 36.2 / 36.6 vs 36.9 fps; mesh outputs written
+directly, `NXRT_HARNESS_MESH_DIRECT=1`, shared memory 13 KB -> 0.4 KB, 36.1 / 36.3 vs 36.9): both stay off (experiment switches).
+**What pays: one vector load per LDG.64/.128** through the pointer fast path (`AmpereGlobal.cs`, tagged words, README "Pointer accesses:
+vector loads"; `NXRT_HARNESS_GMEM_VECTOR=0` = old form). Kokiri outside, 1920x1080 uncapped, same exe (main checkout, 2026-11-09 evening),
+alone, warm pipelines, 130 s from the state, 6 windows of 10 s after 90 s: shared cache 36.6 / 37.3 fps, vector loads 40.4 / 40.35 (+3.8 / +3.0 fps, +10% / +8%; gpu.busy ms per second 683 / 675 -> 727 / 728, shorter frames);
+vector + near:16 40.5 / 39.9 (no further gain). Village capture replay (20261108-000413-a9g1-village): the vector cache's picture equals the
+shared cache's (SSIM 1.000000, max difference 2, as between two shots of one cache; ferns, grass, crowns drawn). Measured with private
+caches (`private_cache.py --token gpt --dumps work\ai_run\oot\a18dump\dump`; deleted). **To merge into the shared cache:** build the
+harness of this branch, then `retranslate_subset.py --corpus work\shaders\oot\corpus --cache work\shaders\oot\spirv --token gpt` (3,419
+corpus blocks) and the 14 gpt "runtime" blocks of `work\ai_run\oot\a18dump\dump` in single mode (culling/HiZ compute among them: 4c1e8564, f2422a7a, a17259b2, 39a1f760; only the gpt rows of that dump change, not 3e986fed / fdfd1e7c;
+leave its upscaler network rows alone, see "Merge pitfall"); pipelines of the gpt programs rebuild on demand (~1-2 s each) until a
+preparation runs. Scratch scripts of this session (run.py: load_state + uncapped trace run; fps.py: fps windows from the log; replay.py,
+cmp.py) were in the session's scratchpad.
+
 **Session 2026-11-09 (frame time: hitches, 1% lows, pacing, uncapped).** Pinned 1920x1080, cap 60, warm runs (one warm-up per scene
 first), alone, `load_state` + `memory.limit_gb 24`; windows: first scene 55-275 s, Link's house 45-190 s, Kokiri outside 55-210 s.
 **Tool:** `[diag] frame_csv` (gauge.cpp) writes every presented frame (interval, every hitch-log counter's growth, every hitch phase's ms;

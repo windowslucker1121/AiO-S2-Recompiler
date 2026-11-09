@@ -1,0 +1,73 @@
+Ryujinx shader translator (experiment, off by default): NXRT_HARNESS_PROPAGATE=near:K folds a single-use value only into one of the next
+K statements of its own block (none = no folding, as DebugMode). AstOptimizer otherwise sinks every single-use value (constant-buffer
+loads, texture results, arithmetic trees) to its use however far away, which keeps the inputs live (OoT fern mesh fbb731e2: 255 registers
+with spills -> 174 without). No fps gain was measured (tools/shaders/README.md, F1). Applied after structured-subgroup-propagation.patch.
+The Ryujinx code in the context lines is MIT.
+--- a/StructuredIr/AstOptimizer.cs
++++ b/StructuredIr/AstOptimizer.cs
+@@ -24,7 +24,8 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+                     {
+                         bool isWorthPropagating = propVar.Uses.Count == 1 || IsWorthPropagating(assignment.Source);
+ 
+-                        if (propVar.Defs.Count == 1 && isWorthPropagating && !MovesMemoryAccess(assignment, propVar))
++                        if (propVar.Defs.Count == 1 && isWorthPropagating && !MovesMemoryAccess(assignment, propVar) &&
++                            !SinksTooFar(assignment, propVar))
+                         {
+                             PropagateExpression(propVar, assignment.Source);
+                         }
+@@ -93,6 +94,55 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+             return true;
+         }
+ 
++        // NXRT_HARNESS_PROPAGATE (experiment, structured-propagation-distance.patch): "all" (default) = Ryujinx's rule; "none" = no propagation (as DebugMode); "near:K" = a single-use
++        // value is folded only into one of the next K statements of its own block with no block in between.
++        private static readonly string PropagateMode = System.Environment.GetEnvironmentVariable("NXRT_HARNESS_PROPAGATE") ?? "all";
++
++        private static bool SinksTooFar(AstAssignment assignment, AstOperand propVar)
++        {
++            if (PropagateMode == "all")
++            {
++                return false;
++            }
++
++            if (PropagateMode == "none")
++            {
++                return true;
++            }
++
++            int k = PropagateMode.StartsWith("near:") ? int.Parse(PropagateMode.Substring(5)) : 1;
++
++            // a unary operation of an operand folded into several uses (IsWorthPropagating) moves nothing far
++            if (propVar.Uses.Count != 1)
++            {
++                return false;
++            }
++
++            IAstNode use = propVar.Uses.First();
++
++            if (use.LLNode == null || use.Parent != assignment.Parent || assignment.LLNode == null)
++            {
++                return true;
++            }
++
++            int steps = 0;
++
++            for (LinkedListNode<IAstNode> n = assignment.LLNode.Next; n != null; n = n.Next)
++            {
++                if (n.Value == use)
++                {
++                    return false;
++                }
++
++                if (n.Value is AstBlock || ++steps >= k)
++                {
++                    return true;
++                }
++            }
++
++            return true;
++        }
++
+         /// The value depends on the other lanes of the subgroup and on which of them are active where it runs.
+         private static bool ReadsLanes(IAstNode node)
+         {
