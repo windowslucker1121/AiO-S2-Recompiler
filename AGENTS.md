@@ -860,7 +860,7 @@ at 63 fps in game and 80-105 fps on the title (no anomaly seen; 120+ fps could n
 for textures bound with nvnCommandBufferBindTexture* or registered with >= 1 MB; OoT names nearly all of its textures through handles in
 uniform blocks and handle expressions, so at the first scene's big cut (~scene + 91 s) ~300 ASTC textures were read, hashed and BC7-cache-read
 one by one on the render thread (tex_prep_log: `render thread`, `sched 0x0`, 2-6 ms each, mostly the cache file's open + read, not the bytes).
-**Built (commit 09652c3 and the next one):**
+**Built (commits 09652c3, c054524, dccd421; test `gfx_nvn_texgpu.parked_image_of_shared_storage`):**
 1. `[nvn] tex_lookahead` (default on, nvn_replay.cpp `tl_*`, also a `cpuperf_ab_what` name): the game thread hands every submission to the
    `nvn-texlook` thread right after queueing it (gpu::submit); it walks the lists (CallCommands included) with a side copy of the state that
    matters for textures (programs, uniform/storage blocks, bound handles, texture pool), resolves each draw's and dispatch's texture bindings
@@ -884,20 +884,28 @@ one by one on the render thread (tex_prep_log: `render thread`, `sched 0x0`, 2-6
 **Measured (first scene, the same build with `tex_lookahead` off vs on, back to back):** main cut (scene + 89..98 s): excess over 2x the
 median 2,880 -> 632 ms, worst frame 703 -> 95 ms, frames over 50 ms 17 (3,171 ms) -> 10 (616 ms), texture upload + image creation in the slow
 frames 2,648 -> 197 ms (the pre-session build: 1,572 ms excess, worst 309 ms; its per-texture cost was lower, ~2 vs ~5.7 ms: the OS file
-cache was warmer, other agents' translations had run in between). Scene + 6..160 s: 1% low 12.3 -> 21.5 fps, frames over 50 ms 32 (4,562 ms) ->
+cache was warmer, other agents' translations had run in between). A second off/on pair with the final build (both runs with another agent's
+translation on the machine, medians 26 / 22 ms): excess 2,173 -> 628 ms, worst 423 -> 160 ms, frames over 50 ms 24 (2,845 ms) -> 8 (583 ms),
+texture time in the slow frames 1,745 -> 272 ms. Screenshots right after the cuts (Saria with the ocarina, the Kokiri boy, the sign
+board): every texture present, nothing popped in (no stand-ins are used: the render thread still waits for a job it needs).
+Steady state: Kokiri outside, `cpuperf_ab = 300` with `cpuperf_ab_what = tex_lookahead`, 10 pairs: fps +0.05 (5/10), 1% low +0.55
+(8/10), render replay -0.65 ms (8/10): no cost. Scene + 6..160 s: 1% low 12.3 -> 21.5 fps, frames over 50 ms 32 (4,562 ms) ->
 25 (1,519 ms), worst 703 -> 95 ms, fps unchanged (50.9 / 50.6). First 3D frame (scene start): texture time in the slow frames 2,069 -> 442 ms
 (the frame itself 4.2 -> 3.0 s: 2.2-2.9 s of it are pool imports). **Area entries** (load_state; after the load frame, which is 2.6-3.0 s of pool
 imports in every run): Link's house 3 frames 837 / 867 / 435 ms (2,139 ms, upload 1,505) -> 237 / 360 / 352 ms (950 ms, upload 176 + image
 creation 198); Kokiri outside 782 / 806 / 411 / 172 ms (2,172 ms) -> 265 / 429 / 415 ms (1,109 ms). Before the eviction change the look-ahead
-alone gave Link's house 1,667 ms and Kokiri 2,040 ms (the giant arrays). What is left in those frames: R32F/R16 terrain data and new
+alone gave Link's house 1,667 ms and Kokiri 2,040 ms (the giant arrays). A Link's house run of the final build under machine load (jobs
+7 ms each instead of 3.8) had 301 / 872 / 150 ms, so the entry still varies with the machine. What is left in those frames: R32F/R16 terrain data and new
 render targets (uncompressed, ~100 ms per entry, render thread), descriptor sets and pipelines for ~800 new images, ~0.1 ms per new VkImage.
 **Dropped:** uncompressed textures named by the look-ahead as jobs too: OoT's new render-target objects are named before the render thread
 gives them a parked image, ~600 useless jobs per second, entries not faster. **Left:** the pool imports of the load frame (2.2-2.9 s,
-`ms_pool_import`); ~175 new VkImages per second in the first scene (the 1600x1600 DEPTH16 shadow targets are shared by hundreds of objects,
+`ms_pool_import`: host-memory imports of 80 MiB chunks, ~31 ms of vkAllocateMemory each, on the render thread and the import worker); ~175 new VkImages per second in the first scene (the 1600x1600 DEPTH16 shadow targets are shared by hundreds of objects,
 `refs 226`, and not parked); two non-texture stalls seen once each in a pre-session run (a 1.1 s render-thread pipeline build at ~scene +
 129 s, `ms_r_pipeline`, and a 4.3 s replay stall near the end); stand-ins instead of waits were not needed (the render thread waits < 25 ms
 for jobs per entry now). Pitfall: other agents' `spirv_harness` batch translations (~10 cores for minutes) slowed the late part of two first-scene
-runs by ~5 ms per frame; check `Get-Process spirv_harness` before trusting a run.
+runs by ~5 ms per frame; check `Get-Process spirv_harness` before trusting a run. Seen once (not reproduced in 5 runs of the group):
+`gfx_nvn_texgpu.astc_with_rgba8_and_bc5_cache_entries` read a stale format for a rewritten cache entry (`cache_entry_format` 0 vs BC5),
+probably the format index's size + write-time check within one timestamp tick.
 
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
