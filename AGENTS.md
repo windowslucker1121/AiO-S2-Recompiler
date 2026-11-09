@@ -744,7 +744,14 @@ at entry (inputs outside the standard: e.g. sdk's crypto bignum and audio Vec* a
 locals stored before the BL (`scratch_store`: main 1,344, sdk 10,148, nearly all stubs), and so does every BLR and host-override call
 (callee unknown). Only a callee that *returns* a value in x9..x17 through an indirect call or an import would still break (none known).
 The e2e oracle skips x9..x17 at the program's return like NZCV (dead there). IC + FRSQRTE + scratch locals (no PGO): G p50 10.22 ms
-(same batch: base 12.11, IC 11.53, IC + FRSQRTE + PGO 9.92). Measured (first scene, 1920x1080, 30-200 s, one run each, alone): **G p50 base 12.72 ms, inline caches
+(same batch: base 12.11, IC 11.53, IC + FRSQRTE + PGO 9.92).
+**Final numbers (G3, after the fp32-FMUL shader merge of 2026-11-09, one warm-up run first, 1920x1080, 30-200 s, alone):** first scene G
+p50 base (main checkout's libraries) 13.21 ms, IC + FRSQRTE + PGO 10.85, **IC + FRSQRTE + scratch locals + PGO 10.46 (-21%)**, p90 15.03 /
+12.67 / 12.22; Link's house (a scene the profile did not cover) base 11.12, final 9.69 (-13%). fps unchanged (41.1 / 47.7: GPU and render
+thread bound), so G now caps the game near ~95 fps. Default (no profile) is IC + FRSQRTE + scratch locals; PGO stays a local opt-in.
+Left on the game side: v16..v31 as locals (helpers take the destination by pointer and some read it, so the liveness needs per-helper
+read/write knowledge), a two-entry cache for polymorphic call sites (sites freeze after 8 target changes; how many is not measured: the
+`inline caches:` summary line only appears on a clean exit), the HLE call counter per thread. Measured (first scene, 1920x1080, 30-200 s, one run each, alone): **G p50 base 12.72 ms, inline caches
 11.67, inline caches + FRSQRTE + PGO 9.91 (-22% against base)**, p90 14.69 / 13.32 / 11.42; fps 37.9 / 39.8 / 40.3 (GPU / render-thread
 bound).
 
