@@ -136,7 +136,7 @@ enum class Btn { primary, normal, danger };
 enum Id : int {
     ID_CARDS = 100, ID_STEPS, ID_LOG, ID_REQ_LIST, ID_REQ_FIX,
     ID_PLAY, ID_PREP, ID_CANCEL, ID_REBUILD, ID_SRC_NUP, ID_SRC_FOLDER, ID_DATA, ID_OPEN_DATA, ID_SHORTCUT, ID_REMOVE,
-    ID_RECHECK, ID_COPY, ID_OPEN_INI, ID_ADD, ID_SETTINGS, ID_MORE, ID_DETAILS,
+    ID_RECHECK, ID_COPY, ID_OPEN_INI, ID_ADD, ID_SETTINGS, ID_MORE, ID_DETAILS, ID_PLAY_AS_IS,
     IDM_ADD = 1000, IDM_EXIT, IDM_RECHECK, IDM_ABOUT, IDM_REPORT, IDM_PAGE0,
 };
 
@@ -216,12 +216,12 @@ private:
     std::vector<std::pair<HWND, int>> ctls_;   // control, page (-1: never shown by show_page)
     std::vector<std::pair<HWND, Btn>> btns_;
     HWND steps_ = nullptr, log_ = nullptr, req_list_ = nullptr, req_fix_ = nullptr;
-    HWND b_more_ = nullptr;
+    HWND b_more_ = nullptr, b_report_ = nullptr;
     HWND b_play_ = nullptr, b_cancel_ = nullptr, b_recheck_ = nullptr, b_copy_ = nullptr, b_open_ini_ = nullptr;
     RECT nav_rect_[P_COUNT] = {}, add_rect_{};
     RECT prog_rect_{};
     int hover_nav_ = -1;
-    bool details_ = false;               // the game page shows the steps and the output
+    bool details_ = true;                // the game page shows the steps and the output (always while a setup runs)
 
     // cards
     struct Hit { RECT r; GameItem* g; int action; };   // action: 0 select, 1 play, 2 prepare, 3 cancel, 4 add
@@ -1127,7 +1127,8 @@ void App::create_controls() {
     b_play_ = button(L"Play", ID_PLAY, Btn::primary);
     b_cancel_ = button(L"Cancel", ID_CANCEL, Btn::danger);
     b_more_ = button(L"\u2022\u2022\u2022", ID_MORE, Btn::normal);
-    for (HWND h : {b_play_, b_cancel_, b_more_}) ctls_.push_back({h, P_GAME});
+    b_report_ = button(L"Report a bug", IDM_REPORT, Btn::normal);
+    for (HWND h : {b_play_, b_cancel_, b_more_, b_report_}) ctls_.push_back({h, P_GAME});
     steps_ = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER | LVS_NOCOLUMNHEADER, 0, 0, 10, 10, wnd_,
                              reinterpret_cast<HMENU>(ID_STEPS), inst_, nullptr);
     ListView_SetExtendedListViewStyle(steps_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
@@ -1195,6 +1196,7 @@ void App::layout() {
     put(b_play_, x, y, S(200), S(48));
     put(b_cancel_, x + S(212), y + S(6), S(110), S(36));
     put(b_more_, x + w - S(48), y + S(6), S(48), S(36));
+    put(b_report_, x + w - S(48) - S(10) - S(130), y + S(6), S(130), S(36));
     y += S(64);
     prog_rect_ = {x, y, x + w, y + S(40)};
     y += S(56);
@@ -1246,7 +1248,8 @@ void App::refresh() {
         EnableWindow(b_open_ini_, g->in_library() && !g->lay.game.empty());
         InvalidateRect(steps_, nullptr, FALSE);
     }
-    for (HWND h : {steps_, log_}) ShowWindow(h, game_page && details_ ? SW_SHOW : SW_HIDE);
+    const bool busy = g && (g->running || g->queued);
+    for (HWND h : {steps_, log_}) ShowWindow(h, game_page && (details_ || busy) ? SW_SHOW : SW_HIDE);
     // this PC: only what needs the player (the PC's checks, then the selected game's)
     ListView_DeleteAllItems(req_list_);
     std::vector<const Check*> all;
@@ -1276,6 +1279,10 @@ void App::more_menu() {
     auto item = [&](int id, const wchar_t* t, bool en) { AppendMenuW(m, MF_STRING | (en ? 0 : MF_GRAYED), id, t); };
     item(ID_DETAILS, details_ ? L"Hide details" : L"Show details", true);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    if (g->playable() && !g->ready()) {     // setup wants to run (new release, update): start the program built last time as it is
+        item(ID_PLAY_AS_IS, L"Play last build (skip setup)", idle);
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    }
     item(ID_SRC_NUP, L"Choose another .nup file...", idle && g->def);
     item(ID_SRC_FOLDER, L"Choose another folder...", idle && g->def);
     item(ID_DATA, L"Move the data folder...", idle && g->in_library());
@@ -1285,8 +1292,6 @@ void App::more_menu() {
     item(ID_SHORTCUT, L"Desktop shortcut", g->playable());
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     item(ID_REMOVE, L"Remove from library", idle && g->in_library());
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    item(IDM_REPORT, L"Report a bug...", true);
     RECT r;
     GetWindowRect(b_more_, &r);
     const int id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_TOPALIGN, r.right, r.bottom + S(4), 0, wnd_, nullptr);
@@ -1686,6 +1691,7 @@ void App::command(int id, int code) {
     GameItem* g = sel();
     switch (id) {
         case ID_PLAY: if (g) primary(*g); break;
+        case ID_PLAY_AS_IS: if (g) play(*g); break;
         case ID_MORE: more_menu(); break;
         case ID_DETAILS: details_ = !details_; break;
         case ID_PREP:
