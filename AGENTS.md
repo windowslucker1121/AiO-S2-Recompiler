@@ -706,6 +706,23 @@ Next on the game side: per-site caches for indirect calls / imports resolved at 
 time), x9-x15 / v16-v31 as dead at calls and returns (same idea as the flags; riskier with hand-written SDK assembly), PGO of the lifted
 code; the HLE call counter could become per-thread.
 
+**Game side (G3, 2026-11-09): inline caches for indirect calls and imports.** Every indirect call site (BLR, BR out of a function,
+jump-table fallbacks; 178,970 in main) and every import stub now has a static `NxIc` of its own (ctx.h `NX_ICALL` / `NX_IIMPORT`,
+`GameConfig.inline_caches`, `NX_INLINE_CACHES=0` for a lift without): the fast path loads the cached immutable `{addr, fn}` target,
+compares the address and calls it, so every site has its own host indirect branch (predicted per site; before, all indirect calls of the
+game went through the one `call` in `dispatch_call`) and skips the call_indirect -> dispatch_call layers, the TLS cache and the epoch load.
+Misses go to the runtime (`nx_icall_miss` / `nx_iimport_miss`, abi_glue.cpp), which dispatches as before and fills the site only with a
+lifted function (import stubs: also a leaf HLE handler such as strlen/memcpy; never another HLE thunk, a longjmp landing or an override);
+a site whose target changed more than 8 times is frozen (no more writes to its shared line, misses dispatch). A replaced `fn_register`,
+`fn_clear` and the import cache invalidation empty every filled site (`ic_invalidate_all`). Imports to lifted functions skip the
+`in_import` bookkeeping (diagnostics only). Done at run time instead of resolving main->sdk imports at lift time: same speed (one load and
+an indirect call the host predicts perfectly) and it keeps the runtime's overrides. `[cpu] inline_caches = on | off | ab` (ab: 5 s windows,
+marks ic.on / ic.off). The ABI version stays 3 (two new runtime functions; an old runtime fails to link, an old library just has no caches).
+Measured with `ab` in one run (first scene, 1920x1080, 30-230 s, alone): **G p50 12.63 -> 11.56 ms (-8.5%), p90 14.87 -> 13.53**
+(window medians 12.81 / 11.64); fps 40.9 / 40.6 (GPU / render-thread bound). The off windows still run the inline check, so the gain over
+a library without caches is a little smaller. Tried and dropped: kernel waits sleeping in WaitOnAddress on the wake flag instead of
+SleepConditionVariableSRW (no user-mode spin): paired windows G p50 11.29 (cv) vs 11.70 (WaitOnAddress): worse, removed.
+
 **Render resolution pinned (WP7, 2026-11-08, `runtime/games/oot/oot_drs.cpp`, no lifted rebuild).** The game's dynamic resolution: renderer
 R = `[[main+0x4e30498] + 0x228]` (found by a pointer search from main's data at run time), its controller C = `[R + 0xb48]` (per-frame step
 main+0x805aa0, called from main+0x31d3ee0): a list of 10 levels (end node C+400, first C+408; node: scale float at -8, level u32 at -4, next

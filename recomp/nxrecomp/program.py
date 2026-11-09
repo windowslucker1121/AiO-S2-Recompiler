@@ -355,8 +355,21 @@ def localize_flags(stmt):
     return s
 
 
+def inline_caches_on(env):
+    if os.environ.get('NX_INLINE_CACHES', '') == '0':
+        return False
+    return bool(getattr(env.cfg, 'inline_caches', True))
+
+
 def lift_function(env, entry):
     """-> (text, instruction count, [(pc, word, reason)], [(pad, entry)])."""
+    text, n, bad, pads = _lift_function(env, entry)
+    if inline_caches_on(env):                    # ctx.h NX_ICALL / NX_IIMPORT: a cache of its own per call site and import stub
+        text = text.replace('call_indirect(c, ', 'NX_ICALL(c, ').replace('host_import(c, ', 'NX_IIMPORT(c, ')
+    return text, n, bad, pads
+
+
+def _lift_function(env, entry):
     img = env.img
     if env.full and env.plt_entry(entry):
         sym, shndx, value = env.plt_entry(entry)

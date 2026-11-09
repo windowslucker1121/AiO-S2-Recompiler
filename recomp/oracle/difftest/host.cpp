@@ -32,6 +32,8 @@ volatile int dt_event;
 extern "C" {
 void call_indirect(Ctx *c, uint64_t a) { (void)c; (void)a; }
 void host_import(Ctx *c, uint32_t s) { (void)c; (void)s; }
+void nx_icall_miss(Ctx *c, uint64_t addr, NxIc *ic) { (void)ic; call_indirect(c, addr); }
+void nx_iimport_miss(Ctx *c, uint32_t id, NxIc *ic) { (void)ic; host_import(c, id); }
 void guest_trap(const char *what, uint64_t addr) { (void)what; (void)addr; dt_event = 2; }
 void guest_unimpl(uint64_t pc, uint32_t insn, const char *what) { (void)pc; (void)insn; (void)what; dt_event = 9; }
 void guest_svc(Ctx *c, uint32_t n) { (void)c; (void)n; dt_event = 3; }

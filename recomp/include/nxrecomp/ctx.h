@@ -89,6 +89,30 @@ void call_indirect(Ctx *c, uint64_t addr);
 #define NX_IMPORT_MODULE(id) ((uint32_t)(id) >> 20)
 #define NX_IMPORT_SYM(id) ((uint32_t)(id) & 0xfffffu)
 void host_import(Ctx *c, uint32_t import_id);
+/* Inline caches (nxrecomp/program.py inline_caches): every indirect call site and every import stub of the lifted code owns a
+ * zero-initialised static NxIc. The fast path below calls the cached target directly (one load, one compare, an indirect call
+ * the host predicts per site); a miss goes to the runtime, which dispatches the call as call_indirect / host_import would and
+ * may fill the cache. The runtime fills it only with a lifted function that nothing replaces (no HLE thunk, no host override)
+ * and points `t` at an immutable NxIcTarget it never frees; it resets every cache it filled when a function registration is
+ * replaced or the import resolution changes. `misses` / `state` belong to the runtime (it stops refilling a site whose target
+ * keeps changing). A runtime without caches implements the two miss functions as call_indirect(c, addr) / host_import(c, id). */
+typedef struct NxIcTarget { uint64_t addr; void (*fn)(Ctx *); } NxIcTarget;
+typedef struct NxIc { const NxIcTarget *t; uint32_t misses; uint32_t state; } NxIc;
+void nx_icall_miss(Ctx *c, uint64_t addr, NxIc *ic);
+void nx_iimport_miss(Ctx *c, uint32_t import_id, NxIc *ic);
+NX_HELPER void nx_icall(Ctx *c, uint64_t addr, NxIc *ic) {
+    const NxIcTarget *t = __atomic_load_n(&ic->t, __ATOMIC_ACQUIRE);
+    if (__builtin_expect(t != 0 && t->addr == addr, 1)) { t->fn(c); return; }
+    nx_icall_miss(c, addr, ic);
+}
+NX_HELPER void nx_iimport(Ctx *c, uint32_t import_id, NxIc *ic) {
+    const NxIcTarget *t = __atomic_load_n(&ic->t, __ATOMIC_ACQUIRE);
+    if (__builtin_expect(t != 0, 1)) { t->fn(c); return; }
+    nx_iimport_miss(c, import_id, ic);
+}
+/* What the lifter emits at an indirect call site / in an import stub: a cache of its own per site. */
+#define NX_ICALL(c, addr) do { static NxIc nx_ic_; nx_icall((c), (addr), &nx_ic_); } while (0)
+#define NX_IIMPORT(c, id) do { static NxIc nx_ic_; nx_iimport((c), (id), &nx_ic_); } while (0)
 /* Raised by the generated code for: an undefined / reserved instruction word, BRK, falling off the end of a function. */
 void guest_trap(const char *what, uint64_t addr);
 /* An instruction the lifter could not translate (a gap in coverage, listed by `cover`). */
