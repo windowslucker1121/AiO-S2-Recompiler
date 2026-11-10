@@ -248,10 +248,11 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   word of an LDG.128) called its helper, searched the marked slots and walked the table.
 - Now (compute only, `AmpereGlobal.EmitSpanClip` / `CacheAloneDecides`): the helper hands main the span its walk ended in only when no
   marked slot overlaps it (64-bit range test per marked slot, on the slow path only), so a cached span can never hide a marked binding, and
-  compute call sites test the cache alone. The vector loads (F1) then work for compute too. `NXRT_HARNESS_GMEM_CS_SPAN=0`: the old form.
-- Measured (Kokiri outside 1080, stamped `gpu_passes`, P4 runtime): #3 5.63 -> 4.92 ms per frame, a17259b2 (6 dispatches) 0.77 -> 0.25 ms,
+  compute call sites test the cache alone. `NXRT_HARNESS_GMEM_CS_SPAN=0`: the old form. F1's vector loads stay off for compute
+  (`NXRT_HARNESS_GMEM_CS_VECTOR=1`): on the village replay they changed ~175 pixels by more than 20, every loop alike, unexplained.
+- Measured (Kokiri outside 1080, stamped `gpu_passes`, P4 runtime): #3 5.63 -> 4.90 ms per frame, a17259b2 (6 dispatches) 0.77 -> 0.24 ms,
   39a1f760 / 5d8324bd 0.12 -> < 0.05 ms each; registers and code size unchanged (pipestat: a17259b2 still 255 registers, ~178 KB; the 255
-  is not the lookup: with `GMEM_IDENTITY` + `NO_SLOTS` + forced inline it stays 255 at 115 KB).
+  is not the lookup: with `GMEM_IDENTITY` + `NO_SLOTS` + forced inline it stays 255 at 115 KB). fps unchanged (render-thread bound).
 
 ## Register pressure of the gpt pre-raster stages: what it is, and what did not pay (F1, 2026-11-10)
 
