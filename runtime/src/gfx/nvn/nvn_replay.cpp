@@ -4099,7 +4099,7 @@ void keep_begin_submit() {
 }
 
 // The check of a kept set (see above). 0: valid; else 1 + the kind of failure (g_keep_fail).
-int keep_valid(KeepEntry& e) {
+__declspec(noinline) int keep_valid(KeepEntry& e) {   // noinline: its own line in the sampler's profile
     if (e.pool_gen != pool_unregister_generation()) return 1;
     if (e.smp_tune != smp_tune_now()) return 5;
     if (const uint64_t rg = pool_registry_generation(); rg != e.reg_gen) {   // a pool registered over an address (aliasing pools): resolved elsewhere now
