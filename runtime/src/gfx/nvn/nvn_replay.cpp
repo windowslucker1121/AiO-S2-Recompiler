@@ -46,6 +46,7 @@
 #include "nvn_mask_clear.h"
 #include "nvn_capture.h"
 #include "nvn_gpu_internal.h"
+#include "nvn_gpu_stats.h"
 #include "nvn_arch_exp.h"
 #include "nvn_hazard.h"
 #include "nvn_cmdq.h"
@@ -203,6 +204,10 @@ bool g_prog_writes = false;     // the bound program has storage buffer or stora
 bool g_mirror_stale = false;    // a GPU write made pages of a pool copy stale while a draw was being set up: bind again at the next draw
 
 uint32_t g_pass_draws = 0;      // draws recorded in the open pass (GPU pass profiler)
+// [nvn] exp_draw_cut = 3 (measurement only): every draw is recorded twice, the second time with no state change in between, so the GPU time it adds is
+// the draws' own work (shaders, raster) without the cost of the state changes before them
+bool g_draw_dup = false;
+#define NX_DRAW_DUP(call) do { call; if (g_draw_dup) call; } while (0)
 // Draws per render pass size since the last statistics line: the size with the most draws is the game's internal render size (dynamic
 // resolution; logged with the statistics so fps measurements can be compared at equal sizes).
 std::unordered_map<uint64_t, uint64_t> g_pass_size_draws;
@@ -234,14 +239,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbVrs = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbViUpload = 1ull << 39 };
 uint64_t ab_mask() {
     static const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"vrs", kAbVrs}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"vi_upload", kAbViUpload}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -508,8 +513,11 @@ bool occlusion_in_pass_on() {
 // CPU reads them, after the submission's serial; a GPU command of the same submission that read a report word would see the old value.
 bool occ_defer_on();
 // The reports of the pass that just ended (outside any pass now): their {0, timestamp} words, then the query results over the counters.
+bool occ_batch_on();
+void occ_flush_batched();
 void occ_flush_pending() {
     if (g_occ_pend.empty()) return;
+    if (occ_batch_on()) { occ_flush_batched(); return; }
     memory_barrier(F->cb);
     for (const OccReport& q : g_occ_pend) {
         const BufRef b = resolve_buffer(q.addr, 16);
@@ -524,6 +532,103 @@ void occ_flush_pending() {
         if (b.ok) vkCmdCopyQueryPoolResults(F->cb, g_occ_pool, static_cast<uint32_t>(q.slot), 1, b.buffer, b.offset, 16, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
     }
     memory_barrier(F->cb);
+    g_occ_pend.clear();
+}
+
+// [nvn] occ_batch (default on; cpuperf_ab_what occ_batch): the same writes as above in a few commands. OoT makes ~1,450 occlusion reports
+// per frame in Kokiri outside; each was one vkCmdUpdateBuffer of its {0, timestamp} words and one vkCmdCopyQueryPoolResults of its count,
+// ~2,900 transfer commands that the GPU runs one after another. Now the report words are written into the upload ring by the CPU and copied
+// with one vkCmdCopyBuffer per destination buffer (one region per report), the query results of each run of consecutive slots are copied
+// into the upload ring with one vkCmdCopyQueryPoolResults, and from there into the reports with one more region copy per destination.
+uint64_t g_occ_batch_reports = 0, g_occ_batch_cmds = 0;
+// [nvn] exp_occ_off (measurement only; cpuperf_ab_what occ_off): the game's samples-passed counters run no query and report a count as if visible
+// (the game then culls nothing by occlusion): the GPU cost of the queries themselves
+bool occ_off_exp() {
+    static const bool on = nxrt::config_get_bool("nvn", "exp_occ_off", false);
+    return on && ab_on(kAbOccOff);
+}
+bool occ_batch_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "occ_batch", true);
+    return on && ab_on(kAbOccBatch);
+}
+void occ_flush_batched() {
+    const size_t n = g_occ_pend.size();
+    UploadAlloc words = F->upload(16ull * n, 16);   // the {counter, timestamp} words of every report, in order
+    UploadAlloc res = F->upload(8ull * n, 16);      // the query results, in report order (filled by the GPU)
+    if (!words || !res) {   // no upload memory: the per-report path
+        static bool noted = false;
+        if (!noted) { noted = true; NXLOG_W("nvn.replay", "occ_batch: no upload memory for %zu reports, written one by one", n); }
+        memory_barrier(F->cb);
+        for (const OccReport& q : g_occ_pend) {
+            const BufRef b = resolve_buffer(q.addr, 16);
+            if (!b.ok) continue;
+            struct { uint64_t counter, timestamp; } rep = {q.slot < 0 ? q.counter : 0, q.timestamp};
+            vkCmdUpdateBuffer(F->cb, b.buffer, b.offset, sizeof rep, &rep);
+        }
+        memory_barrier(F->cb);
+        for (const OccReport& q : g_occ_pend) {
+            if (q.slot < 0) continue;
+            const BufRef b = resolve_buffer(q.addr, 16);
+            if (b.ok) vkCmdCopyQueryPoolResults(F->cb, g_occ_pool, static_cast<uint32_t>(q.slot), 1, b.buffer, b.offset, 16, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        }
+        memory_barrier(F->cb);
+        g_occ_pend.clear();
+        return;
+    }
+    // per destination buffer: the regions of the report words and of the counts
+    struct Dst { VkBuffer buf; std::vector<VkBufferCopy> rep, cnt; };
+    static std::vector<Dst> dsts;
+    dsts.clear();
+    uint64_t* w = reinterpret_cast<uint64_t*>(words.ptr);
+    uint32_t cmds = 0;
+    // query result copies: runs of reports whose slots follow each other (report i's count goes to res + 8 * i)
+    size_t run_start = 0;
+    auto flush_run = [&](size_t end) {
+        if (end <= run_start) return;
+        const int32_t s0 = g_occ_pend[run_start].slot;
+        vkCmdCopyQueryPoolResults(F->cb, g_occ_pool, static_cast<uint32_t>(s0), static_cast<uint32_t>(end - run_start), res.buffer, res.offset + 8ull * run_start, 8,
+                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        ++cmds;
+    };
+    for (size_t i = 0; i < n; ++i) {
+        const OccReport& q = g_occ_pend[i];
+        w[2 * i] = q.slot < 0 ? q.counter : 0;
+        w[2 * i + 1] = q.timestamp;
+        // a run continues while the slots go up by one without wrapping and every report has a slot
+        const bool cont = i > run_start && q.slot >= 0 && g_occ_pend[i - 1].slot >= 0 && q.slot == g_occ_pend[i - 1].slot + 1;
+        if (!cont) {
+            if (i > run_start && g_occ_pend[run_start].slot >= 0) flush_run(i);
+            run_start = i;
+        }
+    }
+    if (g_occ_pend[run_start].slot >= 0) flush_run(n);
+    // a report written twice in this batch: only the last one is copied (regions of one copy must not overlap)
+    static std::unordered_set<uint64_t> later;
+    static std::vector<uint8_t> skip;
+    later.clear();
+    skip.assign(n, 0);
+    for (size_t i = n; i-- > 0;)
+        if (!later.insert(g_occ_pend[i].addr).second) skip[i] = 1;
+    for (size_t i = 0; i < n; ++i) {
+        const OccReport& q = g_occ_pend[i];
+        if (skip[i]) continue;
+        const BufRef b = resolve_buffer(q.addr, 16);
+        if (!b.ok) continue;
+        Dst* d = nullptr;
+        for (Dst& x : dsts) if (x.buf == b.buffer) { d = &x; break; }
+        if (!d) { dsts.push_back({b.buffer, {}, {}}); d = &dsts.back(); }
+        d->rep.push_back({words.offset + 16ull * i, b.offset, 16});
+        if (q.slot >= 0) d->cnt.push_back({res.offset + 8ull * i, b.offset, 8});
+    }
+    memory_barrier(F->cb);   // earlier GPU work on the report words, and the result copies, before the copies below
+    for (const Dst& d : dsts)
+        if (!d.rep.empty()) { vkCmdCopyBuffer(F->cb, words.buffer, d.buf, static_cast<uint32_t>(d.rep.size()), d.rep.data()); ++cmds; }
+    memory_barrier(F->cb);   // the counts land on the words they replace
+    for (const Dst& d : dsts)
+        if (!d.cnt.empty()) { vkCmdCopyBuffer(F->cb, res.buffer, d.buf, static_cast<uint32_t>(d.cnt.size()), d.cnt.data()); ++cmds; }
+    memory_barrier(F->cb);
+    g_occ_batch_reports += n;
+    g_occ_batch_cmds += cmds;
     g_occ_pend.clear();
 }
 
@@ -546,6 +651,7 @@ void occ_reset_ahead() {
 bool occ_begin_in_pass() {
     if (!P.open || static_cast<int32_t>(g_occ_reset_hi - g_occ_next) <= 0) return false;
     const uint32_t slot = g_occ_next++ % kOccSlots;
+    if (gstats::active()) gstats::draw_end(F->cb);
     vkCmdBeginQuery(F->cb, g_occ_pool, slot, device().features().occlusion_query_precise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
     g_occ_active = static_cast<int32_t>(slot);
     g_occ_in_pass = true;
@@ -782,6 +888,7 @@ void gstamp(const char* label) {
 // [prof] gpu_draws (with gpu_passes): a stamp after every draw, labelled "d <fragment shader> <vertex or mesh shader>". The stamps
 // serialize the draws, so each interval is that draw's whole time without overlap: they rank draws (their sum is about the pass time).
 void draw_stamp() {
+    if (gstats::active()) gstats::draw_end(F->cb);   // [prof] gpu_stats
     static const bool on = nxrt::config_get_bool("prof", "gpu_draws", false);
     if (!on || !gpass_on()) return;
     const ShaderInfo* fs = S.stage[kFragment];
@@ -823,6 +930,7 @@ uint64_t g_pass_end_draws[8192] = {};
 uint64_t g_draw_ops = 0;   // draw commands reached by run_list (mesh_copy_ahead)
 void mesh_pre_clear();     // below (mesh_copy_ahead)
 void end_pass(bool to_pass = false, std::source_location loc = std::source_location::current()) {
+    if (gstats::active()) gstats::draw_end(F->cb);   // [prof] gpu_stats: a draw that returned without drawing
     if (P.open) {
         const uint32_t ln = loc.line() & 8191;
         ++g_pass_end_line[ln];
@@ -3634,6 +3742,17 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             }
                         } else if (br.ok && (br.offset % align) == 0) {
                             bi = {br.buffer, br.offset, std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536})};
+                            // [nvn] exp_vi_upload = 3 (measurement only; run with set_reuse and set_keep off): uniform blocks up to 16 KiB are
+                            // bound from a copy in the upload ring (device-local), the cost of reading them from host memory
+                            static const int64_t viu = nxrt::config_get_int("nvn", "exp_vi_upload", 0);
+                            if (viu >= 3 && d.nvn_stage != kCompute && bi.range <= (16u << 10) && ab_on(kAbViUpload)) {
+                                UploadAlloc u = F->upload(bi.range, std::max<VkDeviceSize>(align, 256));
+                                if (u) {
+                                    std::memcpy(u.ptr, host_ptr(bind.addr), bi.range);
+                                    bi = {u.buffer, u.offset, bi.range};
+                                    kbad("exp_vi_upload");
+                                }
+                            }
                         } else if (br.ok) {
                             // unaligned binding: copy into the upload ring
                             kbad("unaligned uniform block");
@@ -4805,7 +4924,27 @@ void set_small_dynamic(VkCommandBuffer cb) {
         uint32_t w = 1, h = 1;
         bool exact = true;
         shading_rate_for_draw(S.small, P.samples > 1 ? 0u : lim.fsr_sizes, w, h, &exact);
-        if (!exact) log_once("vrs-image", "shading rate image bound with a palette of several rates: the image is not converted, draws run at full rate");
+        if (!exact) {
+            log_once("vrs-image", "shading rate image bound with a palette of several rates: the image is not converted, draws run at full rate");
+            static int logged = 0;
+            if (logged < 8) {   // which palettes the game uses (the first few distinct ones)
+                static std::set<std::string> seen;
+                char pb[96] = "";
+                for (int i = 0; i < 16; ++i) std::snprintf(pb + std::strlen(pb), sizeof pb - std::strlen(pb), "%x", S.small.palette[0][i]);
+                if (seen.insert(pb).second) {
+                    ++logged;
+                    NXLOG_I("nvn.replay", "shading rate image %llx palette 0 entries %s mode %d, pass %ux%u", static_cast<unsigned long long>(S.small.rate_image), pb,
+                            S.small.rate_palette_mode, P.extent.width, P.extent.height);
+                }
+            }
+        }
+        // [nvn] exp_vrs_force = N (measurement only: the picture changes): draws with a several-rate palette run at the pipeline rate NxN
+        // instead of 1x1, the ceiling of what converting the game's rate image could save (cpuperf_ab_what vrs)
+        static const int64_t vrs_force = nxrt::config_get_int("nvn", "exp_vrs_force", 0);
+        if (!exact && vrs_force > 1 && ab_on(kAbVrs)) {
+            w = h = static_cast<uint32_t>(std::min<int64_t>(vrs_force, 4));
+            fit_fragment_size(P.samples > 1 ? 0u : lim.fsr_sizes, w, h);
+        }
         const VkExtent2D size = {w, h};
         const VkFragmentShadingRateCombinerOpKHR ops[2] = {VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR, VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR};
         vkCmdSetFragmentShadingRateKHR(cb, &size, ops);
@@ -5092,11 +5231,31 @@ void upscaler_note_draw(const ShaderInfo* fs);
 
 // `mesh`: a DrawMeshTasks draw (task/mesh program, no vertex input): the mesh stage takes the vertex stage's place below.
 bool g_skip_gpt_raster = false;
+// [nvn] exp_vi_upload (measurement only; cpuperf_ab_what vi_upload): index (1) and also vertex (2) ranges that would be read from a pool in host
+// memory are copied by the CPU into the upload ring (device-local, resizable BAR) and bound from there: the cost of reading them over PCIe.
+// Data a GPU command wrote and the CPU has not seen is read stale (the picture can show it); vertex ranges over 64 KiB are left alone.
+uint64_t g_viu_bytes = 0, g_viu_n = 0;
+void exp_vi_upload(BufRef& br, uint64_t addr, uint64_t size, int level) {
+    static const int64_t lv = nxrt::config_get_int("nvn", "exp_vi_upload", 0);
+    if (lv == 3 || lv < level || !size || !ab_on(kAbViUpload) || (level == 2 && size > (64u << 10))) return;
+    const PoolHit hit = pool_lookup(addr);
+    if (!hit.pool || hit.pool->is_virtual || !hit.pool->base || hit.offset + size > hit.pool->size) return;
+    UploadAlloc u = F->upload(size, 16);
+    if (!u) return;
+    std::memcpy(u.ptr, host_ptr(addr), size);
+    br.buffer = u.buffer;
+    br.offset = u.offset;
+    br.avail = size;
+    br.ok = true;
+    g_viu_bytes += size;
+    ++g_viu_n;
+}
+
 bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* topo_out, bool mesh = false) {
     g_skip_gpt_raster = false;
     if (g_gfx_pending) { note_pending_skip(false); return false; }
     static bool last_mesh = false;
-    if (mesh != last_mesh) { g_dirty |= kPipe | kDesc | kVb; last_mesh = mesh; }
+    if (mesh != last_mesh) { g_dirty |= kPipe | kDesc | kVb; last_mesh = mesh; gstats::note_mesh_switch(); }
     if (!g_gfx_missing.empty())   // a stage the translator could not do: skipped (no vertex / mesh shader) or drawn without it (no fragment shader)
         nxrt::gap("draw", S.stage[mesh ? kMesh : kVertex] ? "drawn without an untranslated stage" : mesh ? "skipped: untranslated mesh stage" : "skipped: untranslated vertex stage",
                   g_gfx_missing);
@@ -5115,6 +5274,14 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
                 if (skip_gpt == 1) return false;
                 g_skip_gpt_raster = true;
             }
+    // [nvn] exp_draw_cut (measurement only, cpuperf_ab_what draw_cut): 1 = every draw runs without fragments (empty scissor: the cost of the
+    // vertex / mesh stages and the per-draw state alone), 2 = every draw is left out (the frame without draw work)
+    static const int64_t draw_cut = nxrt::config_get_int("nvn", "exp_draw_cut", 0);
+    g_draw_dup = draw_cut == 3 && ab_on(kAbDrawCut);
+    if (draw_cut && draw_cut != 3 && ab_on(kAbDrawCut)) {
+        if (draw_cut == 2) return false;
+        g_skip_gpt_raster = true;
+    }
     if (!g_skip_fs.empty()) {   // skip_fs_file words "v:<prefix>" (vertex, task or mesh shader) and "gpt" (a pre-raster stage walks the page table)
         for (const std::string& p : g_skip_fs) {
             const bool gpt = p == "gpt";
@@ -5391,6 +5558,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             BufRef br = vb.addr ? resolve_read(vb.addr, vb.size, kReadVertex) : BufRef{dummy_buffer(), 0, 65536, false};
             if (vb.addr) upd_note_read(vb.addr, vb.size ? vb.size : br.avail);
             VkDeviceSize size = vb.size ? std::min<VkDeviceSize>(vb.size, br.avail) : br.avail;
+            if (vb.addr && vb.size) exp_vi_upload(br, vb.addr, size, 2);
             VkDeviceSize stride = static_cast<VkDeviceSize>(S.stream[binding].stride);
             vkCmdBindVertexBuffers2(F->cb, binding, 1, &br.buffer, &br.offset, &size, &stride);
             g_vb_bound_in_cb = true;
@@ -5421,6 +5589,17 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         std::snprintf(t, sizeof t, "draw %d mode %d%s vs %s fs %s", g_draw_idx, mode, indexed ? " indexed" : "", vs->hash.c_str(),
                       S.stage[kFragment] ? S.stage[kFragment]->hash.c_str() : "-");
         checkpoint(*F, t);
+    }
+    if (gstats::on()) {   // [prof] gpu_stats (measurement only): pipeline statistics of this draw, by draw family
+        const ShaderInfo* fs = S.stage[kFragment];
+        char t[160];
+        bool vrs_exact = true;
+        uint32_t vw = 1, vh = 1;
+        shading_rate_for_draw(S.small, ~0u, vw, vh, &vrs_exact);
+        std::snprintf(t, sizeof t, "%.8s %s%.8s %ux%u d%d%d%d%s%s%s", fs ? fs->hash.c_str() : "-", mesh ? "m:" : "", vs->hash.c_str(), P.extent.width, P.extent.height,
+                      S.ds.depth_test ? 1 : 0, S.ds.depth_write ? 1 : 0, S.ds.depth_func, P.depth_ro ? " ro" : "", S.color.blend_enable_mask ? " bl" : "",
+                      !vrs_exact ? " vrsimg" : (vw * vh > 1 ? " vrs" : ""));
+        gstats::draw_begin(F->cb, t, g_cw[0].active < 0, g_occ_active < 0);
     }
     return true;
 }
@@ -5547,7 +5726,7 @@ void do_draw_arrays(const P_DrawArrays& p) {
     const PrimConversion conv = prim_conversion(static_cast<int>(p.mode));
     if (conv == PrimConversion::None) {
         TRACE("    vertices %u instances %u first %u", p.count, p.instance_count, p.first);
-        vkCmdDraw(F->cb, p.count, std::max<uint32_t>(1, p.instance_count), p.first, p.base_instance);
+        NX_DRAW_DUP(vkCmdDraw(F->cb, p.count, std::max<uint32_t>(1, p.instance_count), p.first, p.base_instance));
     } else {
         // QUADS / QUAD_STRIP / POLYGON / LINE_LOOP: generate an index buffer
         std::vector<uint32_t> in(p.count);
@@ -5555,7 +5734,7 @@ void do_draw_arrays(const P_DrawArrays& p) {
         const std::vector<uint32_t> idx = convert_prim_indices(conv, in);
         if (idx.empty()) return;
         if (!bind_u32_indices(idx)) return;
-        vkCmdDrawIndexed(F->cb, static_cast<uint32_t>(idx.size()), std::max<uint32_t>(1, p.instance_count), 0, 0, p.base_instance);
+        NX_DRAW_DUP(vkCmdDrawIndexed(F->cb, static_cast<uint32_t>(idx.size()), std::max<uint32_t>(1, p.instance_count), 0, 0, p.base_instance));
     }
     counters().draws.fetch_add(1, std::memory_order_relaxed);
     g_pass_draws++;
@@ -5639,12 +5818,13 @@ void do_draw_elements(const P_DrawElements& p) {
         const std::vector<uint32_t> idx = convert_prim_indices(conv, in);
         if (idx.empty()) return;
         if (!bind_u32_indices(idx)) return;
-        vkCmdDrawIndexed(F->cb, static_cast<uint32_t>(idx.size()), std::max<uint32_t>(1, p.instance_count), 0, p.base_vertex, p.base_instance);
+        NX_DRAW_DUP(vkCmdDrawIndexed(F->cb, static_cast<uint32_t>(idx.size()), std::max<uint32_t>(1, p.instance_count), 0, p.base_vertex, p.base_instance));
     } else {
         BufRef br = resolve_read(p.index_address, static_cast<uint64_t>(p.count) * isz, kReadIndex);
         upd_note_read(p.index_address, static_cast<uint64_t>(p.count) * isz);
+        exp_vi_upload(br, p.index_address, static_cast<uint64_t>(p.count) * isz, 1);
         vkCmdBindIndexBuffer(F->cb, br.buffer, br.offset, vk_index_type(static_cast<int>(p.type)));
-        vkCmdDrawIndexed(F->cb, p.count, std::max<uint32_t>(1, p.instance_count), 0, p.base_vertex, p.base_instance);
+        NX_DRAW_DUP(vkCmdDrawIndexed(F->cb, p.count, std::max<uint32_t>(1, p.instance_count), 0, p.base_vertex, p.base_instance));
     }
     counters().draws.fetch_add(1, std::memory_order_relaxed);
     g_pass_draws++;
@@ -5719,7 +5899,7 @@ void draw_indirect_cpu(const P_DrawIndirect& p, PrimConversion conv, uint32_t is
         count_primitives(p.mode, count, instances);
         const std::vector<uint32_t> idx = convert_prim_indices(conv, in);
         if (idx.empty() || !bind_u32_indices(idx)) continue;
-        vkCmdDrawIndexed(F->cb, static_cast<uint32_t>(idx.size()), instances, 0, base_vertex, base_instance);
+        NX_DRAW_DUP(vkCmdDrawIndexed(F->cb, static_cast<uint32_t>(idx.size()), instances, 0, base_vertex, base_instance));
         drew = true;
     }
     if (drew) {
@@ -5756,12 +5936,12 @@ void do_draw_indirect(const P_DrawIndirect& p) {
     if (p.multi && p.count_address) {
         BufRef cb = held_or_pool(p.count_address, 4, kOutIndirect, false);
         const uint32_t stride = static_cast<uint32_t>(p.stride ? p.stride : cmd_size);
-        if (indexed) vkCmdDrawIndexedIndirectCount(F->cb, ib.buffer, ib.offset, cb.buffer, cb.offset, p.max_count, stride);
-        else vkCmdDrawIndirectCount(F->cb, ib.buffer, ib.offset, cb.buffer, cb.offset, p.max_count, stride);
+        if (indexed) NX_DRAW_DUP(vkCmdDrawIndexedIndirectCount(F->cb, ib.buffer, ib.offset, cb.buffer, cb.offset, p.max_count, stride));
+        else NX_DRAW_DUP(vkCmdDrawIndirectCount(F->cb, ib.buffer, ib.offset, cb.buffer, cb.offset, p.max_count, stride));
     } else if (indexed) {
-        vkCmdDrawIndexedIndirect(F->cb, ib.buffer, ib.offset, 1, 20);
+        NX_DRAW_DUP(vkCmdDrawIndexedIndirect(F->cb, ib.buffer, ib.offset, 1, 20));
     } else {
-        vkCmdDrawIndirect(F->cb, ib.buffer, ib.offset, 1, 16);
+        NX_DRAW_DUP(vkCmdDrawIndirect(F->cb, ib.buffer, ib.offset, 1, 16));
     }
     counters().draws.fetch_add(1, std::memory_order_relaxed);
     g_pass_draws++;
@@ -5958,7 +6138,7 @@ void do_draw_mesh(const P_DrawMesh& p) {
         if (!begin_draw(NVN_DRAW_PRIMITIVE_TRIANGLES, false, 0, &topo, true)) { counters().draws_skipped.fetch_add(1); return; }
         const uint32_t lim = S.stage[kTask] ? device().limits_ext().task_max_groups : device().limits_ext().mesh_max_groups;
         TRACE("    mesh work groups %u x %u x %u (task %s mesh %s)", x, y, z, S.stage[kTask] ? S.stage[kTask]->hash.c_str() : "-", S.stage[kMesh]->hash.c_str());
-        vkCmdDrawMeshTasksEXT(F->cb, lim ? std::min(x, lim) : x, y, z);
+        NX_DRAW_DUP(vkCmdDrawMeshTasksEXT(F->cb, lim ? std::min(x, lim) : x, y, z));
     } else {
         const uint32_t rec = p.kind == 3 ? 12 : 8;
         const uint64_t stride = p.stride ? static_cast<uint64_t>(p.stride) : rec;
@@ -6010,9 +6190,9 @@ void do_draw_mesh(const P_DrawMesh& p) {
               static_cast<unsigned long long>(stride), p.count_address ? ", count from the GPU" : "", S.stage[kTask] ? S.stage[kTask]->hash.c_str() : "-", S.stage[kMesh]->hash.c_str());
         if (p.multi && p.count_address) {
             const BufRef cb = held_or_pool(p.count_address, 4, kOutIndirect, false);
-            vkCmdDrawMeshTasksIndirectCountEXT(F->cb, buf, off, cb.buffer, cb.offset, n, n > 1 || vstride >= 12 ? vstride : 12);
+            NX_DRAW_DUP(vkCmdDrawMeshTasksIndirectCountEXT(F->cb, buf, off, cb.buffer, cb.offset, n, n > 1 || vstride >= 12 ? vstride : 12));
         } else {
-            vkCmdDrawMeshTasksIndirectEXT(F->cb, buf, off, n, n > 1 ? vstride : 12);
+            NX_DRAW_DUP(vkCmdDrawMeshTasksIndirectEXT(F->cb, buf, off, n, n > 1 ? vstride : 12));
         }
     }
     counters().draws.fetch_add(1, std::memory_order_relaxed);
@@ -7456,6 +7636,15 @@ void run_list(const CmdList& list, int depth) {
             case Op::ReportCounter: {
                 const auto& p = r.payload<P_Counter>();
                 struct { uint64_t counter, timestamp; } rep = {1, timestamp_ns()};   // counters other than the ones handled below are reported as non-zero
+                if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_off_exp() && g_occ_active < 0) {   // [nvn] exp_occ_off: reported as visible
+                    if (p.address) {
+                        g_reports.put(p.address, kReportUnknown);
+                        gpu_wrote(p.address, sizeof rep, kWriteUpdate);
+                        g_occ_pend.push_back({p.address, rep.timestamp, -1, kOccSplitCount});
+                        if (!P.open && !occ_defer_on()) occ_flush_pending();
+                    }
+                    break;
+                }
                 if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready() && occlusion_in_pass_on() && (g_occ_active < 0 || g_occ_in_pass)) {
                     if (g_occ_active >= 0) {
                         vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
@@ -7541,6 +7730,7 @@ void run_list(const CmdList& list, int depth) {
             }
             case Op::ResetCounter: {
                 const auto& p = r.payload<P_Counter>();
+                if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_off_exp() && g_occ_active < 0) break;   // [nvn] exp_occ_off: no query
                 if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready() && occlusion_in_pass_on() && (g_occ_active < 0 || g_occ_in_pass)) {
                     if (g_occ_active >= 0) {                      // an unreported count is dropped
                         vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
@@ -8078,8 +8268,9 @@ void replay_begin_submit(Frame& f) {
                         (unsigned long long)g_pt_from[3], (unsigned long long)g_pt_from[4], (unsigned long long)g_pt_from[5], (unsigned long long)g_pt_from[6],
                         (unsigned long long)g_pt_dirty, (unsigned long long)g_pt_storage);
             }
-            NXLOG_I(kTag, "occlusion reports: %llu in their pass, %llu with a pass break; %llu queries ended early by a pass break (split)",
-                    (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split);
+            NXLOG_I(kTag, "occlusion reports: %llu in their pass, %llu with a pass break; %llu queries ended early by a pass break (split); occ_batch: %llu reports written with %llu commands",
+                    (unsigned long long)g_occ_fast, (unsigned long long)g_occ_slow, (unsigned long long)g_occ_split, (unsigned long long)g_occ_batch_reports,
+                    (unsigned long long)g_occ_batch_cmds);
             NXLOG_I(kTag, "game barriers: %llu, %llu in an open pass: %llu kept the pass (barrier_keep_pass, bits seen %x), %llu ended it after storage or stream-out writes (bits of all %x)",
                     (unsigned long long)g_bar_n, (unsigned long long)g_bar_in_pass, (unsigned long long)g_bar_kept, g_bar_bits_kept, (unsigned long long)g_bar_unsafe, g_bar_bits_all);
             {

@@ -16,6 +16,9 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <cstdio>
+#include <string>
+#include <vector>
 
 #include <volk.h>
 
@@ -269,22 +272,28 @@ inline bool is_render() {
     return tl_render == 1;
 }
 
+// per-function call counts of the render thread (the E4 line prints the most frequent per frame)
+struct EmitFn { const char* name; const uint64_t* n; };
+std::vector<EmitFn>& emit_fns() { static std::vector<EmitFn> v; return v; }
 template <int Cat, auto* Slot, typename T> struct Hook;
 template <int Cat, auto* Slot, typename R, typename... A>
 struct Hook<Cat, Slot, R(VKAPI_PTR*)(A...)> {
     static inline R(VKAPI_PTR* orig)(A...) = nullptr;
+    static inline uint64_t n = 0;
     static R VKAPI_PTR call(A... a) {
         if (!is_render()) return orig(a...);
+        ++n;
         struct T { uint64_t t0 = __rdtsc(); ~T() { g_emit.ticks[Cat] += __rdtsc() - t0; ++g_emit.calls[Cat]; } } t;
         return orig(a...);
     }
-    static void install() {
+    static void install(const char* name) {
         if (!*Slot || orig) return;
+        emit_fns().push_back({name, &n});
         orig = *Slot;
         *Slot = &call;
     }
 };
-#define NXEXP_HOOK(cat, name) Hook<cat, &name, PFN_##name>::install()
+#define NXEXP_HOOK(cat, name) Hook<cat, &name, PFN_##name>::install(#name)
 
 void install_hooks() {
     NXEXP_HOOK(kCatCmd, vkCmdBindPipeline); NXEXP_HOOK(kCatCmd, vkCmdBindDescriptorSets); NXEXP_HOOK(kCatCmd, vkCmdPushConstants);
@@ -567,6 +576,18 @@ void render_frame_tick() {
                   "+ submit %.2f ms + decide (the rest) %.2f ms",
             (unsigned long long)frames, frames / secs, busy, cmd, double(g_emit.calls[kCatCmd] - base.calls[kCatCmd]) / frames, desc,
             double(g_emit.calls[kCatDesc] - base.calls[kCatDesc]) / frames, sub, busy - cmd - desc - sub);
+    {   // the most frequent calls per frame
+        static std::vector<uint64_t> prev;
+        auto& fns = emit_fns();
+        prev.resize(fns.size(), 0);
+        std::vector<std::pair<uint64_t, size_t>> d;
+        for (size_t i = 0; i < fns.size(); ++i) { d.push_back({*fns[i].n - prev[i], i}); prev[i] = *fns[i].n; }
+        std::sort(d.begin(), d.end(), [](auto& a, auto& b) { return a.first > b.first; });
+        std::string line;
+        char b[96];
+        for (size_t k = 0; k < d.size() && k < 30 && d[k].first; ++k) { std::snprintf(b, sizeof b, " %s %.1f", fns[d[k].second].name, double(d[k].first) / frames); line += b; }
+        NXLOG_I(kTag, "E4 calls per frame:%s", line.c_str());
+    }
     base = g_emit;
     frames = 0;
     cyc_acc = 0;
