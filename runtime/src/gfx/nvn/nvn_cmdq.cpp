@@ -555,6 +555,57 @@ void VKAPI_PTR h_pds(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayou
     commit();
 }
 
+// [nvn] cmd_thread_desc (default on; cpuperf_ab_what cmd_desc): vkUpdateDescriptorSets of the render thread is queued as well. The
+// recorder makes the update before any later queued bind of that set, which is all Vulkan asks (sets are only bound after their update;
+// sets are freed or their pools reset only with the ring drained: those calls drain first). Writes with pNext, descriptor copies and very
+// large updates (the 65,536-entry pool-array sets at creation) run directly after a drain.
+std::atomic<bool> g_desc_q{true};
+PFN_vkUpdateDescriptorSets o_uds = nullptr;
+struct UdsArgs { VkDevice dev; uint32_t n; const VkWriteDescriptorSet* w; };
+void x_uds(const uint8_t* p) { const UdsArgs& a = *reinterpret_cast<const UdsArgs*>(p); o_uds(a.dev, a.n, a.w, 0, nullptr); }
+uint64_t g_uds_queued = 0, g_uds_direct = 0;   // statistics (render thread)
+void VKAPI_PTR h_uds(VkDevice dev, uint32_t n, const VkWriteDescriptorSet* w, uint32_t nc, const VkCopyDescriptorSet* c) {
+    if (!queue_here()) return o_uds(dev, n, w, nc, c);
+    bool direct = nc != 0 || !g_desc_q.load(std::memory_order_relaxed);
+    size_t extra = room<VkWriteDescriptorSet>(n);
+    for (uint32_t i = 0; i < n && !direct; ++i) {
+        if (w[i].pNext) { direct = true; break; }
+        const uint32_t k = w[i].descriptorCount;
+        switch (w[i].descriptorType) {   // only the array the type uses is read (the others may be stale pointers)
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC: case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+                extra += room<VkDescriptorBufferInfo>(k); break;
+            case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+                extra += room<VkBufferView>(k); break;
+            case VK_DESCRIPTOR_TYPE_SAMPLER: case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+            case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+                extra += room<VkDescriptorImageInfo>(k); break;
+            default: direct = true; break;
+        }
+    }
+    if (direct || extra > (1u << 20)) { drain_now(); ++g_direct; ++g_uds_direct; return o_uds(dev, n, w, nc, c); }
+    uint8_t* p = reserve(&x_uds, sizeof(UdsArgs) + extra);
+    UdsArgs* a = reinterpret_cast<UdsArgs*>(p);
+    Wr wr{p + sizeof(UdsArgs)};
+    VkWriteDescriptorSet* cw = wr.put(w, n);
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t k = w[i].descriptorCount;
+        cw[i].pBufferInfo = nullptr; cw[i].pImageInfo = nullptr; cw[i].pTexelBufferView = nullptr;
+        switch (w[i].descriptorType) {
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC: case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+                cw[i].pBufferInfo = wr.put(w[i].pBufferInfo, k); break;
+            case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+                cw[i].pTexelBufferView = wr.put(w[i].pTexelBufferView, k); break;
+            default:
+                cw[i].pImageInfo = wr.put(w[i].pImageInfo, k); break;
+        }
+    }
+    *a = {dev, n, cw};
+    commit();
+    ++g_uds_queued;
+}
+
 template <typename P> void hook(P& slot, P& orig, P fn) { if (slot && !orig) { orig = slot; slot = fn; } }
 
 void install_all() {
@@ -606,6 +657,12 @@ void install_all() {
     hook(vkCmdBeginDebugUtilsLabelEXT, o_bdl, &h_bdl); hook(vkCmdSetFragmentShadingRateKHR, o_fsr, &h_fsr); NXQ_DIRECT(vkCmdSetCheckpointNV);
     NXQ_DIRECT(vkCmdSetVertexInputEXT);
     NXQ_DIRECT(vkCmdExecuteCommands);
+    // descriptor set updates queued (cmd_thread_desc); freeing sets and resetting or destroying their pools wait for the queued updates
+    static const bool desc = config_get_bool("nvn", "cmd_thread_desc", true);
+    if (desc) {
+        hook(vkUpdateDescriptorSets, o_uds, &h_uds);
+        NXQ_DIRECT(vkResetDescriptorPool); NXQ_DIRECT(vkFreeDescriptorSets); NXQ_DIRECT(vkDestroyDescriptorPool);
+    }
     // the command buffers, their pools and the queues as a whole
     NXQ_DIRECT(vkBeginCommandBuffer); NXQ_DIRECT(vkEndCommandBuffer); NXQ_DIRECT(vkResetCommandBuffer); NXQ_DIRECT(vkResetCommandPool);
     NXQ_DIRECT(vkAllocateCommandBuffers); NXQ_DIRECT(vkFreeCommandBuffers); NXQ_DIRECT(vkTrimCommandPool); NXQ_DIRECT(vkDestroyCommandPool);
@@ -640,6 +697,8 @@ void begin_submission(bool on) {
 }
 
 void set_copies(bool on) { g_copies_q.store(on, std::memory_order_relaxed); }
+void set_desc(bool on) { g_desc_q.store(on, std::memory_order_relaxed); }
+void desc_stats(uint64_t* queued, uint64_t* direct) { *queued = g_uds_queued; *direct = g_uds_direct; }
 
 void drain() {
     if (g_ring && g_active.load(std::memory_order_relaxed) && gpu::on_render_thread()) drain_now();

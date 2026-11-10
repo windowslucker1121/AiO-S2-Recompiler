@@ -156,6 +156,7 @@ public:
     uint64_t hw_bytes = 0;                // command memory the console would have used for it (the model's estimate)
     CommandBuffer* meter = nullptr;       // the buffer recording it (charged per record), null once recorded and for host-made lists
     std::atomic<uint64_t> calls{0};
+    std::atomic<bool> dropped{false};     // its handle left the table (handle_lookup's per-thread cache checks it)
 
     // Appends one record. `blob` (may be null) is copied after the payload.
     template <class P>
@@ -251,6 +252,9 @@ inline bool is_overflow_addr(uint64_t a) { return a >= kOverflowAddrBase; }
 // the command buffer is finalized (nvn_cmd_handles.cpp).
 uint64_t handle_register(Ref<CmdList> list);
 Ref<CmdList> handle_lookup(uint64_t handle);
+// [nvn] handle_cache (default on): handle_lookup answers from a per-thread cache while the cached list is still in the table (handles are
+// never reused, a list leaves the table only through drop_locked, which marks it dropped). The replay switches it per ab window.
+void handle_cache_enable(bool on);
 void handle_release(uint64_t handle);            // the game finalized the handle (nvnDeviceFinalizeCommandHandle)
 void handle_release_unbacked(uint64_t handle);   // drops the handle only when its list has no region in the game's command memory
 void handles_release_pool(const MemoryPool* pool);

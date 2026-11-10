@@ -1098,6 +1098,36 @@ end-of-submission copy-backs 0.36, ~70 tiny dispatches that each fill a few CPU-
 - Pitfalls: `powershell -File x.ps1 -Runs a,b` passes one string (split it yourself); a run after a refill-on build showed ab windows of
   300-400 fps for the first minute (loading screens): skip the first ~8 windows; `ab.py`-style means are skewed by them, use pair medians.
 
+**Session 2026-11-10 (R6: render thread, per-draw cuts, Kokiri outside at 1080).** Alone, `load_state` + `memory.limit_gb 24`, uncapped,
+paired `cpuperf_ab = 300` windows (each "on" window against the mean of its two neighbours; loading windows with replay under 5 ms left
+out). Profile (100 Hz sampler, Kokiri) before: begin_draw 55% (bind_sets 29, build_set 17, keep_lookup_or_build 6.7, prepare_textures 8.5 with
+pool_set_sync 3.7), out_draw_bindings 14.5 (hot bindings' out_servable 5.9), do_dispatch 5.6, pool_lookup 5.6 (self), handle_lookup 3.2,
+graphics_pipeline 2.8 (a byte-wise FNV over the whole GraphicsKey), prog_layout 2.6 (map + mutex), `_Try_emplace` 1.3 (`g_reports`). Kept
+(new keys default on unless said, each a `cpuperf_ab_what` name; CONFIG.md): `cmd_thread_desc` (`cmd_desc`: vkUpdateDescriptorSets queued
+for the recorder thread; pool reset/free/destroy drain first) replay -0.94 ms (20/21 pairs); `odb_program` (`odb_prog`: a program change
+re-checks only newly active stages' bindings instead of a full draw buffer check; full checks 7.4 M -> 0.1 M per run) -0.81 ms (19/19);
+`pool_sync_fast` (`pool_fast`: pool-array entries not re-registered since the last walk, same view generation/swizzle/depth mode and the
+same request inputs of the walking binding skip the request + signature; keyed by the binding's view type/depth/component, not the
+binding pointer: shaders share the set) -0.99 ms (18/18); `handle_cache` (per-thread CallCommands handle cache, lists marked `dropped`)
+-0.19 ms (13/20); `overlap_pos` (out_overlaps_window also keeps "overlaps" answers, per g_out_ver: exact) -0.32 ms (13/19). Always on:
+word-wise `bytes_hash` (kept sets' view/sampler checks) and `GraphicsKey::hash`, a per-thread `prog_layout` memo (g_layout_gen), page
+hints in front of pool_lookup's binary search (checked to give exactly the search's answer), `g_reports` in a FlatMap64, an identity hash
+for `g_keep`. Dropped: `alloc_batch` (eight sets per vkAllocateDescriptorSets: +0.30 ms, 3/19; default off). **All five toggles on vs off
+(same exe, the always-on items in both):** Kokiri outside replay 21.9 -> 20.2 ms per frame (19/19), fps 42.4 either way (this build was
+GPU bound there: render idle 1.4 -> 3.2 ms); first scene 15.8 -> 14.7 ms (18/26), +0.9 fps; Link's house 11.85 -> 10.76 ms (36/36),
++0.4 fps (76 fps). Before the session (pre-merge exe, same windows) Kokiri replay was ~25-26 ms at ~38 fps. `set_reuse = verify` and
+`odb_incremental = verify` with everything on (Kokiri, 180 s): 0 of 17.3 M kept sets differed, 0 draw buffer checks missed, but **1 of 2.5 M
+set-memo hits differed** (vs 341e0a61 / fs c8826353, set 1: a uniform block at offset 0x1d00 resolved to another buffer, pool copy vs pool,
+~35 s into the scene). Not traced; none of the new keys changes a copy-or-pool decision (they skip checks whose answers are exact), so suspect
+a page-state change the memo's epoch does not see (e.g. the counter-page refills merged with P4). Next: verify runs with `cpuperf_ab_what`
+off windows to tell. Runtime tests: 122 non-gfx and 52 gfx groups pass. Findings: `set_keep_diag` showed the ~550 first
+sightings per frame are signatures that differ in several inputs at once (none of the one-input-left-out variants matched 93%): per-frame
+uniform and storage addresses; not fixable by the keep key. Remaining by profile (Kokiri, after): build_set 21% (graphics 16: ~900 sets per
+frame with written storage, ~550 first sightings; compute 5), out_draw_bindings 10 (~4,000 hot-binding rechecks per frame: out_servable's
+page walk), keep 6.6, prepare_textures 9, do_dispatch 7; costs are now spread over many objects touched per draw (cache misses on
+Texture/TexGpu, KDep vectors). The next step needs fewer per-draw validations (a draw-level memo or work ahead on another thread), not more
+micro cuts. Pitfall: the game lock's `game.next` slot is taken within milliseconds when it frees; poll it fast (work\r6\waitlock.ps1 style).
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
