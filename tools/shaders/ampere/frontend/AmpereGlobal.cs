@@ -128,6 +128,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         /// (arguments 0/1), or -1. Null when the candidates are not one run of 16-byte slots (then the caller checks each one inline).
         internal static Operand EmitCandidateSearch(EmitterContext c, int cbBinding)
         {
+            _cb0Binding = cbBinding;
             int[] w = _candidates;
             if (w == null || w.Length < 2) return null;
             for (int i = 1; i < w.Length; i++) if (w[i] != w[0] + 4 * i) return null;
@@ -307,6 +308,65 @@ namespace Ryujinx.Graphics.Shader.Translation
             return (pLo, pHi);
         }
 
+        // ---- Compute: the page cache with marked slots (2026-11-10) ----------------------------------------------------------------------
+        // Compute bindings are the pool copy or a shadow, so the runtime marked every bound slot (SlotMaskC0 word 0 never 0) and no compute
+        // access ever took the inline fast path: every 32-bit word of OoT's HiZ / culling pointer shaders (submission #3, the one the game's
+        // main thread waits on) called its helper, searched the slots and walked the table. Now the helper hands main a walk's span only when
+        // no marked slot overlaps it, so a cached span can never hide a marked binding, and compute call sites test the cache alone (no
+        // "mask is 0" condition). The runtime marks only the slots whose binding may differ from the pool (nvn_replay.cpp
+        // gmem_compute_slots). NXRT_HARNESS_GMEM_CS_SPAN=0: the form before (compute fast path only with mask 0).
+        static readonly bool ComputeSpanCheck = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_CS_SPAN") != "0";
+        [ThreadStatic] static int _cb0Binding;
+        /// NXRT_HARNESS_GMEM_CS_VECTOR=1: F1's vector loads in compute too. Off by default: on the village capture replay they changed
+        /// ~175 pixels by more than 20 (6,900 by more than 4) against the per-word form, every loop alike, while two replays of one cache
+        /// differ by 30 / 1,300; not explained (the HiZ blocks a17259b2 / 39a1f760 alone with vector loads match exactly).
+        static readonly bool ComputeVector = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_CS_VECTOR") == "1";
+
+        // The span in `leaf` (CacheWords: tag low, tag high, offset mask, ...) becomes "no span" when a marked candidate slot overlaps it.
+        static void EmitSpanClip(EmitterContext c, Operand[] leaf)
+        {
+            int[] w = _candidates;
+            if (w == null || w.Length < 1 || NoSlots) return;
+            for (int i = 1; i < w.Length; i++) if (w[i] != w[0] + 4 * i) return;   // EmitCandidateSearch's layout only (then no span: below)
+            Operand m = Local(), clash = Local();
+            c.Copy(m, c.BitwiseAnd(Cbuf(0, SlotMaskWord(w)), Const(w.Length >= 32 ? -1 : (1 << w.Length) - 1)));
+            c.Copy(clash, c.ICompareNotEqual(Const(0), Const(0)));
+            Operand loop = Label(), done = Label();
+            c.BranchIfFalse(done, c.ICompareNotEqual(m, Const(0)));
+            c.MarkLabel(loop);
+            {
+                Operand k = c.FindLSB(m);
+                Operand v = c.IAdd(Const(w[0] / 4), k);
+                Operand sLo = c.Load(StorageKind.ConstantBuffer, _cb0Binding, Const(0), v, Const(w[0] & 3));
+                Operand sHi = c.Load(StorageKind.ConstantBuffer, _cb0Binding, Const(0), v, Const((w[0] & 3) + 1));
+                Operand sSz = c.Load(StorageKind.ConstantBuffer, _cb0Binding, Const(0), v, Const((w[0] & 3) + 2));
+                // span [L, L + mask], L = (tag high, tag low); slot [S, S + size): overlap when S - L <= mask or L - S < size (64-bit, unsigned)
+                Operand d1Lo = c.ISubtract(sLo, leaf[0]);
+                Operand d1Hi = c.ISubtract(c.ISubtract(sHi, leaf[1]), c.ConditionalSelect(c.ICompareLessUnsigned(sLo, leaf[0]), Const(1), Const(0)));
+                Operand slotInSpan = c.BitwiseAnd(c.ICompareEqual(d1Hi, Const(0)), c.BitwiseNot(c.ICompareLessUnsigned(leaf[2], d1Lo)));
+                Operand d2Lo = c.ISubtract(leaf[0], sLo);
+                Operand d2Hi = c.ISubtract(c.ISubtract(leaf[1], sHi), c.ConditionalSelect(c.ICompareLessUnsigned(leaf[0], sLo), Const(1), Const(0)));
+                Operand spanInSlot = c.BitwiseAnd(c.ICompareEqual(d2Hi, Const(0)), c.ICompareLessUnsigned(d2Lo, sSz));
+                c.Copy(clash, c.BitwiseOr(clash, c.BitwiseOr(slotInSpan, spanInSlot)));
+                c.Copy(m, c.BitwiseAnd(m, c.ISubtract(m, Const(1))));
+                c.BranchIfTrue(loop, c.ICompareNotEqual(m, Const(0)));
+            }
+            c.MarkLabel(done);
+            int[] none = { 1, -1, 0, 0, 0 };
+            for (int i = 0; i < CacheWords; i++) c.Copy(leaf[i], c.ConditionalSelect(clash, Const(none[i]), leaf[i]));
+        }
+
+        /// Compute call sites test the page cache alone (the helper never caches a span a marked slot overlaps: EmitSpanClip).
+        static bool CacheAloneDecides(CodeGenContext ctx) =>
+            ComputeSpanCheck && !NoSlots && ctx.Definitions.Stage == ShaderStage.Compute && SpanClipLayout();
+        static bool SpanClipLayout()
+        {
+            int[] w = _candidates;
+            if (w == null || w.Length < 1) return false;
+            for (int i = 1; i < w.Length; i++) if (w[i] != w[0] + 4 * i) return false;
+            return true;
+        }
+
         internal static void EmitDeviceAddressAccess(EmitterContext c, ResourceManager rm, IrInstruction inst, StorageKind kind, int inArguments, bool returnsValue)
         {
             if (kind != StorageKind.GlobalMemory) return;   // 8/16-bit accesses: not handled (read 0)
@@ -324,6 +384,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 for (int i = 0; i < CacheWords; i++) { leaf[i] = Local(); c.Copy(leaf[i], Const(none[i])); }
             }
             (Operand pLo, Operand pHi) = Identity ? (aLo, aHi) : EmitResolve(c, rm, aLo, aHi, skip, leaf);
+            if (leaf != null && _compute && ComputeSpanCheck) EmitSpanClip(c, leaf);
             if (leaf != null)
                 for (int i = 0; i < FastOuts; i++) c.Copy(Argument(_helperInArgs + i), leaf[i]);   // the span for main's page cache
 
@@ -542,6 +603,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             SpvInstruction slots = ctx.Get(AggregateType.U32, operation.GetSource(3));
             int tag = operation.SourcesCount > 4 ? ConstantOf(operation.GetSource(4)) : 0;
             int vGroup = tag / 64, vCount = tag / 8 % 8, vWord = tag % 8;
+            if (ctx.Definitions.Stage == ShaderStage.Compute && !ComputeVector) vGroup = 0;   // compute: per-word loads unless enabled (C1)
             // the scalar fast path: the page cache test, the load through it, else the helper (vector: word 0 loads them all)
             (SpvInstruction, SpvInstruction) Regular(bool vectorHead)
             {
@@ -549,7 +611,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 for (int i = 0; i < CacheWords; i++) w[i] = ctx.Load(u32, ctx.AccessChain(pw, cacheVar, C((uint)i)));
                 // hit: no marked slot, and the address in the cached span: (a & ~mask) == tag low, a.hi == tag high
                 SpvInstruction hit = ctx.LogicalAnd(bt, ctx.LogicalAnd(bt, ctx.IEqual(bt, ctx.BitwiseAnd(u32, aLo, ctx.Not(u32, w[2])), w[0]), ctx.IEqual(bt, aHi, w[1])),
-                                                    ctx.IEqual(bt, slots, C(0)));
+                                                    CacheAloneDecides(ctx) ? ctx.ConstantTrue(bt) : ctx.IEqual(bt, slots, C(0)));
                 SpvInstruction lFast = ctx.Label(), lSlow = ctx.Label(), lMerge = ctx.Label();
                 ctx.SelectionMerge(lMerge, SelectionControlMask.MaskNone);   // right before the branch
                 ctx.BranchConditional(hit, lFast, lSlow);
