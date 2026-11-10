@@ -1,8 +1,0 @@
-# Title screen -> main menu with Space (bound to "confirm" = A in the menu context). Must look like play_title_pad.nxs.
-@timeout 0
-@frame 1300
-@shot before
-key Space for 6
-@frame 1900
-@shot after
-@pass

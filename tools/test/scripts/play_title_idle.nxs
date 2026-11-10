@@ -1,7 +1,0 @@
-# Control run for the title-screen input oracle: nothing is pressed. The shot "after" shows the title screen still waiting.
-@timeout 0
-@frame 1300
-@shot before
-@frame 1900
-@shot after
-@pass

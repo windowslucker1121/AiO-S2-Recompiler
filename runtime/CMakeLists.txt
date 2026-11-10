@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# nxrt: game-independent runtime skeleton (OS/HLE layer) for the Metroid Prime Remastered static recompilation.
+# nxrt: game-independent runtime skeleton (OS/HLE layer) for statically recompiled Switch games.
 # Build: scripts\build.ps1   (clang-cl + Ninja, Release)   Test: ctest --test-dir build\release
 cmake_minimum_required(VERSION 3.25)
 # Static MSVC runtime (/MT): players need no Visual C++ Redistributable. Set before project() so every target below, third-party code
@@ -38,12 +38,7 @@ option(NXRT_BUILD_GFX "Build the graphics shell (SDL3 + Vulkan + NVN front end, 
 # Game modules (games/<id>/, docs/GAME_BOUNDARY.md): the title-specific code a game exe links. The test executables register one of them, so
 # the tests of the base run against that game's tables (title facts, sites, probes, hooks) as the game exe does.
 option(NXRT_BUILD_GAMES "Build the game modules in games/" ON)
-# The upstream default module games/mpr is not in every checkout (this one carries oot and pkp): then oot is the default.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/games/mpr/CMakeLists.txt")
-    set(NXRT_DEFAULT_GAME "mpr")
-else()
-    set(NXRT_DEFAULT_GAME "oot")
-endif()
+set(NXRT_DEFAULT_GAME "oot")
 set(NXRT_GAMES "${NXRT_DEFAULT_GAME}" CACHE STRING "ids of the game modules to build (games/<id>/), a list")
 set(NXRT_TEST_GAME "${NXRT_DEFAULT_GAME}" CACHE STRING "id of the game module the test executables register (empty: none)")
 if(NOT NXRT_BUILD_GAMES OR NOT NXRT_TEST_GAME IN_LIST NXRT_GAMES)
@@ -111,20 +106,11 @@ if(NXRT_BUILD_GAMES)
         add_subdirectory(games/${_game})
     endforeach()
 endif()
-# The launcher's branding and factory settings: the data part of one game module and its launcher.rc (version info, manifest). Without that
-# module the launcher builds unbranded, with no resources.
-if(TARGET mpr_launcher AND TARGET nxrt_game_${NXRT_LAUNCHER_GAME}_data AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/games/${NXRT_LAUNCHER_GAME}/launcher.rc")
-    target_sources(mpr_launcher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/games/${NXRT_LAUNCHER_GAME}/launcher.rc")
-    target_link_libraries(mpr_launcher PRIVATE nxrt_game_${NXRT_LAUNCHER_GAME}_data)
-    target_compile_definitions(mpr_launcher PRIVATE NXRT_LAUNCHER_GAME_REGISTER=nxrt_register_game_${NXRT_LAUNCHER_GAME}_data)
-    target_link_options(mpr_launcher PRIVATE /MANIFEST:NO)   # launcher.rc carries the manifest
-endif()
-# Each test executable registers the most of the test game it links: the data part (launcher tests), the core part (runtime tests), the whole
+# Each test executable registers the most of the test game it links: the core part (runtime tests), the whole
 # module (graphics tests). tests/test_main.cpp calls NXRT_TEST_GAME_REGISTER before the first test.
 if(NXRT_BUILD_TESTS AND NXRT_TEST_GAME)
     set(_g "${NXRT_TEST_GAME}")
-    foreach(pair "nxrt_tests;nxrt_game_${_g}_core;nxrt_register_game_${_g}_core" "nxrt_gfx_tests;nxrt_game_${_g};nxrt_register_game_${_g}"
-                 "mpr_launcher_tests;nxrt_game_${_g}_data;nxrt_register_game_${_g}_data")
+    foreach(pair "nxrt_tests;nxrt_game_${_g}_core;nxrt_register_game_${_g}_core" "nxrt_gfx_tests;nxrt_game_${_g};nxrt_register_game_${_g}")
         list(GET pair 0 exe)
         list(GET pair 1 lib)
         list(GET pair 2 fn)

@@ -115,7 +115,7 @@ Names given in the IDA database: `ui2dctl_ButtonGroup_UpdatePointer`, `ui2dctl_S
 - Whether groups with bit `0x4` (decide on release) react to hover without a press. The decompiled path suggests they do not, so in those groups a click still works but hover may not.
 - Whether `0x16ffabc` runs every frame for every open menu. The scene skips it when the group has no buttons (`0x46948`) or the scene is inactive.
 - The game module (`games/dkb`) and `recomp/games/dkb` do not exist yet. Wiring them up means:
-  - load `games/dkb/menu.ini` into the config;
+  - load a `games/dkb/menu.ini` with the values above into the config;
   - call `ui2d::config_from_ini("menu", &cfg)` and then `ui2d::install(base, cfg)`;
   - set the `GamePlay` menu functions;
   - add `entryhook 0x71016ffabc` to its `main.sites`.

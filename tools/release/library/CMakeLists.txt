@@ -46,8 +46,8 @@ configure_file("${REPO}/game-build/res/setup.rc" "${GEN}/setup.rc" COPYONLY)
 set(APP "${REPO}/runtime/apps")
 add_executable(recomp_library WIN32
     "${APP}/setup/setup_main.cpp" "${APP}/setup/setup_core.cpp" "${APP}/setup/setup_games.cpp" "${APP}/setup/setup_settings.cpp"
-    "${APP}/launcher/keymap_win.cpp" "${GEN}/setup.rc")
-target_include_directories(recomp_library PRIVATE "${GEN}" "${APP}/setup" "${APP}/launcher"
+    "${APP}/setup/keymap_win.cpp" "${GEN}/setup.rc")
+target_include_directories(recomp_library PRIVATE "${GEN}" "${APP}/setup"
                            "${vulkan_headers_SOURCE_DIR}/include" "${sdl3_SOURCE_DIR}/include")
 target_compile_definitions(recomp_library PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS
                            RECOMP_LIBRARY_VERSION="${LIBRARY_VERSION}")

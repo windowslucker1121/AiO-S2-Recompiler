@@ -1,3 +1,0 @@
-# Keeps a run alive while the play-mode self-test ([play] selftest, runtime/docs/S8.md) drives the window. The self-test ends the process itself.
-@timeout 0
-@frame 10000000

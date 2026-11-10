@@ -1,5 +1,0 @@
-# Bring-up determinism probe: runs against what boots today (the game stops at the first missing service after ~60 SVCs).
-# Needs [test] frame_source = svc:4 (a pseudo frame every 4 SVCs of the first guest thread), see suites/boot.toml.
-8
-@hash early
-@pass

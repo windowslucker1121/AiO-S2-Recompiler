@@ -1,6 +1,5 @@
 # Configure + build the game exe into game-build\build\release (runtime sources are compiled in; the game libraries are imported).
-# -Release builds the package flavour instead (GAME_RELEASE=ON: GUI program, ./exefs, no build paths in the files) into game-build\build\relpkg,
-# together with the runtime launcher: that is the folder tools\release\make_release.py packs.
+# -Release builds the package flavour instead (GAME_RELEASE=ON: GUI program, ./exefs, no build paths in the files) into game-build\build\relpkg.
 # The game comes from its manifest (-Manifest, env GAME_MANIFEST; default: the only recomp/games/<id>/game.toml next to the runtime).
 # Environment overrides use the manifest id uppercased as prefix: <ID>_RUNTIME, <ID>_BUILD_DIR, <ID>_LIB_DIR (as -Runtime, -Out, -LibDir).
 param([string]$Config = "Release", [switch]$Clean, [switch]$Release, [string]$Manifest = $env:GAME_MANIFEST, [string]$Runtime, [string]$Out, [string]$Version = "dev", [string]$LibDir)
@@ -29,6 +28,6 @@ $cfg = "cmake -S `"$root`" -B `"$bd`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DCMAK
 if ($Runtime) { $cfg += " -DGAME_RUNTIME_DIR=`"$Runtime`"" }
 if ($LibDir) { $cfg += " -DGAME_LIB_DIR=`"$LibDir`"" }
 $targets = "game_exe"
-if ($Release) { $cfg += " -DGAME_RELEASE=ON"; $targets = "game_exe ${id}_launcher" }
+if ($Release) { $cfg += " -DGAME_RELEASE=ON"; $targets = "game_exe" }
 cmd /c "call `"$env_cmd`" && $cfg && cmake --build `"$bd`" --target $targets"
 exit $LASTEXITCODE

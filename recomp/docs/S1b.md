@@ -4,7 +4,7 @@ S1b, the Metroid Prime Remastered recompilation milestone, lifts `main`, `sdk`, 
 
 ## Rebuild
 
-    scripts\build_mpr.cmd                                   configure + lift + compile + archive (work\build\mpr), 20 compile processes
+    scripts\build_game.cmd mpr                              configure + lift + compile + archive (work\build\mpr), 20 compile processes
     scripts\nx_env.cmd cmake --build work\build\mpr --target mpr_link_check      (from the repo root; link check, see below)
 
 `games/mpr/CMakeLists.txt` is the project: one `nxrecomp_add_module` per module (index, base and shard count fixed there), static libraries `mpr_main`, `mpr_sdk`, `mpr_subsdk0`, `mpr_rtld`, target `mpr_modules` for all four. Generated sources are written to `work\lift\<module>`, build output to `work\build\mpr`, the compiler cache (its own sccache server on port 24339, so a shared one is not touched) to `work\build\sccache`. Nothing generated is committed. Lifting alone: `python -m nxrecomp lift game\exefs\main work\lift\main --game mpr --index 0 --name main --base 0x7100000000 --shards 96`.

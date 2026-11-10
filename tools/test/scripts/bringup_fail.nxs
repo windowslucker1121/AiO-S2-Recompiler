@@ -1,4 +1,0 @@
-# a script that must fail: asserts something the booting game cannot satisfy
-4
-@assert health > 1000
-@pass

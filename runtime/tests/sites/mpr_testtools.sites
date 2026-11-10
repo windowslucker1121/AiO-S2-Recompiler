@@ -1,8 +1,0 @@
-# Site list for the test tooling (S5): hand it to the lifter (nxrecomp --sites) when lifting `main` so that the runtime's scripted-run
-# machinery gets its two hooks. Addresses are full guest addresses (main base 0x7100000000 + the offset in the v1.0.0 binary, docs/mpr/hooks.md).
-#   0x3c81c8  CGameArchitectureSupport::Update(float*)   once per rendered game frame: the frame boundary (tt::frame_boundary)
-#   0xc70334  CPlayerMP1::ProcessInput(CFinalInput const&, CStateManager&)   x0 = player, x2 = CStateManager: the probes' state pointers
-# Without these sites the runtime still works; use [test] frame_source = tick (present path) or svc:N (bring-up) instead, and the probes only
-# see what gpGameState gives (world, area, health), no position / play time.
-entryhook 0x71003c81c8
-entryhook 0x7100c70334

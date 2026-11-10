@@ -55,9 +55,9 @@ if(GAME_RELEASE)
     add_compile_options("-clang:-ffile-prefix-map=${GAME_ROOT}=.")
 endif()
 
-# The release version ("0.1.0"; "dev" for local builds). The game log, --version and the exe file properties show it, and the
-# launcher (built from the runtime with the same cache value) shows it in its window. game-build/scripts/build.ps1 -Version sets it.
-set(GAME_VERSION "dev" CACHE STRING "release version shown by the game exe and the launcher")
+# The release version ("0.1.0"; "dev" for local builds). The game log, --version and the exe file properties show it.
+# game-build/scripts/build.ps1 -Version sets it.
+set(GAME_VERSION "dev" CACHE STRING "release version shown by the game exe")
 set(GAME_VER_MAJOR 0)
 set(GAME_VER_MINOR 0)
 set(GAME_VER_PATCH 0)
@@ -91,10 +91,10 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/setup.manifest.in" "${GAME_GEN}/
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/setup.rc" "${GAME_GEN}/setup.rc" COPYONLY)
 add_executable(game_setup WIN32 "${GAME_RUNTIME_DIR}/apps/setup/setup_main.cpp" "${GAME_RUNTIME_DIR}/apps/setup/setup_core.cpp"
                "${GAME_RUNTIME_DIR}/apps/setup/setup_games.cpp" "${GAME_RUNTIME_DIR}/apps/setup/setup_settings.cpp"
-               "${GAME_RUNTIME_DIR}/apps/launcher/keymap_win.cpp" "${GAME_GEN}/setup.rc")
+               "${GAME_RUNTIME_DIR}/apps/setup/keymap_win.cpp" "${GAME_GEN}/setup.rc")
 set_target_properties(game_setup PROPERTIES OUTPUT_NAME "recomp_library")
 FetchContent_GetProperties(sdl3)   # SDL_scancode.h only: the key names the settings page writes (no SDL library is linked)
-target_include_directories(game_setup PRIVATE "${GAME_GEN}" "${GAME_RUNTIME_DIR}/apps/setup" "${GAME_RUNTIME_DIR}/apps/launcher"
+target_include_directories(game_setup PRIVATE "${GAME_GEN}" "${GAME_RUNTIME_DIR}/apps/setup"
                            "${vulkan_headers_SOURCE_DIR}/include" "${sdl3_SOURCE_DIR}/include")
 target_compile_definitions(game_setup PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 set_source_files_properties("${GAME_GEN}/setup.rc" PROPERTIES COMPILE_DEFINITIONS "GAME_VER_MAJOR=${GAME_VER_MAJOR};GAME_VER_MINOR=${GAME_VER_MINOR};GAME_VER_PATCH=${GAME_VER_PATCH};GAME_VER_TEXT=\"${GAME_VERSION}\""

@@ -56,5 +56,5 @@ lifts as a build step and builds the result as a static library (flags: C++20, `
 | Known answers | `python oracle/ka/run_ka.py` | 108 cases of the rEden / dynarmic A64 tests (through ScarletNX), no emulator involved: 89 pass, 0 fail, 7 skipped, 6 need FPSR flags and 5 need FPCR (both documented gaps) |
 | Corpus | `python oracle/difftest/gen_corpus.py` | regenerates `corpus.json` (deterministic) |
 
-Lifting and compiling the game itself (`scripts\build_mpr.cmd`) is described in `docs/S1b.md`. Gaps that remain are listed with numbers in `docs/GAPS.md`. The S1 log is `docs/S1.md`, numbered bug notes are in
+Lifting and compiling the game itself (`scripts\build_game.cmd <id>`) is described in `docs/S1b.md`. Gaps that remain are listed with numbers in `docs/GAPS.md`. The S1 log is `docs/S1.md`, numbered bug notes are in
 `docs/debug/`.

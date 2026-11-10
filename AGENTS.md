@@ -20,6 +20,15 @@ current. How to contribute: `CONTRIBUTING.md`.
 - Copied code needs a licence compatible with GPL-3.0 and an entry in the notices (`runtime/THIRD_PARTY_NOTICES.md` or the folder's
   `licenses/`). Never ask users to upload game files or logs that contain game data.
 
+## Repository cleanup (2026-11-10)
+
+Upstream leftovers removed (this repo is a fork of a fork; the upstream ports were Metroid Prime Remastered `mpr`, Super Mario Odyssey `smo`,
+Donkey Kong Bananza `dkb`): the Tauri `launcher/`, the ImGui launcher `runtime/apps/launcher` (its `keymap_win.*` moved to `runtime/apps/setup`,
+its test to `runtime/tests/gfx`), `runtime/cmake/launcher.cmake`, the games' `launcher.rc`, `tools/{analysis,boot,survey,media}`, most of
+`tools/test` (only `imgdiff.py` / `wincap.py`, used by `tools/ai`, stay), the Maxwell stand-in shader corpus, oracle and smo translator in
+`tools/shaders`, old dev logs in `tools/docs`, unused `game-build/release_b` files (DLSS fetcher, manifest_get, README template),
+`recomp/scripts/build_mpr.cmd`, and runtime tests that only ran with mpr data. Facts in the sections below that name those files are history.
+
 ## State (branch `oot-nup`, 2026-11-06)
 
 Porting **The Legend of Zelda: Ocarina of Time** (Switch 2, program `0400486024DEC000`, update 2.0.0 / `131072`) next to the
@@ -169,7 +178,7 @@ took 25 min for 117,981 parts (both raster sets); a forced second one loads the 
   main/sdk/subsdk0 do **not** decode as LZ4 (invalid match offset in every segment, sha256 differ from the manifest; rtld and npdm match):
   needs a re-dump before it can be lifted.
 - **`recomp_library.exe`** (`runtime/apps/setup`, target `game_setup`, replaces `oot_setup.exe`; native Win32 + GDI+, dark theme; the
-  user chose this over the Tauri `launcher/` and `runtime/apps/launcher`): manifests read at run time (`setup_games.cpp`), so one exe
+  user chose this over the Tauri `launcher/` and `runtime/apps/launcher`, both removed 2026-11-10): manifests read at run time (`setup_games.cpp`), so one exe
   serves every game; `library.ini` next to the exe; dumps identified by title id (`nup_extract.py --list` or ACI0 of `main.npdm`), unknown
   titles stay as "No port yet". One button per game, **Play**: the five preparation steps below run once as one queued job (one game at a
   time, the others wait), then the game starts. Status words only; extras in the "•••" menu; This PC lists only problems; drag and drop
@@ -181,7 +190,7 @@ took 25 min for 117,981 parts (both raster sets); a forced second one loads the 
   Test route: `recomp\scripts\nx_env.cmd work\build\library\build.cmd` (standalone build, needs game-build's fetched Vulkan and SDL
   headers), `recomp_library.exe --add <dump>`, `runtime\apps\setup\tests\winshot.py` (shot, cmd ids of the `Id` enum, close).
   Not checked yet: Play running the setup and then the game; two games queued. Next: build a game from the library (lift + compile as a
-  queue step), retire `runtime/apps/launcher` and `launcher/`, release layout `games\<id>\game.toml` next to the exe.
+  queue step), release layout `games\<id>\game.toml` next to the exe.
   **Release package / CI (2026-11-08):** `.github/workflows/release.yml` builds `tools/release/package.ps1` on `windows-latest` (tag
   `v*` or "Run workflow" with a version -> GitHub release with the zip + `.sha256`; PRs touching the library -> build only, zip as a
   workflow artifact). The package: `recomp_library.exe` (standalone CMake `tools/release/library`, no game or runtime needed, no
@@ -367,7 +376,7 @@ Open points besides the milestones:
 - **auddmg** session answers only ListVirtualDeviceNames; microphone capture (the remake's voice/ocarina features) later.
 - **nn::vi queries** (QueryDisplayHdrStatus/VrrSupported/HdrPaperWhite/CurrentRefreshRate) return the SDK's 0x272 for the stand-in display.
 - **Movies** need libvpx (vcpkg `libvpx:x64-windows-static`, `NXRT_LIBVPX_ROOT`); not installed.
-- **Launcher** (`runtime/apps/launcher`, mpr's, not built for OoT) accepts an extracted folder; the Initial Setup (`oot_setup.exe`) takes `.nup` (through `nup_extract.py`) or an extracted folder. Encrypted NSP/XCI are not supported (removed 2026-11-08: no code reads keys or decrypts).
+- **Launchers** (Tauri `launcher/`, `runtime/apps/launcher`) were removed 2026-11-10; the library (`recomp_library.exe`) takes `.nup` (through `nup_extract.py`) or an extracted folder. Encrypted NSP/XCI are not supported (removed 2026-11-08: no code reads keys or decrypts).
 - **Pokopia regression risk** (no Pokopia dump here): shared changes in funcs.py (header/MOD0, ADR starts, RETAA/RETAB, zero FDEs), a64.py
   (PAC decode, DMB LD/ST as compiler barriers, single-store scalar FP writes), tier2 FP16, `nx::fmax_`/`fmin_` NaN order, lifted-code
   flags (/O2, x86-64-v3, forced inlining), used-memory accounting, NVN minor 40, TLS +0x110, MapMemory Alias sources, WaitIfEqual64, bsd descriptors.
@@ -1573,8 +1582,7 @@ Disk: C: had 130 GB free before the setup (the `.nup` already in the repo root);
 
 **Runtime tests** (`runtime\scripts\build.ps1 -Test`, builds in `runtime\build\release`, ~3.5 min clean; one group: `runtime\build\release\nxrt_tests.exe <group>`
 or `nxrt_gfx_tests.exe <group>`, failures print `FAILED <file>:<line>`): **all 172 groups pass** (2026-11-08). `gfx_scene.windowed_screenshot_matches_the_same_reference` failed with mean diff 26.5 on this machine since Windows HDR is on: `[hdr] mode = auto` made the test window's swapchain HDR10 (PQ values in the screenshot); not a regression of any commit. The test now pins SDR output through `nxrt::extras::set_settings` (the settings are read once per process).
-They configure since the default game module became `oot` when `games/mpr` is missing (`tests/gfx/test_prompts.cpp`, which needs mpr's
-pak/txtr readers, is left out) and the lift tests find the repo-local LLVM. The 27 groups that failed on the first run were all stale
+They configure since the default game module is `oot` and the lift tests find the repo-local LLVM. The 27 groups that failed on the first run were all stale
 expectations, none a regression of the OoT branch: the upstream tests were written against the Metroid Prime Remastered module (never in this
 repository), so with `oot` registered (`NXRT_TEST_GAME`) they met another title. What changed, so later tests follow the same rules:
 - **Title facts** (program id, save sizes, display version, languages, firmware, account uid/nickname, aoc base id, SystemResourceSize) are

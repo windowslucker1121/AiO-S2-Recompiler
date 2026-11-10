@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Launcher key and mouse translation (apps/launcher/keymap_win.cpp): Win32 messages to SDL scancodes and button numbers.
+// Library app key and mouse translation (apps/setup/keymap_win.cpp): Win32 messages to SDL scancodes and button numbers.
 #include "test_framework.h"
 
 #include <cstdint>

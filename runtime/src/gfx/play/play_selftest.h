@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Play mode self-test: a tiny scripted driver for the window, used by the oracles (tools/test/suites/play.toml). It is switched on by
+// Play mode self-test: a tiny scripted driver for the window, used by the play tests. It is switched on by
 // [play] selftest = "<step>,<step>,..." (environment NXRT_PLAY_SELFTEST) and runs one step per game frame boundary, on the main thread, through
 // the same paths a person would use: SDL window calls and real SDL events pushed into SDL's queue (so they come back out of the pump).
 //

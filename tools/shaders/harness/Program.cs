@@ -219,7 +219,7 @@ namespace SpirvHarness
             int constSize = BitConverter.ToInt32(ctrl, 0x6fc);
             int constOff = BitConverter.ToInt32(ctrl, 0x700);
             bool compute = BitConverter.ToUInt32(code, 0) == ComputeMagic ||
-                           (ctrl.Length >= 0x718 && BitConverter.ToUInt32(ctrl, 0x714) == 5);   // NVN stage 5 (also set by dksh_to_corpus.py)
+                           (ctrl.Length >= 0x718 && BitConverter.ToUInt32(ctrl, 0x714) == 5);   // NVN stage 5
             // SPH word 0 bits 10..13. Used here for binding ranges only; the translator reads the SPH itself.
             int sphType = compute ? 0 : (BitConverter.ToInt32(code, start) >> 10) & 0xf;
             // SPH types: 0/1 vertex (A / B), 2 tessellation control, 3 tessellation evaluation, 4 geometry, 5 pixel.

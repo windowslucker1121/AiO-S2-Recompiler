@@ -57,7 +57,7 @@ struct Info {
     // ---- files and branding ----
     const char* exe_name = "";              // the game exe: "mpr.exe"
     const char* setup_exe_name = "";        // the setup tool: "mpr_setup.exe"
-    const char* launcher_ini = "";          // the launcher's own settings file: "mpr_launcher.ini"
+    const char* launcher_ini = "";          // a launcher's own settings file (none ships now)
     const char* game_ini = "";              // the settings file the setup tool writes and the game exe reads: "mpr.ini"
     const char* shader_pack = "";           // the shader pack file next to the setup tool: "shader_cache.mprshc"
     const char* save_folder = "";           // save data folder under %APPDATA%: "mpr-recomp" (empty: "nxrt")

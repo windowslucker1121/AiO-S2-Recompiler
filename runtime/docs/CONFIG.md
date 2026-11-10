@@ -286,7 +286,7 @@ Rules:
 | `pkp` | `render_override` | `1` | `NXRT_PKP_RENDER_OVERRIDE` | `games/pkp/pkp_play.cpp` | Pokopia: render the scene at the chosen internal size instead of the game's 1920x1080 layout. 0 = the game's layout. |
 | `pkp` | `menu_in_game` | `1` | `NXRT_PKP_MENU_IN_GAME` | `games/pkp/pkp_menu.cpp`, `src/gfx/play/menu_ktgl.cpp` | Pokopia: the mouse pointer also works in menus opened during play (bag, lists, choices): hover moves the game's cursor, left click confirms, mouse look pauses while one is up. Detection: a cursor and a list of 2+ entries in layouts the game drew this frame (pane draw hooks). 0 = menus out of play only. |
 | `pkp` | `menu_in_game_ignore` | empty | `NXRT_PKP_MENU_IN_GAME_IGNORE` | `games/pkp/pkp_menu.cpp`, `src/gfx/play/menu_ktgl.cpp` | Pokopia: layouts (`id/sub id/sub ...`, as the `in-game menu up` log line names them) never treated as a menu. |
-| `menu` | `ui2d_group_update`, `ui2d_*` | `0` (off) | `NXRT_MENU_UI2D_GROUP_UPDATE` ... | `src/gfx/play/menu_ui2d.cpp` | Games on Nintendo's nn::ui2d layouts: the menu pointer's ui2d adapter. `ui2d_group_update` is the button group's pointer update in main (hooked as an entry hook); the other `ui2d_*` keys are structure offsets with defaults from Donkey Kong Bananza. Also read from this section: `menu_mouse`, `menu_log`, `menu_in_game`. Each key and its evidence: `docs/menu_pointer.md`; Bananza's values: `games/dkb/menu.ini`. Read at install. |
+| `menu` | `ui2d_group_update`, `ui2d_*` | `0` (off) | `NXRT_MENU_UI2D_GROUP_UPDATE` ... | `src/gfx/play/menu_ui2d.cpp` | Games on Nintendo's nn::ui2d layouts: the menu pointer's ui2d adapter. `ui2d_group_update` is the button group's pointer update in main (hooked as an entry hook); the other `ui2d_*` keys are structure offsets with defaults from Donkey Kong Bananza. Also read from this section: `menu_mouse`, `menu_log`, `menu_in_game`. Each key and its evidence: `docs/menu_pointer.md`. Read at install. |
 | `audio` | `sink` | `auto` | `NXRT_AUDIO_SINK` | `src/services/audio_sink.cpp` | `auto` plays through XAudio2 on the default output device and falls back to the null sink (no sound, a warning in the log) when XAudio2 or a device is missing. `xaudio2` is the same with an explicit name. `paced` is a simulated device: it drains its queue at the sample rate and reports underruns and queue levels, which is how the renderer's timing is checked on a machine without a sound card. `null` discards everything. Tests install their own sink. |
 | `audio` | `paced_ppm` | `0` | `NXRT_AUDIO_PACED_PPM` | `src/services/audio_paced.cpp` | Clock error of the paced sink in parts per million (positive: the simulated device runs fast). Used to check that the renderer follows a device clock that is not exactly the host's. |
 | `media` | `movie` | `mf` | `NXRT_MEDIA_MOVIE` | `src/media/movie_mf.cpp` | `mf`: the game's `movie::` imports (Extractor, Decoder, MediaData, Buffer) are answered on Windows Media Foundation. `off`: the library compiled into subsdk0 runs (it needs the NVDEC/VIC driver, which does not exist here, so no movie plays). |
@@ -453,7 +453,7 @@ To change a key, add a line `Key = action` to `[bindings.all]` (every context) o
 
 `[camera] gun_drives_view`, default `1`. `1` is the game's own behaviour: the arm cannon is fixed to the view, so its idle drift, walking bob and landing dip move the whole view. `0` makes the view follow only the mouse and the stick. Those movements move the gun on screen instead, and the view stays still. Takes effect at once, no restart needed. Set it from the F1 page or the launcher, where it shows as "Steady view" (ticked means `0`).
 
-Checked in a real game run with `tools/test/keys_check.py` (warp to `tallon_canyon_cavern`, grant the other beams and visors, press each key and read the game's own beam and visor numbers): `1` to `4` give power, wave, ice and plasma, the wheel steps wave, ice, wave, and `5` to `8` give combat, scan, thermal and x-ray.
+Checked upstream in a Metroid Prime Remastered run: `1` to `4` give power, wave, ice and plasma, the wheel steps wave, ice, wave, and `5` to `8` give combat, scan, thermal and x-ray.
 
 ### Start-up and menus (`controls.ini`, `[tweaks]`)
 
@@ -674,7 +674,7 @@ All off by default; details in `include/nxrt/tt.h` and `docs/S5.md`. Environment
 | `deterministic` | `false` | Virtual clock (one frame = `clock_step_ticks`), seeded RNG, fixed wall-clock epoch. |
 | `seed` | `0x5EED5EED` | RNG seed of deterministic mode. |
 | `clock_step_ticks` | `320000` | Virtual ticks (19.2 MHz) per frame. |
-| `frame_source` | `hook` | `hook` (needs `tests/sites/mpr_testtools.sites` in the lifted game), `tick` (`diag_frame_tick`), `svc:N` (a frame every N SVCs, bring-up), `manual` (tests). |
+| `frame_source` | `hook` | `hook` (needs a frame entry hook in the game's sites file), `tick` (`diag_frame_tick`), `svc:N` (a frame every N SVCs, bring-up), `manual` (tests). |
 | `trace` | `<out>/trace.jsonl` | Per-frame JSON lines; `none` disables. |
 | `record` / `replay` | empty | Record the live pad of every frame / feed a recorded input trace. |
 | `replay_exit` | `false` | With `replay`: `1` ends the run where the recorded input ends. |

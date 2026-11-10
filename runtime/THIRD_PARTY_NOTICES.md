@@ -16,10 +16,6 @@ projects stays under GPL-3.0, the licence of this repository (`LICENSE` at the r
 - `runtime/assets/prompts/prompt_icons.pak`: built from Kenney Input Prompts 1.5a (CC0 1.0, public domain;
   `assets/prompts/LICENSE-Kenney-InputPrompts.txt`). Only the Xbox, PlayStation and keyboard/mouse sets are used.
 - `runtime/assets/fonts/DejaVuSans.ttf`: DejaVu Sans, Bitstream Vera / DejaVu licence (`assets/fonts/LICENSE-DejaVu.txt`).
-- `tools/shaders/corpus/sascha_dksh/`: Maxwell shader binaries compiled with `uam` from the GLSL samples of Sascha Willems'
-  Vulkan examples (https://github.com/SaschaWillems/Vulkan, MIT, Copyright (c) Sascha Willems). Test data only; no game shaders.
-- `launcher/`: uses the Lucide icon set (npm `lucide`, ISC; Copyright (c) Lucide Contributors) for its icons, including
-  `launcher/src-tauri/icons/icon-source.svg` (Lucide's gamepad icon), and Tauri (MIT or Apache-2.0), fetched by npm/cargo at build time.
 - `tools/shaders/oozx/`: a C ABI over the `oozextract` crate, version 0.5.7 pinned in `Cargo.toml` / `Cargo.lock` (fetched by cargo at
   build time, not in the repository). Licence (checked 2026-11-08): crates.io and the crate's `Cargo.toml` say `license = "MIT"`; the
   repository (https://github.com/lvlvllvlvllvlvl/oozextract) has no LICENSE file and no copyright line. Its description calls it a Rust
@@ -27,7 +23,7 @@ projects stays under GPL-3.0, the licence of this repository (`LICENSE` at the r
   Either way the licence is compatible with this project's GPL-3.0; treat the crate as GPL-3.0-or-later if it is a derived work of ooz.
   The built `oozx.dll` is a developer tool for shader extraction and is not shipped in releases.
 - `tools/shaders/licenses/`, `tools/tiling/licenses/`, `tools/textures/licenses/` and `tools/textures/THIRD_PARTY.md`: the licences of
-  the code those tools adapt or fetch (Ryujinx/ryubing, SuperMarioWonderRecomp, Mesa NAK, nxnative, smo-recomp, astc-encoder,
+  the code those tools adapt or fetch (Ryujinx/ryubing, SuperMarioWonderRecomp, Mesa NAK, nxnative, astc-encoder,
   bc7enc_rdo, ISPC). `recomp/THIRD_PARTY.md` covers the recompiler.
 
 ## Runtime sources
@@ -95,7 +91,7 @@ The graphics shell (`src/gfx`, `cmake/gfx*.cmake`) downloads the components belo
 ### SDL3 (zlib)
 
 Also `apps/setup/setup_keynames.inc` (the scancode name table of `src/events/SDL_keymap.c`, altered: only the non-empty entries) and
-`apps/launcher/keymap_win.cpp` (tables ported from SDL's Windows keyboard code).
+`apps/setup/keymap_win.cpp` (tables ported from SDL's Windows keyboard code).
 
 Source: SDL 3.4.18, `LICENSE.txt`:
 

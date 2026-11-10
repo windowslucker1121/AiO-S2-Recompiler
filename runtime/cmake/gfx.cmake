@@ -52,10 +52,6 @@ endforeach()
 
 if(NXRT_BUILD_TESTS)
     file(GLOB_RECURSE NXRT_GFX_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/gfx/*.cpp")
-    # the button prompt tests read icons with the Metroid Prime module's pak/txtr readers (games/mpr), not in every checkout
-    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/games/mpr/CMakeLists.txt")
-        list(FILTER NXRT_GFX_TEST_SOURCES EXCLUDE REGEX "/tests/gfx/test_prompts\\.cpp$")
-    endif()
     # The tests of the registered test game's own code (games/<id>/tests) run in the same executable (docs/GAME_BOUNDARY.md).
     if(NXRT_TEST_GAME)
         file(GLOB NXRT_GAME_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/games/${NXRT_TEST_GAME}/tests/*.cpp")
@@ -64,8 +60,9 @@ if(NXRT_BUILD_TESTS)
     # tests/play_fixture: Metroid Prime Remastered's play vocabulary and factory controls.ini, the data the play_config and play_engine groups
     # are written against (its game module is not in every checkout).
     add_executable(nxrt_gfx_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_main.cpp" ${NXRT_GFX_TEST_SOURCES}
-                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/play_fixture/mpr_play_fixture.cpp")
-    target_include_directories(nxrt_gfx_tests PRIVATE tests src/gfx src/gfx/nvn)
+                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/play_fixture/mpr_play_fixture.cpp"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/apps/setup/keymap_win.cpp")   # the library app's key table (test_keymap_win.cpp)
+    target_include_directories(nxrt_gfx_tests PRIVATE tests src/gfx src/gfx/nvn apps/setup)
     target_link_libraries(nxrt_gfx_tests PRIVATE nxrt_gfx)
     target_compile_definitions(nxrt_gfx_tests PRIVATE NXRT_GFX_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/gfx")
     # The BC7 reference decoder of bc7enc_rdo (public domain; the same file the setup tool checks its texture cache with): the ASTC texture scene
@@ -106,5 +103,3 @@ if(NXRT_BUILD_TESTS)
     message(STATUS "nxrt gfx test groups: ${NXRT_GFX_GROUPS}")
 endif()
 
-# The launcher (apps/launcher).
-include(${CMAKE_CURRENT_LIST_DIR}/launcher.cmake)

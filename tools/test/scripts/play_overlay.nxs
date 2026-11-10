@@ -1,5 +1,0 @@
-# The F1 settings page. The window self-test ([play] selftest) presses F1 around frame 1000; this script takes the picture after it.
-@timeout 0
-@frame 1400
-@shot overlay_on
-@pass
