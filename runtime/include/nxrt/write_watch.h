@@ -104,7 +104,10 @@ bool all_armed(const Region* r, uint64_t first, uint64_t count);
 bool all_valid_or_armed(const Region* r, uint64_t first, uint64_t count, const std::atomic<uint64_t>* extra, const std::atomic<uint64_t>* also = nullptr);
 uint64_t guard_faults();   // accesses that hit a guarded page (statistics)
 
-uint64_t faults();     // write faults handled so far (statistics)
+uint64_t faults();     // write faults handled so far (statistics; counted after the page was released)
+// Moves before a thread other than the owner (a write fault, a file read, a mapping change) clears a page's valid or armed state, so an
+// owner that caches decisions made from those bits (the NVN set memo) sees every such clear that began before it reads this.
+uint64_t changes();
 uint64_t fault_waits(); // rounds a fault spent waiting for another thread's release of the same page (statistics; stays 0 for foreign faults)
 
 }  // namespace nxrt::mem::ww

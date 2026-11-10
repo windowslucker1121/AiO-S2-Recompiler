@@ -1829,6 +1829,10 @@ void index_note_add(uint64_t ver_before, const OutEntry& e, bool is_new, bool wa
 // After entries of m covering [first, last] were removed or changed (lock held): pages no entry covers any more are not newer in the
 // copy; pages no guarded entry covers lose their guard.
 void settle(Mirror* m, uint64_t first, uint64_t last) {
+    // the version moves before gpu_new bits go: a page no longer newer in the copy (and not valid) resolves to the pool from now on, and the
+    // set memo (bind_sets, out_version in its epoch) on the render thread must see that before it can see the bit gone. out_fetch on a game
+    // thread (a guard fault) settles while the render thread replays; its out_changed came only after settle and remove_entries.
+    if (memo_exact_on()) out_changed();
     const uint64_t n = last - first + 1;
     std::vector<uint8_t> cov(static_cast<size_t>(n), 0);     // 1: some entry, 2: some guarded entry
     for (const OutEntry& e : g_out) {
