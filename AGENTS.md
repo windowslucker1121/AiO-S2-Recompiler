@@ -1219,8 +1219,14 @@ was around them. Of that, **~3.1 ms were the occlusion reports**: ~1,450 per fra
 writes them with a few multi-region copies: **43.3 -> 49.6 fps, GPU busy 22.8 -> 19.7 ms, 6 of 6 pairs**; in-game screenshots on vs off as
 close as two shots of one run (SSIM 0.94-0.97, only animated parts differ). Ruled out: the unconverted shading-rate image (the game binds one
 with palette `55557777888aab8b` on the main colour pass; forcing 2x2 on those draws, `exp_vrs_force = 2`, gained 0.2 ms), storage usage on
-render targets (colour compression; no change), redundant FSR / conservative-raster dynamic state sets (no change). After the fix the render
-thread (replay ~18.5 ms) and the GPU (~19.7 ms) are close: both need to drop for 60 fps.
+render targets (colour compression; no change), redundant FSR / conservative-raster dynamic state sets (no change), uniform blocks read from
+host memory (copied into the upload ring, `exp_vi_upload = 3`: no change). occ_batch elsewhere (paired, steady windows): first scene 62.0 ->
+65.8 fps (GPU busy -1.3 ms, 9 of 13 pairs), Link's house 78.4 -> 82.8 (-0.7 ms, 16 of 16). What is left around the draws: the game's occlusion
+queries themselves ~1.0 ms (`exp_occ_off`, not removable), index and small vertex buffers read over PCIe ~1.1 ms (`exp_vi_upload = 2`;
+72% of vertex and 88% of index binds come from the ~300 pools outside the heap's primary view, "pool without a copy": device-local
+copies for those pools are the fix, in the pool-copy code), barriers. The draws' own work is ~9 ms (`exp_draw_cut = 3`), most of it the gpt
+mesh/vertex stages (`skip_gpt`). After the fix the render thread (replay ~18.5 ms in Kokiri) and the GPU (~19.7 ms) are close: both need
+to drop for 60 fps.
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass

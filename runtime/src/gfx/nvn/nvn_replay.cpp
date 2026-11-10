@@ -239,14 +239,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbVrs = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbVrs = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbViUpload = 1ull << 39 };
 uint64_t ab_mask() {
     static const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"vrs", kAbVrs}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"vrs", kAbVrs}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"vi_upload", kAbViUpload}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -541,6 +541,12 @@ void occ_flush_pending() {
 // with one vkCmdCopyBuffer per destination buffer (one region per report), the query results of each run of consecutive slots are copied
 // into the upload ring with one vkCmdCopyQueryPoolResults, and from there into the reports with one more region copy per destination.
 uint64_t g_occ_batch_reports = 0, g_occ_batch_cmds = 0;
+// [nvn] exp_occ_off (measurement only; cpuperf_ab_what occ_off): the game's samples-passed counters run no query and report a count as if visible
+// (the game then culls nothing by occlusion): the GPU cost of the queries themselves
+bool occ_off_exp() {
+    static const bool on = nxrt::config_get_bool("nvn", "exp_occ_off", false);
+    return on && ab_on(kAbOccOff);
+}
 bool occ_batch_on() {
     static const bool on = nxrt::config_get_bool("nvn", "occ_batch", true);
     return on && ab_on(kAbOccBatch);
@@ -3547,6 +3553,17 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             }
                         } else if (br.ok && (br.offset % align) == 0) {
                             bi = {br.buffer, br.offset, std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536})};
+                            // [nvn] exp_vi_upload = 3 (measurement only; run with set_reuse and set_keep off): uniform blocks up to 16 KiB are
+                            // bound from a copy in the upload ring (device-local), the cost of reading them from host memory
+                            static const int64_t viu = nxrt::config_get_int("nvn", "exp_vi_upload", 0);
+                            if (viu >= 3 && d.nvn_stage != kCompute && bi.range <= (16u << 10) && ab_on(kAbViUpload)) {
+                                UploadAlloc u = F->upload(bi.range, std::max<VkDeviceSize>(align, 256));
+                                if (u) {
+                                    std::memcpy(u.ptr, host_ptr(bind.addr), bi.range);
+                                    bi = {u.buffer, u.offset, bi.range};
+                                    kbad("exp_vi_upload");
+                                }
+                            }
                         } else if (br.ok) {
                             // unaligned binding: copy into the upload ring
                             kbad("unaligned uniform block");
@@ -5025,6 +5042,26 @@ void upscaler_note_draw(const ShaderInfo* fs);
 
 // `mesh`: a DrawMeshTasks draw (task/mesh program, no vertex input): the mesh stage takes the vertex stage's place below.
 bool g_skip_gpt_raster = false;
+// [nvn] exp_vi_upload (measurement only; cpuperf_ab_what vi_upload): index (1) and also vertex (2) ranges that would be read from a pool in host
+// memory are copied by the CPU into the upload ring (device-local, resizable BAR) and bound from there: the cost of reading them over PCIe.
+// Data a GPU command wrote and the CPU has not seen is read stale (the picture can show it); vertex ranges over 64 KiB are left alone.
+uint64_t g_viu_bytes = 0, g_viu_n = 0;
+void exp_vi_upload(BufRef& br, uint64_t addr, uint64_t size, int level) {
+    static const int64_t lv = nxrt::config_get_int("nvn", "exp_vi_upload", 0);
+    if (lv == 3 || lv < level || !size || !ab_on(kAbViUpload) || (level == 2 && size > (64u << 10))) return;
+    const PoolHit hit = pool_lookup(addr);
+    if (!hit.pool || hit.pool->is_virtual || !hit.pool->base || hit.offset + size > hit.pool->size) return;
+    UploadAlloc u = F->upload(size, 16);
+    if (!u) return;
+    std::memcpy(u.ptr, host_ptr(addr), size);
+    br.buffer = u.buffer;
+    br.offset = u.offset;
+    br.avail = size;
+    br.ok = true;
+    g_viu_bytes += size;
+    ++g_viu_n;
+}
+
 bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* topo_out, bool mesh = false) {
     g_skip_gpt_raster = false;
     if (g_gfx_pending) { note_pending_skip(false); return false; }
@@ -5332,6 +5369,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             BufRef br = vb.addr ? resolve_read(vb.addr, vb.size, kReadVertex) : BufRef{dummy_buffer(), 0, 65536, false};
             if (vb.addr) upd_note_read(vb.addr, vb.size ? vb.size : br.avail);
             VkDeviceSize size = vb.size ? std::min<VkDeviceSize>(vb.size, br.avail) : br.avail;
+            if (vb.addr && vb.size) exp_vi_upload(br, vb.addr, size, 2);
             VkDeviceSize stride = static_cast<VkDeviceSize>(S.stream[binding].stride);
             vkCmdBindVertexBuffers2(F->cb, binding, 1, &br.buffer, &br.offset, &size, &stride);
             g_vb_bound_in_cb = true;
@@ -5595,6 +5633,7 @@ void do_draw_elements(const P_DrawElements& p) {
     } else {
         BufRef br = resolve_read(p.index_address, static_cast<uint64_t>(p.count) * isz, kReadIndex);
         upd_note_read(p.index_address, static_cast<uint64_t>(p.count) * isz);
+        exp_vi_upload(br, p.index_address, static_cast<uint64_t>(p.count) * isz, 1);
         vkCmdBindIndexBuffer(F->cb, br.buffer, br.offset, vk_index_type(static_cast<int>(p.type)));
         NX_DRAW_DUP(vkCmdDrawIndexed(F->cb, p.count, std::max<uint32_t>(1, p.instance_count), 0, p.base_vertex, p.base_instance));
     }
@@ -7221,6 +7260,15 @@ void run_list(const CmdList& list, int depth) {
             case Op::ReportCounter: {
                 const auto& p = r.payload<P_Counter>();
                 struct { uint64_t counter, timestamp; } rep = {1, timestamp_ns()};   // counters other than the ones handled below are reported as non-zero
+                if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_off_exp() && g_occ_active < 0) {   // [nvn] exp_occ_off: reported as visible
+                    if (p.address) {
+                        g_reports.put(p.address, kReportUnknown);
+                        gpu_wrote(p.address, sizeof rep, kWriteUpdate);
+                        g_occ_pend.push_back({p.address, rep.timestamp, -1, kOccSplitCount});
+                        if (!P.open && !occ_defer_on()) occ_flush_pending();
+                    }
+                    break;
+                }
                 if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready() && occlusion_in_pass_on() && (g_occ_active < 0 || g_occ_in_pass)) {
                     if (g_occ_active >= 0) {
                         vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
@@ -7306,6 +7354,7 @@ void run_list(const CmdList& list, int depth) {
             }
             case Op::ResetCounter: {
                 const auto& p = r.payload<P_Counter>();
+                if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_off_exp() && g_occ_active < 0) break;   // [nvn] exp_occ_off: no query
                 if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready() && occlusion_in_pass_on() && (g_occ_active < 0 || g_occ_in_pass)) {
                     if (g_occ_active >= 0) {                      // an unreported count is dropped
                         vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
