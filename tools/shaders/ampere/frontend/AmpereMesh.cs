@@ -103,6 +103,10 @@ namespace Ryujinx.Graphics.Shader.Translation
             public SpvInstruction PosVar, IndexVar, ThreadIdVar, LoopVar;
             public readonly Dictionary<int, SpvInstruction> GenericVars = new();
             public SpvInstruction DynStoreFunc;   // void (u32 byte address, f32 value), body emitted in FinishModule
+            // early primitive count (EarlyCount)
+            public int SmoId = -1, CountWrites;
+            public bool AttrSeen, EarlyOk;
+            public bool AttrBeforeCount() => CountWrites != 1;
         }
 
         /// Mesh output attributes (ISBEWR.O.ATTR) are written straight into the mesh outputs (default; NXRT_HARNESS_MESH_DIRECT=0: staged in
@@ -234,11 +238,39 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         static bool DirectMesh => Active && !_cur.Info.IsTask && Direct;
 
+        // ---- direct outputs: the real primitive count where the program writes it (experiment, F2) ----------------------------------
+        /// NXRT_HARNESS_MESH_EARLY_COUNT=1 (with MESH_DIRECT): when the program writes its primitive count (ISBEWR.O.32 [3]) once and before
+        /// any output attribute, SetMeshOutputsEXT(max vertices, the count) goes right after that instruction (after its predicate: the
+        /// count is lane 0's, and the instruction takes the first invocation's arguments) instead of the maximum at the start; the
+        /// epilogue then writes only the real primitives (no degenerate ones up to the maximum).
+        static readonly bool EarlyCount = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_EARLY_COUNT") == "1";
+        public const string SmoName = "isbe_smo";
+
+        /// Front end, after each instruction (outside its predicate): notes attribute writes and the count write; after the count write the
+        /// count is read back from the map (lane 0 wrote it) into a store to the dummy memory SmoName, which the back end turns into
+        /// SetMeshOutputsEXT.
+        internal static void AfterInstruction(EmitterContext ctx, string opcode, bool attr, bool w32)
+        {
+            if (!DirectMesh || !EarlyCount || opcode != "ISBEWR") return;
+            State s = _cur;
+            if (attr) { s.AttrSeen = true; return; }
+            if (!w32) return;
+            s.CountWrites++;
+            if (s.AttrSeen || s.CountWrites > 1) { s.EarlyOk = false; return; }
+            ResourceManager rm = ctx.ResourceManager;
+            if (s.SmoId < 0) s.SmoId = rm.Properties.AddSharedMemory(new MemoryDefinition(SmoName, AggregateType.Array | AggregateType.U32, 1));
+            var count = ctx.Load(StorageKind.SharedMemory, MapId(rm), OperandHelper.Const(0));
+            ctx.Store(StorageKind.SharedMemory, s.SmoId, OperandHelper.Const(0), count);
+            s.EarlyOk = true;
+        }
+
+        static bool EarlyOk => DirectMesh && EarlyCount && _cur.EarlyOk && !_cur.AttrBeforeCount();
+
         /// At the start of main (after its locals): direct outputs need the output counts before the first output write, so the mesh
         /// declares its maximum primitive count here; the epilogue gives the primitives past the real count degenerate indices.
         internal static void BeginMain(CodeGenContext ctx)
         {
-            if (!DirectMesh) return;
+            if (!DirectMesh || EarlyOk) return;
             SpvInstruction u32 = ctx.TypeU32();
             SpvInstruction smo = ctx.NewInstruction(SetMeshOutputs);
             smo.AddOperand(ctx.Constant(u32, _cur.Info.MaxVertices)); smo.AddOperand(ctx.Constant(u32, _cur.Info.MaxPrimitives));
@@ -251,6 +283,20 @@ namespace Ryujinx.Graphics.Shader.Translation
             if (!DirectMesh || op.StorageKind != StorageKind.SharedMemory || op.SourcesCount != 3 ||
                 op.GetSource(0) is not AstOperand { Type: Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandType.Constant } id) return false;
             string name = ctx.Properties.SharedMemories[id.Value].Name;
+            if (name == SmoName)
+            {
+                // the early primitive count (AfterInstruction); dropped when the count cannot go early (BeginMain declared the maximum)
+                if (EarlyOk)
+                {
+                    SpvInstruction u = ctx.TypeU32();
+                    SpvInstruction cnt = ctx.Get(AggregateType.U32, op.GetSource(2));
+                    cnt = ctx.Select(u, ctx.ULessThan(ctx.TypeBool(), cnt, ctx.Constant(u, _cur.Info.MaxPrimitives)), cnt, ctx.Constant(u, _cur.Info.MaxPrimitives));
+                    SpvInstruction smo = ctx.NewInstruction(SetMeshOutputs);
+                    smo.AddOperand(ctx.Constant(u, _cur.Info.MaxVertices)); smo.AddOperand(cnt);
+                    Emit(ctx, smo);
+                }
+                return true;
+            }
             if (!name.StartsWith(OutName, StringComparison.Ordinal)) return false;
             State s = _cur;
             AmpereMeshInfo m = s.Info;
@@ -483,11 +529,19 @@ namespace Ryujinx.Graphics.Shader.Translation
             SpvInstruction boolT = ctx.TypeBool();
             SpvInstruction count = map == null ? C(0) : ctx.Load(u32, ctx.AccessChain(ptrWg, map, C(0)));
             count = ctx.Select(u32, ctx.ULessThan(boolT, count, C(m.MaxPrimitives)), count, C(m.MaxPrimitives));
+            // measurement only (F2): NXRT_HARNESS_MESH_EXP=noprims: every mesh work group runs as before but outputs no primitive (a count
+            // the compiler cannot fold: 0 unless the program wrote 0xdeadbeef), so the time left is the shader's own
+            if (Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_EXP") == "noprims")
+                count = ctx.Select(u32, ctx.IEqual(boolT, count, C(unchecked((int)0xdeadbeef))), count, C(0));
             SpvInstruction tid = ctx.CompositeExtract(u32, ctx.Load(ctx.TypeVector(u32, 3), s.ThreadIdVar), (LiteralInteger)0);
             SpvInstruction f32 = ctx.TypeFP32();
             SpvInstruction ptrOutF = ctx.TypePointer(StorageClass.Output, f32);
             SpvInstruction realCount = count;
-            if (Direct)
+            if (Direct && EarlyOk)
+            {
+                // SetMeshOutputsEXT ran where the program wrote its count (AfterInstruction): only the real primitives
+            }
+            else if (Direct)
             {
                 // the counts were declared at the start (BeginMain, the maximum primitives); the vertices are written already
                 count = C(m.MaxPrimitives);

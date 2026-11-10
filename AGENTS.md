@@ -871,6 +871,23 @@ pointer read of a slot the same dispatch wrote (within a workgroup, after a barr
 (578 rows; `stage = compute` with token `gpt`) and the 12 compute gpt "runtime" blocks of `work\ai_run\oot\a18dump\dump` in single mode
 (all but 3e986fed / fdfd1e7c; leave the upscaler network rows alone, "Merge pitfall"); compute pipelines rebuild on demand (~1-2 s each).
 
+**Session 2026-11-10 (F2: gpt pre-raster stages after F1).** Kokiri outside, 1920x1080 uncapped, alone, exe built from a70f2aa (P4 merged),
+shared cache (byte-identical to a fresh F1-form translation of all gpt blocks). **The gpt draws' GPU raster/fragment work is off the critical
+path:** paired `cpuperf_ab` windows with `[nvn] skip_gpt = 2` +0.1 fps (8 pairs, 43.0 vs 42.9); `skip_gpt = 1` +3.75 fps (9/9; render replay
+-0.5..0.9 ms, frame -1.9 ms), and the same +3.95 with every gpt mesh block emitting no primitives (`NXRT_HARNESS_MESH_EXP=noprims`). The frame is
+render-thread bound there (replay 22.4 ms, idle 0.6 ms per frame, main waits ~14 ms in nvnSyncWait). Graphics pointer stages with a slot
+marked: 25-29% of the sets (`graphics pointer stages N, M with a slot marked`). Translator experiments (tools/shaders/README.md "gpt
+pre-raster stages after F1"), each translated into a private cache, picture checked on the village capture replay (all equal to the shared
+cache, max difference 2; note: the first replay of a session once differed by ~600 foliage pixels from all later ones, so compare against a
+second base replay), then 2-4 game pairs: branch-free select fast path (`GMEM_SELECT`) -0.4 / -2.5 fps; direct mesh outputs with the real
+primitive count at the program's count write (`MESH_DIRECT` + `MESH_EARLY_COUNT`, shared memory 13 -> 0.4 KB) +0.8 / -1.3 / 0.0 / +0.2;
+fast path regardless of the slot mask (`GMEM_IGNORE_MASK`, what C1's zero masks would give the GPU) -0.2 / -1.5. Run-to-run spread is about
++-1 fps; nothing kept, all switches off, the default translation unchanged (no shared-cache re-translation needed). Not built (reasons in the
+README): STG vector stores (no STG in these stages), bound-slot vector loads, LDC-to-storage for per-thread constant reads, pointer tables as
+storage bindings. The register question (fbb731e2 / 6ec65625 ~180 vs SASS 126) is moot while their GPU time is not on the critical path.
+What would move Kokiri now: the render thread's per-draw work for the gpt draws (skip_gpt = 1's ~1.9 ms) and the rest of the replay. Lock
+pitfall: other agents poll `work\game.next` about every second; a 20 s poll never gets the queue slot.
+
 **Session 2026-11-10 (F1: gpt pre-raster stages, vector loads).** Goal: the ~6.9 ms of the gpt vertex/mesh stages in Kokiri outside at
 1080. **Registers were the wrong lead:** the original SASS of most hot gpt blocks already uses R247-R252 (40953571, 5332b131, a5bfd19f,
 b8b873e5, a873d795, e41230f8, 8fb97d28; sassdecode `--dump` + max register); only fbb731e2 / 6ec65625 are R125 (control +0x4c = 128).
