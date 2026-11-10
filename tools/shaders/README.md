@@ -274,7 +274,8 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   - `NXRT_HARNESS_MESH_EARLY_COUNT=1` (with `NXRT_HARNESS_MESH_DIRECT=1`): SetMeshOutputsEXT with the real primitive count right after the
     program's own count write (`ISBEWR.O.32 [3]`, lane 0, before any attribute write in all hot blocks), so the direct-output epilogue no
     longer sends degenerate primitives up to the maximum; used only when the count is written once and before the first attribute.
-    Shared memory 13 KB -> 0.4 KB, code unchanged. Game: see AGENTS.md "Session 2026-11-10 (F2)".
+    Shared memory 13 KB -> 0.4 KB, code unchanged, picture the same. Game, four pairs against the shared cache: +0.8, -1.3, 0.0,
+    +0.2 fps (42.5 / 40.9 / 42.0 / 42.4 vs 41.7 / 42.2 / 42.0 / 42.1): noise, stays off.
   - `NXRT_HARNESS_GMEM_IGNORE_MASK=1` (measurement only, wrong where a held result lives only in the pool copy): the fast path whatever
     the slot mask says, i.e. what a runtime with every mask 0 gives: 41.5 / 40.7 vs 41.7 / 42.2 fps, no GPU gain.
   - `NXRT_HARNESS_MESH_EXP=noprims` (measurement only): every mesh work group runs but emits no primitive.
