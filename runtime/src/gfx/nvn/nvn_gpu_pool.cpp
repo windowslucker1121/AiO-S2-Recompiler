@@ -2279,17 +2279,30 @@ bool overlap_grow_on() {
     return on && ab_overlap_grow_on();
 }
 uint64_t g_win_hits = 0, g_win_asks = 0;   // render thread
+// [nvn] overlap_pos (default on; cpuperf_ab_what overlap_pos): out_overlaps_window keeps overlap answers too (per g_out_ver)
+std::atomic<bool> g_overlap_pos_ab{true};
+void overlap_pos_enable(bool on) { g_overlap_pos_ab.store(on, std::memory_order_relaxed); }
+bool overlap_pos_on() {
+    static const bool on = config_get_bool("nvn", "overlap_pos", true);
+    return on && g_overlap_pos_ab.load(std::memory_order_relaxed);
+}
 bool out_overlaps_window(uint64_t page, uint64_t size) {
     if (!out_any() || !size) return false;
     if (!use_index()) return out_overlaps(page, size);
-    struct Slot { uint64_t page = ~0ull, size = 0, ver = 0; };
+    // pos: an overlap answer, kept per g_out_ver (out_overlaps is a function of the index, which moves with g_out_ver): the draw bindings over
+    // held results are asked about at every draw (~4,000 times per frame in Kokiri outside)
+    struct Slot { uint64_t page = ~0ull, size = 0, ver = 0; bool pos = false; };
     static Slot cache[4096];
-    const uint64_t v = overlap_grow_on() ? (g_out_grow.load(std::memory_order_acquire) | (1ull << 63)) : g_out_ver.load(std::memory_order_acquire);
+    const uint64_t ov = g_out_ver.load(std::memory_order_acquire);
+    const uint64_t v = overlap_grow_on() ? (g_out_grow.load(std::memory_order_acquire) | (1ull << 63)) : ov;
     Slot& s = cache[((page >> 12) ^ (page >> 24)) & 4095];
     ++g_win_asks;
-    if (s.page == page && s.size == size && s.ver == v) { ++g_win_hits; return false; }
+    if (s.page == page && s.size == size) {
+        if (!s.pos && s.ver == v) { ++g_win_hits; return false; }
+        if (s.pos && s.ver == ov && overlap_pos_on()) { ++g_win_hits; return true; }
+    }
     const bool r = out_overlaps(page, size);
-    if (!r) { s.page = page; s.size = size; s.ver = v; }
+    s.page = page; s.size = size; s.ver = r ? ov : v; s.pos = r;
     return r;
 }
 
