@@ -6,6 +6,8 @@
 // Lessons applied from SuperMarioWonderRecomp docs/nvn/DEBUG.md and DEBUG-2.md (see work notes in docs/S4d.md): viewport flip by a
 // negative-height viewport, a memory barrier after every pass, textures sampled by a draw are made current before the pass,
 // handles never dropped by count, deferred bind arrays read at record time.
+#include <intrin.h>
+
 #include <atomic>
 #include <algorithm>
 #include <bit>
@@ -232,14 +234,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58 };
 uint64_t ab_mask() {
     static const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -2202,8 +2204,14 @@ bool ssbo_readonly_on() {
 // shader counted as written: each such draw marked its bound buffers written (pool-copy pages stale, the resolve epoch moved, every set
 // resolved anew) and its sets were never reused. Stores through the page table are handled by gmem_before_op (global_writes).
 bool gmem_ro_on();
+// [nvn] reflect_literals (default on): DescriptorBinding::written without the literal operands that matched a variable id (nvn_shaders.cpp);
+// off: the old answer (written_lit). Also a cpuperf_ab_what feature (reflect_lit).
+bool reflect_literals_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "reflect_literals", true);
+    return on && ab_on(kAbReflectLit);
+}
 inline bool storage_binding_writes(const DescriptorBinding& b, const ShaderInfo* s) {
-    if (b.written || !ssbo_readonly_on()) return true;
+    if ((reflect_literals_on() ? b.written : b.written_lit) || !ssbo_readonly_on()) return true;
     if (!s->refl.global_fallback) return false;
     return s->refl.global_writes || !gmem_ro_on();
 }
@@ -3825,7 +3833,7 @@ std::unordered_map<const ProgLayout*, uint8_t> g_reuse_masks;   // cleared at re
 uint8_t set_reuse_mask(const ProgLayout& pl) {
     // keyed by the layout and gmem_ro_on() (its paired windows change which storage bindings count as written)
     const bool c0p = c0_persist_on();
-    const ProgLayout* mk = reinterpret_cast<const ProgLayout*>(reinterpret_cast<uintptr_t>(&pl) | (gmem_ro_on() ? 1u : 0u) | (c0p ? 2u : 0u));
+    const ProgLayout* mk = reinterpret_cast<const ProgLayout*>(reinterpret_cast<uintptr_t>(&pl) | (gmem_ro_on() ? 1u : 0u) | (c0p ? 2u : 0u) | (reflect_literals_on() ? 4u : 0u));
     auto it = g_reuse_masks.find(mk);
     if (it != g_reuse_masks.end()) return it->second;
     uint8_t ok = 0xf;
@@ -4280,6 +4288,23 @@ VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_
     return ds;
 }
 
+// [nvn] exp_static (measurement only): replay time, draws and ops inside lists the replay already ran in an earlier present (static
+// lists, recorded once and submitted again), against all of the replay's lists; the 10 s line "exp_static".
+struct ExpStatic {
+    uint64_t t_static = 0, t_all = 0, draws_static = 0, draws_all = 0, ops_static = 0, ops_all = 0, lists_static = 0, lists_all = 0;
+    uint64_t lists_static_top = 0, presents0 = 0, ns0 = 0, tsc0 = 0;
+    bool in_static = false;
+};
+ExpStatic g_xs;
+uint64_t g_xs_draw_ticks = 0;
+std::unordered_map<std::string, uint64_t> g_xs_writers;   // exp_static: written-storage sets built, by the writing shader
+uint64_t g_xs_built[2][3] = {};   // exp_static: graphics sets built [dynamic, static list][written storage, first sighting, written storage seen in an earlier present]
+
+bool exp_static_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "exp_static", false);
+    return on;
+}
+
 // [nvn] bind_skip (default on): a graphics descriptor set already bound at its index with the same pipeline layout, in the same command buffer and
 // pass, is not bound again (the persistent pool-array sets were bound for every draw). Cleared when a pass begins.
 VkCommandBuffer g_bs_cb = VK_NULL_HANDLE;
@@ -4300,6 +4325,39 @@ void bind_graphics_set(const ProgLayout& pl, VkPipelineBindPoint bp, uint32_t se
     }
     ++g_bs_bound;
     vkCmdBindDescriptorSets(F->cb, bp, pl.layout, set, 1, &ds, 0, nullptr);
+}
+
+// [nvn] memo_storage_check (default on): the epoch memo's key of a set with storage buffers holds whether a held compute result overlaps any
+// of its storage ranges now (such a range resolves to the held result's copy, else to the pool). set_reuse = verify found one memo hit in
+// 4.5 M bound to the pool where a fresh resolve took a held result's copy, once reflect_literals made these sets reusable: the memo's epoch
+// had not moved for that result. Off: as before.
+bool memo_storage_check_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "memo_storage_check", true);
+    return on;
+}
+uint64_t g_memo_storage_held = 0;   // statistics: memo hits and puts refused because a held result overlaps a storage range
+bool storage_set_clear(const ProgLayout& pl, uint32_t set) {
+    for (const BindingDesc& d : pl.bindings) {
+        if (d.set != set || d.type != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) continue;
+        const DescriptorBinding& b = d.shader->refl.bindings[d.index];
+        if (b.nvn.source != NvnSource::StorageBuffer) continue;
+        const int slot = b.nvn.index >= 0 ? b.nvn.index : storage_slot_for(d.nvn_stage, b.nvn.c0_offset);
+        if (slot < 0 || slot >= 16) continue;
+        const GState::Bind& bind = S.ssbo[d.nvn_stage][slot];
+        if (bind.addr && out_overlaps_window(bind.addr, bind.size ? bind.size : 65536)) { ++g_memo_storage_held; return false; }   // statistics: lookups over a held result
+    }
+    return true;
+}
+// The sets of a layout with storage buffers (bit n = set n).
+std::unordered_map<const ProgLayout*, uint8_t> g_storage_masks;
+uint8_t set_storage_mask(const ProgLayout& pl) {
+    auto it = g_storage_masks.find(&pl);
+    if (it != g_storage_masks.end()) return it->second;
+    uint8_t m = 0;
+    for (const BindingDesc& d : pl.bindings)
+        if (d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && d.set < 8) m |= static_cast<uint8_t>(1u << d.set);
+    g_storage_masks.emplace(&pl, m);
+    return m;
 }
 
 void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
@@ -4335,12 +4393,14 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
     }
     // sets the memo may not reuse but set_keep may keep (storage writes): the same conditions as the memo's, graphics only
     const uint8_t keep_only = (mode != SetReuse::Off && reusable_ok && set_keep_on() && keep_writes_on()) ? static_cast<uint8_t>(set_keep_mask(pl) & ~reusable) : 0;
+    const uint8_t memo_chk = (reusable && out_lazy() && memo_storage_check_on()) ? static_cast<uint8_t>(reusable & set_storage_mask(pl)) : 0;   // memo_storage_check
     for (uint32_t set = 0; set < 4; ++set) {
         if (!pl.has_set[set]) continue;
         VkDescriptorSet ds = VK_NULL_HANDLE;
         uint64_t sig = 0;
         if (reusable & (1u << set)) {
             sig = set_signature(pl, set);
+            if (memo_chk & (1u << set)) sig ^= storage_set_clear(pl, set) ? 0x636c656172ull : 0x68656c64ull;   // memo_storage_check: the held-result state is part of the key
             if (VkDescriptorSet* hit = g_set_memo.find(sig)) {
                 ds = *hit;
                 ++g_sets_reused;
@@ -4394,8 +4454,21 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
             else if (!(reusable & (1u << set)) && !(keep_only & (1u << set))) {
                 ++g_set_paths[2];
                 set_bad_why(pl, set);
+                if (exp_static_on()) {   // written storage: would its raw inputs repeat in a later present?
+                    set_signature(pl, set);
+                    static FlatMap64<uint32_t> seen;
+                    const uint32_t now = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
+                    uint32_t* s = seen.find(g_keep_sig);
+                    ++g_xs_built[g_xs.in_static ? 1 : 0][0];
+                    if (s && *s != now) ++g_xs_built[g_xs.in_static ? 1 : 0][2];
+                    seen.put(g_keep_sig, now);
+                    const ShaderInfo* w = nullptr;   // the stage whose storage binding of this set is written
+                    for (const BindingDesc& d : pl.bindings)
+                        if (d.set == set && d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && storage_binding_writes(d.shader->refl.bindings[d.index], d.shader)) { w = d.shader; break; }
+                    if (w) ++g_xs_writers[w->hash + (g_xs.in_static ? " s" : " d") + " set" + std::to_string(set)];
+                }
             }
-            else ++g_set_paths[3];
+            else { ++g_set_paths[3]; if (exp_static_on()) ++g_xs_built[g_xs.in_static ? 1 : 0][1]; }
             ds = build_set(pl, set);
             if (ds && (reusable & (1u << set))) g_set_memo.put(sig, ds);
         }
@@ -6736,7 +6809,37 @@ void run_list(const CmdList& list, int depth) {
     if (depth > kMaxDepth) { log_once("depth", "CallCommands nesting too deep"); return; }
     struct RdRestore { int d; ~RdRestore() { g_rd_depth = d - 1; } } rd_restore{depth};   // pass_lookahead: back to the caller's reader
     counters().lists_replayed.fetch_add(1, std::memory_order_relaxed);
+    struct XsScope {
+        bool outer = false, top = false;
+        uint64_t t0 = 0;
+        ~XsScope() {
+            if (!outer && !top) return;
+            const uint64_t dt = __rdtsc() - t0;
+            if (outer) { g_xs.t_static += dt; g_xs.in_static = false; }
+            if (top) g_xs.t_all += dt;
+        }
+    } xs;
+    if (exp_static_on()) {
+        CmdList& ml = const_cast<CmdList&>(list);
+        const uint64_t now = counters().presents.load(std::memory_order_relaxed);
+        const bool st = ml.replays > 0 && ml.replay_present != now;
+        ++ml.replays;
+        ml.replay_present = now;
+        ++g_xs.lists_all;
+        if (st) ++g_xs.lists_static;
+        xs.top = depth == 0;
+        if (st && !g_xs.in_static) { xs.outer = true; g_xs.in_static = true; ++g_xs.lists_static_top; }
+        if (xs.top || xs.outer) xs.t0 = __rdtsc();
+    }
     for (RecordReader r(list); r.next();) {
+        struct XsOp { uint64_t t0 = 0; ~XsOp() { if (t0) g_xs_draw_ticks += __rdtsc() - t0; } } xs_op;
+        if (exp_static_on()) {
+            const Op o = r.op();
+            const bool dr = o == Op::DrawArrays || o == Op::DrawElements || o == Op::DrawIndirect || o == Op::DrawMeshTasks;
+            ++g_xs.ops_all;
+            g_xs.draws_all += dr;
+            if (g_xs.in_static) { ++g_xs.ops_static; g_xs.draws_static += dr; if (dr) xs_op.t0 = __rdtsc(); }
+        }
         g_rd_cur[depth] = &r;
         g_rd_depth = depth;
         ++g_resolve_gen;   // resolve_cache: results hold for one command
@@ -7621,6 +7724,7 @@ void replay_begin_submit(Frame& f) {
                         (unsigned long long)g_keep_sets_era, g_keep_pools.size(), (unsigned long long)g_keep_eras, (unsigned long long)g_keep_evicted);
                 NXLOG_I(kTag, "sets built outside the memo and set_keep: compute %llu, reuse off for the draw %llu, a set with written storage or a per-draw c[0] %llu, reusable (first sightings, not keepable) %llu",
                         (unsigned long long)g_set_paths[0], (unsigned long long)g_set_paths[1], (unsigned long long)g_set_paths[2], (unsigned long long)g_set_paths[3]);
+                NXLOG_I(kTag, "memo_storage_check: %llu memo look-ups of storage sets over a held result", (unsigned long long)g_memo_storage_held);
                 NXLOG_I(kTag, "sets that may not be reused, why: per-draw c[0] only %llu, written storage only %llu, both %llu, other %llu", (unsigned long long)g_set_why[0],
                         (unsigned long long)g_set_why[1], (unsigned long long)g_set_why[2], (unsigned long long)g_set_why[3]);
                 NXLOG_I(kTag, "c0_persist: %llu table slots found, %llu written (era %llu), %llu hash collisions", (unsigned long long)g_c0_persist_hit,
@@ -7655,6 +7759,36 @@ void replay_begin_submit(Frame& f) {
                 uint64_t ms = 0, mse = 0, msb = 0;
                 park_miss_stats(&ms, &mse, &msb);
                 NXLOG_I(kTag, "parked texture images (tex_park): %llu parked, %llu taken back (%llu of them stale: uploaded again), %llu expired; new images of pool textures with none parked %llu (%llu of them with a key that expired lately, %llu of 1 MiB or more)", (unsigned long long)pk, (unsigned long long)tk, (unsigned long long)st, (unsigned long long)ex, (unsigned long long)ms, (unsigned long long)mse, (unsigned long long)msb);
+            }
+            if (exp_static_on()) {
+                const uint64_t pr = counters().presents.load(), ns = static_cast<uint64_t>(ft::now_ns()), tsc = __rdtsc();
+                if (g_xs.presents0 && pr > g_xs.presents0 && ns > g_xs.ns0) {
+                    const double fr = static_cast<double>(pr - g_xs.presents0), tpn = static_cast<double>(tsc - g_xs.tsc0) / static_cast<double>(ns - g_xs.ns0);
+                    NXLOG_I(kTag, "exp_static per present: lists %.0f (static %.0f, outermost static %.0f), ops %.0f (in static %.0f), draws %.0f (in static %.0f), "
+                                  "replay in lists %.2f ms, in static lists %.2f ms (their draw ops %.2f ms)",
+                            g_xs.lists_all / fr, g_xs.lists_static / fr, g_xs.lists_static_top / fr, g_xs.ops_all / fr, g_xs.ops_static / fr, g_xs.draws_all / fr,
+                            g_xs.draws_static / fr, g_xs.t_all / tpn / 1e6 / fr, g_xs.t_static / tpn / 1e6 / fr, g_xs_draw_ticks / tpn / 1e6 / fr);
+                }
+                if (g_xs.presents0 && pr > g_xs.presents0) {
+                    const double fr = static_cast<double>(pr - g_xs.presents0);
+                    NXLOG_I(kTag, "exp_static sets built per present: dynamic lists written %.0f (repeat %.0f), first sightings %.0f; static lists written %.0f (repeat %.0f), first sightings %.0f",
+                            g_xs_built[0][0] / fr, g_xs_built[0][2] / fr, g_xs_built[0][1] / fr, g_xs_built[1][0] / fr, g_xs_built[1][2] / fr, g_xs_built[1][1] / fr);
+                }
+                {
+                    std::vector<std::pair<uint64_t, std::string>> v;
+                    for (const auto& [k, n] : g_xs_writers) v.emplace_back(n, k);
+                    std::sort(v.rbegin(), v.rend());
+                    std::string t;
+                    for (size_t i = 0; i < v.size() && i < 10; ++i) t += " " + v[i].second + ":" + std::to_string(v[i].first);
+                    NXLOG_I(kTag, "exp_static written-storage sets by writer:%s", t.c_str());
+                    g_xs_writers.clear();
+                }
+                std::memset(g_xs_built, 0, sizeof g_xs_built);
+                g_xs_draw_ticks = 0;
+                const bool ins = g_xs.in_static;
+                g_xs = ExpStatic();
+                g_xs.in_static = ins;
+                g_xs.presents0 = pr; g_xs.ns0 = ns; g_xs.tsc0 = tsc;
             }
             NXLOG_I(kTag, "submissions: %llu, parts sent ahead while recording (submit_chunk_draws): %llu; draw buffer checks skipped %llu; pass look-aheads %llu settled %llu ranges; descriptor sets resolved %llu, %llu of them already in the submission's cache; %llu bound again without resolving (set_reuse), %llu differed (verify); resolve epoch moves: commands %llu, GPU writes %llu, passes %llu; set memo cleared by the epoch %llu, texture state %llu, results sent back %llu",
                     (unsigned long long)counters().submits.load(), (unsigned long long)counters().submit_chunks.load(), (unsigned long long)g_odb_skipped, (unsigned long long)g_la_scans, (unsigned long long)g_la_settled, (unsigned long long)g_sets_built, (unsigned long long)g_sets_cached,

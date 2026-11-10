@@ -159,6 +159,7 @@ struct DescriptorBinding {
     // Some instruction may write through it (a store, an atomic, or the pointer escapes into a call or a phi). False: the code only reads
     // it (storage buffers whose bindings then need no copy-back and leave the pool copy valid).
     bool written = true;
+    bool written_lit = true;   // the rule before [nvn] reflect_literals: a literal operand equal to the variable's id counted as a write
 };
 
 struct ShaderIo {

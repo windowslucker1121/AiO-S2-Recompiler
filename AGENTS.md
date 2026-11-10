@@ -895,6 +895,36 @@ storage bindings. The register question (fbb731e2 / 6ec65625 ~180 vs SASS 126) i
 What would move Kokiri now: the render thread's per-draw work for the gpt draws (skip_gpt = 1's ~1.9 ms) and the rest of the replay. Lock
 pitfall: other agents poll `work\game.next` about every second; a 20 s poll never gets the queue slot.
 
+**Session 2026-11-10 (R7: structural options for the render thread, reflection fix).** Kokiri outside, 1920x1080 uncapped, alone, after R6.
+Profile (100 Hz sampler + trace, replay 21.3 ms per frame with both on): begin_draw 55% of the render thread's busy samples (bind_sets 32,
+build_set 19, keep_lookup 7, keep_valid 4), out_draw_bindings 9, prepare_textures 8, do_dispatch 7, run_list's own loop 6. **Static lists are
+not 70% of the work:** the new measurement key `[nvn] exp_static` counts what the replay runs inside lists it already ran in an earlier
+present (the same list object submitted again): per present 3,840 lists, 1,700 of them static, but only **345 of 2,200 draws** and **2.6 of
+20 ms** of replay (their draw ops 1.9 ms). E1's "70% in lists recorded earlier" counted lists recorded two or more game frames before their
+one submission. So (a) (a translation cache of static lists) has a ceiling under 2.7 ms; (c) (recording one submission on several threads)
+does not fit the sequential coherence state (held results, pool-copy page states, gpu_wrote and the resolve epoch change draw by draw); (b)
+(building sets ahead on a worker) could only take the per-frame first sightings (~700 per present, ~1.5 ms) and needs that same state. What
+`exp_static` found instead: ~850 descriptor sets per present (dynamic lists, writers 05a99b18, 95d3ec66, bcf27148, ... the material fragment
+shaders' storage slots 0-3) were built per draw as "written storage", and their bound ranges marked GPU-written at every draw, although
+the shaders only read them: **the SPIR-V reflection took literal operands for ids** (OpExtInst's instruction number, e.g. GLSL.std.450 38,
+equal to the storage variable's id 38). Fix `[nvn] reflect_literals` (nvn_shaders.cpp; skips OpExtInst's instruction, the literal indices of
+OpCompositeExtract/Insert and OpVectorShuffle, control-flow and image instructions; the old answer stays as `written_lit` for the
+`cpuperf_ab_what` name `reflect_lit`). Whole shared cache (work/r7 `corpus_check.py`, git-ignored): 47,409 modules, written storage/uniform
+bindings 90,434 -> 4,005, 37,479 modules change, the rest are marked only by OpStore and atomics; test
+`gfx_nvn_spirv_patch.written_rule_ignores_literal_operands`. The first verify run then found one memo hit in 4.5 M bound to the pool where a
+fresh resolve took a held result's copy (these sets now enter the memo): **`[nvn] memo_storage_check`** puts whether a held result overlaps
+any storage range of the set into the memo key. Verify (`set_reuse = verify`, `odb_incremental = verify`, Kokiri 110 s): 0 kept-set and 0
+memo differences, 0 missed draw-buffer checks (again 0 / 0 / 0 after merging V1's memo-race fix). Village capture replay
+(20261108-000413) with `reflect_literals` off and on: pixel-identical (SSIM 1.0, mean difference 0). Paired windows (`cpuperf_ab = 300`, `reflect_lit`, ~7 s windows): **Kokiri replay 20.7 ->
+18.6 ms** (median -2.1, 12 of 12) but fps 43.6 -> 43.1 (0 of 12 better), gpu.exec +0.28 ms: Kokiri is GPU-bound at ~23 ms here and the GPU
+got a little slower (not traced; suspicion: the material shaders' storage ranges over held results are no longer re-registered as held per
+draw, so more of them go back at submission end); first scene replay 14.6 -> 12.1 ms (median -1.8, 14 of 16), fps 58.5 -> 61.3 (11 of 16);
+Link's house replay 11.0 -> 10.0 ms (19 of 19), fps 76.0 -> 78.9 (19 of 19), gpu.exec -0.42 (the first scene and house pairs were run
+with an earlier form of the memo rule that bypassed the memo for storage sets). Screenshots (Kokiri foliage, crowns, fog; Link's house)
+normal. Runtime tests 173 of 174; `gfx_nvn_scene_state` segfaults in about 1 of 6 ctest runs (clear_color_*), with the main checkout's
+older test exe too. Left for 12 ms: the ~700 first-sighting sets per present (per-frame uniform/storage addresses of dynamic lists:
+dynamic descriptor offsets would remove them but change every pipeline layout), held-result checks (out_draw_bindings), texture preparation.
+
 **Session 2026-11-10 (F1: gpt pre-raster stages, vector loads).** Goal: the ~6.9 ms of the gpt vertex/mesh stages in Kokiri outside at
 1080. **Registers were the wrong lead:** the original SASS of most hot gpt blocks already uses R247-R252 (40953571, 5332b131, a5bfd19f,
 b8b873e5, a873d795, e41230f8, 8fb97d28; sassdecode `--dump` + max register); only fbb731e2 / 6ec65625 are R125 (control +0x4c = 128).

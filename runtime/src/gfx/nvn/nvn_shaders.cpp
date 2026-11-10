@@ -419,6 +419,23 @@ void derive_meaning(DescriptorBinding& b, ShaderStage stage) {
     set_texture_handle(m, image, bank, word);
 }
 
+// SPIR-V instructions whose operands (after result type and result) hold literals at fixed positions (reflect_spirv's written-variable
+// rule): OpExtInst's instruction number, the indices of OpCompositeExtract / OpCompositeInsert, the components of OpVectorShuffle.
+bool literal_operand(uint32_t op, size_t k) {
+    switch (op) {
+        case 12: return k == 3;    // OpExtInst: type, result, set, instruction (literal), operands
+        case 79: return k >= 4;    // OpVectorShuffle: type, result, v1, v2, components
+        case 81: return k >= 3;    // OpCompositeExtract: type, result, composite, indices
+        case 82: return k >= 4;    // OpCompositeInsert: type, result, object, composite, indices
+        default: return false;
+    }
+}
+// Instructions that never take a pointer to a buffer: control flow (labels, merges, branches, switch) and image instructions (their operands
+// are image values and literal masks).
+bool literal_operands_only(uint32_t op) {
+    return (op >= 246 && op <= 251) || (op >= 86 && op <= 107);
+}
+
 }  // namespace
 
 const DescriptorBinding* ShaderReflection::find(uint32_t set, uint32_t binding) const {
@@ -452,7 +469,7 @@ bool reflect_spirv(const uint32_t* words, size_t count, ShaderReflection& out, s
     // Which variables the code may write through: pointers derived from a variable (access chains, copies) are followed; a load, an atomic
     // load or an array length only reads, any other instruction that takes such a pointer counts as a write (stores, atomics, calls, phis).
     std::unordered_map<uint32_t, uint32_t> root;   // pointer id -> the variable it points into
-    std::unordered_set<uint32_t> written_vars;
+    std::unordered_set<uint32_t> written_vars, written_lit;
     uint32_t entry_id = 0;
     bool have_entry = false;
 
@@ -474,8 +491,18 @@ bool reflect_spirv(const uint32_t* words, size_t count, ShaderReflection& out, s
                 } else if ((op == 61 /* Load */ || op == 227 /* AtomicLoad */ || op == 68 /* ArrayLength */) && n >= 3) {
                     // reads (memory operands after the pointer are literals)
                 } else {
+                    for (size_t k = 0; k < n; k++)   // the rule before reflect_literals (paired measurements: DescriptorBinding::written_lit)
+                        if (auto it = root.find(w[k]); it != root.end()) written_lit.insert(it->second);
+                }
+                const bool derives_or_reads = op == OpAccessChain || op == OpInBoundsAccessChain || op == 67 || op == 70 || op == 83 || op == 61 || op == 227 || op == 68;
+                if (!derives_or_reads && !literal_operands_only(op)) {
+                    // [nvn] reflect_literals (default on): literal operands are not ids. Before, a literal equal to a storage variable's id
+                    // marked it written: OpExtInst's instruction number (GLSL.std.450 Exp2 = 29, ... up to 81) collides with the low ids of
+                    // the variables, and 84% of OoT's translated shaders had a read-only storage buffer counted as written (their descriptor
+                    // sets were never reused or kept, every draw marked the bound ranges GPU-written). Pointers never appear at those positions.
                     for (size_t k = 0; k < n; k++)
-                        if (auto it = root.find(w[k]); it != root.end()) written_vars.insert(it->second);
+                        if (!literal_operand(op, k))
+                            if (auto it = root.find(w[k]); it != root.end()) written_vars.insert(it->second);
                 }
             }
         }
@@ -609,6 +636,7 @@ bool reflect_spirv(const uint32_t* words, size_t count, ShaderReflection& out, s
         b.binding = uint32_t(d->binding);
         b.used = referenced.count(v.id) != 0;
         b.written = written_vars.count(v.id) != 0;
+        b.written_lit = written_lit.count(v.id) != 0;
         if (auto it = names.find(v.id); it != names.end()) b.name = it->second;
         uint32_t inner = pointee;
         for (const Type* t = type(inner); t && (t->op == OpTypeArray || t->op == OpTypeRuntimeArray); t = type(inner)) {

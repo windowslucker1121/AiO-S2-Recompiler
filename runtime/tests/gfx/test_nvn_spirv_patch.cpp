@@ -541,3 +541,58 @@ NXTEST(predict_int_inputs_from_the_code) {
     CHECK(gpu::spirv_predict_int_inputs(std::vector<uint32_t>{1u, 2u}).empty());
 }
 
+
+// reflect_spirv's written-variable rule ([nvn] reflect_literals): a literal operand equal to a storage variable's id is not a write. A
+// synthetic fragment module reads storage buffer (set 0, binding 3, id 10) and passes the value to OpExtInst instruction 10 (a literal);
+// a second module also stores into it.
+namespace {
+std::vector<uint32_t> literal_collision_module(bool store) {
+    std::vector<uint32_t> w = {0x07230203u, 0x00010300u, 0u, 32u, 0u};
+    auto ins = [&](uint32_t op, std::initializer_list<uint32_t> a) {
+        w.push_back(static_cast<uint32_t>((a.size() + 1) << 16) | op);
+        w.insert(w.end(), a);
+    };
+    ins(17, {1});                                                       // OpCapability Shader
+    ins(11, {1, 0x4c534c47u, 0x6474732eu, 0x3035342eu, 0u});            // OpExtInstImport %1 "GLSL.std.450"
+    ins(14, {0, 1});                                                    // OpMemoryModel Logical GLSL450
+    ins(15, {4, 20, 0x6e69616du, 0u});                                  // OpEntryPoint Fragment %20 "main"
+    ins(16, {20, 7});                                                   // OpExecutionMode OriginUpperLeft
+    ins(71, {5, 2});                                                    // OpDecorate %5 Block
+    ins(72, {5, 0, 35, 0});                                             // OpMemberDecorate %5 0 Offset 0
+    ins(71, {10, 34, 0});                                               // DescriptorSet 0
+    ins(71, {10, 33, 3});                                               // Binding 3
+    ins(19, {2});                                                       // void
+    ins(33, {3, 2});                                                    // fn void()
+    ins(22, {4, 32});                                                   // float
+    ins(30, {5, 4});                                                    // struct { float }
+    ins(32, {6, 12, 5});                                                // ptr StorageBuffer struct
+    ins(21, {7, 32, 0});                                                // uint
+    ins(43, {7, 8, 0});                                                 // const 0
+    ins(32, {9, 12, 4});                                                // ptr StorageBuffer float
+    ins(59, {6, 10, 12});                                               // %10 = OpVariable StorageBuffer
+    ins(54, {2, 20, 0, 3});                                             // OpFunction
+    ins(248, {21});                                                     // OpLabel
+    ins(65, {9, 22, 10, 8});                                            // %22 = OpAccessChain %10 0
+    ins(61, {4, 23, 22});                                               // %23 = OpLoad %22
+    ins(12, {4, 24, 1, 10, 23});                                        // %24 = OpExtInst %1 10 (literal == %10) %23
+    if (store) ins(62, {22, 24});                                       // OpStore %22 %24
+    ins(253, {});                                                       // OpReturn
+    ins(56, {});                                                        // OpFunctionEnd
+    return w;
+}
+}  // namespace
+
+NXTEST(written_rule_ignores_literal_operands) {
+    for (const bool store : {false, true}) {
+        const std::vector<uint32_t> w = literal_collision_module(store);
+        ShaderReflection r;
+        std::string err;
+        const bool ok = reflect(w, r, err);
+        CHECK_MSG(ok, err);
+        REQUIRE(ok);
+        const DescriptorBinding* b = r.find(0, 3);
+        REQUIRE(b != nullptr);
+        CHECK(b->written_lit);              // the old rule took the literal 10 for the variable %10
+        CHECK_EQ(b->written, store);        // only the store writes
+    }
+}

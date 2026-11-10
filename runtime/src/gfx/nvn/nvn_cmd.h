@@ -156,6 +156,9 @@ public:
     uint64_t hw_bytes = 0;                // command memory the console would have used for it (the model's estimate)
     CommandBuffer* meter = nullptr;       // the buffer recording it (charged per record), null once recorded and for host-made lists
     std::atomic<uint64_t> calls{0};
+    // render thread only (nvn_replay.cpp run_list): how often and in which present the replay ran this list
+    uint32_t replays = 0;
+    uint64_t replay_present = ~0ull;
     std::atomic<bool> dropped{false};     // its handle left the table (handle_lookup's per-thread cache checks it)
 
     // Appends one record. `blob` (may be null) is copied after the payload.
@@ -198,6 +201,7 @@ public:
     template <class P>
     const uint8_t* blob() const { return cur_ + sizeof(RecHeader) + ((sizeof(P) + 7u) & ~7u); }
     uint32_t size() const { return hdr().size; }
+    const uint8_t* pos() const { return cur_; }   // the current record (stable while the list lives)
 private:
     RecHeader hdr() const { RecHeader h; std::memcpy(&h, cur_, sizeof h); return h; }
     const uint8_t* data_;
