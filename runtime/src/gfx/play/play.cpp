@@ -1276,7 +1276,7 @@ SelfTestHost* selftest_host() {
     return &h;
 }
 
-// mpr.ini and the environment override the settings file for the display extras. A key that is set there ([hdr] mode in mpr.ini, or NXRT_HDR_MODE)
+// the game's ini and the environment override the settings file for the display extras. A key that is set there ([hdr] mode in the game's ini, or NXRT_HDR_MODE)
 // replaces the file's value with the one extras::settings_from_config() reads; other keys keep the file's value (the F1 page edits the file).
 extras::Settings merge_env(const extras::Settings& from_file) {
     const extras::Settings env = extras::settings_from_config();
@@ -1300,7 +1300,7 @@ extras::Settings merge_env(const extras::Settings& from_file) {
     if (config_has("upscale", "frame_generation")) r.upscale.frame_generation = env.upscale.frame_generation;
     if (config_has("latency", "mode")) r.latency.mode = env.latency.mode;
     if (config_has("latency", "log_timings")) r.latency.log_timings = env.latency.log_timings;
-    // [picture]: a preset or any of the four keys in mpr.ini / the environment replaces the file's picture controls as a whole
+    // [picture]: a preset or any of the four keys in the game's ini / the environment replaces the file's picture controls as a whole
     if (config_has("picture", "preset") || config_has("picture", "contrast") || config_has("picture", "saturation") || config_has("picture", "black") ||
         config_has("picture", "gamma"))
         r.picture = env.picture;
@@ -1406,10 +1406,10 @@ bool load() {
         }
     }
     nvn::set_upscaler_replace_enabled(st.settings.display.upscaler_replace);
-    // Display extras: a value set in mpr.ini or in the environment (NXRT_HDR_MODE ...) overrides the file; the file overrides the built-in defaults.
+    // Display extras: a value set in the game's ini or in the environment (NXRT_HDR_MODE ...) overrides the file; the file overrides the built-in defaults.
     st.settings.extras = merge_env(st.settings.extras);
     extras::set_settings(st.settings.extras);
-    // S38 GPU paths: the file's choice becomes [nvn] pool_mirror / pass_barriers unless mpr.ini or the environment set them. The replay
+    // S38 GPU paths: the file's choice becomes [nvn] pool_mirror / pass_barriers unless the game's ini or the environment set them. The replay
     // reads both once, at its first pool and its first submission, after this.
     if (!config_has("nvn", "pool_mirror")) config_set("nvn", "pool_mirror", st.settings.display.fast_gpu_memory ? "on" : "off");
     if (!config_has("nvn", "pass_barriers")) config_set("nvn", "pass_barriers", st.settings.display.fewer_gpu_waits ? "tracked" : "full");

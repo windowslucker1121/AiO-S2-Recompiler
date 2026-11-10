@@ -19,10 +19,10 @@
 // The game files, the shader cache and the BC7 cache stay shared. One run per game folder without an instance, one per instance folder; beside
 // another run the start is refused (exit code 7) when the free memory would not hold one more ([boot] memory_per_run_gb, check_memory below).
 //
-// Installed layout (a release folder after the launcher's setup has run): when exefs\main sits next to the exe, or --game DIR / <ID>_GAME names a
+// Installed layout (a release folder after the library's setup has run): when exefs\main sits next to the exe, or --game DIR / <ID>_GAME names a
 // folder, that folder becomes the working directory, so everything the runtime reads relative to it (bc7_cache, shader_cache, romfs,
 // controls.ini, the log) is found wherever the exe is started from (double click, shortcut, terminal), and the settings file is the
-// manifest's ini (written by the launcher's setup). That ini next to the exe also makes the folder installed. Paths come from it, relative ones
+// manifest's ini (written by the library's setup). That ini next to the exe also makes the folder installed. Paths come from it, relative ones
 // resolved against the game folder: [fs] exefs (default ./exefs), [fs] romfs (default ./romfs), [nvn] shader_cache (default
 // ./shader_cache/spirv). --exefs / <ID>_EXEFS and the NXRT_* variables win over the ini. Without it (development runs from game-build or
 // work/run) nothing changes, except that [fs] exefs in the ini named by --ini / NXRT_INI replaces the built-in ExeFS default.
@@ -462,7 +462,7 @@ DWORD WINAPI deadline_thread(LPVOID p) {
 
 // --prepare-shaders: no game, no window. A headless Vulkan device and the NVN back end's pipeline code compile the shader parts of every program the
 // setup tool listed (shader_cache/programs.bin), so the driver has them in its cache before the first start. Progress goes to stdout as
-// "prepare: <done> <total>" lines (the launcher reads them), the end as "prepare: done ..." / "prepare: ready" (already up to date).
+// "prepare: <done> <total>" lines (the library reads them), the end as "prepare: done ..." / "prepare: ready" (already up to date).
 // Exit code: 0 done or ready, 1 could not run, 3 cancelled.
 // The shader preparation on a headless device of its own: --prepare-shaders and the shader setup before the start (shader_setup_before_start).
 // False: it could not run (err) or prepare_shaders failed (pr->error).
@@ -562,7 +562,7 @@ extern "C" int game_rt_main(int argc, char** argv, const GameRtModules* mods) {
     }
 #else
     if (!mods || mods->size != sizeof(GameRtModules) || mods->api != GAME_RT_API || mods->count != sizeof(kModules) / sizeof(kModules[0])) {
-        MessageBoxA(nullptr, GAME_EXE " and " GAME_RT_DLL " come from different releases. Run the launcher's Set up again.", GAME_SHORT_TITLE, MB_OK | MB_ICONERROR);
+        MessageBoxA(nullptr, GAME_EXE " and " GAME_RT_DLL " come from different releases. Run the game's preparation in the library again.", GAME_SHORT_TITLE, MB_OK | MB_ICONERROR);
         return 3;
     }
     for (uint32_t i = 0; i < mods->count; i++) { kModules[i].nx = mods->mods[i]; kModules[i].abi = mods->abis[i]; }
@@ -815,8 +815,8 @@ int main(int argc, char** argv) {
         std::string err;
         const std::string path = exefs + "\\" + g.file;
         if (!file_exists(widen_utf8(path))) {
-            const std::string where = std::string(nxrt::game::info().short_title) + " launcher (or set [fs] exefs in " + nxrt::game::info().game_ini + ")";
-            die("The game files were not found (%s). Choose your game files in the %s, then start the game again.", path.c_str(), where.c_str());
+            const std::string where = std::string("in the library (or set [fs] exefs in ") + nxrt::game::info().game_ini + ")";
+            die("The game files were not found (%s). Choose your game files %s, then start the game again.", path.c_str(), where.c_str());
         }
         nxrt::Module* m = nxrt::module_load_nso_file(path.c_str(), lo, &err);
         if (!m) die("cannot load %s: %s", path.c_str(), err.c_str());

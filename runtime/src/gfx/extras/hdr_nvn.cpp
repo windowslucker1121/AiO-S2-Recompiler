@@ -27,7 +27,7 @@ bool hdr_tonemap_variant(const std::vector<uint32_t>& words, const std::string& 
     if (!hdr_scene_active()) return false;
     static std::mutex mu;
     static std::set<std::string> tried;
-    // the curve tone map (Metroid Prime Remastered; small shaders), else the LUT tone map (Pokopia's composite pass)
+    // the curve tone map (small shaders), else the LUT tone map (Pokopia's composite pass)
     bool lut = false;
     bool ok = words.size() <= 16384 && spirv_hdr_tonemap(words, out);
     if (!ok) ok = lut = spirv_hdr_tonemap_lut(words, hdr_state().peak_ratio, out);
@@ -47,7 +47,7 @@ bool hdr_is_tonemap(const std::vector<uint32_t>& words, const std::string& hash)
         if (it != cache.end()) return it->second;
     }
     std::vector<uint32_t> scratch;
-    // the curve tone map (MPR) or the LUT composite (Pokopia); the patch result is only used as a match test here
+    // the curve tone map or the LUT composite (Pokopia); the patch result is only used as a match test here
     bool ok = words.size() <= 16384 && spirv_hdr_tonemap(words, scratch);
     if (!ok) {   // no size limit: Pokopia's composite shader is large (hdr_tonemap_variant matches it the same way)
         scratch.clear();

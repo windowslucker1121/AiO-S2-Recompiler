@@ -7,7 +7,7 @@
 // the thread running user code. Samples are written as folded stacks, equal stacks added up, to `[prof] sample_out` (default
 // "prof_samples.folded" in the working folder), now and then and at shutdown:
 //   <label>;<thread>;<outermost frame>;...;<leaf frame> <count>
-// The label is the scene a script marked with `@log SCENE start NAME` (empty when none). Frames in mpr.exe are named from the linker map
+// The label is the scene a script marked with `@log SCENE start NAME` (empty when none). Frames in the game exe are named from the linker map
 // (lifted game functions are f_<guest address>); frames in other modules show as module!+0x<offset>. `prof_report.py` (local test script) turns the file
 // into tables. Cost: a few percent of one core per 100 Hz and 10 threads; each sampled thread is stopped for a few microseconds per sample.
 #include <windows.h>

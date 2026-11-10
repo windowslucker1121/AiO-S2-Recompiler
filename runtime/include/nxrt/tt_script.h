@@ -103,7 +103,7 @@ enum class StepKind : uint8_t {
     Grant,       // text = item name (or 'all'), count = item id (-1 for all), x = amount, y = capacity (written into the player state's power-up array)
     Call,        // count = main-module offset of a guest function, text = its arguments (numbers or $gs $ps $mgr $player), run in the frame hook
     Objs,        // text = class names (door dock pickup special actor platform trigger, or a vtable offset): scan memory for instances, write <out>/objs.txt
-    Watch,       // text = on|off|dump, y = 1 velocity.y, 2 position.y, 3 both (hardware write watch on the player, see the game's probes: games/mpr/mpr_tt_probe.cpp)
+    Watch,       // text = on|off|dump, y = 1 velocity.y, 2 position.y, 3 both (hardware write watch on the player, see the game module's probes)
     Probe,       // text = "IN OUT": does the player's collision box collide with the static world at these positions (S26)
     Poke,        // text = in-file: write guest memory (S26, development aid)
     Peek,        // text = "IN OUT": read guest memory (S26)

@@ -233,7 +233,7 @@ bool supported_or_sibling(Language want, uint32_t mask, Language& out) {
     return false;
 }
 
-// The player's pick in the play-mode settings file ([tweaks] language of controls.ini, set from the launcher), or "" when there is none. Read
+// The player's pick in the play-mode settings file ([tweaks] language of controls.ini, set from the library), or "" when there is none. Read
 // here with the plain ini reader so the language is known before the play-mode settings are loaded.
 std::string controls_language() {
     const std::string rel = config_get_str("play", "controls", "controls.ini");

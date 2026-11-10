@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Texture pixel edit (S45): lets the host change the pixels of game textures that are ASTC in the game and become BC7 (or RGBA8) on the PC,
-// whole mip chains included. Used by the suit and arm cannon colour tweak (games/mpr/mpr_tint.cpp). Unlike tex_override.h (small BC7 UI icons,
+// whole mip chains included. Used by game modules that recolour textures. Unlike tex_override.h (small BC7 UI icons,
 // replaced as a whole), the host sees each level of the game's own image as RGBA8 and edits it in place; the runtime re-encodes it.
 //
 // How it runs (src/gfx/nvn/nvn_tex_edit.cpp):

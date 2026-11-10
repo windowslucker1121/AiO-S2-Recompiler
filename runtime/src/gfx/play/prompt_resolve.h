@@ -4,8 +4,8 @@
 //
 // A game draws its prompts ("PRESS (A) TO START", the footer of the menus, tutorial texts) with small textures, one per Switch button glyph
 // (Icon below). Which textures those are, and how to find them in the game's files, is the game's (PromptGame, nxrt/game.h Info::prompts).
-// Metroid Prime Remastered: 19 small BC7 textures TXTR_ButtonA ... TXTR_DPadIdle and the two stick icons in GuiSysMP1.pak and
-// PreloadFrontEndMPT.pak (games/mpr/mpr_prompts.cpp).
+// A game with its icons in textures, e.g. 19 small BC7 textures TXTR_ButtonA ... TXTR_DPadIdle and the two stick icons in GuiSysMP1.pak and
+// PreloadFrontEndMPT.pak (the game module).
 #pragma once
 #include <cstddef>
 #include <cstdint>

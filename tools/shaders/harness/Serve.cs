@@ -1,6 +1,6 @@
 // spirv_harness --serve: a long-lived translator. One process translates blocks as they are asked for, straight into a shader cache
 // folder (the one the runtime opens: <hash>.spv + results.tsv), so .NET's start-up and the translator's JIT are paid once. Used by
-//   * the launcher's setup: every block of the corpus, in the order it sends them (recorded boot order first);
+//   * the library's setup: every block of the corpus, in the order it sends them (recorded boot order first);
 //   * the runtime (nvn_shader_worker.cpp): blocks the game asks for that the cache does not have yet.
 //
 //   spirv_harness --serve --cache <spirv dir> [--corpus <corpus dir>] [--jobs N] [--priority below|idle|normal]
@@ -17,9 +17,9 @@
 //           X <hash> <reason>              request refused (not in the corpus, bad base64, hash mismatch); nothing was written
 // T requests go ahead of C requests. A hash asked for twice in one process is translated once.
 //
-// Writes are safe against the other writer (launcher setup and runtime worker can run at the same time): <hash>.spv is written to a
+// Writes are safe against the other writer (library setup and runtime worker can run at the same time): <hash>.spv is written to a
 // temporary name and moved into place (an existing file is kept: translation is deterministic), and each row is appended under an
-// exclusive-write open of results.tsv (FileShare.Read: readers are never blocked; the launcher opens it the same way). An empty
+// exclusive-write open of results.tsv (FileShare.Read: readers are never blocked; the library opens it the same way). An empty
 // results.tsv gets the header first.
 
 using System;
@@ -137,7 +137,7 @@ namespace SpirvHarness
             catch (Exception) { }
         }
 
-        // unique_all.tsv (the launcher's full list) or unique.tsv: hash -> files of its first occurrence.
+        // unique_all.tsv (the library's full list) or unique.tsv: hash -> files of its first occurrence.
         static Dictionary<string, CorpusEntry> LoadCorpusIndex(string root)
         {
             Dictionary<string, CorpusEntry> index = new();
@@ -226,7 +226,7 @@ namespace SpirvHarness
 
         static readonly object RowLock = new();
 
-        // Exclusive write, shared read: the launcher and the runtime's worker never interleave rows, readers are not blocked.
+        // Exclusive write, shared read: the library and the runtime's worker never interleave rows, readers are not blocked.
         static void AppendRow(string path, string row)
         {
             byte[] bytes = Encoding.UTF8.GetBytes(row + "\n");

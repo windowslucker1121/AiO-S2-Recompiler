@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# The game exe: the runtime (../nx/runtime) + the lifted game libraries (built by ../nx/recomp/scripts/build_game.cmd <id> into ../work/build/<id>).
+# The game exe: the runtime (runtime) + the lifted game libraries (built by recomp/scripts/build_game.cmd <id> into ../work/build/<id>).
 #   pwsh scripts\build.ps1            configure + build into game-build\build\release
 # Everything game-specific (id, exe and DLL names, modules, load addresses, product name) comes from the game manifest,
 # recomp/games/<id>/game.toml (GAME_MANIFEST; found next to the runtime when exactly one game has one).
@@ -68,7 +68,6 @@ if(GAME_VERSION MATCHES "^([0-9]+)[.]([0-9]+)[.]([0-9]+)")
 endif()
 set(NXRT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(NXRT_GAMES "${GM_ID}" CACHE STRING "" FORCE)            # runtime/games/<id> only
-set(NXRT_LAUNCHER_GAME "${GM_ID}" CACHE STRING "" FORCE)
 set(NXRT_RECOMP_INCLUDE "${GAME_RECOMP_DIR}/include" CACHE PATH "")
 # A runtime worktree without its own prebuilt ASTC transcoder (tools/textures/build) uses the main checkout's.
 if(NOT DEFINED NXRT_A2B_DIR AND NOT EXISTS "${GAME_RUNTIME_DIR}/../tools/textures/build/release/astc2bc7.lib"

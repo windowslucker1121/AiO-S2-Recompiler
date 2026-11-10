@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Lift the NSOs of the user's dump and build one static library per module (as games/pkp). Everything game-specific comes from
+# Lift the NSOs of the user's dump and build one static library per module (as the other game modules). Everything game-specific comes from
 # game.toml in this folder.
 #
 #   recomp\scripts\build_game.cmd oot          (configure + build into work\build\oot; NX_ROOT is the repository root)

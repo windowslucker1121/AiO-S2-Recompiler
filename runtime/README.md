@@ -1,6 +1,6 @@
 # nxrt
 
-nxrt is the game-independent OS and HLE runtime for the Metroid Prime Remastered static recompilation. It runs on native Windows x64, is written in C++20 and builds with clang-cl. It is licensed GPL-3.0-or-later. Third-party material is listed in THIRD_PARTY_NOTICES.md.
+nxrt is the game-independent OS and HLE runtime for static recompilations of Nintendo Switch and Switch 2 games (Ocarina of Time is the current port). It runs on native Windows x64, is written in C++20 and builds with clang-cl. It is licensed GPL-3.0-or-later. Third-party material is listed in THIRD_PARTY_NOTICES.md.
 
 ## Layout
 

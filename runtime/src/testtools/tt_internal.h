@@ -16,7 +16,7 @@ constexpr uint64_t kDefaultGameBase = 0x7100000000ull;
 // ---- tt_game.cpp (memory helpers; the rest forwards to the game's tt::GameProbes) ----
 uint64_t game_base();
 void set_game_base(uint64_t b);
-// The warp sequence of the practice mod (docs/mpr/hooks.md section 8), executed with the live context. false: not possible now (no state manager yet).
+// The warp sequence of a practice mod, executed with the live context. false: not possible now (no state manager yet).
 bool warp(::Ctx* c, const uint8_t world[16], const uint8_t area[16]);
 bool have_state_manager();
 // The game's resource loader thread, read from memory by the game's probe (games/<id>; S42). Unknown: the loader is not readable

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ground-truth SASS disassembly of an NVN2 (Ampere) shader corpus with NVIDIA's nvdisasm, plus an opcode census.
 
-Input: a corpus made by tools/shaders/ampere/extract_corpus.py (unique.tsv, code/<h>.bin, ctrl/<h>.bin).
+Input: a corpus made by tools/shaders/scripts/extract_generic.py (unique.tsv, code/<h>.bin, ctrl/<h>.bin).
 For each distinct code block the program range comes from its control section (docs/AMPERE.md):
     stage = u16 ctrl+0x56 (0 vs, 1 ps, 2 gs, 3 tcs, 4 tes, 5 cs); graphics stages start with a 0x80-byte SPH v4.
     program end = u32 ctrl+0x38 (SPH + SASS, a multiple of 0x80); constant data follows at ctrl+0x40.

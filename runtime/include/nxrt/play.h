@@ -2,14 +2,14 @@
 // Play mode (S8): the PC front end of the recompiled game. One window, the SDL event pump on the game's main thread, the frame
 // limiter on the presenting thread, real controller / keyboard / mouse input into the hid service, raw mouse aim, and the F1 settings page.
 //
-// Start-up order in a launcher (game-build/src/mpr_main.cpp):
+// Start-up order in a game exe (game-build/src/game_main.cpp):
 //   nxrt::init();  play::load();                     // reads controls.ini (or [play] controls) and the [play] keys of nxrt.ini
 //   window + gfx::Device + gfx::Renderer             // window size and present mode come from play::display()
 //   nvn::install_backend({... limiter = play::limiter(), keep_aspect = play::display().keep_aspect})
 //   play::start({...});                              // input source, hooks, overlay page; the game may run from here
 // What is about one game (the frame-boundary site, raw mouse aim, camera look, lock-on, display hooks, menu widgets, context detection, F1
 // entries) comes from the registered game module's play table (nxrt/game.h, src/gfx/play/play_game.h; docs/GAME_BOUNDARY.md). The game must
-// have been lifted with entry hooks at those sites (Metroid Prime Remastered: recomp/games/mpr/main.sites). Without them the window still
+// have been lifted with entry hooks at those sites (Ocarina of Time: recomp/games/oot/main.sites). Without them the window still
 // opens but nothing is pumped (a warning says so after a few seconds).
 //
 // Configuration (nxrt.ini section [play], environment NXRT_PLAY_<KEY>):
@@ -30,7 +30,7 @@ namespace nxrt::play {
 
 // Loads the settings file and creates the frame limiter. Idempotent. Returns false (and uses the factory settings) when the file is invalid.
 bool load();
-// What the launcher needs from the settings before the window exists.
+// What the library needs from the settings before the window exists.
 struct DisplayConfig {
     int width = 1280, height = 720;         // windowed client size
     std::string window_mode = "windowed";   // "windowed" "borderless" "exclusive"

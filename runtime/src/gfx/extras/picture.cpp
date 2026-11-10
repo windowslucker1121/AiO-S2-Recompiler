@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Picture presets and limits (include/nxrt/extras.h): pure functions, also linked into the Win32 launcher.
+// Picture presets and limits (include/nxrt/extras.h): pure functions, also linked into the Win32 library app.
 #include <algorithm>
 #include <string>
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // NVIDIA DLSS Super Resolution / DLAA through Streamline (temporal.h). Streamline (MIT headers in third_party/nvidia_streamline) is loaded at
-// run time from sl.interposer.dll; its plugins (sl.common.dll, sl.dlss.dll) and nvngx_dlss.dll (NVIDIA RTX SDK licence, not bundled: the launcher downloads it) sit next to it
+// run time from sl.interposer.dll; its plugins (sl.common.dll, sl.dlss.dll) and nvngx_dlss.dll (NVIDIA RTX SDK licence, not bundled: the library downloads it) sit next to it
 // (release package: upscalers\streamline\).
 // Nothing is linked. Streamline has to see vkCreateInstance / vkCreateDevice / the swapchain calls, so with DLSS or DLAA selected at start-up
 // the Vulkan loader functions come from its vkGetInstanceProcAddr (streamline_preinit, called by vk_device.cpp before volk is initialised).

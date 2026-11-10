@@ -455,7 +455,7 @@ namespace SpirvHarness
         static List<Job> LoadJobs(string root)
         {
             Dictionary<string, Job> jobs = new();
-            // Ampere corpus layout (tools/shaders/ampere/extract_corpus.py): unique.tsv, code/<h>.bin, ctrl/<h>.bin, glslc/<h>.bin.
+            // Ampere corpus layout (tools/shaders/scripts/extract_generic.py): unique.tsv, code/<h>.bin, ctrl/<h>.bin, glslc/<h>.bin.
             string unique = Path.Combine(root, "unique.tsv");
             if (File.Exists(unique) && Directory.Exists(Path.Combine(root, "code")))
             {

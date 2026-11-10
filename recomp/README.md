@@ -2,8 +2,8 @@
 
 Turns the code of a Nintendo Switch program (NSO modules, or any static AArch64 ELF) into C++ that builds natively on Windows
 x64 with clang-cl. The translation is done by deterministic code. There is no inline assembly and no
-interpreter. It is the CPU half of the Metroid Prime Remastered PC port; nothing here
-is specific to that game except `games/mpr/config.py`, which is a placeholder until the binary is dumped.
+interpreter. It is the CPU half of the PC ports in this repository; nothing here
+is specific to a game except the per-game folders `games/<id>/` (`games/oot/config.py` for Ocarina of Time).
 
 Licence: GPL-3.0-or-later (`LICENSE`). Borrowed code and its licences: `THIRD_PARTY.md`.
 
@@ -25,9 +25,9 @@ version is `NXRECOMP_ABI_VERSION` (3).
 Python is `tools\.venv\Scripts\python.exe` at the repository root (3.13; packages in `requirements.txt`). Build tools: LLVM
 23 clang-cl, CMake, Ninja, sccache; `scripts\nx_env.cmd <command>` runs a command with the MSVC environment set up.
 
-    python -m nxrecomp lift  <module.nso|prog.elf> <outdir> [--game mpr] [--base 0x7100000000] [--name main] [--index N]
+    python -m nxrecomp lift  <module.nso|prog.elf> <outdir> [--game oot] [--base 0x7100000000] [--name main] [--index N]
                              [--shards 16] [--jobs 8] [--patches FILE] [--sites FILE]
-    python -m nxrecomp cover <module.nso|prog.elf> [--game mpr]      per-instruction-word translation coverage of .text
+    python -m nxrecomp cover <module.nso|prog.elf> [--game oot]      per-instruction-word translation coverage of .text
     python -m nxrecomp.funcs <module> --out functions.tsv             function boundaries and the evidence for each
 
 In a CMake build (the game, or an oracle), `cmake/NxRecomp.cmake` gives `nxrecomp_add_module(<target> INPUT <file> ...)`, which
@@ -56,5 +56,5 @@ lifts as a build step and builds the result as a static library (flags: C++20, `
 | Known answers | `python oracle/ka/run_ka.py` | 108 cases of the rEden / dynarmic A64 tests (through ScarletNX), no emulator involved: 89 pass, 0 fail, 7 skipped, 6 need FPSR flags and 5 need FPCR (both documented gaps) |
 | Corpus | `python oracle/difftest/gen_corpus.py` | regenerates `corpus.json` (deterministic) |
 
-Lifting and compiling the game itself (`scripts\build_game.cmd <id>`) is described in `docs/S1b.md`. Gaps that remain are listed with numbers in `docs/GAPS.md`. The S1 log is `docs/S1.md`, numbered bug notes are in
+Lifting and compiling the game itself (`scripts\build_game.cmd <id>`) lifts every module of the dump named by `recomp/games/<id>/game.toml` and compiles it into one library per module (`workuild\<id>`). Gaps that remain are listed with numbers in `docs/GAPS.md`. The S1 log is `docs/S1.md`, numbered bug notes are in
 `docs/debug/`.

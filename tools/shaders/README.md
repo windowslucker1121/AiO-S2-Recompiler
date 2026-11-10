@@ -40,7 +40,7 @@ dotnet tools\shaders\build\bin\Release\net10.0\spirv_harness.dll <code.bin> <ctr
 ```
 
 `spirv_harness --serve --cache <spirv dir> [--corpus <dir>] [--jobs N] [--priority below|idle|normal]` is the long-lived form the
-launcher's setup and the runtime's on-demand translation use: requests on stdin (`C <hash>` corpus block, `T <hash> <code b64> <ctrl b64>`,
+library's setup and the runtime's on-demand translation use: requests on stdin (`C <hash>` corpus block, `T <hash> <code b64> <ctrl b64>`,
 `P <priority>`, `E` end), answers on stdout (`R<TAB><results.tsv row>` once the `.spv` and the row are in the cache, `X <hash> <reason>`).
 Protocol and the rules for two writers on one cache: `harness/Serve.cs`. The project uses server GC (one heap per core; the runtime caps
 it with `DOTNET_GCHeapCount`).

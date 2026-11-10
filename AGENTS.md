@@ -16,7 +16,7 @@ current. How to contribute: `CONTRIBUTING.md`.
   Do not add code that decrypts game containers or reads console keys. Inputs are already decrypted dumps only (an extracted folder or a
   `.nup`); the key-based NSP/XCI path (`nx_extract --keys`, the launcher's keys page) was removed on 2026-11-08 and must not come back.
 - **Names:** game and Nintendo names only to say what a module is for ("module for <game>"). Never in product, app, exe, window or
-  package names, and no Nintendo or game logos, icons or art styles. New game ids are short neutral ids (`oot`, `pkp`).
+  package names, and no Nintendo or game logos, icons or art styles. New game ids are short neutral ids (`oot`, `pkp`; the pkp port itself was removed 2026-11-10).
 - Copied code needs a licence compatible with GPL-3.0 and an entry in the notices (`runtime/THIRD_PARTY_NOTICES.md` or the folder's
   `licenses/`). Never ask users to upload game files or logs that contain game data.
 
@@ -28,6 +28,16 @@ its test to `runtime/tests/gfx`), `runtime/cmake/launcher.cmake`, the games' `la
 `tools/test` (only `imgdiff.py` / `wincap.py`, used by `tools/ai`, stay), the Maxwell stand-in shader corpus, oracle and smo translator in
 `tools/shaders`, old dev logs in `tools/docs`, unused `game-build/release_b` files (DLSS fetcher, manifest_get, README template),
 `recomp/scripts/build_mpr.cmd`, and runtime tests that only ran with mpr data. Facts in the sections below that name those files are history.
+
+Second pass (2026-11-10, user: "remove everything we don't need"): the **Pokopia port** (`recomp/games/pkp`, `runtime/games/pkp`; never built here,
+its CMake linked a missing `../mpr/link_check.cpp`) is gone. Pokopia goes through the generic experimental build like any title without a port
+(make_manifest gives the same module bases and rtld entry the pkp config had, game_build.py unpacks ZBIC per module, extract_generic.py reads
+KTGL's chunked zlib shader containers); shared runtime code that Pokopia needed (KTGL menu adapter, HDR LUT patch, hid mouse) stays. Also removed: `tools/nvn2`
+(IDA scripts), `tools/shaders/ampere/extract_corpus.py` (Pokopia's corpus extractor; extract_generic.py writes the same layout),
+`tools/shaders/scripts/extract_bnsh_corpus.py` (dkb), `recomp/docs/S1b.md` (mpr milestone), unreferenced runtime scripts (`play_syntax.ps1`,
+`play_unit.ps1`, `svc_table.py`, `tt_unit.cmd`, `wt_setup.ps1`, `scripts/prof/{oracle_matrix,oracle_shots,prof_run,project_root}.py`), and stale
+mpr / launcher paths and player-facing "launcher" strings were repointed. gfx tests write `capture_*.png` / `env_shot.png` into the working
+directory (git-ignored now).
 
 ## State (branch `oot-nup`, 2026-11-06)
 
@@ -174,7 +184,7 @@ took 25 min for 117,981 parts (both raster sets); a forced second one loads the 
   G3 would have failed to link.
 - Dumps in the repo root (static analysis only): **Mario Wonder** `.nup` (title 010015100B514000, update 5.0.0, addon with content
   only) is a **Switch 1 binary** (SDK 16.2.12, NVN1, Maxwell bnsh/bfsha, no subsdk; it calls `nn::pl::IsRunningOnOunce`): the runtime's
-  untested Switch 1 path; its ExeFS is in `game\smbw`. **Pokopia** folder (update 655360 = 2.0.1, build id matches `recomp/games/pkp`):
+  untested Switch 1 path; its ExeFS is in `game\smbw`. **Pokopia** folder (update 655360 = 2.0.1, build id matched the removed pkp port's manifest; the folder is no longer in the repo root):
   main/sdk/subsdk0 do **not** decode as LZ4 (invalid match offset in every segment, sha256 differ from the manifest; rtld and npdm match):
   needs a re-dump before it can be lifted.
 - **`recomp_library.exe`** (`runtime/apps/setup`, target `game_setup`, replaces `oot_setup.exe`; native Win32 + GDI+, dark theme; the
@@ -358,7 +368,7 @@ little: trust `main+off`, not the name next to it; sdk exports ~28,700 symbols, 
     `dispatch_call` hands such a target to `eh::longjmp_landing`, which resumes the innermost catch frame whose CFA lies above the
     restored SP with a host longjmp (`runtime/src/eh/catch_call.cpp`; test `eh.guest_longjmp_resumes_the_setjmp_caller_at_its_pad`).
 
-**Manifest bug (fixed for OoT, still in pkp):** the game CMakeLists cached the sites file in one variable for every module, so a second
+**Manifest bug (fixed for OoT; pkp, which still had it, is removed):** the game CMakeLists cached the sites file in one variable for every module, so a second
 module with `sites =` silently got main's file. OoT now uses `OOT_SITES_<MODULE>`.
 
 What the game does by boot 20: rtld -> sdk init -> nnMain; RomFS mounted (186,808 files); account save created; 12 GiB heap; NV/vi
@@ -377,7 +387,7 @@ Open points besides the milestones:
 - **nn::vi queries** (QueryDisplayHdrStatus/VrrSupported/HdrPaperWhite/CurrentRefreshRate) return the SDK's 0x272 for the stand-in display.
 - **Movies** need libvpx (vcpkg `libvpx:x64-windows-static`, `NXRT_LIBVPX_ROOT`); not installed.
 - **Launchers** (Tauri `launcher/`, `runtime/apps/launcher`) were removed 2026-11-10; the library (`recomp_library.exe`) takes `.nup` (through `nup_extract.py`) or an extracted folder. Encrypted NSP/XCI are not supported (removed 2026-11-08: no code reads keys or decrypts).
-- **Pokopia regression risk** (no Pokopia dump here): shared changes in funcs.py (header/MOD0, ADR starts, RETAA/RETAB, zero FDEs), a64.py
+- **Shared-change risk for other titles** (the Pokopia port is removed; Pokopia and others go through the generic build): shared changes in funcs.py (header/MOD0, ADR starts, RETAA/RETAB, zero FDEs), a64.py
   (PAC decode, DMB LD/ST as compiler barriers, single-store scalar FP writes), tier2 FP16, `nx::fmax_`/`fmin_` NaN order, lifted-code
   flags (/O2, x86-64-v3, forced inlining), used-memory accounting, NVN minor 40, TLS +0x110, MapMemory Alias sources, WaitIfEqual64, bsd descriptors.
   Oracles, from `recomp\`: `..\tools\.venv\Scripts\python oracle/difftest/difftest.py all`, `oracle/e2e/run_e2e.py`,
@@ -1681,8 +1691,6 @@ modules first (~3 min).
   `neon.py` `v_un`/`v_bin` (counted as not translated, `guest_unimpl` at run time). Scalar FP16 (`h` registers) is not handled.
 - Switch 2 code uses pointer authentication (`pacibsp`, `retab`).
 - Lift sizes: rtld 44 functions, subsdk0 1,545, sdk 45,857, main 249,445 (15.4M instructions, about 100 s, about 1 GB of C++).
-- Pokopia's `recomp/games/pkp/CMakeLists.txt` looks for `game\` one folder above this repository and links
-  `../mpr/link_check.cpp`, which does not exist here. The OoT copy fixes both; pkp was left as it is.
 - **The game exe has no live control channel** (no pipe, socket or stdin reader in `runtime/src` or `game-build/src`). The runtime
   test tooling (scripts, pad input, `@peek`/`@poke`, game probes) is configured at start through `NXRT_TEST_*` and answers through
   files (`result.json` at exit, `trace.jsonl` every ~64 frames, `shots/`). Live memory access would need a channel added to the

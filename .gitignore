@@ -18,7 +18,10 @@ romfs/
 *.pdb
 *.map
 *.log
-pkp.ini
+*.log.prev
+# gfx test screenshots written into the working directory
+/capture_*.png
+/env_shot.png
 pipeline_keys.bin
 # tool output
 node_modules/

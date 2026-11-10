@@ -29,7 +29,7 @@
 //   shot_dir=<dir>         default <out>/shots; require_shots=1 turns a missing screenshot provider into a failure
 //   game_base=<addr>       base of the game's main module (default 0x7100000000)
 // Probe layout overrides ([probe] section): state_manager=<addr> (a CStateManager the hooks did not see), see the game's probes
-// (GameProbes below; Metroid Prime Remastered: games/mpr/mpr_tt_probe.cpp).
+// (GameProbes below; the game module supplies them, oot has none).
 #pragma once
 #include <atomic>
 #include <cstddef>

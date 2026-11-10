@@ -4,7 +4,7 @@
 // constant: the entry hook on the frame update computes the step, mid hooks load it into the registers that held the 1/60 immediates, and a
 // few per-frame counters that are not driven by that dt (render timings, texture streaming, a per-tick friction, the background-work budget,
 // the movie clock) are corrected. The mechanism is the game's own business only through Sites: the registered game (nxrt/game.h) lists
-// where those places are (Metroid Prime Remastered: games/mpr/mpr_sites.h, the same addresses as recomp/games/mpr/main.sites).
+// where those places are (Ocarina of Time: games/oot/oot_core.cpp, the same addresses as recomp/games/oot/main.sites).
 //
 // Configuration, section [time] (env NXRT_TIME_<KEY>):
 //   mode = real | fixed | off     real (default): the step is the measured frame time, clamped and smoothed.

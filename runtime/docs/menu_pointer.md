@@ -9,7 +9,7 @@ The mouse as a pointer in a game's own menus: hover selects, left click confirms
 | `menu_ktgl.h`, `menu_ktgl.cpp` | Adapter for KTGL screen layouts (Koei Tecmo). Used by Pokopia. |
 | `menu_ui2d.h`, `menu_ui2d.cpp` | Adapter for Nintendo's nn::ui2d layouts (BFLYT) and the button controls built on them. Written for Donkey Kong Bananza. Not wired into any game yet. |
 
-The game module supplies the addresses and wires the adapter into play mode's `GamePlay` table (`menu_frame`, `menu_over_value`, `menu_active`, `menu_in_game`). Pokopia's wiring is `games/pkp/pkp_menu.cpp`: a `ktgl::Config` holding the offsets of its 2.0.1 main, plus `play_follow_live` as the gate policy.
+The game module supplies the addresses and wires the adapter into play mode's `GamePlay` table (`menu_frame`, `menu_over_value`, `menu_active`, `menu_in_game`). The Pokopia port (removed) used it with a `ktgl::Config` holding the offsets of its 2.0.1 main, plus `play_follow_live` as the gate policy.
 
 ## Engine
 
@@ -36,7 +36,7 @@ Once a frame, `Engine::frame(menu_up, geometry, adapter)` does the following:
 
 ## KTGL adapter (Pokopia)
 
-This is the old `games/pkp/pkp_menu.cpp` logic, moved over as it was:
+This is the logic of the removed Pokopia port's menu code, moved over as it was:
 
 - the pool walk, the draw hooks and the per-pane draw records;
 - the pane classification and the cursor rules (`pick`, `pick_extend`).

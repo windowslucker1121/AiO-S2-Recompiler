@@ -2,7 +2,7 @@
 // Display extras (S14): HDR output, upscaling, frame generation and low-latency modes.
 //
 // Everything here is off by default except HDR "auto" (HDR is used when the display and Windows offer it). The settings are read once at
-// start-up from the play-mode settings file (controls.ini, sections [hdr] [upscale] [latency]) with mpr.ini / environment overrides, and
+// start-up from the play-mode settings file (controls.ini, sections [hdr] [upscale] [latency]) with the game's ini / environment overrides, and
 // the live part can be changed from the F1 page. The pieces:
 //
 //   HDR       the game's scene pipeline is switched to float targets and a tone curve whose shoulder reaches the display's peak; the
@@ -76,7 +76,7 @@ struct Settings {
     PictureSettings picture;
 };
 
-// Reads [hdr] [upscale] [latency] from the nxrt configuration (mpr.ini, environment NXRT_HDR_MODE ...). Never fails.
+// Reads [hdr] [upscale] [latency] from the nxrt configuration (the game's ini, environment NXRT_HDR_MODE ...). Never fails.
 Settings settings_from_config();
 // The settings in force (set once by play mode / the boot code from the file; the live fields change from the F1 page).
 Settings settings();
@@ -88,7 +88,7 @@ int upscale_scene_scale();          // percent, 100 = off (a temporal mode with 
 UpscaleQuality upscale_quality();
 bool upscale_temporal();            // the mode is FSR 3, DLSS or DLAA
 int quality_percent(UpscaleQuality q);   // the preset's input scale per side in percent (Custom: -1)
-// The game's own projection jitter as its TAA code last stored it (NDC units, the previous frame's; pkp_taa.cpp), for the log only.
+// The game's own projection jitter as its TAA code last stored it (NDC units, the previous frame's), for the log only.
 void temporal_note_game_jitter(float x_ndc, float y_ndc);
 // The picture controls in force for the present step (lock-free; the F1 page's sliders change them live before Apply and save).
 struct PictureLive {

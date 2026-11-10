@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Per-game configuration of The Legend of Zelda: Ocarina of Time (Nintendo Switch 2).
 
-Identity, build id, version and the module list come from game.toml in this folder (as for games/pkp). What stays here is lifter
+Identity, build id, version and the module list come from game.toml in this folder (as for every game). What stays here is lifter
 knowledge that is not manifest data.
 """
 import os

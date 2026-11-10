@@ -134,7 +134,7 @@ Wheel units: *inferred* 120 per notch (the game clamps its sum at ±600).
 - Placement / Rock Smash detection is not done: auto mode without a request means the Joy-Con 2 mouse is live only where the camera
   does not hold the mouse.
 
-## Menus outside play (pkp_menu.cpp pick_extend)
+## Menus outside play (`pick_extend`, KTGL menu adapter)
 
 The title, settings, language, save and yes / no screens go through the same pane scan as the in-game menus (play mode calls
 `menu_frame` with the menu context whenever the game is not in play). main holds no pane-name strings (the names live in the layout

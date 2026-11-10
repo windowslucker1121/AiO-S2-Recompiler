@@ -16,8 +16,8 @@ otherwise. The package ships no game code. This script
   6. deletes the generated sources and objects (unless --keep) and records the result in <game>/build/done.json.
 
 Resumable: a module's lift counts once its marker file is written, an object once it is renamed into place, so a stopped
-build continues where it stopped. A file named <game>/build/cancel stops it (the launcher's Pause).
-Output for the launcher, one per line on stdout:  @progress <phase> <done> <total> <text>  /  @error <text>
+build continues where it stopped. A file named <game>/build/cancel stops it.
+Output for the library (runtime/apps/setup), one per line on stdout:  @progress <phase> <done> <total> <text>  /  @error <text>
 Exit codes: 0 done, 1 error, 2 cancelled.
 """
 import argparse
@@ -38,7 +38,7 @@ RUNTIME = ''                                   # --runtime: the files the exe ru
 ZIG = os.path.join(HERE, 'zig', 'zig.exe')
 PLAIN_NSO = os.path.join(HERE, 'nx_plain_nso.exe')
 FORMAT = 2          # bump when the build layout or the runtime API (sdk/rt_api.h) changes: older partial builds are then started over
-                    # (the launcher also treats an exe whose done.json has another format as not built: gamebuild.rs BUILD_FORMAT)
+                    # (the library likewise treats an exe built with another format as not built)
 
 MANIFEST = {}       # the game manifest (load_manifest)
 MANIFEST_PATH = ''

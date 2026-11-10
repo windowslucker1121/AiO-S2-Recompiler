@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Storage layout of an NVN texture, computed from its builder (family texture, S4d). Sizes come from the Maxwell
 // block-linear rules in tools/tiling (tegra::compute_layout); the rules were checked against the GPU buffer sizes of the
-// game's 6,927 textures (docs/mpr/survey/SURVEY.md section 3).
+// game's textures.
 #pragma once
 #include <cstdint>
 

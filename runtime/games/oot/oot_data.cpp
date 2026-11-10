@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Ocarina of Time: who the game is and what its files are called (nxrt/game.h Info). Pure data, no runtime: the launcher links this
+// Ocarina of Time: who the game is and what its files are called (nxrt/game.h Info). Pure data, no runtime: the library links this
 // part alone. The values come from the game manifest (recomp/games/oot/game.toml) through the generated game_manifest.h.
 #include "oot_game.h"
 #include "game_manifest.h"

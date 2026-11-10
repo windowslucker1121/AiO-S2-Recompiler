@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Win32 key and mouse messages to the SDL values the launcher stores in controls.ini.
+// Win32 key and mouse messages to the SDL values the library stores in controls.ini.
 #pragma once
 
 #include <windows.h>

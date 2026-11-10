@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Game-independent NVN2 (Switch 2) shader extractor: finds every NVN2 shader block in a romfs and the ExeFS modules by the
 control section's signature, recovers its code area from the program record that points at it, and writes the Ampere
-corpus layout the translator reads (same as tools/shaders/ampere/extract_corpus.py): code/<h>.bin, ctrl/<h>.bin,
+corpus layout the translator reads (the layout of the old KTGL extractor): code/<h>.bin, ctrl/<h>.bin,
 glslc/<h>.bin (whole GLSLC output, when the block sits in one), manifest.tsv (one row per occurrence), unique.tsv (one row
 per distinct code block), summary.txt. <h> = first 16 hex digits of SHA-1 of the bytes (code: the +0x44 bytes of the code
 area, the key the runtime computes).
@@ -9,8 +9,7 @@ area, the key the runtime computes).
     python -I extract_generic.py --romfs <romfs> [--romfs <more>] [--main <exefs/main>] [--exefs <dir>] --out <dir>
                                  [--jobs 4] [--progress]
 
-Same command line as extract_corpus.py (the launcher's setup runs either one as tools/shaders/extract_corpus.py with
---romfs --main --out --jobs --progress). --main also scans the other NSO modules next to it (sdk, subsdk*); --exefs scans
+The library's setup runs it with --romfs --main --out --jobs --progress. --main also scans the other NSO modules next to it (sdk, subsdk*); --exefs scans
 every NSO in a folder. Give each romfs once: a dumped update romfs is already the whole patched romfs.
 
 Signature (docs/AMPERE.md section 3): u32 0x98761234 at +0, version u32 0xc0..0xff at +4 (0xc9 in every game seen),
@@ -999,7 +998,7 @@ def main():
     with open(os.path.join(a.out, 'manifest.tsv'), 'w', newline='\n', encoding='utf-8') as f:
         f.write('source\tbuffer_off\tctrl_off\tmethod\tglslc_off\tstage\tctrl_size\tcode_size\tcode_sha1_16\tctrl_sha1_16\tglslc_sha1_16\n')
         f.write(''.join(r + '\n' for r in rows))
-    # unique.tsv: extract_corpus.py's columns. first_source = the source label (romfs path, with !<container> steps;
+    # unique.tsv: the corpus layout's columns. first_source = the source label (romfs path, with !<container> steps;
     # "main" for the ExeFS main), entry_off = offset of the decompressed buffer in the file, glslc_off = GLSLC output (or
     # control section) offset in that buffer, first_glslc '-' when the block was not inside a GLSLC output.
     with open(os.path.join(a.out, 'unique.tsv'), 'w', newline='\n', encoding='utf-8') as f:

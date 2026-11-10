@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# The Ocarina of Time game module (docs/GAME_BOUNDARY.md, oot_game.h), as games/pkp. Libraries, each a superset of the one before:
-#   nxrt_game_oot_data   identity, branding (pure data; the launcher links it)
+# The Ocarina of Time game module (docs/GAME_BOUNDARY.md, oot_game.h). Libraries, each a superset of the one before:
+#   nxrt_game_oot_data   identity, branding (pure data; the library links it)
 #   nxrt_game_oot_core   + title facts (links nxrt)
 #   nxrt_game_oot        + play-mode hooks (links nxrt_gfx; only with NXRT_BUILD_GFX). oot.exe links this one.
 set(_oot "${CMAKE_CURRENT_SOURCE_DIR}")

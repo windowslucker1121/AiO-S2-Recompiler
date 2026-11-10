@@ -1,41 +1,51 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Game manifest of The Legend of Zelda: Ocarina of Time (Switch 2): the one file that tells the game-independent build, release
-# and launcher code what this game is. Format and readers: recomp/games/pkp/game.toml.
+# and library code what this game is. Adding a game means a new recomp/games/<id>/ folder with its own game.toml (and config.py,
+# sites, runtime/games/<id>/); no shared script, CMake file or library source names a game.
 #
-# Bring-up state: the module list, hashes and build id are of the dump (NUP package, update 2.0.0); nothing is hooked yet and there
-# is no runtime module (runtime/games/oot) or game exe. Values marked "placeholder" are not from the dump.
+# Readers: recomp/games/<id>/config.py, recomp/games/<id>/CMakeLists.txt, runtime/games/<id>/CMakeLists.txt (via
+# recomp/cmake/GameManifest.cmake), game-build (CMake, scripts, release_b/game_build.py) and the library (runtime/apps/setup) at
+# run time; the release package copies this file to games/<id>/game.toml.
+# The CMake reader understands only: [table], [dotted.table], [[array.of.tables]], and "string", integer (also 0x..) and true/false values.
+#
+# Conventions the code relies on (not repeated here): the runtime game module is runtime/games/<id>/<id>_game.h with
+# nxrt_register_game_<id>(); the Info it registers (nxrt/game.h) takes its names from this file; crash reports are
+# <exe stem>_crash.txt / _freeze.txt / _fatal.txt next to the exe.
+#
+# Bring-up state: the module list, hashes and build id are of the dump (NUP package, update 2.0.0). Values marked "placeholder" are
+# not from the dump.
 schema = 1
 
 [game]
-id = "oot"
-title = "The Legend of Zelda: Ocarina of Time"
-short_title = "Ocarina of Time"
+id = "oot"                                  # short id: folder names, CMake targets, environment variable prefix, logs
+title = "The Legend of Zelda: Ocarina of Time"   # the game's own name (log, error boxes)
+short_title = "Ocarina of Time"             # short name in messages
 product = "Recomp module: oot"                 # neutral build name (exe properties); never the game's name
-window_title = "Ocarina of Time (unofficial recompilation)"   # the game window and its dialogs
-title_id = "0400486024DEC000"
+window_title = "Ocarina of Time (unofficial recompilation)"   # the game window and its dialogs (empty: title)
+title_id = "0400486024DEC000"               # Switch program id
 version = "2.0.0"                           # the update the module list and hashes are of
-platform = "switch2"
-languages = 0x1ffff                         # placeholder: every language (the NUP package carries no control.nacp)
+platform = "switch2"                         # "switch2" or "switch" (NVN2 / Maxwell shaders, SDK constants)
+languages = 0x1ffff                         # control.nacp SupportedLanguage bits; placeholder: every language (the NUP package carries no control.nacp)
 
 [files]
-exe = "oot.exe"
-runtime_dll = "oot_rt.dll"
-ini = "oot.ini"
+exe = "oot.exe"                             # built on the player's PC (library step "Build the game program")
+runtime_dll = "oot_rt.dll"                  # the prebuilt runtime in the package (its import library is <stem>.lib)
+ini = "oot.ini"                             # settings file the library writes and the game reads
 log = "oot.log"
-setup_exe = "oot_setup.exe"
+setup_exe = "oot_setup.exe"                 # the library's exe name for this game (setup_exe key)
 launcher_ini = "oot_launcher.ini"
 shader_pack = "shader_cache.ootshc"
-save_folder = "oot-recomp"                  # under %APPDATA%
-old_save_folders = "OcarinaRecompPC"        # earlier save_folder names: moved to save_folder at the first start (keeps old saves)
+save_folder = "oot-recomp"                  # under %APPDATA%; also names the one-game-per-folder mutex
+old_save_folders = "OcarinaRecompPC"        # earlier save_folder names (";"-separated): moved to save_folder at the first start (keeps old saves)
 
 [dump]
-version = "2.0.0 (update 131072)"
+version = "2.0.0 (update 131072)"            # the supported dump, as shown in the build check
 display_version = "2.0.0"                   # placeholder until control.nacp is read (the package has no display version)
-main_build_id = "e0f3ccfaf50065ae4ea01eb5aeb13b1a45da3348"
-example_folder = "OcarinaOfTime_v2.0.0"
+main_build_id = "e0f3ccfaf50065ae4ea01eb5aeb13b1a45da3348"   # of exefs/main (the first 20 bytes of the NSO's build id field)
+example_folder = "OcarinaOfTime_v2.0.0"     # an example dump folder name for messages
 
-# sha256 of every exefs file as dumped (main is ZBIC-compressed: tools/extract nx_plain_nso makes the plain NSO the lifter reads)
+# sha256 of every exefs file as dumped, in the order they are checked (main is ZBIC-compressed: tools/extract nx_plain_nso makes the plain NSO the lifter reads)
 [[dump.file]]
 name = "main"
 sha256 = "7db9ddfda088c22d219ef13496decd7077c68cd67d4b37f53f4ac46a082768f2"
@@ -52,7 +62,9 @@ sha256 = "219f25ef4a64a704e86dacfeb25d9e8977045f2145e629268b94baf34d5e0bbe"
 name = "main.npdm"
 sha256 = "94c154d83cbaca00d092958cc2b3a0494d7308fe49de8cb33ece7e9e67303ea7"
 
-# Modules in lifter order (same layout as Pokopia). units: about 45k instructions each (text size / 4 / 45000).
+# Modules in lifter order. file: the NSO in exefs; base: where the guest maps it (baked into the lifted code); index: NxModule.index;
+# units: translation units the lifter writes (about 45k instructions each: text size / 4 / 45000); sites: hook sites file (relative to
+# this folder). The runtime maps the entry module first, then the others in this order.
 [[module]]
 name = "main"
 file = "main"
@@ -81,10 +93,14 @@ index = 3
 units = 1
 entry = true
 
+# extractor: the shader corpus extractor the library runs (with --romfs --main --out --jobs
+# --progress). "generic" = tools/shaders/scripts/extract_generic.py: any NVN2 game (signature scan; zstd, zlib, SARC, BNSH, GLSLC, Unreal
+# pak/IoStore); needs zstandard for zstd romfs files.
 [shaders]
 extractor = "generic"
 extractor_script = "tools/shaders/scripts/extract_generic.py"
 
+# Names for the release package and the library's headings (neutral: no game name). package_name: release folder and zip.
 [launcher]
 name = "Recomp Launcher"
 window_title = "Recomp Launcher (oot)"

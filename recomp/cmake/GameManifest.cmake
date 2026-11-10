@@ -10,7 +10,7 @@
 # Strings must not contain quotes or backslashes. Dotted names become underscores: [[dump.file]] is GM_dump_file_<n>_<key>.
 # Derived: GM_ID, GM_ID_UPPER, GM_MODULE_COUNT, GM_MODULES (names in lifter order), GM_LOAD_ORDER (names, entry module first),
 # GM_MODULE_LIBS (the per-module library target names <id>_<name>), GM_MANIFEST_FILE.
-# The Python side of the same file: tomllib (config.py, release_b/game_build.py); the launcher: the toml crate.
+# The Python side of the same file: tomllib (config.py, release_b/game_build.py); the library reads it in C++ (runtime/apps/setup/setup_games.cpp).
 
 macro(game_manifest_load _gm_file)
     if(NOT EXISTS "${_gm_file}")

@@ -7,7 +7,7 @@
 //            so every action is tied to a Switch output (buttons and stick directions) by the [switch] table of the settings file.
 //   context  where the player is: in play, in the alternate body (the morph ball), on the map, in a menu, inspecting (the scan visor).
 //            `all` is a layer under every context.
-// The action and context slots are generic; the registered game names them and gives their factory outputs and the launcher's labels
+// The action and context slots are generic; the registered game names them and gives their factory outputs and the library's labels
 // (GameVocabulary below; Metroid Prime Remastered: games/mpr/mpr_vocabulary.cpp). Without a game the slots keep generic names.
 //   trigger  how an input turns into an action: press (while held), tap (a short pulse after a quick release), hold (after a delay,
 //            while held), toggle (each press flips it), doubletap (a second quick press, while held).
@@ -183,7 +183,7 @@ struct DisplaySettings {
     // console's), the preset names the set of values last picked on the F1 page (switch2, high, ultra; custom after a single change).
     std::string quality_preset = "switch2";
     double view_distance = 1.0;
-    // ---- S38 GPU paths, at the next start; [nvn] pool_mirror and pass_barriers in mpr.ini or the environment win over these.
+    // ---- S38 GPU paths, at the next start; [nvn] pool_mirror and pass_barriers in the game's ini or the environment win over these.
     bool fast_gpu_memory = true;   // device-local copies of the pools draws read ([nvn] pool_mirror = on); costs up to 2 GiB of video memory
     bool fewer_gpu_waits = true;   // no full barrier after passes that only wrote their attachments ([nvn] pass_barriers = tracked)
     bool shader_prewarm = true;    // build the pipelines recorded by earlier runs ahead of the draws ([nvn] prewarm); at the next start, [nvn] prewarm in the ini wins
@@ -225,7 +225,7 @@ struct PromptSettings {
 };
 
 // ---- frame rate counter ------------------------------------------------------------------------------------------------------------
-// The small corner overlay with the frame rate and the frame time. Off by default; a hotkey (and the F1 page and the launcher) switches it.
+// The small corner overlay with the frame rate and the frame time. Off by default; a hotkey (and the F1 page and the library) switches it.
 enum class Corner : uint8_t { TopLeft = 0, TopRight, BottomLeft, BottomRight };
 const char* corner_name(Corner c);                       // "top_left" "top_right" "bottom_left" "bottom_right"
 bool parse_corner(const std::string& s, Corner* out);    // case-insensitive, '-' and ' ' equal '_'
@@ -317,24 +317,24 @@ const GameDefaults* game_defaults();                 // the registered game's, o
 // The game's words for the generic slots (Info::play_defaults->vocabulary). Every part is optional: a null table keeps the generic names.
 struct GameActLabel {
     Act act;
-    const char* label;          // the launcher's row label (UTF-8): "Fire", "Power beam"
-    const char* group;          // the launcher's group (UTF-8): "Combat", "Beams"
+    const char* label;          // the library's row label (UTF-8): "Fire", "Power beam"
+    const char* group;          // the library's group (UTF-8): "Combat", "Beams"
 };
 struct GameVocabulary {
     const ActInfo* acts = nullptr;                   // kActCount rows in enum order: the file names and factory outputs of every action
     const char* const* ctx_names = nullptr;          // kCtxCount names in enum order
-    const GameActLabel* labels = nullptr;            // the launcher's Keyboard rows, in display order
+    const GameActLabel* labels = nullptr;            // the library's Keyboard rows, in display order
     unsigned label_count = 0;
-    // settings-file keys and launcher labels of the alternate-body and cycle settings (nullptr: the generic key)
+    // settings-file keys and the library's labels of the alternate-body and cycle settings (nullptr: the generic key)
     const char* key_alt_yaw = nullptr;               // [mouse] (mpr: "morph_yaw"; generic "alt_yaw")
     const char* key_alt_pitch = nullptr;             // [mouse] (mpr: "morph_pitch"; generic "alt_pitch")
     const char* key_wheel_cycles = nullptr;          // [mouse] (mpr: "wheel_beams"; generic "wheel_cycles")
     const char* key_alt_orbit = nullptr;             // [pad]   (mpr: "ball_orbit"; generic "alt_orbit")
     const char* key_alt_camera = nullptr;            // [mouse] on/off (mpr: "ball_camera"; generic "alt_camera")
     const char* key_alt_sens = nullptr;              // [mouse] one sensitivity for both directions, Source scale (mpr: "ball_sensitivity"; generic "alt_sensitivity")
-    const char* label_alt_camera = nullptr;          // launcher slider (mpr: "Morph ball camera")
-    const char* label_wheel_cycles = nullptr;        // launcher check box (mpr: "Mouse wheel changes the beam")
-    const char* label_alt_camera_on = nullptr;       // launcher check box (mpr: "Mouse and right stick turn the morph ball camera")
+    const char* label_alt_camera = nullptr;          // library slider (mpr: "Morph ball camera")
+    const char* label_wheel_cycles = nullptr;        // library check box (mpr: "Mouse wheel changes the beam")
+    const char* label_alt_camera_on = nullptr;       // library check box (mpr: "Mouse and right stick turn the morph ball camera")
 };
 const GameVocabulary* game_vocabulary();             // the registered game's, or nullptr
 // The settings-file keys of the alternate-body and cycle settings: the game's, else the generic ones.

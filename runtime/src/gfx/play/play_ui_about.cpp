@@ -58,7 +58,7 @@ std::string shader_cache_dir() {
 }
 
 // The ExeFS folder: [fs] exefs (the game's main() stores the folder it loaded there; the player may also set it in the game ini), else
-// the old rule for mains that do not: PKP_EXEFS-style variable, else ./exefs when it holds the main module, else game/exefs.
+// the old rule for mains that do not: <ID>_EXEFS-style variable, else ./exefs when it holds the main module, else game/exefs.
 std::string exefs_dir() {
     if (const std::string configured = config_get_str("fs", "exefs", ""); !configured.empty()) return absolute(configured);
     std::string var = game::info().id ? game::info().id : "";

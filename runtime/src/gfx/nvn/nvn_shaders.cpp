@@ -1330,7 +1330,7 @@ const ShaderInfo* ShaderCache::find(const uint8_t* code, const uint8_t* control,
         dump_missing_block(hash, code, control, c.code_size);
         return nullptr;
     }
-    // On-demand translation: a block without a results.tsv record goes to the translator (a .spv without its record, which the launcher's
+    // On-demand translation: a block without a results.tsv record goes to the translator (a .spv without its record, which the library's
     // setup may have written since this run read results.tsv, is translated again: it is the record that is missing). Until it answers the
     // stage is pending; the caller skips what needs it.
     if (!have_record && worker_) {
@@ -1714,9 +1714,9 @@ std::string exe_folder_utf8() {
     return std::string(u.begin(), u.end());
 }
 
-// Held open for the life of the process: the launcher's setup sees the game running (it cannot open the file for writing) and lowers its
+// Held open for the life of the process: the library's setup sees the game running (it cannot open the file for writing) and lowers its
 // own translation to idle priority. <cache dir>/../game_running.lock. Shared for writing, so every run of the game on this cache holds it
-// (named instances: nxrt/instance.h), not only the first; the launcher's exclusive open still fails while any of them runs.
+// (named instances: nxrt/instance.h), not only the first; the library's exclusive open still fails while any of them runs.
 void hold_game_lock(const std::string& cache_dir) {
     static HANDLE h = INVALID_HANDLE_VALUE;
     if (h != INVALID_HANDLE_VALUE) return;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// The Legend of Zelda: Ocarina of Time game module (docs/GAME_BOUNDARY.md), as games/pkp: one nxrt::game::Info in three libraries,
+// The Legend of Zelda: Ocarina of Time game module (docs/GAME_BOUNDARY.md): one nxrt::game::Info in three libraries,
 // each a superset of the one before:
-//   nxrt_game_oot_data   identity, branding (pure data)          the launcher           nxrt_register_game_oot_data()
+//   nxrt_game_oot_data   identity, branding (pure data)          the library           nxrt_register_game_oot_data()
 //   nxrt_game_oot_core   + title facts (needs nxrt)              the service tests      nxrt_register_game_oot_core()
 //   nxrt_game_oot        + play-mode hooks (needs nxrt_gfx)      oot.exe                nxrt_register_game_oot()
 // Bring-up: no hooks, probes or play mode yet.

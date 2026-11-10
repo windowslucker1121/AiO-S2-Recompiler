@@ -4,7 +4,7 @@
 Usage: python -I tools/shaders/scripts/census.py <corpus dir> --game <name> [--out-dir <dir>] [--jobs N] [--no-build] [--keep]
 
 <corpus dir> is either layout the project uses:
-  * Pokopia corpus (tools/shaders/ampere/extract_corpus.py): unique.tsv, code/<h>.bin, ctrl/<h>.bin
+  * Pokopia corpus (tools/shaders/scripts/extract_generic.py): unique.tsv, code/<h>.bin, ctrl/<h>.bin
   * runtime dump (NXRT_NVN_DUMP_MISSING, any game): manifest.tsv, code_<h>.bin, ctrl_<h>.bin (duplicate rows folded)
 
 Writes <out-dir>/census_<game>.tsv (default out-dir: <repo root>/work/audit) and census_<game>_summary.md.

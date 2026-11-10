@@ -224,7 +224,7 @@ bool take_timeout(const std::vector<std::string>& t, std::size_t from, std::vect
     return true;
 }
 
-// EItemType (CPlayerStateMP1::EItemType, docs/mpr/enums.json): name (case and underscores ignored) or number -> id; -1 when unknown.
+// EItemType (CPlayerStateMP1::EItemType): name (case and underscores ignored) or number -> id; -1 when unknown.
 int64_t item_id(const std::string& tok) {
     static const char* const names[] = {"powerbeam", "icebeam", "wavebeam", "plasmabeam", "missiles", "scanvisor", "morphballbombs", "powerbombs",
                                         "flamethrower", "thermalvisor", "chargebeam", "supermissile", "grapplebeam", "xrayvisor", "icespreader",

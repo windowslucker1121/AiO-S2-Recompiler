@@ -724,7 +724,7 @@ const char* temporal_why(extras::UpscaleMode m) {
                "executable, or a path in [upscale] fsr_dll.";
     if (m == extras::UpscaleMode::Dlss || m == extras::UpscaleMode::Dlaa)
         return "Needs an NVIDIA RTX GPU and the Streamline DLLs (sl.interposer.dll, sl.common.dll, sl.dlss.dll, nvngx_dlss.dll) in upscalers\\streamline "
-               "next to the executable, or their folder in [upscale] dlss_dll. The launcher's Game files page downloads nvngx_dlss.dll from NVIDIA.";
+               "next to the executable, or their folder in [upscale] dlss_dll. The library's DLSS row downloads nvngx_dlss.dll from NVIDIA.";
     return "XeSS is not wired up yet.";
 }
 

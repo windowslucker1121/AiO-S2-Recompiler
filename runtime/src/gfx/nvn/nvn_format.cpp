@@ -7,7 +7,7 @@
 //   refs/SuperMarioWonderRecomp/runtime/src/nvn/nvn_format.cpp: NVN value -> VkFormat (the 0x00..0x9C order, the ASTC
 //     and BGR families, DEPTH24 -> D32, R11G11B10F fallback to R16G16B16A16_SFLOAT).
 //   refs/SuperMarioWonderRecomp/docs/nvn/TILING.md: block-linear storage counts in blocks of bytes_per_block.
-//   docs/mpr/survey/SURVEY.md section 3: the texture formats the game uses; tests/gfx/test_nvn_format.cpp checks them.
+//   the texture formats games use; tests/gfx/test_nvn_format.cpp checks them.
 // Where smo and Wonder disagree on a Vulkan layout, the row carries a comment saying which one was used.
 // Row i is the NVNformat value i + 1 (NONE is 0, LARGE is a sentinel and has no row).
 
