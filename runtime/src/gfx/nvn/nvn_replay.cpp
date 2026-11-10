@@ -1661,7 +1661,7 @@ struct PoolSet {
     std::vector<uint8_t> fdirty;
     std::vector<uint32_t> fdirty_ids;
     const void* fast_pool = nullptr;
-    const void* fast_b = nullptr;
+    uint64_t fast_b = ~0ull;            // what of the binding the view request depends on (view type, depth compare, component type)
     uint64_t fast_epoch = ~0ull;
     size_t fast_pos = 0;
     // prepare_textures found every live texture current and in its sampled layout at this g_tex_state_gen (and this sync): nothing to check
@@ -1825,11 +1825,13 @@ PoolSet* pool_set_sync(const PoolBinding& pb) {
         }
         const uint32_t nwalk = by_cand ? static_cast<uint32_t>(st.cand.size()) : cache ? static_cast<uint32_t>(S.tpool->used_ids.size()) : n;
         const bool fast_cfg = cache && pool_fast_on();
+        // shaders sharing the set ask with their own bindings: the walk may skip the request only when the request would be the same
+        const uint64_t bkey = static_cast<uint64_t>(view_type_for(b)) | (b.image.depth ? 1ull << 16 : 0ull) | static_cast<uint64_t>(b.image.component) << 24;
         bool fast = false;
         if (fast_cfg) {
             TexturePool& tp = *S.tpool;
             if (st.fkey.size() != st.written.size()) { st.fkey.assign(st.written.size(), 0); st.fdirty.assign(st.written.size(), 0); st.fdirty_ids.clear(); st.fast_pool = nullptr; }
-            if (st.fast_pool == &tp && st.fast_epoch == tp.reg_log_epoch && st.fast_b == &b && st.fast_pos <= tp.reg_log.size()) {
+            if (st.fast_pool == &tp && st.fast_epoch == tp.reg_log_epoch && st.fast_b == bkey && st.fast_pos <= tp.reg_log.size()) {
                 fast = true;
                 for (size_t k = st.fast_pos; k < tp.reg_log.size(); ++k) {
                     const uint32_t id = tp.reg_log[k];
@@ -1902,7 +1904,7 @@ PoolSet* pool_set_sync(const PoolBinding& pb) {
             st.fast_pool = S.tpool.get();
             st.fast_epoch = S.tpool->reg_log_epoch;
             st.fast_pos = S.tpool->reg_log.size();
-            st.fast_b = &b;
+            st.fast_b = bkey;
         } else {
             st.fast_pool = nullptr;
         }
@@ -3998,7 +4000,9 @@ struct KeepEntry {
 constexpr uint32_t kKeepAge = 600;          // presents without a use before an entry is dropped
 constexpr size_t kKeepMaxPools = 6;          // 16k sets each
 constexpr uint16_t kKeepMaxFails = 6;
-std::unordered_map<uint64_t, KeepEntry> g_keep;
+// keyed by signatures that are hashes already: the key is its own hash (std::hash<uint64_t> hashed the 8 bytes one by one at every look-up)
+struct KeyIsHash { size_t operator()(uint64_t k) const noexcept { return static_cast<size_t>(k ^ (k >> 29)); } };
+std::unordered_map<uint64_t, KeepEntry, KeyIsHash> g_keep;
 std::vector<VkDescriptorPool> g_keep_pools;
 bool g_keep_full = false;
 uint64_t smp_tune_now() {

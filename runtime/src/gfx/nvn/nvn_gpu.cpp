@@ -364,13 +364,14 @@ void keep_dpool_release(VkDescriptorPool p) {
     });
 }
 
-// [nvn] alloc_batch (default on; cpuperf_ab_what alloc_batch): descriptor sets are allocated eight at a time per layout and handed out one
-// by one (one driver call instead of eight; ~1,000 sets per frame are allocated in Kokiri outside).
+// [nvn] alloc_batch (default off; cpuperf_ab_what alloc_batch): descriptor sets are allocated eight at a time per layout and handed out one
+// by one (one driver call instead of eight; ~1,000 sets per frame are allocated in Kokiri outside). Measured worse (Kokiri 1080, paired
+// windows: render replay +0.30 ms per frame, 3 of 19 pairs better): the driver's cost is per set, and spare sets of a layout went unused.
 std::atomic<bool> g_alloc_batch_ab{true};
 void alloc_batch_enable(bool on) { g_alloc_batch_ab.store(on, std::memory_order_relaxed); }
 VkDescriptorSet Frame::alloc_set(VkDescriptorSetLayout layout) {
     Slot& s = *static_cast<Slot*>(slot);
-    static const bool batch_cfg = config_get_bool("nvn", "alloc_batch", true);
+    static const bool batch_cfg = config_get_bool("nvn", "alloc_batch", false);
     if (batch_cfg && g_alloc_batch_ab.load(std::memory_order_relaxed)) {
         Slot::Spare& sp = s.spare[(reinterpret_cast<uintptr_t>(layout) >> 4) & 127];
         if (sp.layout == layout && sp.n) return sp.sets[--sp.n];
