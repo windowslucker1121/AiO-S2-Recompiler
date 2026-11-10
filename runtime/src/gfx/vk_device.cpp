@@ -25,6 +25,7 @@
 #include "vk_gauges.h"
 #include "vk_coopmat_probe.h"
 #include "extras/temporal.h"
+#include "nvn/nvn_hazard.h"
 
 #include <vk_mem_alloc.h>
 
@@ -1053,6 +1054,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     r = vkCreateDevice(physical_, &dci, nullptr, &device_);
     if (r != VK_SUCCESS) return fail("vkCreateDevice failed (" + std::to_string(r) + ")");
     volkLoadDevice(device_);
+    nvn::be::hazard::install_create_hooks();   // [nvn] hazard: what pipelines, sets and buffers touch (nvn_hazard.cpp)
     if (config_get_bool("gfx", "exp_bda_probe", false)) probe_bda_placement(physical_, device_, a12.bufferDeviceAddressCaptureReplay);
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
     if (config_get_bool("gfx", "exp_bda_probe", false)) probe_sparse_window(physical_, device_, queue_, queue_family_);
@@ -1388,6 +1390,7 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
     VkResult r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
     if (r != VK_SUCCESS) return r;
     vk_gauge_buffers().add(1);
+    nvn::be::hazard::note_buffer(b.buffer, usage, size);   // VMA's own vkCreateBuffer is not hooked
     if (use == MemoryUse::Upload || use == MemoryUse::Readback) {      // S34: where host-visible buffers live (device-local host-visible = resizable BAR, else system memory)
         static std::atomic<int> logged{0};
         VkMemoryPropertyFlags mp = 0;

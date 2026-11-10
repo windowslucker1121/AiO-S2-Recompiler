@@ -1128,6 +1128,31 @@ page walk), keep 6.6, prepare_textures 9, do_dispatch 7; costs are now spread ov
 Texture/TexGpu, KDep vectors). The next step needs fewer per-draw validations (a draw-level memo or work ahead on another thread), not more
 micro cuts. Pitfall: the game lock's `game.next` slot is taken within milliseconds when it frees; poll it fast (work\r6\waitlock.ps1 style).
 
+**Session 2026-11-10 (B1: range-based hazard tracking, `[nvn] hazard`, default off).** `runtime/src/gfx/nvn/nvn_hazard.cpp` (+ a
+placeholder barrier in `nvn_cmdq.cpp`): with `hazard = on` the replay's `memory_barrier` calls are only counted and a full barrier is recorded
+where a command touches what an earlier one wrote (or writes what one read) since the last barrier. It works on the Vulkan calls (hooks in
+front of cmd_thread's, plus creation hooks from `volkLoadDevice`): buffer ranges per memory (pool imports by host address, so overlapping
+import chunks alias correctly), descriptor sets by their last update, per-binding storage writes from a SPIR-V scan of each module, pointer
+shaders as "every buffer with a device address", images (attachments, storage, GENERAL sampled, transfers; a layout transition orders its
+image). A render pass gets a placeholder in the recorder ring, decided at its first conflicting draw or at its end (the recorder waits).
+Command buffers end with a host-visible barrier when writes are unordered. `cpuperf_ab_what` names `hazard`, `hazard_piggyback`; the
+`ab window` lines now carry GPU exec / busy (frame trace on) and full barriers per frame; statistics line `hazard:` (barriers by command
+kind and by cause). **Measured (Kokiri outside, 1920x1080, uncapped, alone, paired 300-present windows, 13-14 steady pairs per run, four
+builds):** full memory barriers per frame 908 -> ~300 (plus ~150 layout transitions that carry a full barrier; 361 standalone without that
+piggyback), **GPU busy -0.8 ms (14/14)**, but render-thread replay **+3.2 ms** (best build; first build +4.1) and fps **-3.8** (0/14): Kokiri
+is render-thread and GPU balanced at ~25 ms here, so the tracker's CPU cost (draw-time set registration, descriptor summaries, conflict
+checks: ~6% of the render thread's samples after three rounds of cuts) outweighs the GPU gain. Piggyback alone: GPU busy +0.21 ms (0/10),
+replay -0.2 ms: neutral. **Why the GPU gain is small:** the ~300 barriers left are real dependencies under this model (per frame, by
+cause, approximate: dispatch write-after-write ~64, read-after-write ~9, pointer reads after a write to device-address memory ~9; copies
+read-after-write ~44 / write-after-read ~34; draws in a pass after a write ~20 (+ ~10 pointer reads); attachments re-used ~20; fills ~12): shadow copy-in -> dispatch -> copy-back
+chains, compute chains, mesh-indirect record copies. Removing them needs restructuring (all copy-ins of a run of dispatches first, one
+barrier), not elision; K1's -3.85 ms ceiling assumed all barriers gone. Correctness (hazard on): village capture replay on vs off SSIM
+0.9999999 (both 0.493 against the old reference.png); A18 records on the nb3 capture identical over 4 traced loops (25 mesh draws, sum of
+x 4,398 as in A18); Kokiri and first-scene screenshots normal (foliage, crowns, fog, Deku Tree nose, no 8-px stripes); runtime tests
+173/174 with `NXRT_NVN_HAZARD=on` (gfx_nvn_scene_state segfaulted once in the full run, passes 5/5 alone, known flake). `hazard = verify`
+(old barriers + the tracker counting hazards no requested barrier ordered) is built but was not run in game. Not done: VK_KHR_unified
+_image_layouts, mesh-indirect copies before the pass. Pitfall: game-lock queue races; poll `game.next` every 0.5 s.
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass

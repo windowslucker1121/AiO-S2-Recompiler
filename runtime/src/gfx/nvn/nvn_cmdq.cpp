@@ -31,6 +31,7 @@
 #include <volk.h>
 
 #include "nvn_gpu_internal.h"
+#include "nvn_hazard.h"
 #include "nxrt/config.h"
 #include "nxrt/log.h"
 
@@ -97,6 +98,17 @@ void recorder_loop() {
     }
 }
 
+// The placeholder barrier the recorder may be holding at (ph_insert): its state word in the ring, null when none is pending.
+std::atomic<uint32_t>* g_ph = nullptr;
+PFN_vkCmdPipelineBarrier2 o_pb2_raw = nullptr;   // the driver's (set at install)
+uint64_t g_ph_n = 0, g_ph_forced = 0;
+void ph_set(uint32_t v) {   // 1 barrier, 2 nothing
+    if (!g_ph) return;
+    g_ph->store(v, std::memory_order_release);
+    WakeByAddressSingle(g_ph);
+    g_ph = nullptr;
+}
+
 // Room for a packet of `payload` bytes; the returned pointer is the payload. commit() publishes it.
 uint64_t g_wr = 0;   // producer's write position (== g_head between packets)
 uint8_t* reserve(ExecFn fn, size_t payload) {
@@ -116,6 +128,7 @@ uint8_t* reserve(ExecFn fn, size_t payload) {
             g_wr += size;
             return g_ring + at + sizeof(PacketHdr);
         }
+        if (g_ph) { ++g_ph_forced; ph_set(1); }   // the recorder may be held at a placeholder: it becomes a barrier
         _mm_pause();   // full: the recorder makes room
     }
 }
@@ -126,6 +139,7 @@ void commit() {
 }
 
 void drain_now() {
+    if (g_ph) { ++g_ph_forced; ph_set(1); }
     if (g_tail.load(std::memory_order_acquire) == g_wr) return;
     ++g_drains;
     if (g_sleeping.load(std::memory_order_seq_cst)) WakeByAddressSingle(&g_head);
@@ -342,6 +356,32 @@ void VKAPI_PTR h_pb2(VkCommandBuffer cb, const VkDependencyInfo* di) {
     a->di.pBufferMemoryBarriers = w.put(di->pBufferMemoryBarriers, di->bufferMemoryBarrierCount);
     a->di.pImageMemoryBarriers = w.put(di->pImageMemoryBarriers, di->imageMemoryBarrierCount);
     commit();
+}
+
+// The placeholder barrier ([nvn] hazard): the recorder waits here until the render thread has decided (ph_resolve), then records a full
+// memory barrier or nothing.
+struct PhArgs { VkCommandBuffer cb; std::atomic<uint32_t> state; };
+void full_barrier(VkCommandBuffer cb) {
+    VkMemoryBarrier2 b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    VkDependencyInfo di = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = 1;
+    di.pMemoryBarriers = &b;
+    o_pb2(cb, &di);
+}
+void x_ph(const uint8_t* p) {
+    PhArgs& a = *reinterpret_cast<PhArgs*>(const_cast<uint8_t*>(p));
+    uint32_t s = a.state.load(std::memory_order_acquire);
+    for (int i = 0; s == 0 && i < 20000; ++i) { _mm_pause(); s = a.state.load(std::memory_order_acquire); }
+    while (s == 0) {
+        uint32_t zero = 0;
+        WaitOnAddress(&a.state, &zero, sizeof zero, 1);
+        s = a.state.load(std::memory_order_acquire);
+    }
+    if (s == 1) full_barrier(a.cb);
 }
 
 // vkCmdBeginRendering: the info, its colour attachments and the depth / stencil attachments (no pNext anywhere, else direct).
@@ -667,6 +707,8 @@ void install_all() {
     NXQ_DIRECT(vkBeginCommandBuffer); NXQ_DIRECT(vkEndCommandBuffer); NXQ_DIRECT(vkResetCommandBuffer); NXQ_DIRECT(vkResetCommandPool);
     NXQ_DIRECT(vkAllocateCommandBuffers); NXQ_DIRECT(vkFreeCommandBuffers); NXQ_DIRECT(vkTrimCommandPool); NXQ_DIRECT(vkDestroyCommandPool);
     NXQ_DIRECT(vkQueueSubmit); NXQ_DIRECT(vkQueueSubmit2); NXQ_DIRECT(vkQueueWaitIdle); NXQ_DIRECT(vkDeviceWaitIdle); NXQ_DIRECT(vkQueuePresentKHR);
+    o_pb2_raw = o_pb2;
+    hazard::install_cmd_hooks();   // [nvn] hazard: in front of these hooks
 }
 
 }  // namespace
@@ -699,6 +741,28 @@ void begin_submission(bool on) {
 void set_copies(bool on) { g_copies_q.store(on, std::memory_order_relaxed); }
 void set_desc(bool on) { g_desc_q.store(on, std::memory_order_relaxed); }
 void desc_stats(uint64_t* queued, uint64_t* direct) { *queued = g_uds_queued; *direct = g_uds_direct; }
+
+bool queuing() { return g_ring && queue_here(); }
+
+bool ph_insert(VkCommandBuffer cb) {
+    if (!queuing() || !o_pb2) return false;
+    if (g_ph) ph_set(1);
+    PhArgs* a = reinterpret_cast<PhArgs*>(reserve(&x_ph, sizeof(PhArgs)));
+    a->cb = cb;
+    new (&a->state) std::atomic<uint32_t>(0);
+    g_ph = &a->state;
+    ++g_ph_n;
+    commit();
+    return true;
+}
+void ph_resolve(bool barrier) { ph_set(barrier ? 1 : 2); }
+bool ph_pending() { return g_ph != nullptr; }
+void ph_stats(uint64_t* inserted, uint64_t* forced) { *inserted = g_ph_n; *forced = g_ph_forced; }
+
+void raw_barrier(VkCommandBuffer cb, const VkDependencyInfo* di) {
+    if (o_pb2_raw) o_pb2_raw(cb, di);
+    else vkCmdPipelineBarrier2(cb, di);
+}
 
 void drain() {
     if (g_ring && g_active.load(std::memory_order_relaxed) && gpu::on_render_thread()) drain_now();
