@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// [nvn] hazard (default on): range-based hazard tracking for the render thread's command buffers.
+// [nvn] hazard (default off: see the 2026-11-10 measurements in AGENTS.md): range-based hazard tracking for the render thread's command buffers.
 //
 // The replay used to put a full memory barrier (all commands, all memory) after every dispatch, around every copy, fill and memory write,
 // at the end of passes that wrote storage, and for every game barrier: ~900 per frame in Kokiri Forest at 1920x1080, ~3.85 ms of GPU time
@@ -56,14 +56,15 @@ inline uint64_t H(const void* p) { return reinterpret_cast<uint64_t>(p); }
 
 int mode() {   // 0 off, 1 on, 2 verify
     static const int m = [] {
-        const std::string v = config_get_str("nvn", "hazard", "on");
+        const std::string v = config_get_str("nvn", "hazard", "off");
         return v == "off" || v == "0" || v == "false" ? 0 : v == "verify" ? 2 : 1;
     }();
     return m;
 }
+bool g_piggy_ab = true;   // cpuperf_ab_what hazard_piggyback
 bool piggyback_on() {
     static const bool on = config_get_bool("nvn", "hazard_piggyback", true);
-    return on;
+    return on && g_piggy_ab;
 }
 
 // ---- what objects touch (any thread) -------------------------------------------------------------------------------------------
@@ -75,10 +76,40 @@ struct Rng { uint64_t space = 0, lo = 0, hi = 0; bool bda = true; };
 struct BufInfo { uint64_t space = 0, base = 0, size = kEnd; bool bda = true; };
 struct BufView { VkBuffer buf; VkDeviceSize off, range; };
 struct Res { uint8_t kind = 0; bool storage = false; Rng r; uint64_t img = 0; };   // kind 0 buffer, 1 image, 2 unknown (anything)
-struct Sum { uint64_t ver = 0; std::vector<std::pair<uint32_t, Res>> e; };
+struct Sum {
+    uint64_t ver = 0;
+    std::vector<std::pair<uint32_t, Res>> e;   // key: binding << 16 | array element
+    uint64_t seen_ep = 0, seen_ver = 0;   // registered in barrier interval seen_ep at version seen_ver (render thread)
+    uint64_t seen_wm = 0;                 // ... with these bindings' storage descriptors as written (~0: all)
+    uint64_t gb = 0;                      // granule bloom of its buffer ranges (gbits)
+    bool has_img = false, has_bda = false, has_unknown = false;
+};
+// A 64-bit bloom of the 2 MiB granules a range touches (all bits for a range over 8 granules).
+inline uint64_t gbits(uint64_t space, uint64_t lo, uint64_t hi) {
+    const uint64_t g0 = lo >> 21, g1 = (hi - 1) >> 21;
+    if (g1 - g0 >= 8) return ~0ull;
+    uint64_t b = 0;
+    for (uint64_t g = g0; g <= g1; ++g) b |= uint64_t{1} << (((space ^ (g * 0x9e3779b97f4a7c15ull)) * 0xff51afd7ed558ccdull) >> 58);
+    return b;
+}
+void sum_refresh(Sum& s) {
+    s.gb = 0;
+    s.has_img = s.has_bda = s.has_unknown = false;
+    for (const auto& [k, x] : s.e) {
+        if (x.kind == 0) { s.gb |= gbits(x.r.space, x.r.lo, x.r.hi); s.has_bda |= x.r.bda; }
+        else if (x.kind == 1) s.has_img = true;
+        else s.has_unknown = true;
+    }
+}
+// What a module or pipeline writes: flags, and per descriptor set the bindings its stores reach (bit b: binding b; kFStore in flags:
+// a store whose target is not known, so every storage descriptor counts as written).
+constexpr int kSets = 8;
+struct PInfo { uint32_t f = 0; uint64_t wm[kSets] = {}; };
+PInfo unknown_info() { PInfo i; i.f = 8; return i; }
 
-std::mutex g_mu;
-std::unordered_map<uint64_t, uint32_t> g_mod, g_pipe;
+std::mutex g_mu;     // buffers, memory, views, descriptor set summaries
+std::mutex g_pmu;    // modules and pipelines
+std::unordered_map<uint64_t, PInfo> g_mod, g_pipe;
 std::unordered_map<uint64_t, BufInfo> g_buf;
 std::unordered_map<uint64_t, uint64_t> g_hostmem, g_view;
 std::unordered_map<uint64_t, BufView> g_bview;
@@ -86,57 +117,78 @@ std::unordered_map<uint64_t, Sum> g_sums;
 uint64_t g_ver = 0;
 uint64_t g_mods_n = 0, g_mods_f[4] = {};   // statistics: modules scanned, with each flag
 
-// SPIR-V: does a module store to storage buffers / images, load or store through PhysicalStorageBuffer pointers?
-uint32_t scan_spirv(const uint32_t* w, size_t n) {
-    if (n < 5 || w[0] != 0x07230203u) return kFUnknown;
+// SPIR-V: which storage bindings does a module store to (or write as images), does it load or store through PhysicalStorageBuffer pointers?
+PInfo scan_spirv(const uint32_t* w, size_t n) {
+    PInfo info;
+    if (n < 5 || w[0] != 0x07230203u) return unknown_info();
     const uint32_t bound = w[3];
-    if (bound > (1u << 24)) return kFUnknown;
-    std::vector<uint32_t> cls(bound, ~0u), ty(bound, 0);
-    uint32_t f = 0;
+    if (bound > (1u << 24)) return unknown_info();
+    std::vector<uint32_t> cls(bound, ~0u), ty(bound, 0), base(bound, ~0u), dset(bound, ~0u), dbind(bound, ~0u);
+    uint32_t& f = info.f;
     for (size_t i = 5; i < n;) {
         const uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
-        if (!wc || i + wc > n) return kFUnknown;
+        if (!wc || i + wc > n) return unknown_info();
         switch (op) {
             case 32: if (wc >= 3 && w[i + 1] < bound) cls[w[i + 1]] = w[i + 2]; break;        // OpTypePointer
             case 39: if (wc >= 3 && w[i + 1] < bound) cls[w[i + 1]] = w[i + 2]; break;        // OpTypeForwardPointer
+            case 71:                                                                           // OpDecorate DescriptorSet / Binding
+                if (wc >= 4 && w[i + 1] < bound) { if (w[i + 2] == 34) dset[w[i + 1]] = w[i + 3]; else if (w[i + 2] == 33) dbind[w[i + 1]] = w[i + 3]; }
+                break;
             case 1: case 55: case 57: case 59: case 61: case 65: case 66: case 67: case 70: case 81: case 83: case 120: case 124: case 169: case 245:
                 if (wc >= 3 && w[i + 2] < bound) ty[w[i + 2]] = w[i + 1];
+                // the variable a pointer (or a loaded image) comes from: variables, access chains, copies, loads
+                if (op == 59 && w[i + 2] < bound) base[w[i + 2]] = w[i + 2];
+                else if ((op == 65 || op == 66 || op == 67 || op == 70 || op == 83 || op == 124 || op == 61) && wc >= 4 && w[i + 2] < bound && w[i + 3] < bound)
+                    base[w[i + 2]] = base[w[i + 3]];
                 break;
-            case 99: case 60: f |= kFStore; break;   // OpImageWrite, OpImageTexelPointer (image atomics)
             default: break;
         }
         i += wc;
     }
+    // A store through `id`: the binding of its variable, else (no known variable) every storage binding.
+    auto write_of = [&](uint32_t id) {
+        const uint32_t v = id < bound ? base[id] : ~0u;
+        if (v < bound && dset[v] < static_cast<uint32_t>(kSets) && dbind[v] < 64) info.wm[dset[v]] |= uint64_t{1} << dbind[v];
+        else if (v < bound && dset[v] < static_cast<uint32_t>(kSets) && dbind[v] != ~0u) info.wm[dset[v]] = ~0ull;
+        else f |= kFStore;
+    };
     auto klass = [&](uint32_t id) -> uint32_t {
         if (id >= bound) return ~0u;
         const uint32_t t = ty[id];
         return t < bound ? cls[t] : ~0u;
     };
-    auto store_to = [&](uint32_t c) {
-        if (c == 12 || c == 2 || c == 11) f |= kFStore;          // StorageBuffer, Uniform (BufferBlock), Image
+    auto store_to = [&](uint32_t ptr) {
+        const uint32_t c = klass(ptr);
+        if (c == 12 || c == 2 || c == 11) write_of(ptr);          // StorageBuffer, Uniform (BufferBlock), Image (texel pointer)
         else if (c == 5349) f |= kFBdaWrite | kFBdaRead;          // PhysicalStorageBuffer
         else if (c == ~0u) f |= kFStore;                          // a pointer of unknown origin
     };
     for (size_t i = 5; i < n;) {
         const uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
         switch (op) {
-            case 62: case 228: case 63: case 64: if (wc >= 2) store_to(klass(w[i + 1])); break;   // OpStore, OpAtomicStore, OpCopyMemory(Sized)
+            case 62: case 228: case 63: case 64: if (wc >= 2) store_to(w[i + 1]); break;   // OpStore, OpAtomicStore, OpCopyMemory(Sized)
             case 229: case 230: case 231: case 232: case 233: case 234: case 235: case 236: case 237: case 238: case 239: case 240: case 241: case 242:
             case 6035: case 5614: case 5615:
-                if (wc >= 4) store_to(klass(w[i + 3]));
+                if (wc >= 4) store_to(w[i + 3]);
                 break;
+            case 99: if (wc >= 2) write_of(w[i + 1]); break;                                // OpImageWrite: the loaded image's variable
+            case 60: if (wc >= 4) write_of(w[i + 3]); break;                                // OpImageTexelPointer (image atomics)
             case 61: if (wc >= 4 && klass(w[i + 3]) == 5349) f |= kFBdaRead; break;     // OpLoad through a pointer
             case 120: if (wc >= 3 && w[i + 1] < bound && cls[w[i + 1]] == 5349) f |= kFBdaRead; break;   // OpConvertUToPtr
             default: break;
         }
         i += wc;
     }
-    return f;
+    return info;
 }
 
-uint32_t module_flags_locked(VkShaderModule m) {
+void or_into(PInfo& a, const PInfo& b) {
+    a.f |= b.f;
+    for (int k = 0; k < kSets; ++k) a.wm[k] |= b.wm[k];
+}
+PInfo module_info_locked(VkShaderModule m) {
     const auto it = g_mod.find(H(m));
-    return it == g_mod.end() ? kFUnknown : it->second;
+    return it == g_mod.end() ? unknown_info() : it->second;
 }
 
 BufInfo buf_info_locked(VkBuffer b) {
@@ -181,36 +233,36 @@ const void* find_chain(const void* p, VkStructureType t) {
 VkResult VKAPI_PTR h_csm(VkDevice d, const VkShaderModuleCreateInfo* ci, const VkAllocationCallbacks* a, VkShaderModule* out) {
     const VkResult r = o_csm(d, ci, a, out);
     if (r == VK_SUCCESS) {
-        const uint32_t f = scan_spirv(ci->pCode, ci->codeSize / 4);
-        std::lock_guard<std::mutex> lk(g_mu);
-        g_mod[H(*out)] = f;
+        const PInfo pi = scan_spirv(ci->pCode, ci->codeSize / 4);
+        std::lock_guard<std::mutex> lk(g_pmu);
+        g_mod[H(*out)] = pi;
         ++g_mods_n;
-        for (int b = 0; b < 4; ++b) if (f & (1u << b)) ++g_mods_f[b];
+        for (int b = 0; b < 4; ++b) if (pi.f & (1u << b)) ++g_mods_f[b];
     }
     return r;
 }
 
-uint32_t stages_flags_locked(const VkPipelineShaderStageCreateInfo* st, uint32_t n) {
-    uint32_t f = 0;
+PInfo stages_info_locked(const VkPipelineShaderStageCreateInfo* st, uint32_t n) {
+    PInfo f;
     for (uint32_t i = 0; i < n; ++i) {
-        if (st[i].module) f |= module_flags_locked(st[i].module);
+        if (st[i].module) or_into(f, module_info_locked(st[i].module));
         else if (auto* mi = static_cast<const VkShaderModuleCreateInfo*>(find_chain(st[i].pNext, VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO)))
-            f |= scan_spirv(mi->pCode, mi->codeSize / 4);
-        else f |= kFUnknown;
+            or_into(f, scan_spirv(mi->pCode, mi->codeSize / 4));
+        else f.f |= kFUnknown;
     }
     return f;
 }
 
 VkResult VKAPI_PTR h_cgp(VkDevice d, VkPipelineCache c, uint32_t n, const VkGraphicsPipelineCreateInfo* ci, const VkAllocationCallbacks* a, VkPipeline* out) {
     const VkResult r = o_cgp(d, c, n, ci, a, out);
-    std::lock_guard<std::mutex> lk(g_mu);
+    std::lock_guard<std::mutex> lk(g_pmu);
     for (uint32_t i = 0; i < n; ++i) {
         if (!out[i]) continue;
-        uint32_t f = stages_flags_locked(ci[i].pStages, ci[i].stageCount);
+        PInfo f = stages_info_locked(ci[i].pStages, ci[i].stageCount);
         if (auto* li = static_cast<const VkPipelineLibraryCreateInfoKHR*>(find_chain(ci[i].pNext, VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR)))
             for (uint32_t k = 0; k < li->libraryCount; ++k) {
                 const auto it = g_pipe.find(H(li->pLibraries[k]));
-                f |= it == g_pipe.end() ? kFUnknown : it->second;
+                or_into(f, it == g_pipe.end() ? unknown_info() : it->second);
             }
         g_pipe[H(out[i])] = f;
     }
@@ -218,9 +270,9 @@ VkResult VKAPI_PTR h_cgp(VkDevice d, VkPipelineCache c, uint32_t n, const VkGrap
 }
 VkResult VKAPI_PTR h_ccp(VkDevice d, VkPipelineCache c, uint32_t n, const VkComputePipelineCreateInfo* ci, const VkAllocationCallbacks* a, VkPipeline* out) {
     const VkResult r = o_ccp(d, c, n, ci, a, out);
-    std::lock_guard<std::mutex> lk(g_mu);
+    std::lock_guard<std::mutex> lk(g_pmu);
     for (uint32_t i = 0; i < n; ++i)
-        if (out[i]) g_pipe[H(out[i])] = stages_flags_locked(&ci[i].stage, 1);
+        if (out[i]) g_pipe[H(out[i])] = stages_info_locked(&ci[i].stage, 1);
     return r;
 }
 
@@ -276,10 +328,12 @@ VkResult VKAPI_PTR h_ads(VkDevice d, const VkDescriptorSetAllocateInfo* ai, VkDe
     const VkResult r = o_ads(d, ai, out);
     if (r == VK_SUCCESS) {
         std::lock_guard<std::mutex> lk(g_mu);
-        for (uint32_t i = 0; i < ai->descriptorSetCount; ++i) {
-            Sum& s = g_sums[H(out[i])];
-            s.e.clear();
-            s.ver = ++g_ver;
+        for (uint32_t i = 0; i < ai->descriptorSetCount; ++i) {   // a handle used before: its old contents go (a new one has none)
+            const auto it = g_sums.find(H(out[i]));
+            if (it == g_sums.end() || it->second.e.empty()) continue;
+            it->second.e.clear();
+            it->second.ver = ++g_ver;
+            sum_refresh(it->second);
         }
     }
     return r;
@@ -355,6 +409,7 @@ void VKAPI_PTR h_uds(VkDevice d, uint32_t n, const VkWriteDescriptorSet* w, uint
             }
             if (has || !s.e.empty()) put(s, key, has ? &r : nullptr);
         }
+        sum_refresh(s);
     }
     for (uint32_t i = 0; i < nc; ++i) {   // copies: what the source holds is not followed per descriptor
         Sum& s = g_sums[H(c[i].dstSet)];
@@ -362,6 +417,7 @@ void VKAPI_PTR h_uds(VkDevice d, uint32_t n, const VkWriteDescriptorSet* w, uint
         Res r;
         r.kind = 2;
         put(s, 0xffffffffu, &r);
+        sum_refresh(s);
     }
 }
 
@@ -373,8 +429,53 @@ struct Acc {
     bool bda = false;     // every buffer with a device address
     uint32_t nbda = 0;    // ranges in r over such buffers
     size_t cap = 512;
-    bool empty() const { return !all && !bda && r.empty() && img.empty(); }
-    void clear() { r.clear(); img.clear(); all = bda = false; nbda = 0; cap = 512; }
+    // Coarse (the read sets R / Rp): ranges as bits of a hashed bitmap of 64 KiB granules (a false hit only costs a barrier), ranges over
+    // kCoarseMax granules in `r` as they are. Adding a draw's reads is then a few bit sets instead of keeping a sorted interval list.
+    bool coarse = false;
+    std::vector<uint64_t> bits;   // kBitWords words when coarse
+    uint32_t bits_lo = ~0u, bits_hi = 0;   // words touched since the last clear
+    static constexpr uint32_t kBitWords = 1024;
+    static constexpr uint64_t kCoarseMax = 16;
+    static uint32_t gbit(uint64_t space, uint64_t g) { return static_cast<uint32_t>(((space ^ (g * 0x9e3779b97f4a7c15ull)) * 0xff51afd7ed558ccdull) >> 48) & (kBitWords * 64 - 1); }
+    size_t sorted_n = 0;  // r[0, sorted_n) is sorted by (space, lo) and has no overlaps (compact); the rest is in the order added
+    // Descriptor sets read as a whole (R, Rp, cr): their summaries at a version; a write is checked against them only when its granule bloom
+    // meets `sgb` (the OR of theirs), then entry by entry. A summary updated since counts as a hit.
+    struct SumRef { const Sum* s; uint64_t ver; };
+    std::vector<SumRef> sums;
+    uint64_t sgb = 0;
+    bool s_img = false, s_bda = false, s_unknown = false;
+    uint64_t gb = 0;      // granule bloom of the ranges in r
+    uint64_t bloom = 0;   // bit (space hash & 63) of every range in r
+    static uint64_t bit(uint64_t space) { return uint64_t{1} << ((space * 0x9e3779b97f4a7c15ull) >> 58); }
+    bool empty() const { return !all && !bda && r.empty() && img.empty() && !(coarse && bits_lo <= bits_hi) && sums.empty(); }
+    void add_sum(const Sum& s) {
+        sums.push_back({&s, s.ver});
+        sgb |= s.gb;
+        s_img |= s.has_img;
+        s_bda |= s.has_bda;
+        s_unknown |= s.has_unknown;
+    }
+    void clear() {
+        r.clear(); img.clear(); all = bda = false; nbda = 0; cap = 512; bloom = 0; sorted_n = 0;
+        sums.clear(); sgb = 0; s_img = s_bda = s_unknown = false; gb = 0;
+        if (bits_lo <= bits_hi) std::fill(bits.begin() + bits_lo, bits.begin() + bits_hi + 1, 0);
+        bits_lo = ~0u; bits_hi = 0;
+    }
+    bool coarse_add(const Rng& x) {   // true: taken by the bitmap
+        const uint64_t g0 = x.lo >> 16, g1 = (x.hi - 1) >> 16;
+        if (g1 - g0 >= kCoarseMax) return false;
+        if (bits.empty()) bits.assign(kBitWords, 0);
+        for (uint64_t g = g0; g <= g1; ++g) {
+            const uint32_t b = gbit(x.space, g), w = b >> 6;
+            bits[w] |= uint64_t{1} << (b & 63);
+            bits_lo = std::min(bits_lo, w);
+            bits_hi = std::max(bits_hi, w);
+        }
+        nbda += x.bda;
+        any_bits = true;
+        return true;
+    }
+    bool any_bits = false;
     void compact() {
         std::sort(r.begin(), r.end(), [](const Rng& a, const Rng& b) { return a.space != b.space ? a.space < b.space : a.lo < b.lo; });
         size_t o = 0;
@@ -387,12 +488,15 @@ struct Acc {
         r.resize(o);
         nbda = 0;
         for (const Rng& x : r) nbda += x.bda;
-        cap = std::max<size_t>(512, r.size() * 2);
+        sorted_n = r.size();
     }
     void add(const Rng& x) {
+        if (coarse && coarse_add(x)) return;
+        gb |= gbits(x.space, x.lo, x.hi);
         r.push_back(x);
+        bloom |= bit(x.space);
         nbda += x.bda;
-        if (r.size() > cap) compact();
+        if (r.size() - sorted_n > std::max<size_t>(32, sorted_n / 4)) compact();
     }
     void add_img(uint64_t i) { if (std::find(img.begin(), img.end(), i) == img.end()) img.push_back(i); }
     void merge(const Acc& o) {
@@ -400,20 +504,73 @@ struct Acc {
         bda |= o.bda;
         for (const Rng& x : o.r) add(x);
         for (uint64_t i : o.img) add_img(i);
+        if (!o.sums.empty()) {
+            sums.insert(sums.end(), o.sums.begin(), o.sums.end());
+            sgb |= o.sgb;
+            s_img |= o.s_img;
+            s_bda |= o.s_bda;
+            s_unknown |= o.s_unknown;
+        }
+        if (o.bits_lo <= o.bits_hi) {   // both coarse (R / Rp)
+            if (bits.empty()) bits.assign(kBitWords, 0);
+            for (uint32_t w = o.bits_lo; w <= o.bits_hi; ++w) bits[w] |= o.bits[w];
+            bits_lo = std::min(bits_lo, o.bits_lo);
+            bits_hi = std::max(bits_hi, o.bits_hi);
+            nbda += o.nbda;
+        }
+    }
+    bool sums_hit(const Rng& x) const {
+        if (sums.empty()) return false;
+        if (s_unknown) return true;
+        const uint64_t xb = gbits(x.space, x.lo, x.hi);
+        if (!(xb & sgb)) return false;
+        std::lock_guard<std::mutex> lk(g_mu);   // the summaries (other threads may update sets)
+        for (const SumRef& sr : sums) {
+            if (sr.s->ver != sr.ver) return true;
+            if (!(sr.s->gb & xb)) continue;
+            for (const auto& [k, e] : sr.s->e)
+                if (e.kind == 0 && e.r.space == x.space && e.r.lo < x.hi && x.lo < e.r.hi) return true;
+        }
+        return false;
+    }
+    bool sums_hit_img(uint64_t i) const {
+        if (sums.empty() || !(s_img || s_unknown)) return false;
+        if (s_unknown) return true;
+        std::lock_guard<std::mutex> lk(g_mu);
+        for (const SumRef& sr : sums) {
+            if (sr.s->ver != sr.ver) return true;
+            if (!sr.s->has_img) continue;
+            for (const auto& [k, e] : sr.s->e) if (e.kind == 1 && e.img == i) return true;
+        }
+        return false;
     }
     bool hit(const Rng& x) const {
         if (all || (bda && x.bda)) return true;
-        for (const Rng& a : r) if (a.space == x.space && a.lo < x.hi && x.lo < a.hi) return true;
+        if (sums_hit(x)) return true;
+        if (bits_lo <= bits_hi) {
+            const uint64_t g0 = x.lo >> 16, g1 = (x.hi - 1) >> 16;
+            if (g1 - g0 > 4096) return true;   // a huge range: assume it meets something read
+            for (uint64_t g = g0; g <= g1; ++g) { const uint32_t b = gbit(x.space, g); if ((bits[b >> 6] >> (b & 63)) & 1) return true; }
+        }
+        if (!(bloom & bit(x.space))) return false;
+        if (sorted_n) {   // the merged prefix: the range starting at or before x.lo, and the one after it
+            auto it = std::upper_bound(r.begin(), r.begin() + static_cast<std::ptrdiff_t>(sorted_n), x,
+                                       [](const Rng& a, const Rng& b) { return a.space != b.space ? a.space < b.space : a.lo < b.lo; });
+            if (it != r.begin()) { const Rng& a = *(it - 1); if (a.space == x.space && a.hi > x.lo) return true; }
+            if (it != r.begin() + static_cast<std::ptrdiff_t>(sorted_n) && it->space == x.space && it->lo < x.hi) return true;
+        }
+        for (size_t i = sorted_n; i < r.size(); ++i) { const Rng& a = r[i]; if (a.space == x.space && a.lo < x.hi && x.lo < a.hi) return true; }
         return false;
     }
-    bool hit_bda() const { return all || bda || nbda; }
-    bool hit_img(uint64_t i) const { return all || std::find(img.begin(), img.end(), i) != img.end(); }
+    bool hit_bda() const { return all || bda || nbda || s_bda || s_unknown; }
+    bool hit_img(uint64_t i) const { return all || std::find(img.begin(), img.end(), i) != img.end() || sums_hit_img(i); }
 };
 
 // What one command reads (cr) and writes (cw) before it is checked.
 Acc cr, cw;
 // Since the last barrier: written (D) and read (R). While a pass waits on its placeholder: Dp / Rp hold what came before the pass.
 Acc D, R, Dp, Rp;
+struct CoarseInit { CoarseInit() { R.coarse = Rp.coarse = true; } } g_coarse_init;
 
 enum Why : int { kWDraw, kWDispatch, kWCopy, kWWrite, kWImage, kWAttach, kWUnknown, kWEnd, kWBegin, kWOff, kWN };
 const char* const kWhyName[kWN] = {"draw", "dispatch", "copy", "fill/update", "image", "attachments", "unknown", "cb end", "cb start", "switch"};
@@ -436,16 +593,20 @@ bool g_req_since = false;       // verify: a barrier was requested since the las
 struct BindPt {
     VkDescriptorSet sets[16] = {};
     uint32_t pend = 0;            // sets not yet registered since the last barrier
-    uint32_t flags = 0;
+    PInfo pi;
+    uint32_t push_set = 0;
     bool push_pend = false;
-    std::vector<Res> push;
+    std::vector<std::pair<uint32_t, Res>> push;   // binding, descriptor
 };
 BindPt g_bp[2];
 Rng g_vb[32];
 uint32_t g_vb_set = 0, g_vb_pend = 0;
 Rng g_ib;
 bool g_ib_set = false, g_ib_pend = false;
-std::unordered_map<uint64_t, uint64_t> g_seen;   // set (| 1: as written) -> version registered since the last barrier
+uint64_t g_ep = 1;   // barrier interval: a set registered in an older one is registered again
+constexpr int kScBits = 12;
+struct SumSlot { uint64_t h = 0; Sum* s = nullptr; };
+SumSlot g_sc[1 << kScBits];   // render thread: set handle -> its summary
 
 // next hooks (the command queue's, or the driver's)
 PFN_vkCmdPipelineBarrier2 n_pb2 = nullptr;
@@ -463,7 +624,7 @@ void all_pending() {
     }
     g_vb_pend = g_vb_set;
     g_ib_pend = g_ib_set;
-    g_seen.clear();
+    ++g_ep;
 }
 
 void record_barrier(VkCommandBuffer cb, bool host) {
@@ -493,17 +654,32 @@ void emit(VkCommandBuffer cb, Why why, bool host = false) {
     g_req_since = false;
 }
 
+// Why a command conflicted (statistics): what of the command against what since the last barrier.
+enum Cause : int { kCUnknown, kCPtrRead, kCPtrWrite, kCReadW, kCWriteW, kCWriteR, kCImgRead, kCImgWrite, kCN };
+const char* const kCauseName[kCN] = {"unknown", "pointer read after a write", "pointer write", "read after write", "write after write", "write after read",
+                                     "image read after write", "image write"};
+uint64_t g_cause[kWN][kCN] = {};
+// The side of the conflict found first: 0 none, else Cause + 1; who: D or R hit with all / bda / a range.
+int conflict_c(const Acc& d, const Acc& r) {
+    if (d.empty() && r.empty()) return 0;
+    if (cr.all && !d.empty()) return kCUnknown + 1;
+    if (cw.all && (!d.empty() || !r.empty())) return kCUnknown + 1;
+    if (cr.bda && d.hit_bda()) return kCPtrRead + 1;
+    if (cw.bda && (d.hit_bda() || r.hit_bda())) return kCPtrWrite + 1;
+    if (d.bloom || d.bda || d.all) for (const Rng& x : cr.r) if (d.hit(x)) return kCReadW + 1;
+    for (const Rng& x : cw.r) {
+        if (d.hit(x)) return kCWriteW + 1;
+        if (r.hit(x)) return kCWriteR + 1;
+    }
+    if (!d.img.empty() || d.all) for (uint64_t i : cr.img) if (d.hit_img(i)) return kCImgRead + 1;
+    for (uint64_t i : cw.img) if (d.hit_img(i) || r.hit_img(i)) return kCImgWrite + 1;
+    return 0;
+}
+Why g_why_now = kWDraw;
 bool conflict(const Acc& d, const Acc& r) {
-    if (d.empty() && r.empty()) return false;
-    if (cr.all && !d.empty()) return true;
-    if (cw.all && (!d.empty() || !r.empty())) return true;
-    if (cr.bda && d.hit_bda()) return true;
-    if (cw.bda && (d.hit_bda() || r.hit_bda())) return true;
-    for (const Rng& x : cr.r) if (d.hit(x)) return true;
-    for (const Rng& x : cw.r) if (d.hit(x) || r.hit(x)) return true;
-    for (uint64_t i : cr.img) if (d.hit_img(i)) return true;
-    for (uint64_t i : cw.img) if (d.hit_img(i) || r.hit_img(i)) return true;
-    return false;
+    const int c = conflict_c(d, r);
+    if (c) ++g_cause[g_why_now][c - 1];
+    return c != 0;
 }
 
 // A placeholder the recorder resolved by itself (a drain or a full ring): it is a barrier at the start of the pass.
@@ -527,6 +703,7 @@ void access(VkCommandBuffer cb, Why why, F&& build) {
     cr.clear();
     cw.clear();
     build();
+    g_why_now = why;
     if (g_in_pass) {
         ph_check_forced();
         if (!g_ph && g_pre && conflict(Dp, Rp)) {   // verify: a hazard inside a pass that no requested barrier ordered
@@ -564,6 +741,9 @@ void access(VkCommandBuffer cb, Why why, F&& build) {
 inline bool tracking(VkCommandBuffer cb) { return g_on && cb == g_cb.load(std::memory_order_relaxed) && cb; }
 
 // The bound sets / push descriptors / pipeline flags of a bind point into cr / cw.
+// The bindings of set slot `k` a pipeline writes (~0: all).
+inline uint64_t wmask(const PInfo& pi, uint32_t k) { return (pi.f & (kFStore | kFUnknown)) ? ~0ull : k < kSets ? pi.wm[k] : 0; }
+inline bool written(uint64_t wm, uint32_t key, const Res& x) { const uint32_t b = key >> 16; return x.storage && (b < 64 ? (wm >> b) & 1 : wm == ~0ull); }
 void add_res(const Res& x, bool write) {
     if (x.kind == 2) { cr.all = true; if (write) cw.all = true; return; }
     if (x.kind == 1) { (write ? cw : cr).add_img(x.img); if (write) cr.add_img(x.img); return; }
@@ -571,27 +751,45 @@ void add_res(const Res& x, bool write) {
 }
 void build_bp(int bp) {
     BindPt& b = g_bp[bp];
-    const uint32_t f = b.flags;
+    const uint32_t f = b.pi.f;
     if (f & kFUnknown) { cr.all = cw.all = true; }
     if (f & kFBdaRead) cr.bda = true;
     if (f & kFBdaWrite) cw.bda = true;
-    const bool st = (f & (kFStore | kFUnknown)) != 0;
     if (b.pend) {
         std::lock_guard<std::mutex> lk(g_mu);
         for (uint32_t m = b.pend; m; m &= m - 1) {
             const uint32_t i = static_cast<uint32_t>(__builtin_ctz(m));
-            const auto it = g_sums.find(H(b.sets[i]));
-            if (it == g_sums.end()) continue;   // never written: holds nothing
-            const uint64_t key = H(b.sets[i]) | (st ? 1 : 0);
-            auto [s, fresh] = g_seen.try_emplace(key, it->second.ver);
-            if (!fresh && s->second == it->second.ver) continue;
-            s->second = it->second.ver;
-            for (const auto& [k, x] : it->second.e) add_res(x, st && x.storage);
+            const uint64_t h = H(b.sets[i]);
+            SumSlot& c = g_sc[(h * 0x9e3779b97f4a7c15ull) >> (64 - kScBits)];
+            if (c.h != h) {   // map nodes stay where they are: the pointer is good for as long as the handle has a summary
+                const auto it = g_sums.find(h);
+                if (it == g_sums.end()) continue;   // never written: holds nothing
+                c.h = h;
+                c.s = &it->second;
+            }
+            Sum& sm = *c.s;
+            const uint64_t wm = wmask(b.pi, i);
+            if (sm.seen_ep == g_ep && sm.seen_ver == sm.ver && (sm.seen_wm & wm) == wm) continue;
+            sm.seen_ep = g_ep;
+            sm.seen_ver = sm.ver;
+            sm.seen_wm = wm;
+            // reads: as ranges only when what is unordered (D, or Dp before an open pass) may meet them; else the set as a whole
+            const bool meets = sm.has_unknown || D.all || D.bda || Dp.all || Dp.bda || (sm.gb & (D.gb | Dp.gb)) ||
+                               (sm.has_img && !(D.img.empty() && Dp.img.empty()));
+            bool any_w = false;
+            for (const auto& [k, x] : sm.e) {
+                const bool wr = written(wm, k, x);
+                if (wr || meets) add_res(x, wr);
+                any_w |= wr;
+            }
+            if (!meets) cr.add_sum(sm);
+            (void)any_w;
         }
         b.pend = 0;
     }
     if (b.push_pend) {
-        for (const Res& x : b.push) add_res(x, st && x.storage);
+        const uint64_t wm = wmask(b.pi, b.push_set);
+        for (const auto& [k, x] : b.push) add_res(x, written(wm, k << 16, x));
         b.push_pend = false;
     }
 }
@@ -656,17 +854,16 @@ bool g_xfb_on = false;
 void VKAPI_PTR h_bp(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) {
     if (tracking(cb) && (bp == VK_PIPELINE_BIND_POINT_GRAPHICS || bp == VK_PIPELINE_BIND_POINT_COMPUTE)) {
         BindPt& b = g_bp[bp == VK_PIPELINE_BIND_POINT_COMPUTE ? 1 : 0];
-        uint32_t f;
+        PInfo f;
         {
-            std::lock_guard<std::mutex> lk(g_mu);
+            std::lock_guard<std::mutex> lk(g_pmu);
             const auto it = g_pipe.find(H(p));
-            f = it == g_pipe.end() ? kFUnknown : it->second;
+            f = it == g_pipe.end() ? unknown_info() : it->second;
         }
-        if ((f & (kFStore | kFUnknown)) != (b.flags & (kFStore | kFUnknown))) {   // storage descriptors change between read and written
-            for (uint32_t i = 0; i < 16; ++i) if (b.sets[i]) b.pend |= 1u << i;
-            b.push_pend = !b.push.empty();
-        }
-        b.flags = f;
+        for (uint32_t i = 0; i < 16; ++i)   // storage descriptors that are written now and were not: registered again
+            if (b.sets[i] && (wmask(f, i) & ~wmask(b.pi, i))) b.pend |= 1u << i;
+        if (!b.push.empty() && (wmask(f, b.push_set) & ~wmask(b.pi, b.push_set))) b.push_pend = true;
+        b.pi = f;
     }
     n_bp(cb, bp, p);
 }
@@ -684,6 +881,7 @@ void VKAPI_PTR h_pds(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayou
     if (tracking(cb)) {
         BindPt& b = g_bp[bp == VK_PIPELINE_BIND_POINT_COMPUTE ? 1 : 0];
         b.push.clear();
+        b.push_set = set;
         std::lock_guard<std::mutex> lk(g_mu);
         for (uint32_t i = 0; i < n; ++i)
             for (uint32_t k = 0; k < w[i].descriptorCount; ++k) {
@@ -699,7 +897,7 @@ void VKAPI_PTR h_pds(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayou
                 } else if (t == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || t == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
                     r.kind = 2;
                 } else continue;
-                b.push.push_back(r);
+                b.push.emplace_back(w[i].dstBinding, r);
             }
         b.push_pend = true;
     }
@@ -879,6 +1077,7 @@ void VKAPI_PTR h_br(VkCommandBuffer cb, const VkRenderingInfo* ri) {
     cr.clear();
     cw.clear();
     build();
+    g_why_now = kWAttach;
     if (!D.empty() || !R.empty()) {
         if (conflict(D, R)) {
             emit(cb, kWAttach);
@@ -940,16 +1139,15 @@ void VKAPI_PTR h_pb2(VkCommandBuffer cb, const VkDependencyInfo* di) {
     }
     ++g_st.img_bar;
     if (di->imageMemoryBarrierCount && piggyback_on() && mode() == 1 && (!D.empty() || !R.empty())) {
-        std::vector<VkMemoryBarrier2> mb(di->pMemoryBarriers, di->pMemoryBarriers + di->memoryBarrierCount);
         VkMemoryBarrier2 b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
         b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
         b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-        mb.push_back(b);
-        VkDependencyInfo d2 = *di;
-        d2.memoryBarrierCount = static_cast<uint32_t>(mb.size());
-        d2.pMemoryBarriers = mb.data();
+        VkDependencyInfo d2 = *di;   // di has no memory barriers here (a full one returned above; narrower ones are not made)
+        if (di->memoryBarrierCount) return n_pb2(cb, di);
+        d2.memoryBarrierCount = 1;
+        d2.pMemoryBarriers = &b;
         ++g_st.piggy;
         D.clear();
         R.clear();
@@ -1004,7 +1202,7 @@ void VKAPI_PTR h_etf(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuf
 void begin_cb(VkCommandBuffer cb) {
     g_cb.store(cb, std::memory_order_relaxed);
     reset_bound();
-    g_seen.clear();
+    ++g_ep;
     g_in_pass = g_ph = g_pre = false;
     g_xfb_set = 0;
     g_xfb_on = false;
@@ -1132,7 +1330,8 @@ void install_cmd_hooks() {
             piggyback_on() ? "on" : "off");
 }
 
-void begin_submission(VkCommandBuffer cb, bool on) {
+void begin_submission(VkCommandBuffer cb, bool on, bool piggyback) {
+    g_piggy_ab = piggyback;
     const bool want = on && enabled() && n_pb2 && cmdq::queuing();
     if (!want) {
         if (g_on && cb && (!D.empty() || !R.empty())) {   // switching off: the old barriers order only what follows them
@@ -1154,6 +1353,10 @@ void switch_cb(VkCommandBuffer from, VkCommandBuffer to) {
     if (g_on && on_rt() && from && from == g_cb.load(std::memory_order_relaxed)) begin_cb(to);
 }
 
+void external(VkCommandBuffer cb) {
+    if (tracking(cb) && on_rt() && !g_in_pass) unknown(cb);
+}
+
 bool takes(VkCommandBuffer cb) { return mode() == 1 && tracking(cb) && on_rt(); }
 
 void request(uint32_t) {
@@ -1165,7 +1368,7 @@ std::string stats_line() {
     uint64_t ph_n = 0, ph_f = 0;
     cmdq::ph_stats(&ph_n, &ph_f);
     const uint64_t presents = gpu::counters_if() ? gpu::counters_if()->presents.load() : 0;
-    char b[900];
+    char b[2400];
     int o = std::snprintf(b, sizeof b, "hazard: %s, %llu presents: %llu barriers requested, %llu recorded (", mode() == 2 ? "verify" : "on",
                           (unsigned long long)presents, (unsigned long long)g_st.requests, (unsigned long long)g_st.emitted);
     for (int i = 0; i < kWN && o < (int)sizeof b; ++i)
@@ -1175,9 +1378,17 @@ std::string stats_line() {
                            (unsigned long long)g_st.by[kWAttach], (unsigned long long)g_st.ph_in, (unsigned long long)g_st.ph_skip,
                            (unsigned long long)g_st.ph_need, (unsigned long long)g_st.ph_forced, (unsigned long long)g_st.img_bar, (unsigned long long)g_st.piggy);
     if (o < (int)sizeof b) {
-        std::lock_guard<std::mutex> lk(g_mu);
+        std::lock_guard<std::mutex> lk(g_pmu);
         o += std::snprintf(b + o, sizeof b - o, "; modules %llu: %llu pointer loads, %llu pointer stores, %llu storage stores, %llu unknown", (unsigned long long)g_mods_n,
                            (unsigned long long)g_mods_f[0], (unsigned long long)g_mods_f[1], (unsigned long long)g_mods_f[2], (unsigned long long)g_mods_f[3]);
+    }
+    for (int w = 0; w < kWN && o < (int)sizeof b; ++w) {
+        uint64_t t = 0;
+        for (int c = 0; c < kCN; ++c) t += g_cause[w][c];
+        if (!t) continue;
+        o += std::snprintf(b + o, sizeof b - o, "; %s:", kWhyName[w]);
+        for (int c = 0; c < kCN && o < (int)sizeof b; ++c)
+            if (g_cause[w][c]) o += std::snprintf(b + o, sizeof b - o, " %s %llu", kCauseName[c], (unsigned long long)g_cause[w][c]);
     }
     if (mode() == 2 && o < (int)sizeof b) {
         o += std::snprintf(b + o, sizeof b - o, "; verify: %llu hazards with no requested barrier since (", (unsigned long long)g_st.verify_gaps);
