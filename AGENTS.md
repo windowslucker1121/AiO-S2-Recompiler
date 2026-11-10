@@ -855,6 +855,22 @@ writing through hard links); only if no shared-cache row changed since 2026-11-0
 `retranslate_subset.py` with all corpus hashes, then the runtime blocks with `private_cache.py --dumps` style single-mode translation).
 Then the pipelines of ~42k blocks rebuild on demand (fragment pipelines ~1.4 s each) until a preparation runs.
 
+**Session 2026-11-10 (C1: pointer compute shaders in submission #3).** P4's `[nvn] cs_gmem_held` (merged first; it had the same
+runtime idea as C1's first step, which was dropped for it) marks only the compute slots over held results: ~5 of 11 per dispatch in Kokiri
+outside, so the mask is still non-zero and the old shaders' inline fast path (mask 0 only) never ran for compute. Translator (compute only,
+AmpereGlobal.cs `EmitSpanClip` / `CacheAloneDecides`, tools/shaders/README.md "Pointer accesses in compute"): the helper returns a walk's
+span only when no marked slot overlaps it, so compute call sites test the page cache alone. F1's vector loads stay off for compute (`NXRT_HARNESS_GMEM_CS_VECTOR=1`: on the village replay they moved ~175 pixels by more than 20 against the per-word form, every loop alike, 6x the replay-to-replay noise; unexplained, and they add nothing to #3).
+Kokiri outside 1080 uncapped, P4 runtime, alone, same exe, shared vs private cache (552 compute gpt blocks re-translated): stamped
+(`gpu_passes`) #3 5.63 -> 4.90 ms per frame (a17259b2 x6 0.77 -> 0.24, 39a1f760 / 5d8324bd 0.12 -> < 0.05 each); unstamped 100-175 s,
+final form 41.8 vs 41.95 fps (shared) in a back-to-back pair, earlier pairs of the vector form 43.3 / 42.9 vs 42.7 / 40.6: no fps change
+beyond noise, GPU busy ~17.5 ms either way, the frame is bound by the render thread's replay (~22-24 ms with the trace). Registers/code unchanged: a17259b2 stays 255 registers / ~178 KB (pipestat); the 255 is not the
+lookup (with `GMEM_IDENTITY` + `NO_SLOTS` + forced inline still 255 at 115 KB; SASS 125): the shader's 131 LDG.128 of pointer data plus
+~1,500 FFMA/FMUL under NVIDIA's load hoisting, not taken further. Note on P4's mask: slots the dispatch itself writes are not marked, so a
+pointer read of a slot the same dispatch wrote (within a workgroup, after a barrier) would read the pool; none seen in OoT. Village capture replay (20261108-000413): final form vs shared 0 pixels over 20 (two shared replays differ by 30), every loop identical (A18 culling stable); in-game Kokiri screenshots: foliage, fog, plants normal.
+**To merge into the shared cache:** build this branch's harness, `retranslate_subset.py --hashes <the compute gpt rows of results.tsv>`
+(578 rows; `stage = compute` with token `gpt`) and the 12 compute gpt "runtime" blocks of `work\ai_run\oot\a18dump\dump` in single mode
+(all but 3e986fed / fdfd1e7c; leave the upscaler network rows alone, "Merge pitfall"); compute pipelines rebuild on demand (~1-2 s each).
+
 **Session 2026-11-10 (F1: gpt pre-raster stages, vector loads).** Goal: the ~6.9 ms of the gpt vertex/mesh stages in Kokiri outside at
 1080. **Registers were the wrong lead:** the original SASS of most hot gpt blocks already uses R247-R252 (40953571, 5332b131, a5bfd19f,
 b8b873e5, a873d795, e41230f8, 8fb97d28; sassdecode `--dump` + max register); only fbb731e2 / 6ec65625 are R125 (control +0x4c = 128).
