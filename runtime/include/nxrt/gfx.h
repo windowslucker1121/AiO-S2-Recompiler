@@ -30,6 +30,8 @@ namespace nxrt::extras { class LowLatency; }
 
 namespace nxrt::gfx {
 
+extern bool g_unified_layouts;   // [gfx] unified_layouts is in force on the device (vk_unified_layouts.cpp)
+
 // ---- GPU choice -------------------------------------------------------------------------------------------------------
 // The rule alone (testable without a GPU). type = VkPhysicalDeviceType (0 other, 1 integrated, 2 discrete, 3 virtual, 4 cpu).
 struct GpuCandidate {
@@ -118,6 +120,9 @@ struct DeviceFeatures {
     bool extended_dynamic_state3 = false, vertex_input_dynamic_state = false;
     bool graphics_pipeline_library = false;   // VK_EXT_graphics_pipeline_library (pipelines linked from separately compiled parts, S24)
     bool external_memory_host = false, push_descriptor = false;
+    // VK_KHR_unified_image_layouts with [gfx] unified_layouts: every image layout the runtime names is given to the driver as GENERAL
+    // (vk_unified_layouts.cpp), so a layout change is only a dependency and the replay may re-tag images without a barrier
+    bool unified_layouts = false;
     bool dynamic_rendering_unused_attachments = false;
     bool buffer_device_address = false;   // Vulkan 1.2 bufferDeviceAddress: raw guest pointers in translated shaders (A17, the pool address table)
     bool mesh_shader = false, task_shader = false;   // VK_EXT_mesh_shader (NVN2 task/mesh programs); [gfx] mesh_shader = false leaves it off

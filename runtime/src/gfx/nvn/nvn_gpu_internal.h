@@ -122,6 +122,7 @@ void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImag
 // All commands before, all commands after, all memory (used after passes, dispatches, copies and fills).
 void memory_barrier(VkCommandBuffer cb, std::source_location loc = std::source_location::current());
 extern std::atomic<int> g_exp_bar_drop;   // measurement only: skip_fs_file "bar" (-1) / "bar:<line>"
+extern std::atomic<int> g_exp_bar_more[3];   // the second to fourth "bar:<line>" word
 // Full memory barriers by call site since the start, most first ("file:line count ...", the 10 s statistics line).
 std::string memory_barrier_sites(size_t top);
 // Full memory barriers recorded by the calling thread so far (a later count equal to an earlier one: none in between).
@@ -307,6 +308,7 @@ void tex_poll_cpu_writes();   // start of a submission: textures of coherent poo
 // Moves the whole image to `layout` (no-op if already there). Call with no render pass open.
 void tex_transition(Texture* t, Frame& f, VkImageLayout layout);
 VkImageLayout tex_layout(Texture* t);
+void tex_retag(Texture* t, VkImageLayout layout);   // the tracked layout changed without a barrier (unified image layouts only)
 // The texture has been (or is about to be) written by the GPU: no more uploads from memory until the CPU writes it.
 void tex_mark_gpu_written(Texture* t);
 void tex_sparse_before_copy(Texture* t, uint32_t layer, uint32_t level);   // a sparse texture: bind the mapped tiles a copy writes

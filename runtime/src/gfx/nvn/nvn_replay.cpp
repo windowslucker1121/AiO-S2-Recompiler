@@ -234,14 +234,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42 };
 uint64_t ab_mask() {
     static const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -646,10 +646,14 @@ bool skip_fs_draw(const std::string& hash) {
         while (f >> w) g_skip_fs.push_back(w);
         // Measurement words: "bar" drops every full barrier, "bar:<line>" those of one source line (g_exp_bar_drop); "c:<prefix>" leaves out
         // dispatches (do_dispatch). A change of the set is marked in the frame trace ("skip:<words>") for per-window GPU times.
-        int drop = 0;
+        int drop = 0, more[3] = {}, nmore = 0;
         for (const std::string& p : g_skip_fs)
             if (p == "bar") drop = -1;
-            else if (p.compare(0, 4, "bar:") == 0 && drop >= 0) drop = std::atoi(p.c_str() + 4);
+            else if (p.compare(0, 4, "bar:") == 0 && drop >= 0) {
+                if (!drop) drop = std::atoi(p.c_str() + 4);
+                else if (nmore < 3) more[nmore++] = std::atoi(p.c_str() + 4);
+            }
+        for (int k = 0; k < 3; ++k) g_exp_bar_more[k].store(more[k], std::memory_order_relaxed);
         g_exp_bar_drop.store(drop, std::memory_order_relaxed);
         static bool marked = false;
         if (prev != g_skip_fs || !marked) {
@@ -816,11 +820,14 @@ void flush_deferred_writes() {
 // Which call sites end passes (the 10 s line "passes ended by": source line and the draws the pass had). Render thread.
 uint64_t g_pass_end_line[8192] = {};
 uint64_t g_pass_end_draws[8192] = {};
+uint64_t g_draw_ops = 0;   // draw commands reached by run_list (mesh_copy_ahead)
+void mesh_pre_clear();     // below (mesh_copy_ahead)
 void end_pass(bool to_pass = false, std::source_location loc = std::source_location::current()) {
     if (P.open) {
         const uint32_t ln = loc.line() & 8191;
         ++g_pass_end_line[ln];
         g_pass_end_draws[ln] += g_pass_draws;
+        mesh_pre_clear();
     }
     if (!P.open) {
         if (!to_pass && !g_pending.empty()) {
@@ -1014,6 +1021,34 @@ bool pre_layout_on() {
     return on && ab_on(kAbPreLayout);
 }
 bool attachment_layout(VkImageLayout l) { return l == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL || l == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; }
+
+// [nvn] uil_retag (default on; cpuperf_ab_what uil_retag), with [gfx] unified_layouts: the driver keeps every image in GENERAL
+// (vk_unified_layouts.cpp), so a layout change is only the dependency its barrier carries. An image left in an attachment layout by an
+// earlier pass whose end recorded a full barrier (it is not in g_pending, the passes that ended without one) already has that dependency
+// for its attachment writes: it is re-tagged as sampled without a barrier, and the open pass goes on. In Kokiri outside ~40 passes per
+// frame ended for such layout changes alone (prepare_textures). Not for images the CPU wrote (an upload follows), images in other layouts
+// (transfer writes, storage writes of a draw in the open pass), or attachments of the open pass.
+uint64_t g_uil_retags = 0, g_uil_retag_kept_open = 0;   // statistics
+bool uil_retag_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "uil_retag", true);
+    return on && nxrt::gfx::g_unified_layouts && ab_on(kAbUilRetag);
+}
+bool uil_retag_ok(Texture* t) {
+    if (!t || t->cpu_dirty.load()) return false;
+    const VkImageLayout l = tex_layout(t);
+    // read-only to read-only (a depth image in its read-only attachment layout sampled through a colour-format object): nothing to wait for
+    if (l == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL || l == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return true;
+    // a storage image: written by a dispatch (each ends with a full barrier) or by a draw of a pass that wrote storage (such a pass ends with
+    // one); only the open pass's own storage writes would be unordered
+    if (l == VK_IMAGE_LAYOUT_GENERAL) return !(P.open && g_pass_unsafe);
+    if (!attachment_layout(l)) return false;
+    for (const PendingWrite& w : g_pending) if (same_image(w.tex.get(), t)) return false;
+    if (P.open) {
+        for (uint32_t i = 0; i < P.ncolor; ++i) if (same_image(P.color[i].tex, t)) return false;
+        if (same_image(P.depth.tex, t)) return false;
+    }
+    return true;
+}
 // At a pass begin (before its attachments' own layout changes): every remembered image that is not an attachment of the new pass.
 void pre_layout_prev_targets() {
     if (g_prev_att.empty()) return;
@@ -1025,6 +1060,7 @@ void pre_layout_prev_targets() {
         bool attached = same_image(t, S.depth_tex.get());
         for (uint32_t i = 0; i < S.ncolor && !attached; ++i) attached = same_image(t, S.color_tex[i].get());
         if (attached) { g_prev_att[keep++] = g_prev_att[k]; continue; }   // still in use: later
+        if (uil_retag_on() && uil_retag_ok(t)) { tex_retag(t, tex_sampled_layout(t)); ++g_pre_layout_n; continue; }
         tex_transition(t, *F, tex_sampled_layout(t));
         ++g_pre_layout_n;
     }
@@ -1039,6 +1075,7 @@ void pre_layout_note(Texture* t) {
 // Starts a pass on the current render targets if none is open for them. False when there is nothing to render to.
 void bind_skip_reset();   // below (bind_sets)
 void pass_lookahead();   // below: settles the reads of the coming draws before the pass begins
+void mesh_copies_ahead();   // below (do_draw_mesh): the {count, 1, 1} records of the pass's mesh draws, before it begins
 bool ensure_pass(bool depth_ro = false) {
     if (P.open && targets_match() && P.depth_ro == depth_ro) return true;
     end_pass(true);
@@ -1055,6 +1092,7 @@ bool ensure_pass(bool depth_ro = false) {
     }
     pre_layout_prev_targets();
     if (out_any()) pass_lookahead();
+    mesh_copies_ahead();
     if (gpass_on()) gpass_stamp(*F, "gap", 0);      // copies, dispatches, barriers and layout changes since the previous pass
     g_pass_draws = 0;
     g_pass_verts = 0;
@@ -1991,7 +2029,20 @@ void prepare_textures(const ProgLayout& pl) {
         if (d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
             TexResolved r = resolve_image(d);
             if (!r.tex || !tex_gpu(r.tex) || !tex_has_storage(r.tex)) continue;
-            if (r.tex->cpu_dirty.load() || tex_layout(r.tex) != VK_IMAGE_LAYOUT_GENERAL || tex_scale(r.tex) != 1.0f) need_storage.push_back(r.tex);
+            if (r.tex->cpu_dirty.load() || tex_layout(r.tex) != VK_IMAGE_LAYOUT_GENERAL || tex_scale(r.tex) != 1.0f) {
+                // uil_retag for a dispatch's storage image: every earlier use is ordered before it (each dispatch ends with a full barrier, and
+                // do_dispatch's end_pass records one for passes that ended without), so only images not yet in use (undefined) or last
+                // written by a copy need a real layout change
+                const VkImageLayout l = tex_layout(r.tex);
+                if (d.nvn_stage == kCompute && !r.tex->cpu_dirty.load() && tex_scale(r.tex) == 1.0f && uil_retag_on() && l != VK_IMAGE_LAYOUT_UNDEFINED &&
+                    l != VK_IMAGE_LAYOUT_PREINITIALIZED && l != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && l != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+                    tex_retag(r.tex, VK_IMAGE_LAYOUT_GENERAL);
+                    tex_mark_gpu_written(r.tex);
+                    ++g_uil_retags;
+                    continue;
+                }
+                need_storage.push_back(r.tex);
+            }
             continue;
         }
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
@@ -2037,6 +2088,19 @@ void prepare_textures(const ProgLayout& pl) {
             st->clean_synced = st->synced;
             st->clean_pass = pass_key;
         }
+    }
+    if (!need.empty() && uil_retag_on()) {   // unified layouts: layout changes alone need no barrier and no pass break (uil_retag_ok)
+        size_t keep = 0;
+        for (Texture* t : need) {
+            if (uil_retag_ok(t)) {
+                tex_retag(t, tex_sampled_layout(t));
+                ++g_uil_retags;
+                if (P.open) ++g_uil_retag_kept_open;
+                continue;
+            }
+            need[keep++] = t;
+        }
+        need.resize(keep);
     }
     if (need.empty() && need_storage.empty()) return;
     for (Texture* t : need) out_texture_read(t);           // an upload reads game memory: compute results held there go back first
@@ -2811,6 +2875,131 @@ void sh_barrier_once() {
     if (g_sh_barrier) return;
     memory_barrier(F->cb);       // earlier writes to these ranges (any command) before the copies read them
     g_sh_barrier = true;
+}
+
+// [nvn] fill_ahead (default on; cpuperf_ab_what fill_ahead): a run of dispatches (OoT's culling submission: ~150 per frame, ~70 of them
+// tiny ones that each copy a few CPU-written pages into the pool copy first) paid a full barrier, the copy and a second full barrier
+// before each dispatch that needed pages. At the first dispatch of a run the storage ranges of the dispatches that follow (up to the first
+// command that is not a dispatch, a barrier or state) are looked up from the command list, and their pages the copy does not hold are copied
+// in together with the first dispatch's own, under its barrier pair. The later dispatches then find their ranges current. A copy in reads
+// the pool, where only the CPU's data can be (a page the GPU wrote is current in the copy, and the dispatches of the run write only the
+// copy, their own shadows or, through pointers, pages they mark written: those are copied in again by their reader as before), so copying it
+// earlier gives the same bytes. Ranges over held results are left to their dispatch.
+uint64_t g_fa_scans = 0, g_fa_dispatches = 0, g_fa_ranges = 0, g_fa_bytes = 0;   // statistics
+uint32_t g_fa_left = 0;   // dispatches of the current run already looked ahead for
+bool fill_ahead_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "fill_ahead", true);
+    return on && ab_on(kAbFillAhead);
+}
+bool fa_run_op(Op op) {   // commands a run of dispatches may have between its dispatches (fa_scan)
+    switch (op) {
+        case Op::Dispatch: case Op::DispatchIndirect: case Op::BindProgram: case Op::BindBuffers: case Op::CallCommands:
+        case Op::Nop: case Op::Barrier: case Op::WaitEvent: case Op::PushDebugGroup: case Op::PopDebugGroup: case Op::Small:
+        case Op::BindTextures: case Op::BindImages: case Op::SetTexturePool: case Op::SetSamplerPool:
+            return true;
+        default:
+            return false;
+    }
+}
+struct FaSim { GState::Bind ssbo[16]; const ShaderInfo* cs; };
+struct FaRange { uint64_t addr, size; uint32_t disp; bool write; };
+// The storage ranges a dispatch with `sim`'s state binds. False: it may write memory the ranges do not name (stores through pointers,
+// storage texel buffers): the look-ahead stops before it.
+bool fa_dispatch(const FaSim& sim, uint32_t disp, std::vector<FaRange>& out) {
+    if (!sim.cs) return true;
+    if (sim.cs->refl.global_writes) return false;
+    for (const DescriptorBinding& b : sim.cs->refl.bindings) {
+        if (b.type == DescriptorType::StorageTexelBuffer || b.type == DescriptorType::StorageImage) return false;
+        if (!b.used || b.type != DescriptorType::StorageBuffer || b.nvn.source != NvnSource::StorageBuffer) continue;
+        const int slot = b.nvn.index >= 0 ? b.nvn.index : storage_slot_for(kCompute, b.nvn.c0_offset);
+        if (slot < 0 || slot >= 16 || !sim.ssbo[slot].addr) continue;
+        out.push_back({sim.ssbo[slot].addr, sim.ssbo[slot].size, disp, storage_binding_writes(b, sim.cs)});
+    }
+    return true;
+}
+bool fa_scan(RecordReader rd, int depth, FaSim& sim, int& budget, uint32_t& dispatches, std::vector<FaRange>& out) {
+    while (rd.next()) {
+        if (--budget < 0) return false;
+        switch (rd.op()) {
+            case Op::BindProgram: {
+                const auto& p = rd.payload<P_BindProgram>();
+                if (p.stages & (1u << kCompute)) sim.cs = p.program ? p.program->stage[kCompute] : nullptr;
+                break;
+            }
+            case Op::BindBuffers: {
+                const auto& p = rd.payload<P_BindBuffers>();
+                if (p.kind != kBufStorage || p.stage != kCompute) break;
+                const NVNbufferRange* rg = reinterpret_cast<const NVNbufferRange*>(rd.blob<P_BindBuffers>());
+                for (uint32_t i = 0; i < p.count; ++i)
+                    if (p.first + i < 16) sim.ssbo[p.first + i] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
+                break;
+            }
+            case Op::Dispatch: case Op::DispatchIndirect:
+                if (!fa_dispatch(sim, ++dispatches, out)) return false;
+                break;
+            case Op::CallCommands: {
+                if (depth >= kMaxDepth) return false;
+                const auto& p = rd.payload<P_CallCommands>();
+                const uint64_t* h = reinterpret_cast<const uint64_t*>(rd.blob<P_CallCommands>());
+                for (uint32_t i = 0; i < p.count; ++i) {
+                    Ref<CmdList> l = handle_lookup(h[i]);
+                    if (l && !fa_scan(RecordReader(*l), depth + 1, sim, budget, dispatches, out)) return false;
+                }
+                break;
+            }
+            // state and ordering only: no memory written
+            case Op::Nop: case Op::Barrier: case Op::WaitEvent: case Op::PushDebugGroup: case Op::PopDebugGroup: case Op::Small:
+            case Op::BindTextures: case Op::BindImages: case Op::SetTexturePool: case Op::SetSamplerPool:
+                break;
+            default:
+                return false;
+        }
+    }
+    return true;
+}
+// do_dispatch, after the dispatch's own bindings (its copies in are recorded, the barrier before them too when it had any).
+void fill_ahead() {
+    if (g_fa_left) { --g_fa_left; return; }
+    if (g_rd_depth < 0 || !g_rd_cur[g_rd_depth] || !compute_direct_on()) return;
+    static FaSim sim;
+    std::memcpy(sim.ssbo, S.ssbo[kCompute], sizeof sim.ssbo);
+    sim.cs = S.stage[kCompute];
+    static std::vector<FaRange> ranges;
+    ranges.clear();
+    if (!fa_dispatch(sim, 0, ranges)) return;   // this dispatch writes memory its ranges do not name: nothing ahead of it
+    int budget = 2048;
+    uint32_t n = 0;
+    ++g_fa_scans;
+    fa_scan(*g_rd_cur[g_rd_depth], g_rd_depth, sim, budget, n, ranges);
+    g_fa_left = n;
+    g_fa_dispatches += n;
+    if (n == 0) return;
+    for (FaRange& r : ranges) {   // the bytes each binding covers (as build_set binds it); 0: outside every pool
+        const BufRef br = resolve_buffer(r.addr, r.size);
+        r.size = br.ok ? std::min<uint64_t>(r.size ? r.size : br.avail, br.avail) : 0;
+    }
+    // Only ranges no earlier dispatch of the run (this one included) may write: their pool bytes are the same now as at their dispatch.
+    // (ranges are in dispatch order; a binding outside every pool counts as written over everything)
+    auto written_before = [&](size_t i) {
+        for (size_t j = 0; j < i && ranges[j].disp < ranges[i].disp; ++j)
+            if (ranges[j].write && (!ranges[j].size || (ranges[j].addr < ranges[i].addr + ranges[i].size && ranges[i].addr < ranges[j].addr + ranges[j].size)))
+                return true;
+        return false;
+    };
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        if (!ranges[i].disp || !ranges[i].size) continue;    // this dispatch's own: filled by its bindings
+        bool dup = false;
+        for (size_t j = 0; j < i && !dup; ++j) dup = ranges[j].addr == ranges[i].addr && ranges[j].size == ranges[i].size;
+        if (dup || written_before(i)) continue;
+        const uint64_t addr = ranges[i].addr, size = ranges[i].size;
+        if (size > kShadowMax || out_overlaps(addr, size)) continue;
+        const MirrorSpan ms = mirror_span(addr, size);
+        if (!ms.buf || ms.valid) continue;
+        sh_barrier_once();
+        uint64_t filled = 0;
+        mirror_fill(F->cb, addr, size, &filled, refill_compute_on());
+        if (filled) { g_sh_copied = true; g_sh_kinds |= 1; ++g_fa_ranges; g_fa_bytes += filled; }
+    }
 }
 
 // The buffer a dispatch binds for [addr, addr + size): the pool copy, the shadow (its copy-in recorded now), or `host` when it cannot have
@@ -5588,6 +5777,175 @@ void do_draw_indirect(const P_DrawIndirect& p) {
 // game's culling compute writes them): {x, y, z} records (the 3D forms) go to vkCmdDrawMeshTasksIndirectEXT as they are; {count, first} records
 // (DrawMeshTasksIndirect; VK_NV_mesh_shader's layout, which NVN2's API mirrors: inferred, the driver is not in the game) get their count copied
 // into {count, 1, 1} records in the upload ring first (outside the pass).
+// [nvn] mesh_copy_ahead (default on; cpuperf_ab_what mesh_ahead): the {count, first} -> {count, 1, 1} copies of a pass's mesh draws are
+// recorded before the pass begins, all under one barrier pair, instead of ending the pass (and two full barriers) at each such draw (Kokiri
+// outside: ~26 pass breaks per frame). The records come from earlier work (the culling submission); the look-ahead stops at the first command
+// of the pass that may write memory (a draw whose program stores to storage buffers, images or through pointers, counter reports, uniform
+// updates, render target changes, ...), so nothing writes a record between its copy and its draw. A draw checks that its records resolve to
+// the same buffer as at the copy, else it copies as before.
+struct MeshPre { uint64_t indirect; uint32_t n, stride; VkBuffer src; VkDeviceSize src_off; VkBuffer buf; VkDeviceSize off; };
+std::vector<MeshPre> g_mesh_pre;
+uint64_t g_mesh_pre_until = 0;   // g_draw_ops of the last draw the look-ahead covered
+uint64_t g_mesh_pre_n = 0, g_mesh_pre_used = 0;   // statistics
+void mesh_pre_clear() { g_mesh_pre.clear(); }
+bool mesh_copy_ahead_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "mesh_copy_ahead", true);
+    return on && ab_on(kAbMeshAhead);
+}
+bool shader_writes_memory(const ShaderInfo* s) {
+    static std::unordered_map<const ShaderInfo*, bool> memo;   // shader infos live as long as the shader cache (never freed while running)
+    const auto it = memo.find(s);
+    if (it != memo.end()) return it->second;
+    bool w = s->refl.global_writes;
+    for (const DescriptorBinding& b : s->refl.bindings) {
+        if (w) break;
+        if (!b.used) continue;
+        if (b.type == DescriptorType::StorageImage || b.type == DescriptorType::StorageTexelBuffer) w = true;
+        if (b.type == DescriptorType::StorageBuffer && storage_binding_writes(b, s)) w = true;
+    }
+    memo.emplace(s, w);
+    return w;
+}
+bool prog_writes_memory(const ShaderInfo* const st[kStages]) {
+    for (int k = 0; k < kStages; ++k)
+        if (st[k] && k != kCompute && shader_writes_memory(st[k])) return true;
+    return false;
+}
+uint64_t g_mesh2_present = 0;   // the last present with a {count, first} mesh draw (+1): the look-ahead runs only in scenes that have them
+struct MeshSim {
+    const ShaderInfo* st[kStages];
+    GState::Bind ssbo[kStages][16];
+    bool writes;
+    uint64_t draws;
+    std::vector<std::pair<uint64_t, uint64_t>> written, records;   // [lo, hi): storage the scanned draws may write; the records collected
+};
+bool mesh_overlaps(const std::vector<std::pair<uint64_t, uint64_t>>& v, uint64_t lo, uint64_t hi) {
+    for (const auto& r : v) if (lo < r.second && r.first < hi) return true;
+    return false;
+}
+// A draw of `sim`'s program that may write memory: the storage ranges it may write are added to sim.written. False when it may write
+// memory no binding names (stores through pointers, storage texel buffers, images) or a range a collected record lies in.
+bool mesh_note_writes(MeshSim& sim) {
+    for (int k = 0; k < kStages; ++k) {
+        const ShaderInfo* s = sim.st[k];
+        if (!s || k == kCompute || !shader_writes_memory(s)) continue;
+        if (s->refl.global_writes) return false;
+        for (const DescriptorBinding& b : s->refl.bindings) {
+            if (!b.used) continue;
+            if (b.type == DescriptorType::StorageImage || b.type == DescriptorType::StorageTexelBuffer) return false;
+            if (b.type != DescriptorType::StorageBuffer || b.nvn.source != NvnSource::StorageBuffer || !storage_binding_writes(b, s)) continue;
+            const int slot = b.nvn.index >= 0 ? b.nvn.index : storage_slot_for(k, b.nvn.c0_offset);
+            if (slot < 0 || slot >= 16) return false;
+            const GState::Bind& w = sim.ssbo[k][slot];
+            if (!w.addr) continue;
+            const uint64_t hi = w.size ? w.addr + w.size : UINT64_MAX;
+            if (mesh_overlaps(sim.records, w.addr, hi)) return false;
+            sim.written.emplace_back(w.addr, hi);
+        }
+    }
+    return true;
+}
+bool mesh_scan(RecordReader rd, int depth, MeshSim& sim, int& budget, std::vector<P_DrawMesh>& out) {
+    while (rd.next()) {
+        if (--budget < 0) return false;
+        const Op op = rd.op();
+        switch (op) {
+            case Op::BindProgram: {
+                const auto& p = rd.payload<P_BindProgram>();
+                const uint32_t bits = p.stages | ((p.stages & ((1u << kCompute) - 1)) ? ((1u << kTask) | (1u << kMesh)) : 0u);
+                for (int st = 0; st < kStages; ++st)
+                    if (bits & (1u << st)) sim.st[st] = p.program ? p.program->stage[st] : nullptr;
+                sim.writes = prog_writes_memory(sim.st);
+                break;
+            }
+            case Op::BindBuffers: {   // storage bindings of the graphics stages: where writing draws write
+                const auto& p = rd.payload<P_BindBuffers>();
+                if (p.kind != kBufStorage || p.stage >= kStages) break;
+                const NVNbufferRange* rg = reinterpret_cast<const NVNbufferRange*>(rd.blob<P_BindBuffers>());
+                for (uint32_t i = 0; i < p.count; ++i)
+                    if (p.first + i < 16) sim.ssbo[p.stage][p.first + i] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
+                break;
+            }
+            case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: case Op::DrawMeshTasks:
+                if (op == Op::DrawMeshTasks && rd.payload<P_DrawMesh>().kind == 2) {
+                    const P_DrawMesh& p = rd.payload<P_DrawMesh>();
+                    const uint64_t stride = p.stride ? static_cast<uint64_t>(p.stride) : 8;
+                    const uint32_t n = p.multi ? std::max<uint32_t>(1, std::min<uint32_t>(p.max_count, 4096)) : 1;
+                    const uint64_t hi = p.indirect + stride * (n - 1) + 8;
+                    if (mesh_overlaps(sim.written, p.indirect, hi)) return false;   // a draw before it may write its records
+                    sim.records.emplace_back(p.indirect, hi);
+                    out.push_back(p);
+                }
+                if (sim.writes && !mesh_note_writes(sim)) return false;
+                ++sim.draws;
+                break;
+            case Op::CallCommands: {
+                if (depth >= kMaxDepth) return false;
+                const auto& p = rd.payload<P_CallCommands>();
+                const uint64_t* h = reinterpret_cast<const uint64_t*>(rd.blob<P_CallCommands>());
+                for (uint32_t i = 0; i < p.count; ++i) {
+                    Ref<CmdList> l = handle_lookup(h[i]);
+                    if (l && !mesh_scan(RecordReader(*l), depth + 1, sim, budget, out)) return false;
+                }
+                break;
+            }
+            case Op::Nop: case Op::BindTextures: case Op::BindImages: case Op::BindVertexAttribs: case Op::BindVertexStreams:
+            case Op::BindBlend: case Op::BindColor: case Op::BindChannelMask: case Op::BindDepthStencil: case Op::BindPolygon: case Op::BindMultisample:
+            case Op::SetTexturePool: case Op::SetSamplerPool: case Op::SetViewports: case Op::SetScissors: case Op::SetDepthRanges: case Op::SetDepthBounds:
+            case Op::SetStencil: case Op::SetBlendColor: case Op::SetPointSize: case Op::SetLineWidth: case Op::SetPolygonOffsetClamp: case Op::SetAlphaRef:
+            case Op::SetSampleMask: case Op::SetRasterizerDiscard: case Op::SetDepthClamp: case Op::SetPrimitiveRestart: case Op::SetPatchSize:
+            case Op::SetTessLevels: case Op::SetCoverageModulationTable: case Op::SetConservativeRaster: case Op::Small: case Op::PushDebugGroup:
+            case Op::PopDebugGroup:
+                break;
+            default:
+                return false;
+        }
+    }
+    return true;
+}
+void mesh_copies_ahead() {
+    g_mesh_pre.clear();
+    if (!mesh_copy_ahead_on() || g_rd_depth < 0 || !g_rd_cur[g_rd_depth] || !device().features().mesh_shader) return;
+    if (!g_mesh2_present || counters().presents.load(std::memory_order_relaxed) + 1 > g_mesh2_present + 120) return;
+    static MeshSim sim;
+    for (int k = 0; k < kStages; ++k) sim.st[k] = S.stage[k];
+    std::memcpy(sim.ssbo, S.ssbo, sizeof sim.ssbo);
+    sim.written.clear();
+    sim.records.clear();
+    sim.writes = prog_writes_memory(sim.st);
+    sim.draws = 0;
+    if (sim.writes && !mesh_note_writes(sim)) return;   // the draw that begins the pass (it runs before the ones looked at)
+    static std::vector<P_DrawMesh> draws;
+    draws.clear();
+    int budget = 4096;
+    mesh_scan(*g_rd_cur[g_rd_depth], g_rd_depth, sim, budget, draws);
+    if (draws.empty()) return;
+    g_mesh_pre_until = g_draw_ops + sim.draws;   // the draws the scan saw before it stopped (this one is counted already)
+    bool barrier = false;
+    for (const P_DrawMesh& p : draws) {
+        const uint32_t rec = 8;
+        const uint64_t stride = p.stride ? static_cast<uint64_t>(p.stride) : rec;
+        const uint32_t n = p.multi ? std::max<uint32_t>(1, std::min<uint32_t>(p.max_count, 4096)) : 1;
+        bool dup = false;
+        for (const MeshPre& m : g_mesh_pre) dup |= m.indirect == p.indirect && m.n == n && m.stride == stride;
+        if (dup) continue;   // the same records again: one copy serves both (nothing writes them in between)
+        const BufRef ib = held_or_pool(p.indirect, stride * (n - 1) + rec, kOutIndirect, false);
+        if (!ib.ok) continue;
+        UploadAlloc u = F->upload(12ull * n, 16);
+        if (!u) continue;
+        uint32_t* w = reinterpret_cast<uint32_t*>(u.ptr);
+        for (uint32_t i = 0; i < n; ++i) { w[3 * i] = 0; w[3 * i + 1] = 1; w[3 * i + 2] = 1; }
+        static std::vector<VkBufferCopy> regions;
+        regions.resize(n);
+        for (uint32_t i = 0; i < n; ++i) regions[i] = {ib.offset + stride * i, u.offset + 12ull * i, 4};
+        if (!barrier) { memory_barrier(F->cb); barrier = true; }
+        vkCmdCopyBuffer(F->cb, ib.buffer, u.buffer, n, regions.data());
+        g_mesh_pre.push_back({p.indirect, n, static_cast<uint32_t>(stride), ib.buffer, ib.offset, u.buffer, u.offset});
+        ++g_mesh_pre_n;
+    }
+    if (barrier) memory_barrier(F->cb);
+}
+
 void do_draw_mesh(const P_DrawMesh& p) {
     if (!device().features().mesh_shader || (S.stage[kTask] && !device().features().task_shader)) {
         nxrt::gap("draw", "mesh draw: the device has no VK_EXT_mesh_shader"); counters().draws_skipped.fetch_add(1); return;
@@ -5610,7 +5968,19 @@ void do_draw_mesh(const P_DrawMesh& p) {
         VkBuffer buf = ib.buffer;
         VkDeviceSize off = ib.offset;
         uint32_t vstride = static_cast<uint32_t>(stride);
-        if (p.kind == 2) {   // {count, first} -> {count, 1, 1}
+        const MeshPre* pre = nullptr;
+        if (p.kind == 2) {
+            g_mesh2_present = counters().presents.load(std::memory_order_relaxed) + 1;
+            if (g_draw_ops > g_mesh_pre_until) g_mesh_pre.clear();   // past the command where the look-ahead stopped
+            for (const MeshPre& m : g_mesh_pre)
+                if (m.indirect == p.indirect && m.n == n && m.stride == stride && m.src == ib.buffer && m.src_off == ib.offset) { pre = &m; break; }
+        }
+        if (pre) {   // mesh_copy_ahead: copied before the pass began
+            buf = pre->buf;
+            off = pre->off;
+            vstride = 12;
+            ++g_mesh_pre_used;
+        } else if (p.kind == 2) {   // {count, first} -> {count, 1, 1}
             UploadAlloc u = F->upload(12ull * n, 16);
             if (!u) { counters().draws_skipped.fetch_add(1); return; }
             uint32_t* w = reinterpret_cast<uint32_t*>(u.ptr);
@@ -6007,6 +6377,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     }
     g_c0_made = {};
     bind_sets(*pl, VK_PIPELINE_BIND_POINT_COMPUTE);
+    if (g_shadowing && fill_ahead_on()) fill_ahead();   // the coming dispatches' pages copied in with this one's
     if (indirect && g_c0_made.buffer && ind.ok) {
         // The CPU's copy of the arguments is stale when a dispatch of this frame wrote them (GPU-driven culling chains: OoT's mesh draws are
         // counted by compute 328a6c18, which is itself dispatched indirectly): the header gets the counts the GPU dispatches with.
@@ -6842,6 +7213,11 @@ void run_list(const CmdList& list, int depth) {
         }
         g_rd_cur[depth] = &r;
         g_rd_depth = depth;
+        if (g_fa_left && !fa_run_op(r.op())) g_fa_left = 0;   // fill_ahead: the run of dispatches it looked at ended early
+        switch (r.op()) {
+            case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: case Op::DrawMeshTasks: ++g_draw_ops; break;
+            default: break;
+        }
         ++g_resolve_gen;   // resolve_cache: results hold for one command
         chunk_at_op();
         if (!op_keeps_sets(r.op())) { desc_epoch_bump(kBumpOp); ++g_bump_op[static_cast<size_t>(r.op()) & 255]; }
@@ -7639,6 +8015,7 @@ void replay_begin_submit(Frame& f) {
     S.window_origin = window_origin_mode();
     S.depth_mode = depth_mode();
     g_draw_idx = 0;
+    g_fa_left = 0;
     g_chunk_work = 0;
     desc_epoch_bump(kBumpSubmit);     // the sets of earlier submissions came from other slots' pools
     keep_begin_submit();
@@ -7688,8 +8065,13 @@ void replay_begin_submit(Frame& f) {
                 }
                 NXLOG_I(kTag, "passes ended by:%s; memory writes kept to the pass end %llu (%llu flushes)", s.c_str(), (unsigned long long)g_wdefer_n,
                         (unsigned long long)g_wdefer_flushes);
-                NXLOG_I(kTag, "pass_pre_layout: %llu images put into their sampled layout at a pass begin, %zu images known to break passes",
-                        (unsigned long long)g_pre_layout_n, g_break_prone.size());
+                NXLOG_I(kTag, "pass_pre_layout: %llu images put into their sampled layout at a pass begin, %zu images known to break passes; "
+                        "uil_retag: %llu re-tagged without a barrier (%llu in an open pass)",
+                        (unsigned long long)g_pre_layout_n, g_break_prone.size(), (unsigned long long)g_uil_retags, (unsigned long long)g_uil_retag_kept_open);
+                NXLOG_I(kTag, "fill_ahead: %llu looks ahead over %llu dispatches, %llu ranges copied in early (%llu KiB)", (unsigned long long)g_fa_scans,
+                        (unsigned long long)g_fa_dispatches, (unsigned long long)g_fa_ranges, (unsigned long long)(g_fa_bytes >> 10));
+                NXLOG_I(kTag, "mesh_copy_ahead: %llu record copies before their pass, %llu draws used one", (unsigned long long)g_mesh_pre_n,
+                        (unsigned long long)g_mesh_pre_used);
                 NXLOG_I(kTag, "texture work that ended an open pass: %llu breaks; textures by old layout: general %llu, color attachment %llu, depth attachment %llu, "
                         "depth read-only %llu, transfer %llu, undefined %llu, other %llu; CPU-written (uploads) %llu, storage images %llu",
                         (unsigned long long)g_pt_breaks, (unsigned long long)g_pt_from[0], (unsigned long long)g_pt_from[1], (unsigned long long)g_pt_from[2],

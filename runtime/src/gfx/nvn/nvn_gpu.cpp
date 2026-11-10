@@ -680,11 +680,16 @@ uint64_t memory_barriers_here() { return t_barriers; }
 // Measurement only ([nvn] skip_fs_file words "bar" / "bar:<line>", nvn_replay.cpp): 0 keeps every full barrier, -1 drops all of them, a
 // line number drops the barriers of that source line. The picture may break; it gives the GPU cost of the barriers at real clocks.
 std::atomic<int> g_exp_bar_drop{0};
+std::atomic<int> g_exp_bar_more[3] = {};   // further "bar:<line>" words
 
 void memory_barrier(VkCommandBuffer cb, std::source_location loc) {
     ++t_barriers;
     bar_site_count(loc);
-    if (const int drop = g_exp_bar_drop.load(std::memory_order_relaxed); drop && (drop < 0 || static_cast<uint32_t>(drop) == loc.line())) return;
+    if (const int drop = g_exp_bar_drop.load(std::memory_order_relaxed); drop) {
+        if (drop < 0 || static_cast<uint32_t>(drop) == loc.line()) return;
+        for (const auto& m : g_exp_bar_more)
+            if (static_cast<uint32_t>(m.load(std::memory_order_relaxed)) == loc.line()) return;
+    }
     if (hazard::takes(cb)) { hazard::request(loc.line()); return; }   // [nvn] hazard: recorded only where a command needs it (nvn_hazard.cpp)
     g_gauge_barriers_mem.add(1);
     VkMemoryBarrier2 b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};

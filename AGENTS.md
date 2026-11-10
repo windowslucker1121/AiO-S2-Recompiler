@@ -1207,6 +1207,27 @@ x 4,398 as in A18); Kokiri and first-scene screenshots normal (foliage, crowns, 
 (old barriers + the tracker counting hazards no requested barrier ordered) is built but was not run in game. Not done: VK_KHR_unified
 _image_layouts, mesh-indirect copies before the pass. Pitfall: game-lock queue races; poll `game.next` every 0.5 s.
 
+**Session 2026-11-10 (P5: our GPU time, copy chains, mesh-indirect copies, unified layouts).** Kokiri outside, 1920x1080 uncapped, alone,
+paired `cpuperf_ab = 300` windows (one feature each; the `ab window` lines give GPU exec/busy with `[prof] trace` on). Kept (default on):
+(1) `[nvn] fill_ahead` (`fill_ahead`): at the first dispatch of a run, the coming dispatches' CPU-written pages are copied into the pool copy
+under that dispatch's barrier pair (only ranges no earlier dispatch of the run may write; stops before pointer stores, storage images and texel
+buffers): GPU busy -0.39 ms (25/25), +0.75 fps (24/25), -150 full barriers per frame, replay unchanged, same copy-in bytes. (2) `[nvn]
+mesh_copy_ahead` (`mesh_ahead`): the {count,1,1} record copies of a pass's mesh draws before the pass begins; the look-ahead follows writing
+draws' storage ranges and stops at a write that may reach a record: GPU -0.13 ms (26/26), +0.23 fps (22/26), replay +0.1 ms (~40% of the
+copies are made for draws that then do not use them: room to trim). Both, after merging 2a596ea: **+0.75 fps (30/30, 47.7 fps), GPU busy
+-0.34 ms median, replay +0.07 ms**. Dropped: `write_merge` (deferred memory writes after the pass end's own barrier: -8 barriers, GPU -0.02 ms,
+removed); `uil_pending_barrier` (barrier at a pass begin so attachments can be re-tagged: +51 barriers, GPU +0.08 ms, removed). Built but off:
+`[gfx] unified_layouts` (VK_KHR_unified_image_layouts: hooks under all others map every layout to GENERAL, `vk_unified_layouts.cpp`) with
+`[nvn] uil_retag` (re-tag without barrier/pass break where the dependency is known to exist): neutral; of ~35 prepare_textures pass breaks per
+frame most are attachments of passes that ended without a barrier (real dependencies, `g_pending`). Runtime tests pass with it on and off.
+Measured with real clocks (`skip_fs_file` `bar:<line>` now takes up to four lines): post-dispatch barriers 0.0 ms, deferred-write flush pair
+-0.07, copy-back pair -0.03, pass-end barrier -0.32 ms GPU busy; dropping the mesh-copy or copy-in barriers changes the workload (the culling
+records race), so those ablations are not costs. Stamped #3 (culling): 7 indirect-argument copy-backs (`compute out 6`, 0.36 ms: the args'
+page is "newer in the copy but CPU-written", `indirect arguments over a held result not servable` log lines; P4's area) and ~20 compute
+layout changes per frame (`uploads/layouts`) are the next own costs there. Correctness: nb3 capture replay features on vs off: 0 pixels over
+20, per-loop mesh records identical (41 draws, sum of x 4,398 every loop, as A18); Kokiri screenshots at 1080 normal (foliage, crowns, fog,
+no stripes). Pitfall: replays take ~55 s to load and ~5 s per loop: trace loops 6-9 and take screenshots after loop 4+, not by time.
+
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
