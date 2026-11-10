@@ -1700,3 +1700,16 @@ modules first (~3 min).
 - Changing Windows Defender exclusions (for `work\`, `tools\llvm\`) would likely speed builds, but it is a security setting: only the
   user changes it.
 - Keep `recomp/nxrecomp` changes game independent; game knowledge goes in `recomp/games/<id>/` and `runtime/games/<id>/`.
+
+**Session 2026-11-10 (DLSS WP1, `runtime/docs/DLSS_PLAN.md`; Streamline/DLSS DLLs are not on this machine, the SDK paths are code-reviewed only).**
+Tests: `gfx_nvn_dlss` (5 groups cases: exact copy at equal size with rectangle bases, bilinear rectangle into rectangle, `[upscale] mode` dlss / dlaa / fsr3
+with missing DLLs falls back to the plain blit). Render-thread findings in `do_evaluate_dlss`: the recorder queue was drained once at the start, but the
+native input pass's own vkCmd* calls are queued after that, while the SDK records straight into the command buffer: `NativeTemporalFrame::quiesce`
+drains right before the backend records (fixed). The tracker got `hazard::external` only before the evaluation; now also after (fixed). Held compute
+results: already covered, `compute_out_may_wait(EvaluateDlss)` is false so every result goes back before the op. Resolve epoch / memo: nothing to bump
+(descriptors reference views; content writes of copies do not bump it either; layouts go through tex_transition). Streamline device: after
+vkCreateDevice the extensions with commands are probed (mesh, EDS3, vertex input, xfb, shading rate); a missing one logs and turns DLSS off
+(`temporal_dlss_disable`); feature-only extensions cannot be probed. Render size: `slDLSSGetOptimalSettings` (mode nearest to the quality scale) when
+`[upscale] mode = dlss` runs, else the percentages. Streamline: pre-exposure, game exposure texture, bias-current-colour mask, MV-jittered flag, one
+viewport per history key. Not mapped: DLSS preset, low-res-MV flag (handled by the input pass). `gfx_scene` capture tests are flaky here (3 of 7 failed
+once, 1 of 7 on a rerun, unrelated).

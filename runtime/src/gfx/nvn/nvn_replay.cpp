@@ -7035,6 +7035,27 @@ void do_evaluate_dlss(const P_EvaluateDlss& p) {
         f.depth_reversed = (p.flags & 8u) != 0;
         f.reset = p.reset != 0;
         f.history_key = p.net ^ (static_cast<uint64_t>(p.serial) << 52);
+        f.quiesce = [] { cmdq::drain(); };   // our input pass above was queued for the recorder thread; the SDK then records into F->cb directly
+        f.pre_exposure = p.pre_exposure;
+        f.mv_jittered = (p.flags & 4u) != 0;
+        auto aux = [&](const DlssTex& t, extras::TemporalImage* img) {   // the game's exposure texture / bias-current-colour mask, as it is
+            Texture* x = t.tex;
+            if (!x || x == in || x == out || !tex_gpu(x) || tex_is_depth(x)) return;
+            const SubRes xs = sub_of(t.view, t.has_view);
+            tex_ensure_current(x, *F);
+            tex_transition(x, *F, tex_sampled_layout(x));
+            const VkExtent3D xe = tex_extent(x, xs.level);
+            img->image = tex_image(x);
+            img->view = tex_sampled_view(x, request(xs));
+            img->format = tex_vk_format(x);
+            img->width = xe.width;
+            img->height = xe.height;
+            img->usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+            if (!img->view) *img = {};
+        };
+        aux(p.exposure, &f.exposure);
+        aux(p.bias, &f.bias_mask);
+        f.aux_layout = f.exposure.image ? tex_sampled_layout(p.exposure.tex) : tex_sampled_layout(p.bias.tex ? p.bias.tex : in);
         extras::NativeTemporalResult res;
         if (f.color.view && f.depth.view && f.motion.view && extras::temporal_evaluate_native(&device(), F->cb, f, &res)) {
             g_dirty = kAllDirty;                                               // the SDKs bind their own compute state
@@ -7072,6 +7093,7 @@ void do_evaluate_dlss(const P_EvaluateDlss& p) {
                        same ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
     }
     memory_barrier(F->cb);
+    hazard::external(F->cb);   // the SDK's writes are unknown to the tracker: whatever comes next waits for them
     counters().copies.fetch_add(1, std::memory_order_relaxed);
     static std::string told;   // the route is logged when it changes
     if (told != route) {

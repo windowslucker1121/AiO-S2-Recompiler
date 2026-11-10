@@ -722,6 +722,13 @@ bool temporal_evaluate_native(void* gfx_device, VkCommandBuffer cb, const Native
         NXLOG_I(kTag, "%s on the game's own inputs: render %ux%u -> %ux%u, depth %s, motion vector scale %.3f %.3f, jitter %+.3f %+.3f px", be->name(), f.render.width,
                 f.render.height, f.out.width, f.out.height, f.depth_reversed ? "reversed" : "forward (reversed here)", static_cast<double>(f.mv_scale[0]),
                 static_cast<double>(f.mv_scale[1]), static_cast<double>(f.jitter_px[0]), static_cast<double>(f.jitter_px[1]));
+    tf.pre_exposure = f.pre_exposure;
+    tf.aux_layout = f.aux_layout;
+    tf.mv_jittered = f.mv_jittered;
+    tf.exposure = f.exposure;
+    tf.bias_mask = f.bias_mask;
+    tf.history_key = f.history_key;
+    if (f.quiesce) f.quiesce();   // our own calls above are made before the SDK records directly into cb
     if (!be->evaluate(cb, tf)) return false;
     barrier(cb, n.output.img.image, VK_IMAGE_LAYOUT_GENERAL, any, VK_ACCESS_2_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,

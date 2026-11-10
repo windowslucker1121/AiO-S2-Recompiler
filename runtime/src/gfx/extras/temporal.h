@@ -35,6 +35,12 @@ struct TemporalFrame {
     float frame_ms = 16.7f;
     float near_z = 0.1f, far_z = 1000.0f, fov_y = 1.0f, aspect = 1.0f;
     float sharpness = 0.0f;          // 0..1, FSR's RCAS
+    // the game's own extras (native path only; defaults mean "none")
+    float pre_exposure = 1.0f;
+    TemporalImage exposure, bias_mask;   // the game's textures in aux_layout (image null: none)
+    VkImageLayout aux_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    bool mv_jittered = false;
+    uint64_t history_key = 0;        // one Streamline viewport per key (0: the camera path's single one)
     // camera (column-vector convention, stored column-major: the memory layout of a row-major matrix in row-vector convention, as Streamline wants)
     float view_to_clip[16] = {}, clip_to_view[16] = {}, clip_to_prev_clip[16] = {}, prev_clip_to_clip[16] = {};
     float cam_pos[3] = {}, cam_up[3] = {}, cam_right[3] = {}, cam_fwd[3] = {};
@@ -83,6 +89,13 @@ struct NativeTemporalFrame {
     bool depth_reversed = true;                 // 1 is near (NVN network flag DepthInverted); false: the pass reverses it
     bool reset = false;                         // the game's history reset
     uint64_t history_key = 0;                   // names the network; a new key (or a re-initialised network) starts a new history
+    // the SDKs record into cb through their own loader, while this pass's own vkCmd* calls may sit in the recorder thread's queue (nvn_cmdq.cpp): the
+    // caller's hook waits until the queue is empty, and is called right before the backend records
+    void (*quiesce)() = nullptr;
+    float pre_exposure = 1.0f;                  // the game's pre-exposure (DLSS parameter)
+    TemporalImage exposure, bias_mask;          // the game's own textures in aux_layout (image null: none); handed to Streamline as they are
+    VkImageLayout aux_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    bool mv_jittered = false;                   // network flag bit 4: the motion vectors include the jitter (bit 2, low-res vectors, is the input pass's)
 };
 struct NativeTemporalResult {
     VkImage image = VK_NULL_HANDLE;             // `out` large, RGBA16F, GENERAL layout, readable by compute, fragment and transfer after the recorded barrier
@@ -100,7 +113,12 @@ TemporalBackend* temporal_dlss(void* gfx_device, bool dlaa);
 // True when the backend's DLLs can be found (for the F1 page; does not load anything).
 bool temporal_ffx_available();
 bool temporal_dlss_available();
-bool temporal_dlss_started();   // Streamline was initialised before the Vulkan instance (needed for DLSS; set by streamline_preinit)
+bool temporal_dlss_started();
+// slDLSSGetOptimalSettings for the output size and a render scale in percent (the DLSS mode nearest to it): the render size, or false when DLSS is not
+// running (mode not dlss, Streamline not started, plugin function missing).
+bool temporal_dlss_optimal_size(uint32_t out_w, uint32_t out_h, int scale_pct, uint32_t* render_w, uint32_t* render_h);
+// Marks the Streamline-owned device's missing extensions (vk_device.cpp): DLSS is turned off for the rest of the run.
+void temporal_dlss_disable(const char* why);   // Streamline was initialised before the Vulkan instance (needed for DLSS; set by streamline_preinit)
 
 // Streamline must own vkCreateInstance / vkCreateDevice / the swapchain calls: when the start-up mode is DLSS or DLAA, this loads
 // sl.interposer.dll, runs slInit and returns its vkGetInstanceProcAddr for volkInitializeCustom (vk_device.cpp). Null: use the normal loader.

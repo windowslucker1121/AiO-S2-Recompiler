@@ -22,6 +22,7 @@
 #include <cstring>
 #include <mutex>
 
+#include "extras/temporal.h"
 #include "nvn_cmd.h"
 #include "nvn_impl.h"
 #include "nxrt/extras.h"
@@ -117,6 +118,12 @@ void optimal_size(int out_w, int out_h, int method, int32_t* w, int32_t* h) {
         if (method == 1) pct = std::min(pct, 33);
     }
     pct = std::clamp(pct, 20, 100);
+    uint32_t sw = 0, sh = 0;   // Streamline's own answer for the mode nearest to the quality, when DLSS runs
+    if (pct < 100 && extras::temporal_dlss_optimal_size(static_cast<uint32_t>(out_w), static_cast<uint32_t>(out_h), pct, &sw, &sh) && sw && sh) {
+        *w = static_cast<int32_t>(sw);
+        *h = static_cast<int32_t>(sh);
+        return;
+    }
     *w = std::max(1, static_cast<int32_t>(std::ceil(out_w * pct / 100.0)));
     *h = std::max(1, static_cast<int32_t>(std::ceil(out_h * pct / 100.0)));
 }

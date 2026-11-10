@@ -7,9 +7,12 @@
 // Choosing DLSS later in the F1 page takes effect at the next start.
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 
 #include "extras/temporal.h"
 #include "nxrt/extras.h"
@@ -87,9 +90,8 @@ void on_log(sl::LogType type, const char* msg) {
     else if (type == sl::LogType::eWarn) NXLOG_W(kTag, "streamline: %s", m.c_str());
 }
 
-sl::Resource resource(const TemporalImage& t) {
-    sl::Resource r(sl::ResourceType::eTex2d, reinterpret_cast<void*>(t.image), nullptr, reinterpret_cast<void*>(t.view),
-                   static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL));
+sl::Resource resource(const TemporalImage& t, VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL) {
+    sl::Resource r(sl::ResourceType::eTex2d, reinterpret_cast<void*>(t.image), nullptr, reinterpret_cast<void*>(t.view), static_cast<uint32_t>(layout));
     r.width = t.width;
     r.height = t.height;
     r.nativeFormat = static_cast<uint32_t>(t.format);
@@ -106,6 +108,14 @@ sl::float4x4 mat(const float* cm) {   // column-major column-vector matrix -> St
     return m;
 }
 
+std::mutex g_sl_mu;   // slDLSSSetOptions / slDLSSGetOptimalSettings are not thread safe: the game thread asks for sizes, the render thread evaluates
+bool g_disabled = false;
+
+sl::DLSSMode mode_for_ratio(double r) {   // output / render
+    return r < 1.01 ? sl::DLSSMode::eDLAA : r < 1.55 ? sl::DLSSMode::eMaxQuality : r < 1.8 ? sl::DLSSMode::eBalanced
+           : r < 2.2 ? sl::DLSSMode::eMaxPerformance : sl::DLSSMode::eUltraPerformance;
+}
+
 class Dlss final : public TemporalBackend {
 public:
     explicit Dlss(gfx::Device& dev) : dev_(&dev) {}
@@ -115,23 +125,31 @@ public:
     bool evaluate(VkCommandBuffer cb, const TemporalFrame& f) override {
         Sl& s = sl_state();
         if (failed_) return false;
-        const sl::ViewportHandle vp(0u);
+        if (g_disabled) return false;
+        // one Streamline viewport (history) per network: the camera path (key 0) and each game network have their own
+        auto ins = viewports_.emplace(f.history_key, Vp{static_cast<uint32_t>(viewports_.size())});
+        Vp& v = ins.first->second;
+        const sl::ViewportHandle vp(v.id);
         sl::FrameToken* frame = nullptr;
         if (s.token(frame, nullptr) != sl::Result::eOk || !frame) return fail("slGetNewFrameToken");
         // the mode from the size ratio (DLAA at the same size)
         const double r = static_cast<double>(f.out.width) / static_cast<double>(f.render.width);
         sl::DLSSOptions o;
-        o.mode = (dlaa_ || r < 1.01) ? sl::DLSSMode::eDLAA : r < 1.55 ? sl::DLSSMode::eMaxQuality : r < 1.8 ? sl::DLSSMode::eBalanced
-               : r < 2.2 ? sl::DLSSMode::eMaxPerformance : sl::DLSSMode::eUltraPerformance;
+        o.mode = dlaa_ ? sl::DLSSMode::eDLAA : mode_for_ratio(r);
         o.outputWidth = f.out.width;
         o.outputHeight = f.out.height;
         o.colorBuffersHDR = sl::Boolean::eTrue;
-        o.useAutoExposure = sl::Boolean::eTrue;
-        if (o.mode != last_mode_ || f.out.width != last_out_.width || f.out.height != last_out_.height) {
+        o.preExposure = f.pre_exposure;
+        o.useAutoExposure = f.exposure.image ? sl::Boolean::eFalse : sl::Boolean::eTrue;   // the game's exposure texture, or DLSS's own
+        if (o.mode != v.mode || f.out.width != v.out.width || f.out.height != v.out.height || o.preExposure != v.pre_exposure || o.useAutoExposure != v.auto_exp) {
+            std::lock_guard<std::mutex> lk(g_sl_mu);
             if (s.set_options(vp, o) != sl::Result::eOk) return fail("slDLSSSetOptions");
-            last_mode_ = o.mode;
-            last_out_ = f.out;
-            NXLOG_I(kTag, "%s: mode %u, %ux%u -> %ux%u", name(), static_cast<unsigned>(o.mode), f.render.width, f.render.height, f.out.width, f.out.height);
+            v.mode = o.mode;
+            v.out = f.out;
+            v.pre_exposure = o.preExposure;
+            v.auto_exp = o.useAutoExposure;
+            NXLOG_I(kTag, "%s viewport %u: mode %u, %ux%u -> %ux%u, pre-exposure %.3f, %s exposure", name(), v.id, static_cast<unsigned>(o.mode), f.render.width,
+                    f.render.height, f.out.width, f.out.height, static_cast<double>(o.preExposure), f.exposure.image ? "the game's" : "automatic");
         }
         sl::Constants c;
         c.cameraViewToClip = mat(f.view_to_clip);
@@ -154,16 +172,21 @@ public:
         c.cameraMotionIncluded = sl::Boolean::eTrue;
         c.motionVectors3D = sl::Boolean::eFalse;
         c.reset = f.reset ? sl::Boolean::eTrue : sl::Boolean::eFalse;
-        c.motionVectorsJittered = sl::Boolean::eFalse;
+        c.motionVectorsJittered = f.mv_jittered ? sl::Boolean::eTrue : sl::Boolean::eFalse;
         if (s.constants(c, *frame, vp) != sl::Result::eOk) return fail("slSetConstants");
         sl::Resource col = resource(f.color), dep = resource(f.depth), mv = resource(f.motion), out = resource(f.output);
         const sl::Extent in_ext{0, 0, f.render.width, f.render.height}, out_ext{0, 0, f.out.width, f.out.height};
-        sl::ResourceTag tags[4] = {sl::ResourceTag(&col, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent, &in_ext),
+        sl::Resource exp_r = resource(f.exposure, f.aux_layout), bias_r = resource(f.bias_mask, f.aux_layout);
+        const sl::Extent one{0, 0, 1, 1};
+        sl::ResourceTag tags[6] = {sl::ResourceTag(&col, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent, &in_ext),
                                    sl::ResourceTag(&dep, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent, &in_ext),
                                    sl::ResourceTag(&mv, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, &in_ext),
                                    sl::ResourceTag(&out, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent, &out_ext)};
+        uint32_t nt = 4;
+        if (f.exposure.image) tags[nt++] = sl::ResourceTag(&exp_r, sl::kBufferTypeExposure, sl::ResourceLifecycle::eValidUntilPresent, &one);
+        if (f.bias_mask.image) tags[nt++] = sl::ResourceTag(&bias_r, sl::kBufferTypeBiasCurrentColorHint, sl::ResourceLifecycle::eValidUntilPresent, &in_ext);
         auto* slcb = reinterpret_cast<sl::CommandBuffer*>(cb);
-        if (s.tag(*frame, vp, tags, 4, slcb) != sl::Result::eOk) return fail("slSetTagForFrame");
+        if (s.tag(*frame, vp, tags, nt, slcb) != sl::Result::eOk) return fail("slSetTagForFrame");
         const sl::BaseStructure* inputs[] = {&vp};
         const sl::Result er = s.evaluate(sl::kFeatureDLSS, *frame, inputs, 1, slcb);
         if (er != sl::Result::eOk) return fail("slEvaluateFeature", static_cast<int>(er));
@@ -179,8 +202,14 @@ private:
     }
     gfx::Device* dev_;
     bool dlaa_ = false, failed_ = false;
-    sl::DLSSMode last_mode_ = sl::DLSSMode::eCount;
-    VkExtent2D last_out_ = {};
+    struct Vp {
+        uint32_t id;
+        sl::DLSSMode mode = sl::DLSSMode::eCount;
+        VkExtent2D out = {};
+        float pre_exposure = -1.0f;
+        sl::Boolean auto_exp = sl::Boolean::eFalse;
+    };
+    std::unordered_map<uint64_t, Vp> viewports_;
 };
 
 }  // namespace
@@ -189,7 +218,29 @@ bool temporal_dlss_available() {
     const std::wstring dir = sl_dir();
     return exists(dir + L"sl.interposer.dll") && exists(dir + L"sl.dlss.dll") && exists(dir + L"nvngx_dlss.dll");
 }
-bool temporal_dlss_started() { return sl_state().started; }
+bool temporal_dlss_started() { return sl_state().started && !g_disabled; }
+
+void temporal_dlss_disable(const char* why) {
+    if (!g_disabled) NXLOG_W(kTag, "DLSS off for this run: %s", why);
+    g_disabled = true;
+}
+
+bool temporal_dlss_optimal_size(uint32_t out_w, uint32_t out_h, int scale_pct, uint32_t* rw, uint32_t* rh) {
+    Sl& s = sl_state();
+    if (!s.started || g_disabled || settings().upscale.mode != UpscaleMode::Dlss) return false;
+    std::lock_guard<std::mutex> lk(g_sl_mu);
+    if (!s.optimal && (!s.feature_fn || s.feature_fn(sl::kFeatureDLSS, "slDLSSGetOptimalSettings", reinterpret_cast<void*&>(s.optimal)) != sl::Result::eOk || !s.optimal))
+        return false;
+    sl::DLSSOptions o;
+    o.mode = mode_for_ratio(100.0 / std::max(1, scale_pct));
+    o.outputWidth = out_w;
+    o.outputHeight = out_h;
+    sl::DLSSOptimalSettings os;
+    if (s.optimal(o, os) != sl::Result::eOk || !os.optimalRenderWidth || !os.optimalRenderHeight) return false;   // ponytail: falls back to the percentage
+    *rw = os.optimalRenderWidth;
+    *rh = os.optimalRenderHeight;
+    return true;
+}
 
 PFN_vkGetInstanceProcAddr streamline_preinit() {
     const UpscaleMode m = settings().upscale.mode;

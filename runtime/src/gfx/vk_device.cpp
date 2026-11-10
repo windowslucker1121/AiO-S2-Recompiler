@@ -1062,6 +1062,25 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     r = vkCreateDevice(physical_, &dci, nullptr, &device_);
     if (r != VK_SUCCESS) return fail("vkCreateDevice failed (" + std::to_string(r) + ")");
     volkLoadDevice(device_);
+    if (extras::temporal_dlss_started()) {
+        // Streamline owns vkCreateDevice and may drop or add extensions: an extension we asked for whose commands did not come through means DLSS cannot be
+        // trusted with this device (the replay needs them); log the delta and turn DLSS off (the device itself cannot be made again here)
+        // ponytail: probes only extensions that have commands; feature-only ones (GPL, unified layouts, float16) cannot be told from here
+        struct Probe { const char* ext; const void* fn; };
+        const Probe probes[] = {{VK_EXT_MESH_SHADER_EXTENSION_NAME, reinterpret_cast<const void*>(vkCmdDrawMeshTasksEXT)},
+                                {VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME, reinterpret_cast<const void*>(vkCmdSetPolygonModeEXT)},
+                                {VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME, reinterpret_cast<const void*>(vkCmdSetVertexInputEXT)},
+                                {VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME, reinterpret_cast<const void*>(vkCmdBeginTransformFeedbackEXT)},
+                                {VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME, reinterpret_cast<const void*>(vkCmdSetFragmentShadingRateKHR)}};
+        std::string dropped;
+        for (const Probe& pr : probes) {
+            bool asked = false;
+            for (const char* e : dev_exts) asked = asked || !std::strcmp(e, pr.ext);
+            if (asked && !pr.fn) dropped += std::string(dropped.empty() ? "" : ", ") + pr.ext;
+        }
+        NXLOG_I(kTag, "device created through Streamline: %zu extensions requested, %s", dev_exts.size(), dropped.empty() ? "none of the probed ones dropped" : ("dropped: " + dropped).c_str());
+        if (!dropped.empty()) extras::temporal_dlss_disable(("Streamline's device lacks " + dropped).c_str());
+    }
     unified_layouts_install(features_.unified_layouts);   // before every other hook: the driver sees GENERAL wherever the runtime names a layout
     if (features_.unified_layouts) NXLOG_I(kTag, "unified image layouts on: images are kept in GENERAL ([gfx] unified_layouts)");
     nvn::be::hazard::install_create_hooks();   // [nvn] hazard: what pipelines, sets and buffers touch (nvn_hazard.cpp)
