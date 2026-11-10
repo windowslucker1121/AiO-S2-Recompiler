@@ -240,6 +240,19 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   outside, 1920x1080 uncapped, same exe, alone, warm): **36.6 -> 40.4 fps** (results in AGENTS.md "Session 2026-11-10 (F1)"). Village
   capture replay: the same picture as the old cache (SSIM 1.000000, max difference 2, as two shots of one cache).
 
+## Pointer accesses in compute: the page cache with marked slots (C1, 2026-11-10)
+
+- A compute binding is the pool copy or a shadow, so the runtime marks bound slots in the c[0] slot mask (all of them before P4's
+  `[nvn] cs_gmem_held`; since then the slots over held results, ~5 of 11 per dispatch in Kokiri). The inline fast path required mask 0, so
+  OoT's HiZ / culling pointer shaders (submission #3, the one the game's main thread waits on) never took it: every 32-bit word (and every
+  word of an LDG.128) called its helper, searched the marked slots and walked the table.
+- Now (compute only, `AmpereGlobal.EmitSpanClip` / `CacheAloneDecides`): the helper hands main the span its walk ended in only when no
+  marked slot overlaps it (64-bit range test per marked slot, on the slow path only), so a cached span can never hide a marked binding, and
+  compute call sites test the cache alone. The vector loads (F1) then work for compute too. `NXRT_HARNESS_GMEM_CS_SPAN=0`: the old form.
+- Measured (Kokiri outside 1080, stamped `gpu_passes`, P4 runtime): #3 5.63 -> 4.92 ms per frame, a17259b2 (6 dispatches) 0.77 -> 0.25 ms,
+  39a1f760 / 5d8324bd 0.12 -> < 0.05 ms each; registers and code size unchanged (pipestat: a17259b2 still 255 registers, ~178 KB; the 255
+  is not the lookup: with `GMEM_IDENTITY` + `NO_SLOTS` + forced inline it stays 255 at 115 KB).
+
 ## Register pressure of the gpt pre-raster stages: what it is, and what did not pay (F1, 2026-11-10)
 
 - Most hot gpt blocks use ~253 registers in their original SASS too (40953571 R252, 5332b131 R247, a5bfd19f / b8b873e5 / a873d795 /

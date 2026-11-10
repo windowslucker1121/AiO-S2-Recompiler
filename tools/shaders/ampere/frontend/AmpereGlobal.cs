@@ -317,6 +317,10 @@ namespace Ryujinx.Graphics.Shader.Translation
         // gmem_compute_slots). NXRT_HARNESS_GMEM_CS_SPAN=0: the form before (compute fast path only with mask 0).
         static readonly bool ComputeSpanCheck = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_CS_SPAN") != "0";
         [ThreadStatic] static int _cb0Binding;
+        /// NXRT_HARNESS_GMEM_CS_VECTOR=1: F1's vector loads in compute too. Off by default: on the village capture replay they changed
+        /// ~175 pixels by more than 20 (6,900 by more than 4) against the per-word form, every loop alike, while two replays of one cache
+        /// differ by 30 / 1,300; not explained (the HiZ blocks a17259b2 / 39a1f760 alone with vector loads match exactly).
+        static readonly bool ComputeVector = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_CS_VECTOR") == "1";
 
         // The span in `leaf` (CacheWords: tag low, tag high, offset mask, ...) becomes "no span" when a marked candidate slot overlaps it.
         static void EmitSpanClip(EmitterContext c, Operand[] leaf)
@@ -599,6 +603,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             SpvInstruction slots = ctx.Get(AggregateType.U32, operation.GetSource(3));
             int tag = operation.SourcesCount > 4 ? ConstantOf(operation.GetSource(4)) : 0;
             int vGroup = tag / 64, vCount = tag / 8 % 8, vWord = tag % 8;
+            if (ctx.Definitions.Stage == ShaderStage.Compute && !ComputeVector) vGroup = 0;   // compute: per-word loads unless enabled (C1)
             // the scalar fast path: the page cache test, the load through it, else the helper (vector: word 0 loads them all)
             (SpvInstruction, SpvInstruction) Regular(bool vectorHead)
             {
