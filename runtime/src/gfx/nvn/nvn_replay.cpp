@@ -2458,7 +2458,7 @@ bool g_odb_all_dirty = true;
 uint64_t g_odb_grow = ~0ull;
 struct OdbHot { const GState::Bind* b; bool copy_ok; int why; };
 std::vector<OdbHot> g_odb_hot;
-uint64_t g_odb_full = 0, g_odb_inc = 0, g_odb_inc_checked = 0, g_odb_verify_bad = 0;   // statistics
+uint64_t g_odb_full = 0, g_odb_inc = 0, g_odb_inc_checked = 0, g_odb_verify_bad = 0, g_odb_hot_n = 0, g_odb_full_grow = 0;   // statistics
 bool odb_incremental_on() {
     static const bool on = [] { const std::string v = nxrt::config_get_str("nvn", "odb_incremental", "on"); return v != "off" && v != "0" && v != "false"; }();
     return on && ab_on(kAbOdbInc);
@@ -2499,6 +2499,7 @@ void out_draw_bindings() {
             else { kind = kOdbSsbo; st = static_cast<int>((b - &S.ssbo[0][0]) / 16); slot = static_cast<uint32_t>((b - &S.ssbo[0][0]) % 16); }
             if (g_odb_dirty[kind][st] & (1u << slot)) continue;
             if (kind != kOdbVtx && kind != kOdbXfb && (st == kCompute || !S.stage[st])) continue;
+            ++g_odb_hot_n;
             check(*b, h.copy_ok, h.why);
         }
         for (uint32_t m = g_odb_dirty[kOdbVtx][0]; m; m &= m - 1) check(S.vtx[std::countr_zero(m)], true, kOutDrawBuffer);
@@ -2537,6 +2538,7 @@ void out_draw_bindings() {
         return;
     }
     ++g_odb_full;
+    if (!g_odb_all_dirty) ++g_odb_full_grow;
     g_odb_hot.clear();
     const VkDeviceSize ualign0 = device().properties().limits.minUniformBufferOffsetAlignment;
     // out_draw_read is true for a binding over a held result (and for those only): checked again at every draw until the next full check
@@ -7579,8 +7581,9 @@ void replay_begin_submit(Frame& f) {
                     cmdq::desc_stats(&dq, &dd);
                     NXLOG_I(kTag, "cmd_thread_desc: %llu descriptor set updates queued, %llu made directly", (unsigned long long)dq, (unsigned long long)dd);
                 }
-                NXLOG_I(kTag, "draw buffer checks (odb_incremental): %llu full, %llu incremental with %llu bindings checked, %llu missed (verify)", (unsigned long long)g_odb_full,
-                        (unsigned long long)g_odb_inc, (unsigned long long)g_odb_inc_checked, (unsigned long long)g_odb_verify_bad);
+                NXLOG_I(kTag, "draw buffer checks (odb_incremental): %llu full (%llu after held results grew), %llu incremental with %llu bindings checked (%llu over held results before), %llu missed (verify)",
+                        (unsigned long long)g_odb_full, (unsigned long long)g_odb_full_grow, (unsigned long long)g_odb_inc, (unsigned long long)g_odb_inc_checked,
+                        (unsigned long long)g_odb_hot_n, (unsigned long long)g_odb_verify_bad);
                 if (g_sig_var_on)
                     NXLOG_I(kTag, "set_keep_diag: %llu signatures not in the table; seen in an earlier present without uniform addresses %llu, without storage addresses %llu, "
                             "without texture handles %llu, without pools and targets %llu; none of these %llu; pool registry generation %llu", (unsigned long long)g_var_new, (unsigned long long)g_var_hit[0],

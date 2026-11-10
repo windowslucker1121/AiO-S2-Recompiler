@@ -71,14 +71,30 @@ void publish_snapshot() {                                          // g_pool_mu 
 }
 thread_local const PoolSnap* tl_snap = nullptr;
 thread_local size_t tl_idx = 0;
+// Per thread, the index the search found for a page, checked before it is used: the address lies in that pool and no later base is at or
+// below it, i.e. exactly what the binary search returns (the render thread asks ~20k times per frame for a few hundred distinct addresses
+// among ~3,300 pools; the search was 5% of its busy time).
+struct PageHint { const PoolSnap* s = nullptr; uint64_t page = ~0ull; size_t idx = 0; };
+thread_local PageHint tl_hint[512];
 PoolHit lookup_snapshot(const PoolSnap* s, uint64_t a) {
     if (tl_snap == s && tl_idx < s->base.size() && a >= s->base[tl_idx] && a < s->end[tl_idx]) return {s->pool[tl_idx], a - s->base[tl_idx]};
+    const uint64_t page = a >> 12;
+    PageHint& h = tl_hint[(page ^ (page >> 9)) & 511];
+    if (h.s == s && h.page == page) {
+        const size_t i = h.idx;
+        if (i < s->base.size() && a >= s->base[i] && a < s->end[i] && (i + 1 == s->base.size() || s->base[i + 1] > a)) {
+            tl_snap = s;
+            tl_idx = i;
+            return {s->pool[i], a - s->base[i]};
+        }
+    }
     const auto it = std::upper_bound(s->base.begin(), s->base.end(), a);
     if (it == s->base.begin()) return {};
     const size_t i = static_cast<size_t>(it - s->base.begin()) - 1;
     if (a >= s->end[i]) return {};
     tl_snap = s;
     tl_idx = i;
+    h.s = s; h.page = page; h.idx = i;
     return {s->pool[i], a - s->base[i]};
 }
 }  // namespace
