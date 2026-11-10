@@ -1099,7 +1099,11 @@ for `g_keep`. Dropped: `alloc_batch` (eight sets per vkAllocateDescriptorSets: +
 (same exe, the always-on items in both):** Kokiri outside replay 21.9 -> 20.2 ms per frame (19/19), fps 42.4 either way (this build was
 GPU bound there: render idle 1.4 -> 3.2 ms); first scene 15.8 -> 14.7 ms (18/26), +0.9 fps; Link's house 11.85 -> 10.76 ms (36/36),
 +0.4 fps (76 fps). Before the session (pre-merge exe, same windows) Kokiri replay was ~25-26 ms at ~38 fps. `set_reuse = verify` and
-`odb_incremental = verify` with everything on: see the result in the commit message. Findings: `set_keep_diag` showed the ~550 first
+`odb_incremental = verify` with everything on (Kokiri, 180 s): 0 of 17.3 M kept sets differed, 0 draw buffer checks missed, but **1 of 2.5 M
+set-memo hits differed** (vs 341e0a61 / fs c8826353, set 1: a uniform block at offset 0x1d00 resolved to another buffer, pool copy vs pool,
+~35 s into the scene). Not traced; none of the new keys changes a copy-or-pool decision (they skip checks whose answers are exact), so suspect
+a page-state change the memo's epoch does not see (e.g. the counter-page refills merged with P4). Next: verify runs with `cpuperf_ab_what`
+off windows to tell. Runtime tests: 122 non-gfx and 52 gfx groups pass. Findings: `set_keep_diag` showed the ~550 first
 sightings per frame are signatures that differ in several inputs at once (none of the one-input-left-out variants matched 93%): per-frame
 uniform and storage addresses; not fixable by the keep key. Remaining by profile (Kokiri, after): build_set 21% (graphics 16: ~900 sets per
 frame with written storage, ~550 first sightings; compute 5), out_draw_bindings 10 (~4,000 hot-binding rechecks per frame: out_servable's
