@@ -474,6 +474,9 @@ contain only the Vulkan frame. Posted mouse clicks miss in the game window (SDL 
 
 ## Performance work: state and next steps (2026-11-08)
 
+**Overview of the whole fps effort (state, what paid, what was dropped, what is open, how agents are run): `PERFORMANCE.md`.** Keep it current with each merge.
+
+
 Goal from the user: 60 fps in the first scene and in game, with real rendering. **Measure** with `load_state("first_scene", instance=...)`,
 settings `{"memory.limit_gb": 24}` (+ `prof.sample_hz: 100` for the CPU sampler, `prof.trace: "ftrace.txt"` for zones and `gpu.exec`
 (GPU time per submission), `prof.gpu_passes: 1` for GPU time per pass kind; the passes add drains, so absolute fps is lower with them).
