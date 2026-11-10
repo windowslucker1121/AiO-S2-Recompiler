@@ -226,13 +226,17 @@ def boot_check(exefs, plain):
 
 
 def lift(runner, exefs, gen, jobs):
-    """One lifter process per module (the lifter itself runs `jobs` worker processes)."""
+    """One lifter process per module (the lifter itself runs `jobs` worker processes). Progress counts translation units, so the
+    big main module weighs what it takes, not one module of four."""
+    total = sum(m[4] for m in MODULES)
+    done = 0
     for k, (name, nso, base, index, shards, sites) in enumerate(MODULES):
         out = os.path.join(gen, name)
         marker = os.path.join(out, '.lifted')
+        done += shards
         if os.path.isfile(marker):
             continue
-        progress('lift', k, len(MODULES), 'Translating the game code: %s (%d of %d)' % (name, k + 1, len(MODULES)))
+        progress('lift', done - shards, total, 'Translating the game code: %s (%d of %d)' % (name, k + 1, len(MODULES)))
         if os.path.isdir(out):
             shutil.rmtree(out)
         os.makedirs(out)
@@ -245,7 +249,7 @@ def lift(runner, exefs, gen, jobs):
         if rc != 0:
             raise Fail('Translating %s failed (exit %d):\n%s' % (name, rc, tail))
         open(marker, 'w').write('ok\n')
-    progress('lift', len(MODULES), len(MODULES), 'Game code translated')
+    progress('lift', total, total, 'Game code translated')
 
 
 def compile_all(runner, gen, obj, jobs, env):

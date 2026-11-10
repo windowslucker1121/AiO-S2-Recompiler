@@ -113,7 +113,21 @@ struct GameItem {
     bool play_after = false;             // Play pressed before the setup was done: start the game when it is
     int cur = -1;
     uint64_t done = 0, total = 0;
+    std::string phase;                   // the @progress label (game_build.py: verify, lift, compile, link, finish)
     std::chrono::steady_clock::time_point t0;
+    // How far the running step is, 0..1. The game build reports its phases one after another, each 0..total of its own:
+    // weighted into one range so the bar never jumps back and the time estimate looks at the whole step.
+    double step_fraction() const {
+        if (!total) return 0;
+        const double part = static_cast<double>(std::min(done, total)) / static_cast<double>(total);
+        // ponytail: fixed weights (compile dominates, lift ~1/5 on 16 cores); measure the phases' times if the estimate drifts
+        static const struct { const char* name; double from, w; } kBuild[] = {
+            {"verify", 0.00, 0.02}, {"lift", 0.02, 0.20}, {"compile", 0.22, 0.73}, {"link", 0.95, 0.04}, {"finish", 0.99, 0.01}};
+        if (cur == S_BUILD)
+            for (const auto& p : kBuild)
+                if (phase == p.name) return p.from + p.w * part;
+        return part;
+    }
     std::string error;
     Child child;
     std::deque<std::wstring> log;
@@ -415,8 +429,7 @@ Status App::status_of(const GameItem& g) const {
         s.progress = 0;
         if (g.total) {
             // the steps as one bar: each step a fifth
-            const double part = static_cast<double>(std::min(g.done, g.total)) / static_cast<double>(g.total);
-            s.progress = (static_cast<double>(std::max(g.cur, 0)) + part) / static_cast<double>(S_COUNT);
+            s.progress = (static_cast<double>(std::max(g.cur, 0)) + g.step_fraction()) / static_cast<double>(S_COUNT);
             wchar_t b[32];
             std::swprintf(b, 32, L" \u00B7 %d%%", static_cast<int>(s.progress * 100));
             s.text += b;
@@ -861,6 +874,7 @@ void App::next_step(GameItem& g) {
     }
     g.cur = s;
     g.done = g.total = 0;
+    g.phase.clear();
     g.t0 = std::chrono::steady_clock::now();
     g.result_ok = false;
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
@@ -932,7 +946,9 @@ void App::step_line(GameItem& g, const std::string& l) {
     else if (std::sscanf(l.c_str(), "translate: %llu %llu", &a, &b) == 2 && l.find("done") == std::string::npos) progress = true;
     else if (std::sscanf(l.c_str(), "prepare: %llu %llu", &a, &b) == 2) progress = true;
     if (progress) {
-        if (label[0] && b != g.total) g.t0 = std::chrono::steady_clock::now();
+        // a new tree of the extraction starts its own count; the build's phases share one step-wide fraction and clock
+        if (label[0] && b != g.total && g.cur != S_BUILD) g.t0 = std::chrono::steady_clock::now();
+        g.phase = label;
         g.done = a;
         g.total = b;
         return;
@@ -1489,9 +1505,12 @@ void App::paint_game_header(gp::Graphics& g, const RECT& rc) {
         bar = true;
         pt = L"Step " + std::to_wstring(s->cur + 1) + L" of " + std::to_wstring(S_COUNT);
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - s->t0).count();
-        if (s->total && s->done > 0 && s->done < s->total && secs > 5 && s->done * 20 >= s->total) {
-            const int left = static_cast<int>(secs / static_cast<double>(s->done) * static_cast<double>(s->total - s->done));
-            pt += left >= 120 ? L"  \u00B7  about " + std::to_wstring(left / 60) + L" min left" : L"  \u00B7  almost done";
+        const double f = s->step_fraction();
+        // no guess before 5% of the step and 20 s; "almost done" only near the end, never from a fast first phase
+        if (f >= 0.05 && f < 1 && secs > 20) {
+            const int left = static_cast<int>(secs / f * (1 - f));
+            if (f >= 0.9 && left < 120) pt += L"  \u00B7  almost done";
+            else pt += L"  \u00B7  about " + std::to_wstring(std::max(1, (left + 59) / 60)) + L" min left";
         }
         if (s->play_after) pt += L"  \u00B7  the game starts when it is done";
         if (s->cancel_requested) pt = L"Stopping...";
