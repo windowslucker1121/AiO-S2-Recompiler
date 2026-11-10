@@ -215,6 +215,7 @@ void mirror_destroy(PoolGpu* p);
 // Off: every result goes back at the end of its submission, and before any command other than a dispatch, a state change or a barrier.
 // Render thread unless noted.
 bool out_lazy();
+bool memo_exact_on();   // nvn_replay.cpp: the set memo's exact epoch (measurement switch memo_exact of [nvn] cpuperf_ab_what)
 bool out_any();                                                    // any thread (a hint)
 // The direct binding [addr, +size) at (mbuf, moff) of the copy was written (host: the pool's buffer). True: the same range was out already.
 // in_mirror false: (mbuf, moff) is a buffer of its own (a compute shadow), not the pool copy: the entry marks no pages of the copy, never

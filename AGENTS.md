@@ -1134,6 +1134,23 @@ frame with written storage, ~550 first sightings; compute 5), out_draw_bindings 
 page walk), keep 6.6, prepare_textures 9, do_dispatch 7; costs are now spread over many objects touched per draw (cache misses on
 Texture/TexGpu, KDep vectors). The next step needs fewer per-draw validations (a draw-level memo or work ahead on another thread), not more
 micro cuts. Pitfall: the game lock's `game.next` slot is taken within milliseconds when it frees; poll it fast (work\r6\waitlock.ps1 style).
+**V1 (2026-11-10): the one stale set-memo hit was a race, fixed.** The memo's epoch held `mem::ww::faults()`, which a write fault counts only
+at its very end, after `release_page` cleared the page's valid/armed bits and ran its VirtualProtect (ms under the address space lock). A
+bind_sets between the two kept memo hits bound to the pool copy while a fresh resolve took the pool (a page the CPU was writing: the GPU
+would read the copy's older uniform data, at worst one draw with a frame-old constant block, a one-frame jitter or flicker). The same
+order existed for copy-backs a guard fault settles on a game thread (`settle` cleared gpu_new bits, `out_changed` came after). Fix:
+`mem::ww::changes()` moves *before* release_page / forget clear any bit and replaces faults() in the epoch (`memo_epoch_now`); settle moves
+the held-result version first. P4's refills, out_delta, deferred writes and R6's caches were not involved (render-thread paths move the
+resolve epoch, `note_gpu_write` returns stale for fresh/valid pages; kept sets re-read the page bits in `read_dep_check` at every use, so
+set_keep never had the hole). Verify mode now separates hits that raced a change begun after the epoch read, or between a kept set's
+checks and the fresh resolve (`set memo: N verify differences raced ..., kept sets M the same way`: not stale, the answer for the moment
+of the check) from real differences; the same line counts epoch checks that hit the old window (16-29k per run). `cpuperf_ab_what` name
+`memo_exact` (measurement only) switches back to the old epoch. Verify runs (1920x1080, everything on, `set_reuse` + `odb_incremental` =
+verify): Kokiri outside 180 s x3: 0 of 2.60 M / 2.60 M / 2.32 M memo hits differed, 0 kept-set differences (16-17.9 M hits), 0 draw
+checks missed; first scene 220 s: 0 of 3.27 M memo hits, 1 of 15.7 M kept sets (a uniform block, copy -> pool, before the kept-set race
+classification existed; read_dep_check computes exactly what resolve_read_dep does, so only a page change between the two explains it);
+again with the classification: 0 of 3.47 M memo hits, 0 of 16.5 M kept sets, 2 kept-set hits raced.
+Cost (Kokiri, `memo_exact`, 29 pairs): fps +0.00 median, replay +0.12 ms (13/29): none.
 
 **Session 2026-11-10 (B1: range-based hazard tracking, `[nvn] hazard`, default off).** `runtime/src/gfx/nvn/nvn_hazard.cpp` (+ a
 placeholder barrier in `nvn_cmdq.cpp`): with `hazard = on` the replay's `memory_barrier` calls are only counted and a full barrier is recorded
