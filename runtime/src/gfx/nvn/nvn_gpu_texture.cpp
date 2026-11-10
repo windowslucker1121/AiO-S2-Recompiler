@@ -2005,6 +2005,15 @@ VkImageLayout tex_layout(Texture* t) {
     return (t && t->gpu && !t->gpu->failed) ? t->gpu->layout : VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
+// [gfx] unified_layouts: the driver keeps every image in GENERAL, so a change of the tracked layout needs no barrier when the caller knows
+// the dependency is already there (nvn_replay.cpp prepare_textures, uil_retag).
+void tex_retag(Texture* t, VkImageLayout layout) {
+    TexGpu* g = tex_or_null(t);
+    if (!g || g->layout == layout) return;
+    g->layout = layout;
+    g_tex_state_gen.fetch_add(1, std::memory_order_acq_rel);
+}
+
 void tex_sparse_before_copy(Texture* t, uint32_t layer, uint32_t level) {
     TexGpu* g = tex_or_null(t);
     if (g && g->sparse) sparse_bind_for_copy(t, *g, layer, level);

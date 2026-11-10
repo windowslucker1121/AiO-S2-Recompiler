@@ -55,6 +55,8 @@ nxrt::GaugeCounter& vk_gauge_memory_bytes() { static nxrt::GaugeCounter g("vk.me
 
 namespace nxrt::gfx {
 
+void unified_layouts_install(bool on);   // vk_unified_layouts.cpp
+
 namespace {
 
 constexpr const char* kTag = "gfx";
@@ -889,6 +891,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     if (x_cp) dev_exts.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
     // tensor-core HMMA of translated compute shaders (the cooperative-matrix variant of a block, vk_coopmat_probe.cpp)
     const bool x_cm = config_get_bool("gfx", "cooperative_matrix", true) && add_ext(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME, &acm);
+    // [gfx] unified_layouts (VK_KHR_unified_image_layouts): every layout the runtime names goes to the driver as GENERAL (vk_unified_layouts.cpp)
+    VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR auil = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR};
+    const bool x_uil = config_get_bool("gfx", "unified_layouts", true) && add_ext("VK_KHR_unified_image_layouts", &auil);
     // [nvn] exp_pipeline_stats (architecture experiment E5, measurement only): the driver's statistics of each pipeline (nvn_pipeline.cpp)
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR apep = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
     const bool x_pep = config_get_bool("nvn", "exp_pipeline_stats", false) && add_ext(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME, &apep);
@@ -915,6 +920,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     amesh.primitiveFragmentShadingRateMeshShader = VK_FALSE;
     amesh.meshShaderQueries = VK_FALSE;
     acm.cooperativeMatrixRobustBufferAccess = VK_FALSE;   // the translated shaders never load or store matrices
+    auil.unifiedImageLayoutsVideo = VK_FALSE;
+    features_.unified_layouts = x_uil && auil.unifiedImageLayouts;
     VkPhysicalDeviceFeatures2& en = avail;
     const VkPhysicalDeviceFeatures& af = avail.features;
     features_.bc = af.textureCompressionBC;
@@ -1054,6 +1061,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     r = vkCreateDevice(physical_, &dci, nullptr, &device_);
     if (r != VK_SUCCESS) return fail("vkCreateDevice failed (" + std::to_string(r) + ")");
     volkLoadDevice(device_);
+    unified_layouts_install(features_.unified_layouts);   // before every other hook: the driver sees GENERAL wherever the runtime names a layout
+    if (features_.unified_layouts) NXLOG_I(kTag, "unified image layouts on: images are kept in GENERAL ([gfx] unified_layouts)");
     nvn::be::hazard::install_create_hooks();   // [nvn] hazard: what pipelines, sets and buffers touch (nvn_hazard.cpp)
     if (config_get_bool("gfx", "exp_bda_probe", false)) probe_bda_placement(physical_, device_, a12.bufferDeviceAddressCaptureReplay);
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
