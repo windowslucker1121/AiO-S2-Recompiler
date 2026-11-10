@@ -14,7 +14,7 @@
 # No game data and no lifted code: the package holds this repository's own programs only (LEGAL.md). A game exe is never part of
 # it: the library builds it on the player's PC from their own dump (tools\build\game_build.py).
 #
-#   powershell -ExecutionPolicy Bypass -File tools\release\package.ps1 -Version 0.1.0 [-Out work\release] [-RtGames oot,generic]
+#   powershell -ExecutionPolicy Bypass -File tools\release\package.ps1 -Version 0.1.0 [-Out work\release] [-RtGames generic]
 #              [-RtBuildDir <existing runtime DLL build of the first game>] [-SkipTranslator] [-SkipPython] [-SkipRuntime]
 # Needs, on PATH or in the environment: a VS x64 developer environment (rc.exe, the Windows SDK), clang-cl, cmake, ninja, the .NET 10
 # SDK, and a Python 3.13 with pip (it fetches the wheels for the bundled Python). The Ryujinx submodule (refs\ryubing) must be checked out.
@@ -23,7 +23,7 @@
 param(
     [string]$Version = 'dev',
     [string]$Out = '',
-    [string[]]$RtGames = @('oot', 'generic'),
+    [string[]]$RtGames = @('generic'),   # game ports are opt-in: -RtGames <id>,generic
     [string]$RtBuildDir = '',
     [switch]$SkipTranslator,
     [switch]$SkipPython,

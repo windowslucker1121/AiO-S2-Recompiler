@@ -158,7 +158,7 @@ took 25 min for 117,981 parts (both raster sets); a forced second one loads the 
   window thread (OoT presents from guest-82), it asks the window thread's SVC pump for a pump each frame. Library: an unknown dump shows
   **Try experimental build** (when the release has `games\generic\{sdk,runtime}`, `tools\scripts\make_manifest.py` and the game
   build): exefs-only extraction, manifest into `<exe dir>\experimental\<id>\game.toml`, then the normal queue (build, shaders, Play);
-  status "(experimental)". The package carries `-RtGames oot,generic`. **Checked 2026-11-09:** OoT's lifted libraries linked
+  status "(experimental)". The package carries only `-RtGames generic` by default (user, 2026-11-10: the released library holds no game port; a port is opt-in with `-RtGames <id>,generic`, and the CI smoke test refuses any `games\<id>` but `generic`). **Checked 2026-11-09:** OoT's lifted libraries linked
   (clang-cl) against `generic_rt.dll` with a make_manifest manifest: boots, title movie, Enter posted at the title starts the intro,
   window never hung (work/gtest, deleted). Not checked: the library flow end to end (needs a release package), a title nobody ported.
   Also fixed on the way: `rt.def.in` lacked `nx_icall_miss` / `nx_iimport_miss` (inline caches, G3), so every player-side build since
@@ -176,7 +176,7 @@ took 25 min for 117,981 parts (both raster sets); a forced second one loads the 
   adds a dump. **The library page lists only games the player added** (user, 2026-11-08: known games without a dump stay hidden; `sel()`
   returns only added games). **Report a bug...** (Help menu and "•••") opens a GitHub issue form (`.github/ISSUE_TEMPLATE`: `bug_game.yml`,
   `bug_recompiler.yml`, `game_status.yml`) with `game`, `app` (version, `RECOMP_LIBRARY_VERSION` from the standalone CMake) and `system`
-  (GPU/driver, Windows, memory from the This PC checks) prefilled by query parameters; nothing is sent by the app. Settings page (`setup_settings.cpp`): Graphics, Display, Controller, Keyboard & mouse (press-to-bind, SDL key names from
+  (GPU/driver, Windows, memory from the This PC checks) prefilled by query parameters; nothing is sent by the app. **Navigation (2026-11-10, user):** the side menu lists only the player's games and This PC (the brand is the library home); a game has "Overview | Settings" tabs (pages P_GAME / P_SET); "Report a bug" is a pill top right on every page (`report_rect_`, drawn in `paint_report`). This PC lists every check with what it needs (`Check::need`), what the PC has and a mark (check, "!", cross). The Controller tab shows a live XInput diagram (click a control to remap it through a menu), the stick boxes with the dead zone shaded, and a rumble test (`setup_settings.cpp`, XInput loaded at run time; SDL-only pads do not show). Checked with winshot on a fake folder source, not with a physical pad. Settings page (`setup_settings.cpp`): Graphics, Display, Controller, Keyboard & mouse (press-to-bind, SDL key names from
   `setup_keynames.inc`), Audio; edits the game folder's `controls.ini` in place (only changed keys). User preference: minimal text.
   Test route: `recomp\scripts\nx_env.cmd work\build\library\build.cmd` (standalone build, needs game-build's fetched Vulkan and SDL
   headers), `recomp_library.exe --add <dump>`, `runtime\apps\setup\tests\winshot.py` (shot, cmd ids of the `Id` enum, close).
@@ -185,7 +185,7 @@ took 25 min for 117,981 parts (both raster sets); a forced second one loads the 
   **Release package / CI (2026-11-08):** `.github/workflows/release.yml` builds `tools/release/package.ps1` on `windows-latest` (tag
   `v*` or "Run workflow" with a version -> GitHub release with the zip + `.sha256`; PRs touching the library -> build only, zip as a
   workflow artifact). The package: `recomp_library.exe` (standalone CMake `tools/release/library`, no game or runtime needed, no
-  `SETUP_DEV_ROOT`), `games\<id>\game.toml` (only the `-RtGames` games, default `oot`: a game without its runtime DLL cannot be built
+  `SETUP_DEV_ROOT`), `games\<id>\game.toml` (only the `-RtGames` games, default `generic` only: a game without its runtime DLL cannot be built
   from the package), `tools\scripts` (3 .py), `tools\spirv_harness` (self-contained `dotnet publish`),
   `tools\python` (python.org embeddable 3.13.17, SHA-256 pinned, + zstandard/lz4/capstone wheels), licences, and the **player-side
   game build** (release model b): `tools\build\` = `game_build.py` (game-build/release_b), the lifter (`recomp\nxrecomp`, `include`,

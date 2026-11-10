@@ -109,6 +109,7 @@ struct Check {
     std::wstring item, state, detail;
     std::wstring fix;     // exact steps or commands for the player; empty when nothing is to do
     Level level = Level::info;
+    std::wstring need;    // what the check measures against ("Windows 10 1809 or newer"), shown next to what this PC has
 };
 struct GpuInfo {
     std::wstring name;

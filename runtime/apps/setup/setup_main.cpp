@@ -67,6 +67,7 @@ constexpr UINT kMsgExit = WM_APP + 2;     // wParam: GameItem*, lParam: exit cod
 constexpr UINT kMsgCheck = WM_APP + 3;    // wParam: GameItem*, lParam: std::string* (the prepare check's answer)
 constexpr UINT kMsgReqs = WM_APP + 4;     // lParam: std::vector<Check>* (the PC's checks, made on a thread)
 constexpr UINT_PTR kTimer = 1;
+constexpr int kHovPc = 90, kHovBrand = 98, kHovAdd = 99, kHovReport = 100, kHovTab = 101;
 
 // Two colours per game for its card's banner, from its id (stable, distinct, never too dark or too bright).
 void banner_colors(const std::string& id, COLORREF* a, COLORREF* b) {
@@ -158,6 +159,9 @@ private:
     void show_page(int p);
     void paint(HDC dc);
     void paint_side(gp::Graphics& g, const RECT& rc);
+    void nav_layout();
+    void paint_tabs(gp::Graphics& g, const gp::Font& bold);
+    void paint_report(gp::Graphics& g);
     void paint_game_header(gp::Graphics& g, const RECT& rc);
     void paint_cards(HWND h, HDC dc);
     void draw_button(const DRAWITEMSTRUCT* d);
@@ -216,11 +220,12 @@ private:
     std::vector<std::pair<HWND, int>> ctls_;   // control, page (-1: never shown by show_page)
     std::vector<std::pair<HWND, Btn>> btns_;
     HWND steps_ = nullptr, log_ = nullptr, req_list_ = nullptr, req_fix_ = nullptr;
-    HWND b_more_ = nullptr, b_report_ = nullptr;
+    HWND b_more_ = nullptr;
     HWND b_play_ = nullptr, b_cancel_ = nullptr, b_recheck_ = nullptr, b_copy_ = nullptr, b_open_ini_ = nullptr;
-    RECT nav_rect_[P_COUNT] = {}, add_rect_{};
+    RECT brand_rect_{}, pc_rect_{}, add_rect_{}, report_rect_{}, tab_rect_[2] = {};
+    std::vector<std::pair<RECT, GameItem*>> nav_games_;   // the side menu: one entry per game in the library, then This PC
     RECT prog_rect_{};
-    int hover_nav_ = -1;
+    int hover_nav_ = -1;                 // 0.. a game, kHovPc, kHovBrand, kHovAdd, kHovReport, kHovTab + 0/1
     bool details_ = true;                // the game page shows the steps and the output (always while a setup runs)
 
     // cards
@@ -662,9 +667,43 @@ void App::choose_data(GameItem& g) {
 
 void App::remove_game(GameItem& g) {
     if (g.running || g.queued) return;
-    if (MessageBoxW(wnd_, (L"Remove " + g.title + L" from the library? Nothing is deleted.").c_str(),
-                    kAppName, MB_YESNO | MB_ICONQUESTION) != IDYES)
+    // what the library made for this game, inside its data folder (never the player's own dump folder, never other files there)
+    std::vector<std::wstring> names = {L"dump", L"program", L"shader_cache", L"manifest_exefs", L"setup_state.ini"};
+    if (!g.cfg.game_ini.empty()) names.push_back(g.cfg.game_ini);
+    if (g.cfg.data_dir.empty()) names.clear();
+    uint64_t bytes = 0;
+    std::error_code ec;
+    for (const std::wstring& n : names) {
+        const fs::path p = fs::path(g.cfg.data_dir) / n;
+        if (fs::is_directory(p, ec)) {
+            for (fs::recursive_directory_iterator it(p, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end; it.increment(ec))
+                if (it->is_regular_file(ec)) bytes += it->file_size(ec);
+        } else if (fs::is_regular_file(p, ec)) bytes += fs::file_size(p, ec);
+    }
+    bool wipe = false;
+    if (bytes > 0) {
+        const std::wstring wipe_text = L"Remove and delete its data\nFrees " + gib(bytes) + L": the extracted game, the built program and the shaders. Your own .nup file or dump folder stays.";
+        TASKDIALOG_BUTTON b[] = {{301, wipe_text.c_str()},
+                                 {302, L"Remove only\nKeeps the data, so adding the game again is quick."}};
+        TASKDIALOGCONFIG c{sizeof c};
+        c.hwndParent = wnd_;
+        c.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+        c.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+        c.pszWindowTitle = kAppName;
+        const std::wstring head = L"Remove " + g.title + L" from the library?";
+        c.pszMainInstruction = head.c_str();
+        c.cButtons = 2;
+        c.pButtons = b;
+        int pick = 0;
+        if (FAILED(TaskDialogIndirect(&c, &pick, nullptr, nullptr)) || (pick != 301 && pick != 302)) return;
+        wipe = pick == 301;
+    } else if (MessageBoxW(wnd_, (L"Remove " + g.title + L" from the library? Nothing is deleted.").c_str(), kAppName, MB_YESNO | MB_ICONQUESTION) != IDYES)
         return;
+    if (wipe) {
+        SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        for (const std::wstring& n : names) fs::remove_all(fs::path(g.cfg.data_dir) / n, ec);
+        fs::remove(g.cfg.data_dir, ec);   // only if now empty
+    }
     g.cfg.source.clear();
     save_lib();
     if (!g.def) {
@@ -1127,8 +1166,7 @@ void App::create_controls() {
     b_play_ = button(L"Play", ID_PLAY, Btn::primary);
     b_cancel_ = button(L"Cancel", ID_CANCEL, Btn::danger);
     b_more_ = button(L"\u2022\u2022\u2022", ID_MORE, Btn::normal);
-    b_report_ = button(L"Report a bug", IDM_REPORT, Btn::normal);
-    for (HWND h : {b_play_, b_cancel_, b_more_, b_report_}) ctls_.push_back({h, P_GAME});
+    for (HWND h : {b_play_, b_cancel_, b_more_}) ctls_.push_back({h, P_GAME});
     steps_ = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER | LVS_NOCOLUMNHEADER, 0, 0, 10, 10, wnd_,
                              reinterpret_cast<HMENU>(ID_STEPS), inst_, nullptr);
     ListView_SetExtendedListViewStyle(steps_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
@@ -1174,8 +1212,10 @@ void App::create_controls() {
         it.pszText = const_cast<wchar_t*>(kStepName[i]);
         ListView_InsertItem(steps_, &it);
     }
-    col(req_list_, 0, L"Missing", S(240));
-    col(req_list_, 1, L"", S(400));
+    col(req_list_, 0, L"Check", S(190));
+    col(req_list_, 1, L"Needs", S(220));
+    col(req_list_, 2, L"This PC", S(260));
+    col(req_list_, 3, L"Result", S(110));
 }
 
 constexpr int kSideW = 236;
@@ -1186,9 +1226,7 @@ void App::layout() {
     const int x = S(kSideW) + S(32), w = rc.right - x - S(32), bottom = rc.bottom;
     auto put = [](HWND h, int x0, int y0, int w0, int h0) { MoveWindow(h, x0, y0, std::max(w0, 1), std::max(h0, 1), TRUE); };
     // side nav
-    int ny = S(96);
-    for (int p = 0; p < P_COUNT; ++p) { nav_rect_[p] = {S(12), ny, S(kSideW) - S(12), ny + S(42)}; ny += S(46); }
-    add_rect_ = {S(12), bottom - S(60), S(kSideW) - S(12), bottom - S(16)};
+    nav_layout();
     // library
     put(cards_, S(kSideW), S(92), rc.right - S(kSideW), bottom - S(92));
     // game page: banner 0..S(200), the button row, a status line with the bar, then (details) the steps and the output
@@ -1196,7 +1234,6 @@ void App::layout() {
     put(b_play_, x, y, S(200), S(48));
     put(b_cancel_, x + S(212), y + S(6), S(110), S(36));
     put(b_more_, x + w - S(48), y + S(6), S(48), S(36));
-    put(b_report_, x + w - S(48) - S(10) - S(130), y + S(6), S(130), S(36));
     y += S(64);
     prog_rect_ = {x, y, x + w, y + S(40)};
     y += S(56);
@@ -1208,14 +1245,17 @@ void App::layout() {
     put(log_, x, y, w, bottom - y - S(24));
     // settings: the panel below the page title, the file button in the title row
     put(settings_, S(kSideW), S(92), rc.right - S(kSideW), bottom - S(92));
-    put(b_open_ini_, rc.right - S(32) - S(130), S(30), S(130), S(34));
+    put(b_open_ini_, rc.right - S(32) - S(130), S(58), S(130), S(30));
     // this PC: the problems only
     const int bh = S(36);
-    const int list_h = std::max(S(120), (bottom - S(110)) / 3);
-    put(req_list_, x, S(110), w, list_h);
-    ListView_SetColumnWidth(req_list_, 0, S(240));
-    ListView_SetColumnWidth(req_list_, 1, std::max(S(120), w - S(244)));
-    const int fy = S(110) + list_h + S(14);
+    const int list_h = std::max(S(200), (bottom - S(100)) * 58 / 100);
+    put(req_list_, x, S(100), w, list_h);
+    const int c0 = S(190), c3 = S(110), rest = std::max(S(200), w - c0 - c3 - S(4));
+    ListView_SetColumnWidth(req_list_, 0, c0);
+    ListView_SetColumnWidth(req_list_, 1, rest * 42 / 100);
+    ListView_SetColumnWidth(req_list_, 2, rest * 58 / 100);
+    ListView_SetColumnWidth(req_list_, 3, c3);
+    const int fy = S(100) + list_h + S(14);
     put(req_fix_, x, fy, w, bottom - fy - S(64));
     put(b_recheck_, x, bottom - S(52), S(140), bh);
     put(b_copy_, x + S(150), bottom - S(52), S(100), bh);
@@ -1225,7 +1265,7 @@ void App::layout() {
 void App::show_page(int p) {
     const int before = page_;
     page_ = std::clamp(p, 0, P_COUNT - 1);
-    if (page_ != P_LIB && !sel()) page_ = P_LIB;
+    if ((page_ == P_GAME || page_ == P_SET) && !sel()) page_ = P_LIB;
     if (page_ == P_SET && before != P_SET) update_settings();
     for (auto& [h, pg] : ctls_) ShowWindow(h, pg == page_ ? SW_SHOW : SW_HIDE);
     refresh();
@@ -1250,24 +1290,26 @@ void App::refresh() {
     }
     const bool busy = g && (g->running || g->queued);
     for (HWND h : {steps_, log_}) ShowWindow(h, game_page && (details_ || busy) ? SW_SHOW : SW_HIDE);
-    // this PC: only what needs the player (the PC's checks, then the selected game's)
+    // this PC: every check, what it needs, what this PC has, and a mark for each (the fixes of the ones that are not met below)
     ListView_DeleteAllItems(req_list_);
     std::vector<const Check*> all;
-    for (const Check& c : sys_checks_) if (c.level == Level::bad || c.level == Level::warn) all.push_back(&c);
-    if (g) for (const Check& c : g->checks) if (c.level == Level::bad || c.level == Level::warn) all.push_back(&c);
+    for (const Check& c : sys_checks_) all.push_back(&c);
+    if (g) for (const Check& c : g->checks) all.push_back(&c);
     std::wstring fixes;
     for (size_t i = 0; i < all.size(); ++i) {
+        const Check& c = *all[i];
         LVITEMW it{LVIF_TEXT | LVIF_PARAM};
         it.iItem = static_cast<int>(i);
-        it.pszText = const_cast<wchar_t*>(all[i]->item.c_str());
-        it.lParam = static_cast<LPARAM>(all[i]->level);
+        it.pszText = const_cast<wchar_t*>(c.item.c_str());
+        it.lParam = static_cast<LPARAM>(c.level);
         ListView_InsertItem(req_list_, &it);
-        ListView_SetItemText(req_list_, static_cast<int>(i), 1, const_cast<wchar_t*>(all[i]->state.c_str()));
-        if (!all[i]->fix.empty()) fixes += all[i]->item + L":\r\n" + all[i]->fix + L"\r\n\r\n";
+        const std::wstring mark = std::wstring(c.level == Level::ok ? L"✓  " : c.level == Level::warn ? L"!  " : c.level == Level::bad ? L"✗  " : L"○  ") + c.state;
+        ListView_SetItemText(req_list_, static_cast<int>(i), 1, const_cast<wchar_t*>(c.need.c_str()));
+        ListView_SetItemText(req_list_, static_cast<int>(i), 2, const_cast<wchar_t*>(c.detail.c_str()));
+        ListView_SetItemText(req_list_, static_cast<int>(i), 3, const_cast<wchar_t*>(mark.c_str()));
+        if (!c.fix.empty()) fixes += c.item + L":\r\n" + c.fix + L"\r\n\r\n";
     }
-    const bool problems = !all.empty();
-    for (HWND h : {req_list_, req_fix_, b_copy_}) ShowWindow(h, page_ == P_PC && problems ? SW_SHOW : SW_HIDE);
-    SetWindowTextW(req_fix_, fixes.c_str());
+    SetWindowTextW(req_fix_, fixes.empty() ? L"Nothing to fix." : fixes.c_str());
     for (auto& [h, k] : btns_) InvalidateRect(h, nullptr, FALSE);
 }
 
@@ -1312,16 +1354,12 @@ void App::paint_side(gp::Graphics& g, const RECT& rc) {
     text(g, L"R", bold, gp::RectF(Sf(20), Sf(26), Sf(34), Sf(34)), RGB(255, 255, 255), gp::StringAlignmentCenter, gp::StringAlignmentCenter);
     text(g, L"Recomp", bold, gp::RectF(Sf(64), Sf(24), Sf(160), Sf(20)), kText);
     text(g, L"Library", smallf, gp::RectF(Sf(64), Sf(43), Sf(160), Sf(18)), kMuted);
-    // nav
-    const GameItem* s = const_cast<App*>(this)->sel();
-    const wchar_t* names[P_COUNT] = {L"Library", L"", L"Settings", L"This PC"};
-    for (int p = 0; p < P_COUNT; ++p) {
-        const RECT& r = nav_rect_[p];
-        std::wstring name = names[p];
-        if (p == P_GAME) name = s ? s->short_title : L"Game";
-        const bool on = p == page_, dim = p != P_LIB && p != P_PC && !s;
+    // nav: the games of the library (a game opens its page, which has the settings), then This PC
+    nav_layout();
+    const GameItem* s = sel();
+    auto row = [&](const RECT& r, const std::wstring& name, bool on, bool hot, COLORREF dot, const std::wstring& sub) {
         gp::RectF rf(static_cast<gp::REAL>(r.left), static_cast<gp::REAL>(r.top), static_cast<gp::REAL>(r.right - r.left), static_cast<gp::REAL>(r.bottom - r.top));
-        if (on || hover_nav_ == p) {
+        if (on || hot) {
             gp::SolidBrush b(C(on ? kCardHi : kCard));
             fill_round(g, rf, Sf(8), b);
         }
@@ -1329,33 +1367,22 @@ void App::paint_side(gp::Graphics& g, const RECT& rc) {
             gp::SolidBrush a(C(kAccent));
             fill_round(g, gp::RectF(rf.X, rf.Y + Sf(10), Sf(4), rf.Height - Sf(20)), Sf(2), a);
         }
-        // a small mark: library count, game status dot, PC problems
-        std::wstring sub;
-        COLORREF dot = 0;
-        if (p == P_LIB) {
-            int n = 0;
-            for (auto& gi : games_) n += gi->in_library();
-            sub = std::to_wstring(n);
-        } else if (p == P_GAME && s) {
-            dot = status_of(*s).color;
-        } else if (p == P_PC) {
-            int bad = 0;
-            for (const Check& c : sys_checks_) bad += c.level == Level::bad;
-            if (bad) { sub = std::to_wstring(bad); dot = kBad; }
-            else if (!sys_checks_.empty()) dot = kOk;
-        }
-        if (p == P_GAME) {
-            text(g, L"GAME", smallf, gp::RectF(rf.X + Sf(16), rf.Y - Sf(2), rf.Width, Sf(14)), kMuted);
-        }
-        text(g, name, on ? bold : normal, gp::RectF(rf.X + Sf(16), rf.Y, rf.Width - Sf(56), rf.Height), dim ? kMuted : kText, gp::StringAlignmentNear,
-             gp::StringAlignmentCenter);
+        text(g, name, on ? bold : normal, gp::RectF(rf.X + Sf(16), rf.Y, rf.Width - Sf(56), rf.Height), kText, gp::StringAlignmentNear, gp::StringAlignmentCenter);
         if (dot) {
             gp::SolidBrush db(C(dot));
             g.FillEllipse(&db, rf.X + rf.Width - Sf(24), rf.Y + rf.Height / 2 - Sf(4), Sf(8), Sf(8));
         } else if (!sub.empty()) {
             text(g, sub, smallf, gp::RectF(rf.X + rf.Width - Sf(44), rf.Y, Sf(32), rf.Height), kMuted, gp::StringAlignmentFar, gp::StringAlignmentCenter);
         }
+    };
+    if (nav_games_.empty()) text(g, L"No games yet. Add one below.", smallf, gp::RectF(Sf(20), Sf(100), Sf(kSideW - 40), Sf(40)), kMuted, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+    for (size_t i = 0; i < nav_games_.size(); ++i) {
+        const GameItem* gi = nav_games_[i].second;
+        row(nav_games_[i].first, gi->short_title, gi == s && (page_ == P_GAME || page_ == P_SET), hover_nav_ == static_cast<int>(i), status_of(*gi).color, L"");
     }
+    int bad = 0;
+    for (const Check& c : sys_checks_) bad += c.level == Level::bad;
+    row(pc_rect_, L"This PC", page_ == P_PC, hover_nav_ == kHovPc, bad ? kBad : sys_checks_.empty() ? 0 : kOk, L"");
     // the queue, at the bottom: what runs, what waits
     float qy = static_cast<float>(add_rect_.top) - Sf(70);
     if (active_ || !queue_.empty()) {
@@ -1373,9 +1400,50 @@ void App::paint_side(gp::Graphics& g, const RECT& rc) {
     // add a game
     gp::RectF ar(static_cast<gp::REAL>(add_rect_.left), static_cast<gp::REAL>(add_rect_.top), static_cast<gp::REAL>(add_rect_.right - add_rect_.left),
                  static_cast<gp::REAL>(add_rect_.bottom - add_rect_.top));
-    gp::SolidBrush ab(C(hover_nav_ == 99 ? kAccentHi : kAccent));
+    gp::SolidBrush ab(C(hover_nav_ == kHovAdd ? kAccentHi : kAccent));
     fill_round(g, ar, Sf(10), ab);
     text(g, L"+  Add a game", bold, ar, RGB(255, 255, 255), gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+}
+
+// the side menu's rectangles: the games the player added, This PC after them, the brand (the library) on top
+void App::nav_layout() {
+    RECT rc;
+    GetClientRect(wnd_, &rc);
+    brand_rect_ = {S(12), S(16), S(kSideW) - S(12), S(70)};
+    nav_games_.clear();
+    int ny = S(88);
+    for (auto& gi : games_)
+        if (gi->in_library()) { nav_games_.push_back({RECT{S(12), ny, S(kSideW) - S(12), ny + S(42)}, gi.get()}); ny += S(46); }
+    if (nav_games_.empty()) ny += S(44);   // room for the "no games yet" note
+    pc_rect_ = {S(12), ny + S(8), S(kSideW) - S(12), ny + S(50)};
+    add_rect_ = {S(12), rc.bottom - S(60), S(kSideW) - S(12), rc.bottom - S(16)};
+    report_rect_ = {rc.right - S(24) - S(132), S(14), rc.right - S(24), S(46)};
+}
+
+// "Overview | Settings" of the selected game (the same place on both pages)
+void App::paint_tabs(gp::Graphics& g, const gp::Font& bold) {
+    const wchar_t* names[2] = {L"Overview", L"Settings"};
+    float x = Sf(kSideW) + Sf(32);
+    for (int i = 0; i < 2; ++i) {
+        const bool on = (i == 0) == (page_ == P_GAME);
+        const float w = Sf(i ? 90 : 96);
+        text(g, names[i], bold, gp::RectF(x, Sf(26), w, Sf(26)), on || hover_nav_ == kHovTab + i ? RGB(255, 255, 255) : RGB(0xD0, 0xD4, 0xDC), gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+        if (on) { gp::SolidBrush u(C(kAccentHi)); g.FillRectangle(&u, x + Sf(8), Sf(54), w - Sf(16), Sf(3)); }
+        tab_rect_[i] = {static_cast<LONG>(x), S(20), static_cast<LONG>(x + w), S(62)};
+        x += w + Sf(8);
+    }
+}
+
+// Report a bug: top right, on every page
+void App::paint_report(gp::Graphics& g) {
+    HDC dc = g.GetHDC();
+    gp::Font bold(dc, bold_);
+    g.ReleaseHDC(dc);
+    const RECT& r = report_rect_;
+    const gp::RectF rf(static_cast<float>(r.left), static_cast<float>(r.top), static_cast<float>(r.right - r.left), static_cast<float>(r.bottom - r.top));
+    gp::SolidBrush b(C(hover_nav_ == kHovReport ? RGB(0x3A, 0x40, 0x4D) : RGB(0x0C, 0x0E, 0x12), hover_nav_ == kHovReport ? 235 : 170));
+    fill_round(g, rf, Sf(8), b);
+    text(g, L"Report a bug", bold, rf, RGB(255, 255, 255), gp::StringAlignmentCenter, gp::StringAlignmentCenter);
 }
 
 void App::paint_game_header(gp::Graphics& g, const RECT& rc) {
@@ -1466,29 +1534,29 @@ void App::paint(HDC hdc) {
         g.FillRectangle(&bg, 0, 0, rc.right, rc.bottom);
         paint_side(g, rc);
         HDC fdc = g.GetHDC();
-        gp::Font title(fdc, title_), normal(fdc, font_), smallf(fdc, small_);
+        gp::Font title(fdc, title_), normal(fdc, font_), smallf(fdc, small_), boldf(fdc, bold_);
         g.ReleaseHDC(fdc);
         const float x = Sf(kSideW) + Sf(32), w = static_cast<float>(rc.right) - x - Sf(32);
         if (page_ == P_LIB) {
             text(g, L"Your games", title, gp::RectF(x, Sf(24), w, Sf(34)), kText);
         } else if (page_ == P_GAME) {
             paint_game_header(g, rc);
+            paint_tabs(g, boldf);
         } else if (page_ == P_SET) {
             const GameItem* sg = sel();
-            text(g, L"Settings", title, gp::RectF(x, Sf(24), w, Sf(34)), kText);
-            text(g, sg ? sg->title : std::wstring(), normal, gp::RectF(x, Sf(60), w - Sf(220), Sf(20)), kMuted);
+            paint_tabs(g, boldf);
+            text(g, sg ? sg->title : std::wstring(), normal, gp::RectF(x, Sf(64), w - Sf(220), Sf(24)), kMuted, gp::StringAlignmentNear, gp::StringAlignmentCenter);
         } else if (page_ == P_PC) {
             text(g, L"This PC", title, gp::RectF(x, Sf(24), w, Sf(34)), kText);
-            bool problems = false;
-            for (const Check& c : sys_checks_) problems |= c.level == Level::bad || c.level == Level::warn;
-            if (const GameItem* sg = sel()) for (const Check& c : sg->checks) problems |= c.level == Level::bad || c.level == Level::warn;
-            if (sys_checks_.empty()) text(g, L"Checking...", normal, gp::RectF(x, Sf(70), w, Sf(24)), kMuted);
-            else if (!problems) {
-                gp::SolidBrush ok(C(kOk, 40));
-                fill_round(g, gp::RectF(x, Sf(110), std::min(w, Sf(520)), Sf(64)), Sf(12), ok);
-                text(g, L"\u2713  Everything is ready", title, gp::RectF(x + Sf(20), Sf(110), w, Sf(64)), kOk, gp::StringAlignmentNear, gp::StringAlignmentCenter);
-            } else text(g, L"Select an item to see how to fix it.", normal, gp::RectF(x, Sf(70), w, Sf(24)), kMuted);
+            int total = 0, met = 0;
+            for (const Check& c : sys_checks_) { ++total; met += c.level == Level::ok || c.level == Level::info; }
+            if (const GameItem* sg = sel()) for (const Check& c : sg->checks) { ++total; met += c.level == Level::ok || c.level == Level::info; }
+            wchar_t b[96];
+            std::swprintf(b, 96, L"%d of %d checks met", met, total);
+            if (sys_checks_.empty()) text(g, L"Checking...", normal, gp::RectF(x, Sf(64), w, Sf(24)), kMuted);
+            else text(g, (met == total ? L"✓  " : L"") + std::wstring(b), normal, gp::RectF(x, Sf(64), w, Sf(24)), met == total ? kOk : kWarn);
         }
+        paint_report(g);
     }
     BitBlt(hdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
     SelectObject(dc, old);
@@ -1657,7 +1725,7 @@ LRESULT App::notify(NMHDR* n) {
             const int i = static_cast<int>(cd->nmcd.dwItemSpec);
             cd->clrText = kText;
             cd->clrTextBk = kCard;
-            if (cd->iSubItem == 1) {
+            if (cd->iSubItem == (n->idFrom == ID_REQ_LIST ? 3 : 1)) {
                 if (n->idFrom == ID_REQ_LIST) {
                     LVITEMW it{LVIF_PARAM};
                     it.iItem = i;
@@ -1893,13 +1961,18 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
         }
         case WM_MOUSEMOVE: {
             const POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            nav_layout();
             int hov = -1;
-            for (int i = 0; i < P_COUNT; ++i) if (PtInRect(&nav_rect_[i], p)) hov = i;
-            if (PtInRect(&add_rect_, p)) hov = 99;
+            for (size_t i = 0; i < nav_games_.size(); ++i) if (PtInRect(&nav_games_[i].first, p)) hov = static_cast<int>(i);
+            if (PtInRect(&pc_rect_, p)) hov = kHovPc;
+            if (PtInRect(&brand_rect_, p)) hov = kHovBrand;
+            if (PtInRect(&add_rect_, p)) hov = kHovAdd;
+            if (PtInRect(&report_rect_, p)) hov = kHovReport;
+            if (sel() && (page_ == P_GAME || page_ == P_SET))
+                for (int i = 0; i < 2; ++i) if (PtInRect(&tab_rect_[i], p)) hov = kHovTab + i;
             if (hov != hover_nav_) {
                 hover_nav_ = hov;
-                RECT side{0, 0, S(kSideW), 10000};
-                InvalidateRect(wnd_, &side, FALSE);
+                InvalidateRect(wnd_, nullptr, FALSE);
             }
             TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, wnd_, 0};
             TrackMouseEvent(&t);
@@ -1909,8 +1982,7 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
         }
         case WM_MOUSELEAVE: {
             hover_nav_ = -1;
-            RECT side{0, 0, S(kSideW), 10000};
-            InvalidateRect(wnd_, &side, FALSE);
+            InvalidateRect(wnd_, nullptr, FALSE);
             for (auto& [h, k] : btns_) if (IsWindowVisible(h)) InvalidateRect(h, nullptr, FALSE);
             return 0;
         }
@@ -1919,9 +1991,15 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
             break;
         case WM_LBUTTONUP: {
             const POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
-            for (int i = 0; i < P_COUNT; ++i)
-                if (PtInRect(&nav_rect_[i], p)) { show_page(i); return 0; }
-            if (PtInRect(&add_rect_, p)) add_game();
+            nav_layout();
+            for (const auto& [r, gi] : nav_games_)
+                if (PtInRect(&r, p)) { select(gi->id); show_page(page_ == P_SET ? P_SET : P_GAME); return 0; }
+            if (PtInRect(&pc_rect_, p)) show_page(P_PC);
+            else if (PtInRect(&brand_rect_, p)) show_page(P_LIB);
+            else if (PtInRect(&add_rect_, p)) add_game();
+            else if (PtInRect(&report_rect_, p)) report(sel());
+            else if (sel() && (page_ == P_GAME || page_ == P_SET))
+                for (int i = 0; i < 2; ++i) if (PtInRect(&tab_rect_[i], p)) show_page(i == 0 ? P_GAME : P_SET);
             return 0;
         }
         case WM_COMMAND: command(LOWORD(w), HIWORD(w)); return 0;

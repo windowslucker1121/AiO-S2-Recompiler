@@ -151,8 +151,8 @@ jobs:
           foreach ($f in 'recomp_library.exe', 'tools\spirv_harness\spirv_harness.exe', 'tools\python\python.exe',
                          'tools\scripts\nup_extract.py', 'tools\scripts\extract_generic.py', 'tools\scripts\bnsh_programs.py', 'LICENSE',
                          'tools\build\game_build.py', 'tools\build\zig\zig.exe', 'tools\build\nx_plain_nso.exe',
-                         'tools\build\recomp\nxrecomp\__main__.py', 'games\oot\sdk\oot_rt.lib', 'games\oot\sdk\stub.cpp',
-                         'games\oot\runtime\oot_rt.dll', 'tools\scripts\make_manifest.py', 'games\generic\sdk\generic_rt.lib',
+                         'tools\build\recomp\nxrecomp\__main__.py', 'games\generic\sdk\stub.cpp',
+                         'tools\scripts\make_manifest.py', 'games\generic\sdk\generic_rt.lib',
                          'games\generic\runtime\generic_rt.dll') {
             if (-not (Test-Path (Join-Path $pkg.FullName $f))) { throw "missing in the package: $f" }
           }
@@ -163,10 +163,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'game_build.py --help failed with the bundled Python' }
           & (Join-Path $pkg.FullName 'tools\python\python.exe') -I (Join-Path $pkg.FullName 'tools\scripts\make_manifest.py') --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'make_manifest.py --help failed with the bundled Python' }
-          # the runtime DLL must carry the AV1 movie decoder, or the game waits forever at its title movie
-          if (-not (Select-String -Path (Join-Path $pkg.FullName 'games\oot\runtime\oot_rt.dll') -Pattern 'dav1d' -SimpleMatch -Quiet)) { throw 'oot_rt.dll was built without dav1d' }
+          # the runtime DLL must carry the AV1 movie decoder (a game with AV1 movies waits forever at its first movie without it)
+          if (-not (Select-String -Path (Join-Path $pkg.FullName 'games\generic\runtime\generic_rt.dll') -Pattern 'dav1d' -SimpleMatch -Quiet)) { throw 'generic_rt.dll was built without dav1d' }
+          # no game manifest but the generic template: game ports are opt-in (-RtGames)
+          $ports = Get-ChildItem (Join-Path $pkg.FullName 'games') -Directory | Where-Object Name -ne 'generic'
+          if ($ports) { throw "game ports in the package: $($ports.Name -join ', ')" }
           # Nothing from a game may ever be in a release (LEGAL.md): refuse console/game file types outright.
-          $bad = Get-ChildItem $pkg.FullName -Recurse -File | Where-Object { $_.Extension -in '.nso', '.nro', '.nca', '.nsp', '.xci', '.nup', '.bfsha', '.bnsh', '.spv', '.keys' -or $_.Name -in 'main', 'sdk', 'rtld', 'main.npdm', 'oot.exe', 'pkp.exe' }
+          $bad = Get-ChildItem $pkg.FullName -Recurse -File | Where-Object { $_.Extension -in '.nso', '.nro', '.nca', '.nsp', '.xci', '.nup', '.bfsha', '.bnsh', '.spv', '.keys' -or $_.Name -in 'main', 'sdk', 'rtld', 'main.npdm' -or ($_.Extension -eq '.exe' -and $_.Name -ne 'recomp_library.exe' -and $_.FullName -notlike "$($pkg.FullName)\tools\*") }
           if ($bad) { throw "game/console files in the package: $($bad.FullName -join ', ')" }
           Write-Host "package ok: $($pkg.Name)"
 

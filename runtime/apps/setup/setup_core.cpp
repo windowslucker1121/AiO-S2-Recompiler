@@ -500,8 +500,8 @@ std::vector<GpuInfo> query_gpus(std::wstring* error) {
 }
 
 uint64_t remaining_disk_need(const Config& c, const State& s) {
-    // Sizes seen with Ocarina of Time 2.0.0 on an NVIDIA RTX 4080: the game 26.3 GB, the shader corpus 0.9 GB, the translations 5.5 GB,
-    // the compiled pipeline cache 2.3-4.7 GB. The extraction needs about the package's size.
+    // ponytail: fixed estimates measured on one ~26 GB title (shader corpus 0.9 GB, translations 5.5 GB, pipeline cache 2.3-4.7 GB);
+    // scale them by the package size if a much smaller or larger game is refused or runs out of disk. The extraction needs about the package's size.
     const Layout l = layout_of(c);
     uint64_t need = 0;
     if (source_kind(c.source) == SourceKind::nup && l.game.empty()) need += size_of(c.source);
@@ -517,6 +517,7 @@ std::vector<Check> run_system_checks(const Tools& t) {
     // Windows
     {
         Check k{L"Windows", L"", L"", L"", Level::ok};
+        k.need = L"Windows 10 (1809) or newer, 64-bit";
         typedef LONG(WINAPI * RtlGetVersionFn)(OSVERSIONINFOW*);
         OSVERSIONINFOW v{sizeof v};
         if (auto f = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"))) f(&v);
@@ -531,6 +532,7 @@ std::vector<Check> run_system_checks(const Tools& t) {
     // Graphics card
     {
         Check k{L"Graphics card (Vulkan 1.3)", L"", L"", L"", Level::ok};
+        k.need = L"Vulkan 1.3, pipeline library and mesh shaders";
         std::wstring err;
         const std::vector<GpuInfo> gpus = query_gpus(&err);
         const GpuInfo* best = nullptr;
@@ -563,6 +565,7 @@ std::vector<Check> run_system_checks(const Tools& t) {
     // Memory
     {
         Check k{L"Memory", L"", L"", L"", Level::ok};
+        k.need = L"at least 12 GB (16 GB recommended)";
         MEMORYSTATUSEX ms{sizeof ms};
         GlobalMemoryStatusEx(&ms);
         const double gbs = static_cast<double>(ms.ullTotalPhys) / double(1ull << 30);
@@ -580,6 +583,7 @@ std::vector<Check> run_system_checks(const Tools& t) {
     // .NET for the shader translator (a self-contained translator needs none)
     {
         Check k{L"Shader translator", L"", L"", L"", Level::ok};
+        k.need = L"the translator and its .NET runtime";
         if (t.translator.empty()) {
             k.level = Level::bad;
             k.state = L"Missing";
@@ -625,6 +629,7 @@ std::vector<Check> run_system_checks(const Tools& t) {
     // Python for the extraction and the shader scan
     {
         Check k{L"Python (extraction, shader scan)", L"", L"", L"", Level::ok};
+        k.need = L"Python 3 with zstandard and lz4";
         const std::wstring pip_cmd = (t.python.empty() ? L"py -3" : quote(t.python) + (t.python_args.empty() ? L"" : L" " + t.python_args)) +
                                      L" -m pip install --user zstandard lz4";
         if (t.nup_extract.empty() || t.shader_scripts.empty()) {
@@ -676,6 +681,7 @@ std::vector<Check> run_game_checks(const Tools& t, const GameDef& g, const Confi
     // Disk space
     {
         Check k{L"Disk space", L"", L"", L"", Level::ok};
+        k.need = L"about " + gib(disk_need) + L" free for the setup";
         const uint64_t free = free_bytes(c.data_dir);
         k.detail = gib(free) + L" free where the setup writes (" + c.data_dir + L"); still needed: about " + gib(disk_need);
         if (free < disk_need) {
@@ -688,6 +694,7 @@ std::vector<Check> run_game_checks(const Tools& t, const GameDef& g, const Confi
     // The game exe and the DLLs it imports (the Visual C++ runtime is linked in statically; this finds whatever else is missing)
     {
         Check k{L"Game program", L"", L"", L"", Level::ok};
+        k.need = exe_name + L" and the DLLs it imports";
         if (!file_exists(game_exe) && buildable) {
             k.level = Level::info;
             k.state = L"Not built yet";
@@ -734,6 +741,7 @@ std::vector<Check> run_game_checks(const Tools& t, const GameDef& g, const Confi
     // The player's dump
     {
         Check k{L"Your game dump", L"", L"", L"", Level::ok};
+        k.need = title + L", " + want_ver + L" (decrypted dump)";
         const SourceKind sk = source_kind(c.source);
         const Layout l = layout_of(c);
         const std::wstring want = title + L" (" + widen(g.title_id) + L"), " + want_ver;

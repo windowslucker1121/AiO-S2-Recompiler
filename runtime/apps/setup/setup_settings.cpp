@@ -398,8 +398,38 @@ std::string capture_input(HWND owner, const Fonts& fonts, const std::wstring& wh
     return c.result;
 }
 
+// ---- the controller test: XInput (loaded at run time, so nothing is linked) ---------------------------------------------------------
+struct XState { DWORD packet; WORD buttons; BYTE lt, rt; SHORT lx, ly, rx, ry; };
+struct XVib { WORD left, right; };
+struct XInputApi {
+    DWORD(WINAPI* get)(DWORD, XState*) = nullptr;
+    DWORD(WINAPI* set)(DWORD, XVib*) = nullptr;
+    XInputApi() {
+        HMODULE m = LoadLibraryW(L"xinput1_4.dll");
+        if (!m) m = LoadLibraryW(L"xinput9_1_0.dll");
+        if (!m) return;
+        get = reinterpret_cast<decltype(get)>(GetProcAddress(m, "XInputGetState"));
+        set = reinterpret_cast<decltype(set)>(GetProcAddress(m, "XInputSetState"));
+    }
+};
+
+// One physical control of the diagram: its [padmap] key, XInput button mask (0: a trigger, trig 1 left / 2 right), box in diagram units (96 dpi).
+struct PadShape { const char* key; WORD mask; int trig; float x, y, w, h; bool round; };
+const PadShape kShapes[] = {
+    {"left_trigger", 0, 1, 30, 0, 90, 18, false},    {"right_trigger", 0, 2, 300, 0, 90, 18, false},
+    {"left_shoulder", 0x0100, 0, 30, 22, 90, 20, false}, {"right_shoulder", 0x0200, 0, 300, 22, 90, 20, false},
+    {"left_stick", 0x0040, 0, 50, 70, 60, 60, true},  {"right_stick", 0x0080, 0, 230, 170, 60, 60, true},
+    {"back", 0x0020, 0, 172, 92, 16, 16, true},       {"start", 0x0010, 0, 232, 92, 16, 16, true},
+    {"north", 0x8000, 0, 306, 56, 28, 28, true},      {"west", 0x4000, 0, 276, 86, 28, 28, true},
+    {"east", 0x2000, 0, 336, 86, 28, 28, true},       {"south", 0x1000, 0, 306, 116, 28, 28, true},
+    {"dpad_up", 1, 0, 140, 170, 20, 20, false},       {"dpad_down", 2, 0, 140, 210, 20, 20, false},
+    {"dpad_left", 4, 0, 120, 190, 20, 20, false},     {"dpad_right", 8, 0, 160, 190, 20, 20, false},
+};
+constexpr int kPadH = 300;    // height of the diagram area (96 dpi)
+constexpr UINT_PTR kPadTimer = 77, kRumbleTimer = 78;
+
 // ---- the panel ------------------------------------------------------------------------------------------------------------------------
-enum class RowKind { heading, option, binding_head, binding, add_binding, note };
+enum class RowKind { heading, option, binding_head, binding, add_binding, note, pad_test };
 struct Row {
     RowKind kind;
     int opt = -1;                   // options() index
@@ -443,7 +473,16 @@ private:
     void command(int id, int code, HWND ctl);
     void draw_item(const DRAWITEMSTRUCT* d);
     void set_bindings(const std::string& section, const std::vector<std::pair<std::string, std::string>>& e);
+    void paint_pad(gp::Graphics& g, float oy, const gp::Font& font, const gp::Font& bold, const gp::Font& little);
+    std::wstring pad_label(const PadShape& s) const;
+    void poll_pad();
+    void pick_mapping(const char* key, POINT screen);
+    double ini_num(const char* key, double def) const { return std::atof(ini_.get("pad", key, std::to_string(def)).c_str()); }
 
+    XInputApi xi_;
+    XState pad_{};
+    int pad_idx_ = -1, pad_scan_ = 0;
+    std::vector<std::pair<RECT, const PadShape*>> pad_hits_;   // client coordinates, filled by paint
     HWND wnd_;
     Fonts fonts_;
     std::wstring title_, path_, why_;
@@ -538,6 +577,10 @@ void Panel::rebuild() {
         }
     } else {
         const auto& o = options();
+        if (tab_ == T_PAD) {
+            Row t{RowKind::pad_test};
+            add(t, S(kPadH + 16))->ctl = make_button(L"Test rumble", 2);
+        }
         for (size_t i = 0; i < o.size(); ++i) {
             if (o[i].tab != tab_) continue;
             if (!o[i].section) {
@@ -557,8 +600,117 @@ void Panel::rebuild() {
         }
     }
     content_h_ = y + S(24);
+    if (tab_ == T_PAD) SetTimer(wnd_, kPadTimer, 33, nullptr);
+    else KillTimer(wnd_, kPadTimer);
     place();
     InvalidateRect(wnd_, nullptr, FALSE);
+}
+
+// ---- the controller diagram -----------------------------------------------------------------------------------------------------
+std::wstring Panel::pad_label(const PadShape& s) const {
+    const std::string v = ini_.get("padmap", s.key, "default");
+    if (v != "default") {
+        static const std::pair<const char*, const wchar_t*> sh[] = {{"none", L"–"}, {"PLUS", L"+"}, {"MINUS", L"−"}, {"LSTICK", L"LS"}, {"RSTICK", L"RS"},
+                                                                    {"UP", L"↑"}, {"DOWN", L"↓"}, {"LEFT", L"←"}, {"RIGHT", L"→"}};
+        for (const auto& p : sh) if (v == p.first) return p.second;
+        return widen(v);
+    }
+    const bool abxy = ini_.get("pad", "label_abxy", "1") != "0";
+    const std::string k = s.key;
+    if (k == "south") return abxy ? L"A" : L"B";
+    if (k == "east") return abxy ? L"B" : L"A";
+    if (k == "west") return abxy ? L"X" : L"Y";
+    if (k == "north") return abxy ? L"Y" : L"X";
+    if (k == "left_shoulder") return L"L";
+    if (k == "right_shoulder") return L"R";
+    if (k == "left_trigger") return L"ZL";
+    if (k == "right_trigger") return L"ZR";
+    if (k == "start") return L"+";
+    if (k == "back") return L"−";
+    if (k == "left_stick") return L"LS";
+    if (k == "right_stick") return L"RS";
+    if (k == "dpad_up") return L"↑";
+    if (k == "dpad_down") return L"↓";
+    if (k == "dpad_left") return L"←";
+    return L"→";
+}
+
+void Panel::poll_pad() {
+    if (!xi_.get) return;
+    if (pad_idx_ < 0) {
+        if (pad_scan_++ % 30) return;   // an empty slot is slow to ask: look for a controller once a second
+        for (DWORD i = 0; i < 4; ++i) if (xi_.get(i, &pad_) == 0) { pad_idx_ = static_cast<int>(i); break; }
+        if (pad_idx_ < 0) pad_ = XState{};
+        return;
+    }
+    if (xi_.get(static_cast<DWORD>(pad_idx_), &pad_) != 0) { pad_idx_ = -1; pad_ = XState{}; }
+}
+
+void Panel::paint_pad(gp::Graphics& g, float oy, const gp::Font& font, const gp::Font& bold, const gp::Font& little) {
+    pad_hits_.clear();
+    const float ox = Sf(32);
+    const double thr = ini_num("trigger_threshold", 0.35);
+    auto pressed = [&](const PadShape& s) {
+        if (pad_idx_ < 0) return false;
+        if (s.trig) return (s.trig == 1 ? pad_.lt : pad_.rt) / 255.0 > thr;
+        return (pad_.buttons & s.mask) != 0;
+    };
+    // the controller: every control shows what it does in the game; click one to change it
+    for (const PadShape& s : kShapes) {
+        const gp::RectF r(ox + Sf(s.x), oy + Sf(s.y), Sf(s.w), Sf(s.h));
+        const bool on = pressed(s);
+        gp::SolidBrush fill(C(on ? kAccent : kCard));
+        gp::Pen edge(C(on ? kAccentHi : kLine), Sf(1.5f));
+        if (s.round) { g.FillEllipse(&fill, r); g.DrawEllipse(&edge, r); }
+        else { fill_round(g, r, Sf(5), fill); gp::GraphicsPath p; round_path(p, r, Sf(5)); g.DrawPath(&edge, &p); }
+        text(g, pad_label(s), s.w < 30 ? bold : font, r, on ? RGB(255, 255, 255) : kText, gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+        pad_hits_.push_back({RECT{static_cast<LONG>(r.X), static_cast<LONG>(r.Y), static_cast<LONG>(r.X + r.Width), static_cast<LONG>(r.Y + r.Height)}, &s});
+    }
+    text(g, L"Click a button to change what it does", little, gp::RectF(ox + Sf(120), oy + Sf(250), Sf(300), Sf(18)), kMuted, gp::StringAlignmentCenter);
+    // the sticks as boxes: the dead zone is the shaded circle, the dot is the stick
+    const double dz[2] = {ini_num("deadzone", 0.1), ini_num("right_deadzone", 0.1)};
+    const float val[2][2] = {{pad_.lx / 32768.f, pad_.ly / 32768.f}, {pad_.rx / 32768.f, pad_.ry / 32768.f}};
+    for (int i = 0; i < 2; ++i) {
+        const float bs = Sf(110), bx = ox + Sf(440) + i * Sf(122), by = oy;
+        gp::SolidBrush bg(C(kCard));
+        fill_round(g, gp::RectF(bx, by, bs, bs), Sf(8), bg);
+        const gp::RectF zone(bx + bs / 2 - static_cast<float>(dz[i]) * bs / 2, by + bs / 2 - static_cast<float>(dz[i]) * bs / 2, static_cast<float>(dz[i]) * bs,
+                             static_cast<float>(dz[i]) * bs);
+        gp::SolidBrush zb(C(kWarn, 120));
+        g.FillEllipse(&zb, zone);
+        gp::Pen zp(C(kWarn), Sf(1.2f));
+        g.DrawEllipse(&zp, zone);
+        gp::Pen ring(C(kLine), Sf(1));
+        g.DrawEllipse(&ring, gp::RectF(bx + Sf(2), by + Sf(2), bs - Sf(4), bs - Sf(4)));
+        g.DrawLine(&ring, bx, by + bs / 2, bx + bs, by + bs / 2);
+        g.DrawLine(&ring, bx + bs / 2, by, bx + bs / 2, by + bs);
+        const float mag = std::sqrt(val[i][0] * val[i][0] + val[i][1] * val[i][1]);
+        gp::SolidBrush dot(C(mag > dz[i] ? kAccentHi : kMuted));
+        const float dx = bx + bs / 2 + val[i][0] * (bs / 2 - Sf(4)), dy = by + bs / 2 - val[i][1] * (bs / 2 - Sf(4));
+        g.FillEllipse(&dot, dx - Sf(5), dy - Sf(5), Sf(10), Sf(10));
+        wchar_t b[64];
+        std::swprintf(b, 64, L"%ls · dead zone %d%%", i ? L"Right" : L"Left", static_cast<int>(dz[i] * 100 + 0.5));
+        text(g, b, little, gp::RectF(bx, by + bs + Sf(4), Sf(122), Sf(18)), kMuted);
+    }
+    text(g, pad_idx_ >= 0 ? L"Controller " + std::to_wstring(pad_idx_ + 1) + L" connected" : xi_.get ? L"No controller found. Connect an XInput controller (Xbox style)." : L"XInput is not available on this PC.",
+         font, gp::RectF(ox + Sf(440), oy + Sf(196), Sf(300), Sf(40)), pad_idx_ >= 0 ? kOk : kMuted, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+}
+
+// the mapping of one control, chosen from a menu (the rows below the diagram show the same value)
+void Panel::pick_mapping(const char* key, POINT screen) {
+    HMENU m = CreatePopupMenu();
+    const std::string cur = ini_.get("padmap", key, "default");
+    for (size_t i = 0; i < kPadButtons.size(); ++i)
+        AppendMenuW(m, MF_STRING | (lower(cur) == lower(kPadButtons[i].value) ? MF_CHECKED : 0), 1 + i, kPadButtons[i].label);
+    const int id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, screen.x, screen.y, 0, wnd_, nullptr);
+    DestroyMenu(m);
+    if (id <= 0) return;
+    ini_.set("padmap", key, kPadButtons[static_cast<size_t>(id - 1)].value);
+    save();
+    const int keep = scroll_;
+    rebuild();
+    scroll_ = std::min(keep, std::max(0, content_h_ - 100));
+    place();
 }
 
 void Panel::place() {
@@ -584,6 +736,8 @@ void Panel::place() {
             put(r.ctl3, S(520), y + S(6), S(32), S(32));
         } else if (r.kind == RowKind::add_binding) {
             put(r.ctl, S(32), y + S(8), S(160), S(34));
+        } else if (r.kind == RowKind::pad_test) {
+            put(r.ctl, S(32 + 440), y + S(8 + 150), S(234), S(34));
         }
     }
     EndDeferWindowPos(dw);
@@ -607,8 +761,7 @@ void Panel::save() {
     std::swprintf(b, 64, L"Saved ✓");
     (void)t;
     saved_note_ = b;
-    RECT top{0, 0, 100000, S(76)};
-    InvalidateRect(wnd_, &top, FALSE);
+    InvalidateRect(wnd_, nullptr, FALSE);   // the whole panel: the controller diagram shows dead zones and mappings
 }
 
 void Panel::set_bindings(const std::string& section, const std::vector<std::pair<std::string, std::string>>& e) {
@@ -623,6 +776,13 @@ void Panel::set_bindings(const std::string& section, const std::vector<std::pair
 void Panel::command(int id, int code, HWND ctl) {
     (void)id;
     for (Row& r : rows_) {
+        if (r.kind == RowKind::pad_test && ctl == r.ctl) {
+            if (code != BN_CLICKED || !xi_.set || pad_idx_ < 0) return;
+            XVib v{0xFFFF, 0xFFFF};
+            xi_.set(static_cast<DWORD>(pad_idx_), &v);
+            SetTimer(wnd_, kRumbleTimer, 700, nullptr);
+            return;
+        }
         if (r.kind == RowKind::option && ctl == r.ctl) {
             const Opt& o = options()[static_cast<size_t>(r.opt)];
             std::string v;
@@ -763,6 +923,8 @@ void Panel::paint(HDC hdc) {
                     text(g, o.label, font, gp::RectF(Sf(32), y + Sf(10), lw, Sf(20)), kText);
                     text(g, o.hint, little, gp::RectF(Sf(32), y + Sf(32), lw, Sf(18)), kMuted);
                 } else text(g, o.label, font, gp::RectF(Sf(32), y, lw, static_cast<float>(r.h)), kText, gp::StringAlignmentNear, gp::StringAlignmentCenter);
+            } else if (r.kind == RowKind::pad_test) {
+                paint_pad(g, y + Sf(8), font, bold, little);
             } else if (r.kind == RowKind::binding) {
                 text(g, L"→", font, gp::RectF(Sf(212), y, Sf(16), static_cast<float>(r.h)), kMuted, gp::StringAlignmentCenter, gp::StringAlignmentCenter);
             }
@@ -805,6 +967,18 @@ LRESULT Panel::on(UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         case WM_ERASEBKGND: return 1;
+        case WM_TIMER:
+            if (w == kRumbleTimer) {
+                KillTimer(wnd_, kRumbleTimer);
+                XVib off{0, 0};
+                if (xi_.set && pad_idx_ >= 0) xi_.set(static_cast<DWORD>(pad_idx_), &off);
+            } else if (w == kPadTimer && IsWindowVisible(wnd_)) {
+                const XState before = pad_;
+                const int idx = pad_idx_;
+                poll_pad();
+                if (idx != pad_idx_ || before.packet != pad_.packet || before.buttons != pad_.buttons) InvalidateRect(wnd_, nullptr, FALSE);
+            }
+            return 0;
         case WM_SIZE: place(); InvalidateRect(wnd_, nullptr, FALSE); return 0;
         case WM_COMMAND: command(LOWORD(w), HIWORD(w), reinterpret_cast<HWND>(l)); return 0;
         case WM_DRAWITEM: draw_item(reinterpret_cast<const DRAWITEMSTRUCT*>(l)); return TRUE;
@@ -833,6 +1007,9 @@ LRESULT Panel::on(UINT m, WPARAM w, LPARAM l) {
         case WM_SETCURSOR: if (LOWORD(l) == HTCLIENT) return TRUE; break;
         case WM_LBUTTONUP: {
             const POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            if (tab_ == T_PAD && p.y > S(64))
+                for (const auto& h : pad_hits_)
+                    if (PtInRect(&h.first, p)) { POINT s = p; ClientToScreen(wnd_, &s); pick_mapping(h.second->key, s); return 0; }
             for (size_t i = 0; i < tab_rects_.size(); ++i)
                 if (PtInRect(&tab_rects_[i], p) && static_cast<int>(i) != tab_) { tab_ = static_cast<int>(i); scroll_ = 0; saved_note_.clear(); rebuild(); }
             return 0;

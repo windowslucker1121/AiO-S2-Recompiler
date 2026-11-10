@@ -3,7 +3,7 @@
 update) and a few small shader archives of its romfs, so every step (extract, shader scan, translation, program list, preparation) runs
 in minutes instead of hours. The game does not play from it (the romfs is a sliver of the real one).
 
-    python -I make_test_nup.py --game <dump>/updates/<version> --base <dump>/base --out <file>.nup [--romfs-file Shader/X ...]
+    python -I make_test_nup.py --game <dump>/updates/<version> --base <dump>/base --title-id <hex> --version <n> --out <file>.nup [--romfs-file Shader/X ...]
 
 Built with tools/extract/tests/test_nup_extract.py's writer. Never commit its output (it holds game files).
 """
@@ -39,8 +39,8 @@ def main():
     ap.add_argument('--base', required=True, help='the base folder (exefs)')
     ap.add_argument('--out', required=True)
     ap.add_argument('--romfs-file', action='append', default=[])
-    ap.add_argument('--title-id', default='0400486024DEC000')
-    ap.add_argument('--version', type=int, default=131072)
+    ap.add_argument('--title-id', required=True, help='program id of the dump (hex), as in its game.toml')
+    ap.add_argument('--version', type=int, required=True, help='update version of the dump (e.g. 131072)')
     a = ap.parse_args()
     romfs = {}
     for rel in a.romfs_file or DEFAULT_FILES:

@@ -220,7 +220,7 @@ Play runs `oot.exe --game <game folder> --ini <data>\oot.ini` (also what the des
 
 A small end-to-end test (minutes, not hours) with a synthetic `.nup` (the real ExeFS and four small romfs files):
 ```bat
-tools\.venv\Scripts\python -I runtime\apps\setup\tests\make_test_nup.py --game game\oot\updates\131072 --base game\oot\base --out work\setup_test\oot_test.nup
+tools\.venv\Scripts\python -I runtime\apps\setup\tests\make_test_nup.py --game game\oot\updates\131072 --base game\oot\base --title-id 0400486024DEC000 --version 131072 --out work\setup_test\oot_test.nup
 game-build\build\release\oot_setup.exe --data %CD%\work\setup_test\data --source %CD%\work\setup_test\oot_test.nup --start
 ```
 `runtime\apps\setup\tests\winshot.py shot "Initial Setup" <png>` takes a screenshot without the mouse (PrintWindow); `cmd "Initial Setup"
