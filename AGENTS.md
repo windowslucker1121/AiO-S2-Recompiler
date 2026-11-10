@@ -1207,6 +1207,20 @@ x 4,398 as in A18); Kokiri and first-scene screenshots normal (foliage, crowns, 
 (old barriers + the tracker counting hazards no requested barrier ordered) is built but was not run in game. Not done: VK_KHR_unified
 _image_layouts, mesh-indirect copies before the pass. Pitfall: game-lock queue races; poll `game.next` every 0.5 s.
 
+**Session 2026-11-10 (G1: why our draws cost several times the console's).** Kokiri outside, 1920x1080, uncapped, alone, paired `cpuperf_ab`
+windows with the frame trace (GPU busy per frame). New measurement tool `[prof] gpu_stats` (nvn_gpu_stats.cpp: pipeline statistics + precise
+occlusion per draw family, `gpu stats` lines). Findings (ms of GPU per frame, real clocks): **the GPU time is not pixels**: render height 480
+instead of 1080 (5x fewer pixels) only 22.9 -> 21.8 ms; per frame ~2,200 draws, 1.3 M vertex invocations, 29.5 M fragment invocations (mostly
+~12 full-screen 1080/1440 passes), early-Z intact (fragments per passed sample 1.0-1.2 for opaque families; no translated hot fragment shader
+declares storage writes, depth writes or demote). **Draws left out (`exp_draw_cut = 2`): 22.7 -> 5.9 ms**; draws without fragments (`= 1`):
+-2.6 ms only; every draw recorded twice (`= 3`): +9.0 ms. So ~9 ms is the draws' own work (pre-raster dominated: the gpt meshes) and ~8 ms
+was around them. Of that, **~3.1 ms were the occlusion reports**: ~1,450 per frame, each one `vkCmdUpdateBuffer` + one
+`vkCmdCopyQueryPoolResults` (E4 call counts: `[nvn] exp_emit` now prints the most frequent vkCmd* per frame). `[nvn] occ_batch` (default on)
+writes them with a few multi-region copies: **43.3 -> 49.6 fps, GPU busy 22.8 -> 19.7 ms, 6 of 6 pairs**; in-game screenshots on vs off as
+close as two shots of one run (SSIM 0.94-0.97, only animated parts differ). Ruled out: the unconverted shading-rate image (the game binds one
+with palette `55557777888aab8b` on the main colour pass; forcing 2x2 on those draws, `exp_vrs_force = 2`, gained 0.2 ms), storage usage on
+render targets (colour compression; no change), redundant FSR / conservative-raster dynamic state sets (no change). After the fix the render
+thread (replay ~18.5 ms) and the GPU (~19.7 ms) are close: both need to drop for 60 fps.
 Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each ResetCounter/ReportCounter ended the pass); look for
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass

@@ -29,6 +29,7 @@
 #include "nvn_capture.h"
 #include "nvn_hazard.h"
 #include "nvn_gpu_internal.h"
+#include "nvn_gpu_stats.h"
 #include "nvn_impl.h"
 #include "nvn_pipeline.h"
 #include "nvn_present_pass.h"
@@ -724,6 +725,7 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(s.cb, &bi);
     const uint32_t qi = static_cast<uint32_t>(&s - g->slots) * 2;
+    gstats::slot_begin(s.cb, static_cast<uint32_t>(&s - g->slots));   // [prof] gpu_stats (measurement only)
     if (g->gpool) {
         vkCmdResetQueryPool(s.cb, g->gpool, static_cast<uint32_t>(&s - g->slots) * kGpMax, kGpMax);
         s.gp_n = 0;
