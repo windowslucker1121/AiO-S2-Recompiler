@@ -232,14 +232,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56 };
 uint64_t ab_mask() {
     static const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -255,6 +255,11 @@ uint64_t ab_mask() {
 }
 // False only in an "off" window of [nvn] cpuperf_ab for a feature it switches.
 inline bool ab_on(AbFeat f) { return g_cpu_ab_on || !(ab_mask() & f); }
+}  // namespace
+// [nvn] cpuperf_ab_what name memo_exact (measurement only; always on otherwise): the set memo's epoch counts page releases before they
+// happen (mem::ww::changes()) and settle moves the held-result version before gpu_new bits go. Off windows: the faults()-based epoch of before.
+bool memo_exact_on() { return ab_on(kAbMemoExact); }
+namespace {
 bool flat_set_maps_on() {
     static const bool on = nxrt::config_get_bool("nvn", "flat_set_maps", true);
     return on && ab_on(kAbFlatMaps);
@@ -3970,6 +3975,21 @@ uint64_t set_signature(const ProgLayout& pl, uint32_t set) {
 SetMap g_set_memo;   // signature -> set, valid for g_set_memo_epoch
 uint64_t g_set_memo_epoch = 0;
 uint64_t g_sets_reused = 0, g_sets_verify_bad = 0;          // statistics
+uint64_t g_sets_verify_raced = 0, g_memo_release_window = 0;  // statistics (see the statistics line)
+uint64_t g_memo_ext[2] = {};   // mem::ww::changes() and out_version() as the last bind_sets read them (verify: a hit that raced a change)
+// The set memo's epoch (bind_sets): everything a memoized read-only set's resolution depends on beyond its signature. The resolve epoch; the
+// texture images (or states); results sent back and the held-result index version (settle moves it before gpu_new bits go); the pool
+// registry: a pool registered over bound addresses (aliasing pools) resolves them elsewhere; and mem::ww::changes(): a write fault, file read or
+// mapping change on a tracked page of a pool copy makes the copy no longer serve it, so a uniform block there resolves to the pool now.
+// changes() moves before the page's bits go; faults() (used before 2026-11-10) moved only after the release's VirtualProtect, and a memo hit
+// in between still bound the copy (set_reuse = verify: 1 in 2.5 M hits in Kokiri outside).
+uint64_t memo_epoch_now(uint64_t* tg_out = nullptr, uint64_t* ob_out = nullptr) {
+    const uint64_t tg = memo_pass_keep() ? g_tex_image_gen.load(std::memory_order_relaxed) ^ 0x5bd1e995ull : g_tex_state_gen.load(std::memory_order_relaxed), ob = out_bytes_total();
+    if (tg_out) *tg_out = tg;
+    if (ob_out) *ob_out = ob;
+    return ((g_desc_epoch * 0x100000001b3ull ^ tg * 0x9e3779b97f4a7c15ull ^ ob ^ out_version() * 0xc2b2ae3d27d4eb4full) * 31 + pool_registry_generation()) * 31 +
+           (memo_exact_on() ? mem::ww::changes() : mem::ww::faults());
+}
 uint64_t g_memo_clr[3] = {}, g_memo_last[3] = {};            // statistics: memo clears by the resolve epoch, texture state, results sent back
 
 // ---- persistent, validated descriptor sets ([nvn] set_keep) ---------------------------------------------------------------------------
@@ -4013,7 +4033,7 @@ uint64_t smp_tune_now() {
     return static_cast<uint64_t>(static_cast<uint32_t>(nxrt::gfx::tuning().anisotropy.load(std::memory_order_relaxed))) << 32 ^ b;
 }
 uint64_t g_keep_sets_era = 0, g_keep_eras = 0, g_keep_sweep_at = 0;
-uint64_t g_keep_hit = 0, g_keep_new = 0, g_keep_rebuilt = 0, g_keep_dead_n = 0, g_keep_bad_n = 0, g_keep_verify_bad = 0, g_keep_evicted = 0;
+uint64_t g_keep_hit = 0, g_keep_new = 0, g_keep_rebuilt = 0, g_keep_dead_n = 0, g_keep_bad_n = 0, g_keep_verify_bad = 0, g_keep_verify_raced = 0, g_keep_evicted = 0;
 uint64_t g_keep_fail[5] = {};                // pool generation, uniform decision, held result, texture, layout
 std::unordered_map<std::string, uint64_t> g_keep_bad_why;   // statistics: why sets were not kept
 uint64_t g_var_new = 0, g_var_none = 0, g_var_hit[4] = {};   // set_keep_diag
@@ -4176,12 +4196,19 @@ VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_
     }
     if (it != g_keep.end()) {
         KeepEntry& e = it->second;
+        const uint64_t ch0 = mode == SetReuse::Verify ? mem::ww::changes() : 0, ov0 = mode == SetReuse::Verify ? out_version() : 0;
         const int why = keep_valid(e);
         if (why == 0) {
             e.last_used = now;
             ++g_keep_hit;
             if (mode == SetReuse::Verify) {
                 const VkDescriptorSet fresh = build_set(pl, set);
+                if (fresh && g_last_set_key != e.content && (mem::ww::changes() != ch0 || out_version() != ov0)) {
+                    // a page release (write fault) or a settled copy-back began on another thread between the checks and the fresh resolve:
+                    // the checks answered for the moment they ran (read_dep_check reads the same page bits resolve_read_dep does)
+                    ++g_keep_verify_raced;
+                    return fresh;
+                }
                 if (fresh && g_last_set_key != e.content) {
                     ++g_keep_verify_bad;
                     if (g_keep_verify_bad < 20 || (g_keep_verify_bad & 1023) == 0) {
@@ -4283,12 +4310,18 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
                              !nxrt::gfx::tuning().ufs_hash.load(std::memory_order_relaxed) && !extras::temporal_wanted();
     if (reusable_ok) {
         reusable = set_reuse_mask(pl);
-        const uint64_t tg = memo_pass_keep() ? g_tex_image_gen.load(std::memory_order_relaxed) ^ 0x5bd1e995ull : g_tex_state_gen.load(std::memory_order_relaxed), ob = out_bytes_total();
-        // the pool registry: a pool registered over bound addresses (aliasing pools) resolves them elsewhere (set_reuse = verify found such stale hits)
-        // and the CPU's write faults on tracked pages: a page of a pool copy the CPU wrote is no longer served by the copy, so a uniform block
-        // there resolves to the pool now (set_reuse = verify found memo hits still bound to the copy after such a write)
-        const uint64_t epoch = ((g_desc_epoch * 0x100000001b3ull ^ tg * 0x9e3779b97f4a7c15ull ^ ob ^ out_version() * 0xc2b2ae3d27d4eb4full) * 31 + pool_registry_generation()) * 31 +
-                               mem::ww::faults();
+        uint64_t tg = 0, ob = 0;
+        g_memo_ext[0] = mem::ww::changes();   // read first: what verify compares against may only have moved after the epoch below
+        g_memo_ext[1] = out_version();
+        const uint64_t epoch = memo_epoch_now(&tg, &ob);
+        {   // statistics: epoch checks where a page release by another thread had begun but its fault was not counted yet (the stale window
+            // of the faults()-based epoch before 2026-11-10)
+            static uint64_t last_ch = 0, last_f = 0;
+            const uint64_t ch = mem::ww::changes(), f = mem::ww::faults();
+            if (ch - last_ch > f - last_f && !g_set_memo.empty() && epoch != g_set_memo_epoch) ++g_memo_release_window;
+            last_ch = ch;
+            last_f = f;
+        }
         if (epoch != g_set_memo_epoch) {
             if (!g_set_memo.empty()) {   // statistics: what cleared a memo that held sets
                 if (g_desc_epoch != g_memo_last[0]) ++g_memo_clr[0];
@@ -4314,7 +4347,18 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
                 if (mode == SetReuse::Verify) {
                     const VkDescriptorSet fresh = build_set(pl, set);
                     const auto kc = g_set_content.find(ds);   // a kept set is another handle with the same content: compare the content keys
-                    if (kc != g_set_content.end() ? (fresh && kc->second != g_last_set_key) : fresh != ds) {
+                    const uint64_t ch_now = mem::ww::changes(), ov_now = out_version();
+                    if ((kc != g_set_content.end() ? (fresh && kc->second != g_last_set_key) : fresh != ds) && (ch_now != g_memo_ext[0] || ov_now != g_memo_ext[1])) {
+                        // another thread began a change the epoch counts after this bind_sets read it (a write fault, a copy-back settling on a
+                        // game thread): the hit is what a resolve at that moment gave, not a stale one
+                        ++g_sets_verify_raced;
+                        if (g_sets_verify_raced < 10)
+                            NXLOG_I(kTag, "set_reuse verify: set %u of vs %s fs %s differs, raced with a change after the epoch was read (page releases %+lld, "
+                                    "held-result version %+lld)", set, S.stage[kVertex] ? S.stage[kVertex]->hash.c_str() : "-",
+                                    S.stage[kFragment] ? S.stage[kFragment]->hash.c_str() : "-", static_cast<long long>(ch_now - g_memo_ext[0]),
+                                    static_cast<long long>(ov_now - g_memo_ext[1]));
+                        ds = fresh;
+                    } else if (kc != g_set_content.end() ? (fresh && kc->second != g_last_set_key) : fresh != ds) {
                         ++g_sets_verify_bad;
                         if (g_sets_verify_bad < 20 || (g_sets_verify_bad & 1023) == 0)
                             NXLOG_W(kTag, "set_reuse verify: set %u of vs %s fs %s differs from the reused one (%llu so far)", set,
@@ -7617,6 +7661,9 @@ void replay_begin_submit(Frame& f) {
                     (unsigned long long)g_sets_reused, (unsigned long long)g_sets_verify_bad, (unsigned long long)g_bump_n[kBumpOp],
                     (unsigned long long)g_bump_n[kBumpWrite], (unsigned long long)g_bump_n[kBumpPass], (unsigned long long)g_memo_clr[0], (unsigned long long)g_memo_clr[1],
                     (unsigned long long)g_memo_clr[2]);
+            NXLOG_I(kTag, "set memo: %llu verify differences raced with a change the epoch counts after it was read (not stale), kept sets %llu the same way; %llu epoch checks found a page "
+                    "release by another thread begun but its fault not counted yet (stale hits there before changes() was in the epoch)",
+                    (unsigned long long)g_sets_verify_raced, (unsigned long long)g_keep_verify_raced, (unsigned long long)g_memo_release_window);
             {   // the commands that moved the resolve epoch most often
                 std::vector<std::pair<uint64_t, int>> v;
                 for (int i = 0; i < 256; ++i) if (g_bump_op[i]) v.emplace_back(g_bump_op[i], i);

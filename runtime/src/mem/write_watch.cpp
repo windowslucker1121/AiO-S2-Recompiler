@@ -80,6 +80,9 @@ std::atomic<int> g_hi{0};              // slots [0, g_hi) may be in use
 std::atomic<int> g_busy{0};            // fault handlers and os-write calls looking at the table
 std::atomic<int> g_live{0};
 std::atomic<uint64_t> g_faults{0};
+// Moves *before* any thread other than the owner clears a page's valid or prot bit (release_page, forget): an owner that read changes()
+// before such a clear and sees the same count later knows no such clear began in between. g_faults moves only after the release.
+std::atomic<uint64_t> g_changes{0};
 std::atomic<uint64_t> g_prot_epoch{0};   // memory.cpp mapping / protection changes (protection_changed)
 std::atomic<uint64_t> g_waits{0};      // rounds a fault waited for another releaser (statistics, tests)
 std::atomic<uint64_t> g_guard_faults{0};   // accesses that hit a guarded page
@@ -167,6 +170,7 @@ bool release_page(Region* r, uint64_t page) {
     std::atomic<uint16_t>& rel = r->releasing[page];
     const bool armed = (r->prot[w].load(std::memory_order_acquire) & b) != 0;
     if (armed) rel.fetch_add(1, std::memory_order_seq_cst);
+    g_changes.fetch_add(1, std::memory_order_seq_cst);   // before the bits go (changes())
     const uint64_t old = r->prot[w].fetch_and(~b, std::memory_order_acq_rel);
     r->valid[w].fetch_and(~b, std::memory_order_acq_rel);
     r->written[w].fetch_or(b, std::memory_order_acq_rel);
@@ -704,6 +708,7 @@ void forget(uint64_t addr, uint64_t size, bool ban) {
     for_regions(addr, size, [ban](Region* r, uint64_t first, uint64_t count) {
         if (ban) set_bits(r->ban.get(), first, count, true);
         if (!any_set(r->prot.get(), first, count) && !any_set(r->valid.get(), first, count)) return;
+        g_changes.fetch_add(1, std::memory_order_seq_cst);   // before the bits go (changes())
         for (uint64_t q = first; q < first + count; ++q)           // guarded pages: read-only first (the owner's newer copy is dropped)
             if (test(r->guard.get(), q)) {              // protection first, then the bit (see unguard_locked)
                 DWORD was = 0;
@@ -721,6 +726,7 @@ void forget(uint64_t addr, uint64_t size, bool ban) {
 void ban_section(uint64_t offset, uint64_t size) { forget(kHeapBase + offset, size, true); }
 
 uint64_t faults() { return g_faults.load(std::memory_order_relaxed); }
+uint64_t changes() { return g_changes.load(std::memory_order_seq_cst); }
 uint64_t fault_waits() { return g_waits.load(std::memory_order_relaxed); }
 
 }  // namespace nxrt::mem::ww
