@@ -575,6 +575,10 @@ project)**. `prepare.state`'s key changed with results.tsv, so the default run's
 fix) is merged into `work\shaders\oot\spirv`; the replaced .spv files are kept as hard links in `work\shaders\struct_backup` (with the
 old results.tsv). Checked in game at 1920x1080 (frame cap 60): Kokiri outside 36.6 fps steady (1% low 29-34, was ~24), first scene
 54-59 in its first part, Link's house 60; upscaler and foliage clean. A full shader preparation is due (last step of the project).
+**2026-11-10: F1's vector pointer loads (054b256) merged into the shared cache:** the gpt set re-translated (3,419 corpus blocks, all ok)
+plus the 12 gpt "runtime" blocks of `work\ai_run\oot\a18dump\dump` in single mode (3e986fed, fdfd1e7c and the upscaler rows untouched);
+old files and results.tsv in `work\shaders\gpt_backup_v9` (runtime ones in its `runtime\`). In game, 1920x1080 uncapped, alone, warm:
+Kokiri outside 42.6 fps (1% low 29-32; warm-up run 41.5-42.6), Link's house 76.2 (1% low ~48); foliage, crowns, upscaler clean.
 Pitfall: the MCP `settings` `display.fps_limit` does not reach the limiter (`play: frame cap ... fps_limit -1`): the cap is a
 `controls.ini [display]` key; set it there for uncapped runs. **Merge pitfall (2026-11-09):** a full re-translation folder also holds rows of "runtime"-group blocks (from `work\shaders\oot\missing`) translated with the translator of that day; merging it later with `merge_results.py` overwrote the 27 A22-fixed upscaler network blocks with their pre-fix SPIR-V and brought the 1080 stripes back for ~1.5 h. Before merging an older full translation, drop its runtime rows (or every row whose block changed in the cache since), and screenshot the game at 1080 afterwards. Re-translating a subset now: `tools\.venv\Scripts\python -I tools\shaders\scripts\retranslate_subset.py --corpus work\shaders\oot\corpus
 --cache work\shaders\oot\spirv (--token gpt | --hashes FILE | PREFIX ...) [--backup DIR]` (temporary subset and output folders, removed
