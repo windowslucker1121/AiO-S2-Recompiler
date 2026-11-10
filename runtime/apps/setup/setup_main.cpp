@@ -116,6 +116,22 @@ struct GameItem {
     uint64_t done = 0, total = 0;
     std::string phase;                   // the @progress label (game_build.py: verify, lift, compile, link, finish)
     std::chrono::steady_clock::time_point t0;
+    // first progress report of the step: the rate counts from here, so a resumed step (done > 0 at once) is not taken as fast
+    bool seen = false;
+    uint64_t done0 = 0;
+    std::chrono::steady_clock::time_point t1;
+    // Seconds left in the running step, -1 while there is no fair guess yet (under 20 s or under 2% of the work measured).
+    int secs_left() const {
+        const auto now = std::chrono::steady_clock::now();
+        if (cur == S_BUILD) {   // phases with their own counts: the weighted fraction over the whole step
+            const double f = step_fraction(), secs = std::chrono::duration<double>(now - t0).count();
+            return f >= 0.05 && f < 1 && secs > 20 ? static_cast<int>(secs / f * (1 - f)) : -1;
+        }
+        const double secs = std::chrono::duration<double>(now - t1).count();
+        if (!seen || !total || done <= done0 || done >= total || secs < 20 || (done - done0) * 50 < total) return -1;
+        // ponytail: linear rate; the preparation does the expensive programs first, so early guesses run long
+        return static_cast<int>(secs / static_cast<double>(done - done0) * static_cast<double>(total - done));
+    }
     // How far the running step is, 0..1. The game build reports its phases one after another, each 0..total of its own:
     // weighted into one range so the bar never jumps back and the time estimate looks at the whole step.
     double step_fraction() const {
@@ -912,6 +928,7 @@ void App::next_step(GameItem& g) {
     g.done = g.total = 0;
     g.phase.clear();
     g.t0 = std::chrono::steady_clock::now();
+    g.seen = false;
     g.result_ok = false;
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     const std::wstring jobs = std::to_wstring(hw > 3 ? hw - 2 : 1);
@@ -983,7 +1000,8 @@ void App::step_line(GameItem& g, const std::string& l) {
     else if (std::sscanf(l.c_str(), "prepare: %llu %llu", &a, &b) == 2) progress = true;
     if (progress) {
         // a new tree of the extraction starts its own count; the build's phases share one step-wide fraction and clock
-        if (label[0] && b != g.total && g.cur != S_BUILD) g.t0 = std::chrono::steady_clock::now();
+        if (label[0] && b != g.total && g.cur != S_BUILD) { g.t0 = std::chrono::steady_clock::now(); g.seen = false; }
+        if (!g.seen) { g.seen = true; g.done0 = a; g.t1 = std::chrono::steady_clock::now(); }
         g.phase = label;
         g.done = a;
         g.total = b;
@@ -1541,14 +1559,17 @@ void App::paint_game_header(gp::Graphics& g, const RECT& rc) {
     bool bar = false;
     if (s->running && s->cur >= 0) {
         bar = true;
-        pt = L"Step " + std::to_wstring(s->cur + 1) + L" of " + std::to_wstring(S_COUNT);
-        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - s->t0).count();
-        const double f = s->step_fraction();
-        // no guess before 5% of the step and 20 s; "almost done" only near the end, never from a fast first phase
-        if (f >= 0.05 && f < 1 && secs > 20) {
-            const int left = static_cast<int>(secs / f * (1 - f));
-            if (f >= 0.9 && left < 120) pt += L"  \u00B7  almost done";
-            else pt += L"  \u00B7  about " + std::to_wstring(std::max(1, (left + 59) / 60)) + L" min left";
+        pt = L"Step " + std::to_wstring(s->cur + 1) + L" of " + std::to_wstring(S_COUNT) + L": " + kStepName[s->cur];
+        // the shader steps count blocks / programs: show how many
+        if ((s->cur == S_CORPUS || s->cur == S_TRANSLATE || s->cur == S_PREPARE) && s->total) {
+            auto th = [](uint64_t v) { std::wstring d = std::to_wstring(v); for (int i = static_cast<int>(d.size()) - 3; i > 0; i -= 3) d.insert(i, L","); return d; };
+            pt += L"  ·  " + th(std::min(s->done, s->total)) + L" of " + th(s->total);
+        }
+        const int left = s->secs_left();
+        if (left >= 0) {
+            if (left < 60) pt += L"  ·  under a minute left";
+            else if (left < 5400) pt += L"  ·  about " + std::to_wstring((left + 59) / 60) + L" min left";
+            else pt += L"  ·  about " + std::to_wstring(left / 3600) + L" h " + std::to_wstring(left / 60 % 60) + L" min left";
         }
         if (s->play_after) pt += L"  \u00B7  the game starts when it is done";
         if (s->cancel_requested) pt = L"Stopping...";
