@@ -232,14 +232,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbUilPend = 1ull << 44, kAbMemoExact = 1ull << 56 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbMemoExact = 1ull << 56 };
 uint64_t ab_mask() {
     static const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"uil_pend", kAbUilPend}, {"memo_exact", kAbMemoExact}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead},{"memo_exact", kAbMemoExact}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -1026,14 +1026,10 @@ bool attachment_layout(VkImageLayout l) { return l == VK_IMAGE_LAYOUT_COLOR_ATTA
 // for its attachment writes: it is re-tagged as sampled without a barrier, and the open pass goes on. In Kokiri outside ~40 passes per
 // frame ended for such layout changes alone (prepare_textures). Not for images the CPU wrote (an upload follows), images in other layouts
 // (transfer writes, storage writes of a draw in the open pass), or attachments of the open pass.
-uint64_t g_uil_retags = 0, g_uil_retag_kept_open = 0, g_uil_pend_n = 0;   // statistics
+uint64_t g_uil_retags = 0, g_uil_retag_kept_open = 0;   // statistics
 bool uil_retag_on() {
     static const bool on = nxrt::config_get_bool("nvn", "uil_retag", true);
     return on && nxrt::gfx::g_unified_layouts && ab_on(kAbUilRetag);
-}
-bool uil_pend_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "uil_pending_barrier", true);
-    return on && uil_retag_on() && ab_on(kAbUilPend);
 }
 bool uil_retag_ok(Texture* t) {
     if (!t || t->cpu_dirty.load()) return false;
@@ -1091,18 +1087,6 @@ bool ensure_pass(bool depth_ro = false) {
             memory_barrier(F->cb);
             g_pending.clear();
         }
-    }
-    // [nvn] uil_pending_barrier (default on; cpuperf_ab_what uil_pend), with unified layouts: when an image that has ended an open pass
-    // before (g_break_prone) is among the attachments of passes that ended without a barrier, the barrier is recorded now, between the
-    // passes: the coming pass may then re-tag it as sampled (uil_retag_ok) instead of breaking for its layout change.
-    if (!g_pending.empty() && uil_pend_on()) {
-        for (const PendingWrite& w : g_pending)
-            if (w.tex && w.tex->gpu && g_break_prone.count(w.tex->gpu)) {
-                memory_barrier(F->cb);
-                g_pending.clear();
-                ++g_uil_pend_n;
-                break;
-            }
     }
     pre_layout_prev_targets();
     if (out_any()) pass_lookahead();
@@ -7979,9 +7963,8 @@ void replay_begin_submit(Frame& f) {
                 NXLOG_I(kTag, "passes ended by:%s; memory writes kept to the pass end %llu (%llu flushes)", s.c_str(), (unsigned long long)g_wdefer_n,
                         (unsigned long long)g_wdefer_flushes);
                 NXLOG_I(kTag, "pass_pre_layout: %llu images put into their sampled layout at a pass begin, %zu images known to break passes; "
-                        "uil_retag: %llu re-tagged as sampled without a barrier (%llu in an open pass), %llu barriers at a pass begin for them (uil_pending_barrier)",
-                        (unsigned long long)g_pre_layout_n, g_break_prone.size(), (unsigned long long)g_uil_retags, (unsigned long long)g_uil_retag_kept_open,
-                        (unsigned long long)g_uil_pend_n);
+                        "uil_retag: %llu re-tagged without a barrier (%llu in an open pass)",
+                        (unsigned long long)g_pre_layout_n, g_break_prone.size(), (unsigned long long)g_uil_retags, (unsigned long long)g_uil_retag_kept_open);
                 NXLOG_I(kTag, "fill_ahead: %llu looks ahead over %llu dispatches, %llu ranges copied in early (%llu KiB)", (unsigned long long)g_fa_scans,
                         (unsigned long long)g_fa_dispatches, (unsigned long long)g_fa_ranges, (unsigned long long)(g_fa_bytes >> 10));
                 NXLOG_I(kTag, "mesh_copy_ahead: %llu record copies before their pass, %llu draws used one", (unsigned long long)g_mesh_pre_n,

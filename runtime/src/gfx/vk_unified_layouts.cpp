@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// [gfx] unified_layouts (VK_KHR_unified_image_layouts, default on where the driver has it): every image layout the runtime names is
-// handed to the driver as VK_IMAGE_LAYOUT_GENERAL.
+// [gfx] unified_layouts (VK_KHR_unified_image_layouts where the driver has it; default off: in OoT's Kokiri outside at 1080 it changed
+// no GPU time, see AGENTS.md P5): every image layout the runtime names is handed to the driver as VK_IMAGE_LAYOUT_GENERAL.
 //
 // With the extension, GENERAL is as fast as the specific layouts for every use, so an image never needs a layout change, only the
 // dependency a barrier carries. The runtime's own bookkeeping keeps its layouts (they say how an image was used last, and a change of them
