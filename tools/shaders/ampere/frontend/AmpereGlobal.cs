@@ -99,6 +99,9 @@ namespace Ryujinx.Graphics.Shader.Translation
         /// NXRT_HARNESS_GMEM_SCAN_ALL=1: the candidate search visits all 16 slots per access (the form before 2026-11-09).
         static readonly bool ScanAllSlots = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_SCAN_ALL") == "1";
         internal static readonly bool NoSlots = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_NO_SLOTS") == "1";
+        /// Measurement only (F2; wrong where a held compute result lives only in the pool copy): NXRT_HARNESS_GMEM_IGNORE_MASK=1 takes the
+        /// inline fast path whatever the slot mask says (what a runtime with every mask 0 would give).
+        static readonly bool IgnoreMask = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_IGNORE_MASK") == "1";
 
         public static int[] Candidates => _candidates;
 
@@ -391,7 +394,12 @@ namespace Ryujinx.Graphics.Shader.Translation
         // Fast-path helpers: one extra in argument (the stage's slot mask word, c[0] SlotMaskC0), out arguments {the five cache words of
         // the span the walk ended in}. The page cache is read and written only by main's inline code (so the driver keeps it in registers:
         // a cache the out-of-line helper touched lived in local memory); in SPIR-V the helper returns {value, span} as a struct.
-        public const int FastArguments = 2, FastOuts = CacheWords;
+        public const int FastOuts = CacheWords;
+        /// NXRT_HARNESS_GMEM_SELECT=1 (experiment, F2): the load sits outside control flow. Only the helper call is conditional (a miss);
+        /// after it the address is selected (the cached span, the span the walk returned, else the page table's own address as a harmless
+        /// stand-in, extra fast arguments 2/3) and the value too (the loaded word, else what the helper returned).
+        internal static readonly bool SelectLoads = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_SELECT") == "1";
+        public static readonly int FastArguments = SelectLoads ? 4 : 2;   // after SelectLoads (static initializers run in text order)
         [ThreadStatic] static bool _lastFallback;
         [ThreadStatic] static int _helperInArgs;
         [ThreadStatic] static bool _helperFast;
@@ -416,8 +424,14 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         /// The fast path's extra call arguments: the slot mask word (the cache test itself is SPIR-V at the call, TryGenerateHelperCall) and
         /// the load's vector tag (VectorTag; the helper does not read it).
-        internal static Operand[] EmitFastOperands(Operation op) =>
-            new[] { Cbuf(0, SlotMaskWord(_candidates)), Const(_vectorTags != null && _vectorTags.TryGetValue(op, out int t) ? t : 0) };
+        internal static Operand[] EmitFastOperands(Operation op)
+        {
+            Operand tag = Const(_vectorTags != null && _vectorTags.TryGetValue(op, out int t) ? t : 0);
+            Operand mask = IgnoreMask ? Const(0) : Cbuf(0, SlotMaskWord(_candidates));
+            return SelectLoads
+                ? new[] { mask, tag, Cbuf(0, PageTableC0 / 4 + 2), Cbuf(0, PageTableC0 / 4 + 3) }
+                : new[] { mask, tag };
+        }
 
         // ---- Vector loads (LDG.64 / LDG.128) --------------------------------------------------------------------------------------------
         // The front end splits a vector load into 32-bit loads (the IR is scalar). Through the fast path each word then made its own
@@ -627,6 +641,79 @@ namespace Ryujinx.Graphics.Shader.Translation
                     (_vectorDone ??= new())[vGroup] = (hitFlag, words);
                 }
                 return (res, lMerge);
+            }
+
+            // SelectLoads: only the miss is control flow; the load comes after the merge through a selected address
+            (SpvInstruction, SpvInstruction) Selected(bool vectorHead)
+            {
+                SpvInstruction tabLo = ctx.Get(AggregateType.U32, operation.GetSource(5)), tabHi = ctx.Get(AggregateType.U32, operation.GetSource(6));
+                SpvInstruction[] w = new SpvInstruction[CacheWords];
+                for (int i = 0; i < CacheWords; i++) w[i] = ctx.Load(u32, ctx.AccessChain(pw, cacheVar, C((uint)i)));
+                SpvInstruction hit = ctx.LogicalAnd(bt, ctx.LogicalAnd(bt, ctx.IEqual(bt, ctx.BitwiseAnd(u32, aLo, ctx.Not(u32, w[2])), w[0]), ctx.IEqual(bt, aHi, w[1])),
+                                                    ctx.IEqual(bt, slots, C(0)));
+                SpvInstruction lEntry = ctx.Label(), lSlow = ctx.Label(), lMerge = ctx.Label();
+                ctx.Branch(lEntry);
+                ctx.AddLabel(lEntry);
+                ctx.SelectionMerge(lMerge, SelectionControlMask.MaskNone);
+                ctx.BranchConditional(hit, lMerge, lSlow);
+                ctx.AddLabel(lSlow);
+                SpvInstruction r = ctx.FunctionCall(HelperReturnType(ctx, function), spvFunc, vals);
+                SpvInstruction slowValue = ctx.CompositeExtract(retType, r, (Spv.Generator.LiteralInteger)0);
+                SpvInstruction[] s = new SpvInstruction[CacheWords];
+                for (int i = 0; i < CacheWords; i++)
+                {
+                    SpvInstruction word = ctx.CompositeExtract(ctx.GetType(function.OutArguments[i]), r, (Spv.Generator.LiteralInteger)(1 + i));
+                    s[i] = ctx.BitcastIfNeeded(AggregateType.U32, function.OutArguments[i], word);
+                    ctx.Store(ctx.AccessChain(pw, cacheVar, C((uint)i)), s[i]);
+                }
+                ctx.Branch(lMerge);
+                ctx.AddLabel(lMerge);
+                SpvInstruction[] span = new SpvInstruction[CacheWords];
+                for (int i = 0; i < CacheWords; i++) span[i] = ctx.Phi(u32, w[i], lEntry, s[i], lSlow);
+                SpvInstruction helperValue = ctx.Phi(retType, function.ReturnType == AggregateType.U32 ? C(0) : ctx.Bitcast(retType, C(0)), lEntry, slowValue, lSlow);
+                // the span covers the address: the cache hit, or the span the walk ended in (not when a bound slot answered: no span)
+                SpvInstruction ok = ctx.LogicalAnd(bt, ctx.IEqual(bt, ctx.BitwiseAnd(u32, aLo, ctx.Not(u32, span[2])), span[0]), ctx.IEqual(bt, aHi, span[1]));
+                SpvInstruction lo = ctx.IAdd(u32, span[3], ctx.BitwiseAnd(u32, aLo, span[2]));
+                SpvInstruction hi = ctx.IAdd(u32, span[4], ctx.Select(u32, ctx.ULessThan(bt, lo, span[3]), C(1), C(0)));
+                lo = ctx.Select(u32, ok, lo, tabLo);
+                hi = ctx.Select(u32, ok, hi, tabHi);
+                SpvInstruction addr = ctx.BitwiseOr(u64, ctx.UConvert(u64, lo), ctx.ShiftLeftLogical(u64, ctx.UConvert(u64, hi), C(32)));
+                int n = vectorHead ? vCount : 1;
+                SpvInstruction lt = n == 1 ? u32 : ctx.TypeVector(u32, n);
+                SpvInstruction ld = ctx.Load(lt, ctx.ConvertUToPtr(ctx.TypePointer((StorageClass)5349, lt), addr), MemoryAccessMask.Aligned);
+                ld.AddOperand((Spv.Generator.LiteralInteger)(4 * n));
+                SpvInstruction w0 = n == 1 ? ld : ctx.CompositeExtract(u32, ld, (Spv.Generator.LiteralInteger)0);
+                SpvInstruction res = ctx.Select(retType, ok, function.ReturnType == AggregateType.U32 ? w0 : ctx.Bitcast(retType, w0), helperValue);
+                if (vectorHead)
+                {
+                    SpvInstruction[] words = new SpvInstruction[vCount];
+                    for (int i = 1; i < vCount; i++) words[i] = ctx.CompositeExtract(u32, ld, (Spv.Generator.LiteralInteger)i);
+                    (_vectorDone ??= new())[vGroup] = (ok, words);
+                }
+                return (res, lMerge);
+            }
+
+            if (SelectLoads && vGroup != 0 && vWord != 0 && _vectorDone != null && _vectorDone.TryGetValue(vGroup, out var sdone))
+            {
+                // a later word: its lane of word 0's vector, else (a bound slot answered word 0) its own call, under a branch
+                SpvInstruction lEntry = ctx.Label(), lReg = ctx.Label(), lEnd = ctx.Label();
+                ctx.Branch(lEntry);
+                ctx.AddLabel(lEntry);
+                ctx.SelectionMerge(lEnd, SelectionControlMask.MaskNone);
+                ctx.BranchConditional(sdone.Hit, lEnd, lReg);
+                ctx.AddLabel(lReg);
+                SpvInstruction rc = ctx.FunctionCall(HelperReturnType(ctx, function), spvFunc, vals);
+                SpvInstruction regValue = ctx.CompositeExtract(retType, rc, (Spv.Generator.LiteralInteger)0);
+                ctx.Branch(lEnd);
+                ctx.AddLabel(lEnd);
+                SpvInstruction have = function.ReturnType == AggregateType.U32 ? sdone.Words[vWord] : ctx.Bitcast(retType, sdone.Words[vWord]);
+                result = ctx.Phi(retType, have, lEntry, regValue, lReg);
+                return true;
+            }
+            if (SelectLoads)
+            {
+                (result, _) = Selected(vGroup != 0 && vWord == 0 && vCount is 2 or 4);
+                return true;
             }
 
             if (vGroup != 0 && vWord != 0 && _vectorDone != null && _vectorDone.TryGetValue(vGroup, out var done))

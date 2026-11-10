@@ -260,6 +260,29 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
   115). **Slower in game** (36.1 / 36.3 vs 36.9 fps; probably the degenerate primitives up to the maximum): off.
 - Not tried: spirv-opt (no Vulkan SDK here), specialization constants for the page-table shifts (the walk runs only on a miss).
 
+## gpt pre-raster stages after F1: what is left, experiments (F2, 2026-11-10)
+
+- Measured in game (Kokiri outside, 1920x1080 uncapped, alone, exe of a70f2aa, paired `cpuperf_ab` windows from 100 s): `[nvn] skip_gpt = 2`
+  (gpt draws without fragments) **+0.1 fps** (8 pairs, 43.0 vs 42.9): the gpt draws' rasterization and fragment work is off the critical
+  path; `skip_gpt = 1` (gpt draws left out) +3.75 fps (9/9), and +3.95 with the mesh blocks emitting no primitives (below): the gpt draws'
+  remaining cost (~1.9 ms per frame) is their pre-raster work plus the render thread's per-draw work, and the frame is render-thread bound
+  (replay 22.4 ms, idle 0.6 ms per frame). Graphics pointer stages with a slot marked (no inline fast path): 25-29% of the sets.
+- Experiment switches, all off (measurement or no gain; the default translation is byte-identical to F1's):
+  - `NXRT_HARNESS_GMEM_SELECT=1`: the fast-path load sits after the merge through a selected address (cached span, the span the walk
+    returned, else the page table's own address as a stand-in) and the value is selected; only the miss call is control flow. pipestat:
+    same code size, 50-130 B less local memory. Game: 41.3 vs 41.7 and 39.7 vs 42.2 fps: dropped.
+  - `NXRT_HARNESS_MESH_EARLY_COUNT=1` (with `NXRT_HARNESS_MESH_DIRECT=1`): SetMeshOutputsEXT with the real primitive count right after the
+    program's own count write (`ISBEWR.O.32 [3]`, lane 0, before any attribute write in all hot blocks), so the direct-output epilogue no
+    longer sends degenerate primitives up to the maximum; used only when the count is written once and before the first attribute.
+    Shared memory 13 KB -> 0.4 KB, code unchanged. Game: see AGENTS.md "Session 2026-11-10 (F2)".
+  - `NXRT_HARNESS_GMEM_IGNORE_MASK=1` (measurement only, wrong where a held result lives only in the pool copy): the fast path whatever
+    the slot mask says, i.e. what a runtime with every mask 0 gives: 41.5 / 40.7 vs 41.7 / 42.2 fps, no GPU gain.
+  - `NXRT_HARNESS_MESH_EXP=noprims` (measurement only): every mesh work group runs but emits no primitive.
+- Not built, with the reason: vector stores (the gpt pre-raster stages have no STG); vector loads for the bound-slot path (the GPU side of
+  the gpt draws is not on the critical path, see `IGNORE_MASK`); per-thread-indexed constant buffer reads through storage buffers (the
+  console's own SASS reads them with LDC as well); pointer tables bound as storage buffers (a load through them still needs a bounds check
+  and a fallback, the same shape as the page-cache test).
+
 ## TLD / TLD4 / TXD .F16 (OoT upscaler network, A22)
 
 - TEX, TLD, TLD4 and TXD all carry `.F16.RN` / `.F16.RZ` in bits 79..80 (nvdisasm 13.3 probe: `TLD4.SCR.R.F16.RN.PTP`,

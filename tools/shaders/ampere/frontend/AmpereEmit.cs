@@ -76,6 +76,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
                 EmitAmpereOp(ctx, prog, i);
                 if (skip != null) ctx.MarkLabel(skip);
+                if (prog.Mesh != null) AmpereMesh.AfterInstruction(ctx, i.Opcode, Has(i, "ATTR"), Has(i, "32"));
             }
             catch (AmpereSkip e)
             {
