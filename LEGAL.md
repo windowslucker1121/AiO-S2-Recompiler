@@ -47,6 +47,12 @@ Nintendo. Pokémon is a trademark of Nintendo, Creatures Inc. and GAME FREAK inc
 They are used only nominatively: to say which hardware a dump comes from and which game a module supports. Their use does not mean
 that any rights holder endorses or is connected with this project. The project's apps and icons use no Nintendo or game logos or art.
 
+## DLSS
+
+NVIDIA Streamline (`sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`) is MIT-licensed and may ship in the release package. NVIDIA's
+DLSS library `nvngx_dlss.dll` is under the NVIDIA RTX SDKs LICENSE and is never shipped or committed: the library downloads it from
+NVIDIA's own repository only on the user's request, after showing the licence and getting the user's OK (`tools/release/fetch_dlss.py`).
+
 ## Licences
 
 The project is licensed under GPL-3.0 (`LICENSE`; parts say GPL-3.0-or-later). Third-party code keeps its own licence:

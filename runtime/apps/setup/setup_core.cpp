@@ -146,6 +146,7 @@ Tools find_tools() {
     // The game's own default for the translator is <exe dir>\tools\spirv_harness\spirv_harness.exe (nvn_shaders.cpp start_translator).
     t.translator = pick({join(rel, L"spirv_harness\\spirv_harness.exe"),
                          dev.empty() ? L"" : join(dev, L"tools\\shaders\\build\\bin\\Release\\net10.0\\spirv_harness.exe")});
+    t.fetch_dlss = pick({join(rel, L"scripts\\fetch_dlss.py"), dev.empty() ? L"" : join(dev, L"tools\\release\\fetch_dlss.py")});
     t.make_manifest = pick({join(rel, L"scripts\\make_manifest.py"), dev.empty() ? L"" : join(dev, L"tools\\extract\\make_manifest.py")});
     if (file_exists(join(rel, L"build\\zig\\zig.exe"))) t.game_build = pick({join(rel, L"build\\game_build.py")});
     t.python = pick({join(rel, L"python\\python.exe"), dev.empty() ? L"" : join(dev, L"tools\\.venv\\Scripts\\python.exe")});
@@ -473,6 +474,7 @@ std::vector<GpuInfo> query_gpus(std::wstring* error) {
         GpuInfo g;
         g.name = widen(p.deviceName);
         g.driver = driver_text(p.vendorID, p.driverVersion);
+        g.vendor = p.vendorID;
         g.api = p.apiVersion;
         uint32_t ne = 0;
         vkEnumerateDeviceExtensionProperties(d, nullptr, &ne, nullptr);
@@ -510,6 +512,18 @@ uint64_t remaining_disk_need(const Config& c, const State& s) {
     if (s.built_for.empty()) need += 4'000'000'000ull;   // the game build's generated C++ and objects (removed when it is done)
     if (!file_exists(join(l.shaders, L"pipeline_cache.bin"))) need += 5'000'000'000ull;
     return need;
+}
+
+std::wstring dlss_dir(const Tools& t) { return join(t.exe_dir, L"upscalers\\streamline"); }
+
+int dlss_state(const Tools& t) {
+    static const bool rtx = [] {
+        std::wstring err;
+        for (const GpuInfo& g : query_gpus(&err)) if (g.vendor == 0x10DE && g.name.find(L"RTX") != std::wstring::npos) return true;
+        return false;
+    }();
+    if (!rtx) return 0;
+    return file_exists(join(dlss_dir(t), L"sl.interposer.dll")) && file_exists(join(dlss_dir(t), L"nvngx_dlss.dll")) ? 2 : 1;
 }
 
 std::vector<Check> run_system_checks(const Tools& t) {
@@ -559,6 +573,19 @@ std::vector<Check> run_system_checks(const Tools& t) {
                 k.state = L"OK";
                 if (!best->mesh_shader) { k.level = Level::warn; k.state = L"OK (no mesh shaders)"; k.detail += L"; foliage needs VK_EXT_mesh_shader"; }
             }
+        }
+        out.push_back(k);
+    }
+    // DLSS (optional)
+    {
+        Check k{L"DLSS", L"", L"", L"", Level::ok};
+        k.need = L"optional: NVIDIA RTX graphics card and the DLSS files";
+        const int d = dlss_state(t);
+        if (d == 2) { k.state = L"OK"; k.detail = dlss_dir(t); }
+        else {
+            k.level = Level::warn;
+            if (d == 0) { k.state = L"Not available"; k.detail = L"no NVIDIA RTX graphics card"; }
+            else { k.state = L"Files missing"; k.detail = dlss_dir(t); k.fix = L"Settings > Graphics > Download DLSS (asks for NVIDIA's licence first)."; }
         }
         out.push_back(k);
     }

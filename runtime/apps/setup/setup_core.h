@@ -40,6 +40,7 @@ struct Tools {
     std::wstring python_args;      // "-3" for the py.exe launcher
     std::wstring game_build;       // tools\build\game_build.py of a release (with its Zig and lifter), else empty
     std::wstring make_manifest;    // make_manifest.py (tools\scripts in a release, tools\extract in the checkout)
+    std::wstring fetch_dlss;       // fetch_dlss.py (tools\scripts in a release, tools\release in the checkout)
 };
 Tools find_tools();
 // The game's exe: <exe dir>\<files.exe>; a development build also looks in the checkout's game-build\build\release.
@@ -118,9 +119,14 @@ struct GpuInfo {
     bool usable = false;          // Vulkan 1.3, dynamic rendering + synchronization2, swapchain
     bool pipeline_library = false;
     bool mesh_shader = false;
+    uint32_t vendor = 0;          // PCI vendor id (0x10DE NVIDIA)
     std::wstring why;             // not usable: why
 };
 std::vector<GpuInfo> query_gpus(std::wstring* error);
+// DLSS (optional): 0 no NVIDIA RTX GPU, 1 RTX but sl.interposer.dll / nvngx_dlss.dll missing, 2 ready. The DLLs live in
+// <exe dir>\upscalers\streamline. The GPU answer is asked once and kept.
+int dlss_state(const Tools& t);
+std::wstring dlss_dir(const Tools& t);
 // The PC's checks (Windows, GPU, memory, translator, Python): the same for every game.
 std::vector<Check> run_system_checks(const Tools& t);
 // One game's checks: disk space for its remaining steps, its program and the DLLs it needs, its dump. disk_need: bytes still to write.

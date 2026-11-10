@@ -44,6 +44,16 @@ const game::Info& data_info() {
             // 02dcb888 is not checked on screen yet and its pipeline takes ~270 s to build the first time, which the upscaler fallback
             // does not cover: it stays a linearly filtered scaled copy of its input composite (tex0) into its output (img1) for now.
             "pass_copy = 02dcb888b204187a:tex0:img1\n"
+            // [dlss_pass] (runtime/docs/CONFIG.md): with [upscale] mode dlss / dlaa / fsr3 the network pass (any variant) is replaced by the
+            // temporal backend: colour = the composite the network reads (tex0), output = its image 1. Unverified: depth = the latest 3D draw's
+            // depth target; motion = none because the network's motion input is not identified (no camera-derived vectors yet), so for now the
+            // backend never runs and the game's chain stays as it is. Mode off (the default): nothing changes either way.
+            "[dlss_pass]\n"
+            "match = fea98fe7,f90d726d,49659bca,02dcb888\n"
+            "color = tex0\n"
+            "depth = depth_rt\n"
+            "motion = none\n"
+            "output = img1\n"
             // The real-time frame step (oot_core.cpp apply_step; [time] mode = off gives the console's fixed 1/60 s per frame). The game is
             // made for 30-60 fps; on a PC that renders 15-25 fps in Kokiri Forest the step goes up to 1/10 s (scale 6; walking and the ladder
             // checked at 10 fps). Frames slower than that slow the game down instead of taking larger steps.

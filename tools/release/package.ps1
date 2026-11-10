@@ -10,6 +10,7 @@
 #   tools\build\                    the player-side game build: game_build.py, the lifter (recomp\), Zig (zig\), nx_plain_nso.exe
 #   games\<id>\sdk\                 per game with a runtime module: stub.cpp, rt_api.h, game.rc, game.manifest.in, <id>_rt.lib
 #   games\<id>\runtime\             <id>_rt.dll, the ASTC decoder DLLs, fonts\ (copied next to the exe the player builds)
+#   upscalers\streamline\          with -Streamline: sl.interposer.dll, sl.common.dll, sl.dlss.dll (MIT); nvngx_dlss.dll is never shipped (fetch_dlss.py)
 #   LICENSE, LEGAL.md, README.md, THIRD_PARTY_NOTICES.md, licenses\
 # No game data and no lifted code: the package holds this repository's own programs only (LEGAL.md). A game exe is never part of
 # it: the library builds it on the player's PC from their own dump (tools\build\game_build.py).
@@ -28,6 +29,7 @@ param(
     [switch]$SkipTranslator,
     [switch]$SkipPython,
     [switch]$SkipRuntime,
+    [switch]$Streamline,     # opt-in: ship NVIDIA's MIT Streamline DLLs in upscalers\streamline\ (never nvngx_dlss.dll)
     [string]$HostPython = 'python'
 )
 $ErrorActionPreference = 'Stop'
@@ -56,6 +58,10 @@ $PyWheels = @('zstandard', 'lz4', 'capstone==5.0.9')   # capstone: the lifter's 
 $ZigVersion = '0.17.0'
 $ZigUrl = "https://ziglang.org/download/$ZigVersion/zig-x86_64-windows-$ZigVersion.zip"
 $ZigSha256 = 'B5663F69581DCF391293FBF16C06CB80D81D806545CE618B4D0BAB7F0EB8C428'   # ziglang.org/download/index.json
+
+# Streamline v2.14.16 (MIT) release zip, used only with -Streamline. Asset name assumed from NVIDIA-RTX/Streamline's release page.
+$SlUrl = 'https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip'
+$SlSha256 = 'TODO-fill-on-first-run'   # not computed yet (no download was allowed when this was written): fill in, then the step runs
 
 function Fetch([string]$url, [string]$file, [string]$sha) {
     if (-not (Test-Path $file) -or (Get-FileHash $file -Algorithm SHA256).Hash -ne $sha) {
@@ -91,6 +97,24 @@ Copy-Item (Join-Path $repo 'tools\extract\nup_extract.py') $sd
 Copy-Item (Join-Path $repo 'tools\extract\make_manifest.py') $sd
 Copy-Item (Join-Path $repo 'tools\shaders\scripts\extract_generic.py') $sd
 Copy-Item (Join-Path $repo 'tools\shaders\scripts\bnsh_programs.py') $sd
+Copy-Item (Join-Path $repo 'tools\release\fetch_dlss.py') $sd
+
+# 3a. Streamline DLLs (MIT, opt-in)
+if ($Streamline) {
+    if ($SlSha256 -like 'TODO*') { throw 'package.ps1: $SlSha256 (Streamline v2.14.16 zip) is not filled in yet; download it once, check it, put its SHA-256 in the script' }
+    $slzip = Join-Path $tmp 'streamline.zip'
+    Fetch $SlUrl $slzip $SlSha256
+    $slx = Join-Path $tmp 'streamline'
+    if (Test-Path $slx) { Remove-Item -Recurse -Force $slx }
+    Expand-Archive $slzip $slx
+    $sld = Join-Path $pkg 'upscalers\streamline'
+    New-Item -ItemType Directory -Force $sld | Out-Null
+    foreach ($dll in 'sl.interposer.dll', 'sl.common.dll', 'sl.dlss.dll') {
+        $f = Get-ChildItem $slx -Recurse -Filter $dll | Where-Object { $_.FullName -match 'bin\\x64\\' -and $_.FullName -notmatch 'development' } | Select-Object -First 1
+        if (-not $f) { throw "$dll not found in the Streamline zip" }
+        Copy-Item $f.FullName $sld
+    }
+}
 
 # 3b. the player-side game build: game_build.py, the lifter, the NSO converter, Zig
 $bt = Join-Path $pkg 'tools\build'

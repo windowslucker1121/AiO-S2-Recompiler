@@ -6,6 +6,7 @@
 #pragma once
 #include <windows.h>
 
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -43,5 +44,9 @@ HWND create(HWND parent, HINSTANCE inst, int id);
 void set_fonts(HWND panel, const Fonts& f);
 // The game whose settings the panel shows. controls_ini empty: not available yet, why_not says why (shown instead of the settings).
 void set_game(HWND panel, const std::wstring& title, const std::wstring& controls_ini, const std::wstring& why_not);
+
+// DLSS availability (setup::dlss_state): 2 shows the DLSS/DLAA entries; 1 hides them and offers a "Download DLSS" button that calls
+// download; 0 hides them. Call before set_game.
+void set_dlss(HWND panel, int state, std::function<void()> download);
 
 }  // namespace setup::settings

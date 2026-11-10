@@ -1,6 +1,11 @@
 # DLSS for every game: plan (draft, 2026-11-10)
 
-Status: investigation only, nothing built. Goal: NVIDIA DLSS Super Resolution / DLAA in the runtime for any recompiled game,
+Status (2026-11-10, branch feat/dlss-wp1): WP1 done (d58ee2c). WP2 mechanism done (`[dlss_pass]`, CONFIG.md, GAME_BOUNDARY.md);
+OoT defaults are inert (`motion = none`): its depth / motion-vector / jitter inputs are not identified (this machine has no extracted game
+and no capture). WP0 code done: `tools/release/fetch_dlss.py` (licence flag, pinned sha256, test), `package.ps1 -Streamline` (its
+`$SlSha256` and zip name are still to fill on the first real download), LEGAL.md section. WP4 done in the library: This PC "DLSS" row,
+Settings hides DLSS/DLAA until the files are there and offers "Download DLSS" (licence dialog first); Play passes the folder as
+`NXRT_UPSCALE_DLSS_DLL`. Nothing tested with real Streamline/DLSS DLLs. WP3 not started (optional per section 4). Goal: NVIDIA DLSS Super Resolution / DLAA in the runtime for any recompiled game,
 with no per-game code. A game may at most add *data*: config defaults or manifest keys.
 
 ## 1. What already exists (more than expected)

@@ -193,3 +193,14 @@ show different moments in two runs (docs/S5.md, known limits). Compare runs at a
 2. A game exe that calls the register function before `nxrt::init()`.
 3. `recomp/games/<id>/` with a `<id>_modules` target; build it with `scripts\build_game.cmd <id>`.
 4. `tools/setup/src/games/<id>.cpp` and `tools/release/games/<id>.json`.
+
+## Replacing a game's own upscaler / TAA with DLSS or FSR 3 (`[dlss_pass]`)
+
+No code per game: the game module's `config_defaults` names the pass. Recipe for a title that has a compute upscaler or TAA of its own:
+1. Capture a frame and trace it (`[nvn] trace_frame`, `cs bound tex/img` lines per dispatch) to find the pass's shader hash and what it samples:
+   scene colour, depth, motion vectors (a texture the size of the render target), and the image it writes.
+2. Set `match` (hash prefixes of the pass and of the chain's other passes), `color`, `depth`, `motion`, `output` as `texN` / `imgN` / `depth_rt`.
+3. Name where the game keeps its jitter (`jitter = ubo:<slot>:<word>,<word>`), `mv_scale`, `reset` and `depth_reversed`.
+4. Run with `[upscale] mode = dlss` (or `dlaa`, `fsr3`): the log says `dlss pass: ...` and `EvaluateDlss: ... by <backend>`. With the mode off or the DLLs missing the
+   game's pass runs untouched. Without a motion binding (`motion = none`) nothing is replaced yet (camera-derived vectors are not built for this route).
+Keys: `runtime/docs/CONFIG.md` (`dlss_pass`). OoT's defaults are in `runtime/games/oot/oot_data.cpp` (motion not identified, so inert).

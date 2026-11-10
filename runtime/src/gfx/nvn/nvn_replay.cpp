@@ -61,6 +61,8 @@
 #include "nvn_pipeline.h"
 #include "nvn_shaders.h"
 
+#include "nvn_dlss_pass.h"
+
 namespace nxrt::nvn::be::gpu {
 namespace {
 
@@ -6311,7 +6313,9 @@ void upscaler_frame_check() {
 }
 
 // begin_draw: remember the scene target and the texture the upscaler's output goes to.
+void dlss_pass_note_draw();
 void upscaler_note_draw(const ShaderInfo* fs) {
+    dlss_pass_note_draw();
     const UpscalerOverride& u = upscaler_override();
     if (u.replace.empty() || !g_upscaler_on.load(std::memory_order_relaxed)) return;
     upscaler_frame_check();
@@ -6441,6 +6445,68 @@ bool pass_copy_dispatch(const std::string& hash) {
     return false;
 }
 
+// [dlss_pass] (nvn_dlss_pass.h, docs/CONFIG.md): the dispatch of the first `match` shader is replaced by the temporal backend (DLSS / FSR 3) run on
+// the bindings the config names; when the backend cannot run (mode off, DLLs missing, no motion binding) the game's pass runs unchanged and the
+// other `match` passes are left out only in presents where it did run. motion = none: no evaluation (no camera-derived vectors yet), the game's
+// own pass keeps running.
+bool evaluate_dlss_impl(const P_EvaluateDlss& p, bool plain_fallback);
+Ref<Texture> g_dp_color, g_dp_depth;   // depth_rt: colour target 0 and depth target of the latest draw with a depth target
+DlssPassState g_dp_state;
+
+const DlssPassCfg& dlss_pass_cfg() {
+    static const DlssPassCfg c = [] {
+        auto get = [](const char* k) { return nxrt::config_get_str("dlss_pass", k, ""); };
+        DlssPassStrings k{get("match"), get("color"), get("depth"), get("motion"), get("output"), get("jitter"), get("mv_scale"), get("reset"), get("depth_reversed")};
+        DlssPassCfg out = parse_dlss_pass(k);
+        if (out.valid())
+            NXLOG_I(kTag, "dlss pass: %s (+%zu skipped) replaced by the temporal backend when [upscale] mode runs one (color %s, output %s%s)", out.match[0].c_str(),
+                    out.match.size() - 1, k.color.c_str(), k.output.c_str(), out.motion.kind == DlssPassBind::None ? ", no motion binding: the game's pass keeps running" : "");
+        return out;
+    }();
+    return c;
+}
+
+void dlss_pass_note_draw() {
+    if (!dlss_pass_cfg().valid() || !S.depth_tex || !S.color_tex[0]) return;
+    g_dp_color = S.color_tex[0];
+    g_dp_depth = S.depth_tex;
+}
+
+bool dlss_pass_evaluate(const DlssPassCfg& c) {
+    if (!extras::temporal_wanted()) return false;
+    auto bind = [&](const DlssPassBind& b, bool depth) -> Texture* {
+        switch (b.kind) {
+            case DlssPassBind::Tex: return pool_texture(S.tex[kCompute][b.n & 63]);
+            case DlssPassBind::Img: return pool_texture(S.img[kCompute][b.n & 15]);
+            case DlssPassBind::DepthRt: return depth ? g_dp_depth.get() : g_dp_color.get();
+            default: return nullptr;
+        }
+    };
+    P_EvaluateDlss p = {};
+    p.color.tex = bind(c.color, false);
+    p.depth.tex = bind(c.depth, true);
+    p.motion.tex = bind(c.motion, false);
+    p.output.tex = bind(c.output, false);
+    if (!p.color.tex || !p.depth.tex || !p.motion.tex || !p.output.tex) return false;
+    auto word = [&](int slot, int w) { return read_handle_word_in(S.ubo[kCompute], slot + 3, w); };
+    if (c.jitter_slot >= 0)
+        for (int i = 0; i < 2; ++i) { const uint32_t v = word(c.jitter_slot, c.jitter_word[i]); std::memcpy(&p.jitter[i], &v, 4); }
+    if (c.reset_slot >= 0) p.reset = word(c.reset_slot, c.reset_word) != 0;
+    p.mv_scale[0] = c.mv_scale[0];
+    p.mv_scale[1] = c.mv_scale[1];
+    p.pre_exposure = 1.0f;
+    p.flags = 2u | (c.depth_reversed ? 8u : 0u);   // vectors at the render size
+    p.net = std::hash<std::string>()(c.match[0]);
+    return evaluate_dlss_impl(p, false);
+}
+
+bool dlss_pass_dispatch(const std::string& hash) {
+    const DlssPassCfg& c = dlss_pass_cfg();
+    if (!c.valid()) return false;
+    const DlssPassAction a = dlss_pass_decide(c, g_dp_state, hash, counters().presents.load(std::memory_order_relaxed), [&] { return dlss_pass_evaluate(c); });
+    return a != DlssPassAction::RunGamePass;
+}
+
 // Statistics: dispatches recorded right after another one with no barrier between them but the one after every dispatch (the game
 // ordered nothing between them; memory_barriers_here() after the last dispatch).
 uint64_t g_disp_end_mark = ~0ull;
@@ -6473,6 +6539,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
                   S.small.push_cs_stage, c.c0_ubos, c.c0_ssbos, c.c0_textures, c.c0_images, words.empty() ? "" : "; push words:", words.c_str());
         }
     }
+    if (dlss_pass_dispatch(cs ? cs->hash : g_cs_missing)) return;   // [dlss_pass]
     if (pass_copy_dispatch(cs ? cs->hash : g_cs_missing)) return;   // [nvn] pass_copy
     if (upscaler_dispatch(cs ? cs->hash : g_cs_missing)) return;   // [nvn] upscaler_replace: the game's upscaler, replaced
     if (g_cs_pending) { note_pending_skip(true); return; }
@@ -6964,12 +7031,13 @@ void do_downsample(const P_Downsample& p) {
 // runs on the game's colour, depth and motion vectors (temporal_evaluate_native) and its result is copied into the game's output rectangle;
 // otherwise (or when that cannot run) the colour rectangle is scaled into the output rectangle with the bilinear filter, which is a copy when the
 // two have the same size.
-void do_evaluate_dlss(const P_EvaluateDlss& p) {
+// plain_fallback false ([dlss_pass]): returns false, without writing the output, when the temporal backend cannot run; the caller keeps the game's own pass.
+bool evaluate_dlss_impl(const P_EvaluateDlss& p, bool plain_fallback) {
     cmdq::drain();   // the DLSS evaluation records through its own loader: everything queued before it first
     Texture *in = p.color.tex, *out = p.output.tex;
-    if (!in || !out || in == out) { log_once("dlss-args", "EvaluateDlss without an input colour or an output texture (or both the same): skipped"); return; }
-    if (!tex_gpu(in) || !tex_gpu(out)) return;
-    if (tex_is_depth(in) || tex_is_depth(out)) { log_once("dlss-depthfmt", "EvaluateDlss on a depth-format colour or output texture: skipped"); return; }
+    if (!in || !out || in == out) { log_once("dlss-args", "EvaluateDlss without an input colour or an output texture (or both the same): skipped"); return false; }
+    if (!tex_gpu(in) || !tex_gpu(out)) return false;
+    if (tex_is_depth(in) || tex_is_depth(out)) { log_once("dlss-depthfmt", "EvaluateDlss on a depth-format colour or output texture: skipped"); return false; }
     end_pass();
     hazard::external(F->cb);   // [nvn] hazard: what the upscaler's own calls touch is not seen: ordered before and after
     const SubRes is = sub_of(p.color.view, p.color.has_view), os = sub_of(p.output.view, p.output.has_view);
@@ -7074,6 +7142,7 @@ void do_evaluate_dlss(const P_EvaluateDlss& p) {
             done = true;
         }
     }
+    if (!done && !plain_fallback) return false;
     if (!done) {
         tex_ensure_current(in, *F);
         tex_ensure_current(out, *F);
@@ -7101,7 +7170,10 @@ void do_evaluate_dlss(const P_EvaluateDlss& p) {
         NXLOG_I(kTag, "EvaluateDlss: %ux%u -> %ux%u by %s", render.width, render.height, outx.width, outx.height, route);
     }
     gstamp("evaluate dlss");
+    return true;
 }
+
+void do_evaluate_dlss(const P_EvaluateDlss& p) { evaluate_dlss_impl(p, true); }
 
 void do_write_memory(uint64_t gpu_addr, const void* data, uint32_t size) {
     // a GPU-ordered write of up to 64 KiB into pool memory (UpdateUniformBuffer, counters, events)

@@ -65,6 +65,7 @@ constexpr wchar_t kAppName[] = L"Recomp Library";
 constexpr UINT kMsgLine = WM_APP + 1;     // wParam: GameItem*, lParam: std::string* (one output line of its running step)
 constexpr UINT kMsgExit = WM_APP + 2;     // wParam: GameItem*, lParam: exit code
 constexpr UINT kMsgCheck = WM_APP + 3;    // wParam: GameItem*, lParam: std::string* (the prepare check's answer)
+constexpr UINT kMsgDlss = WM_APP + 5;     // lParam: std::wstring* (empty: DLSS downloaded, else the error)
 constexpr UINT kMsgReqs = WM_APP + 4;     // lParam: std::vector<Check>* (the PC's checks, made on a thread)
 constexpr UINT_PTR kTimer = 1;
 constexpr int kHovPc = 90, kHovBrand = 98, kHovAdd = 99, kHovReport = 100, kHovTab = 101;
@@ -223,6 +224,8 @@ private:
     std::wstring primary_label(const GameItem& g, bool* enabled) const;
     void refresh();                       // texts and enabled states of the controls of the current page
     void update_settings();               // the settings panel shows the selected game
+    void download_dlss();                 // licence dialog, then fetch_dlss.py as a child
+    Child dlss_child_;
 
     HINSTANCE inst_ = nullptr;
     HWND wnd_ = nullptr, cards_ = nullptr, settings_ = nullptr;
@@ -331,7 +334,40 @@ void App::select(const std::string& id) {
     InvalidateRect(wnd_, nullptr, FALSE);
 }
 
+// The NVIDIA RTX SDKs LICENSE does not fit a GPL package, so the DLL is never shipped: the player sees the licence, then
+// fetch_dlss.py downloads it from NVIDIA's repository (sha256 checked) into <exe dir>\upscalers\streamline.
+void App::download_dlss() {
+    if (dlss_child_.running()) return;
+    if (tools_.python.empty() || tools_.fetch_dlss.empty()) { MessageBoxW(wnd_, L"Python or fetch_dlss.py is missing (This PC page).", kAppName, MB_ICONWARNING); return; }
+    TASKDIALOGCONFIG c{sizeof c};
+    c.hwndParent = wnd_;
+    c.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+    c.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
+    c.pszWindowTitle = kAppName;
+    c.pszMainInstruction = L"Download NVIDIA DLSS?";
+    c.pszContent = L"The DLSS file (nvngx_dlss.dll, about 56 MB) comes from NVIDIA's own repository and is under the "
+                   L"<a href=\"https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt\">NVIDIA RTX SDKs LICENSE</a>. "
+                   L"By pressing OK you accept that licence.";
+    c.pfCallback = [](HWND, UINT n, WPARAM, LPARAM l, LONG_PTR) -> HRESULT {
+        if (n == TDN_HYPERLINK_CLICKED) ShellExecuteW(nullptr, L"open", reinterpret_cast<const wchar_t*>(l), nullptr, nullptr, SW_SHOWNORMAL);
+        return S_OK;
+    };
+    int pick = 0;
+    if (FAILED(TaskDialogIndirect(&c, &pick, nullptr, nullptr)) || pick != IDOK) return;
+    HWND w = wnd_;
+    auto err = std::make_shared<std::wstring>();
+    std::wstring e;
+    if (!dlss_child_.start(tools_.python, py_args(tools_.fetch_dlss, L"--accept-license --out " + quote(dlss_dir(tools_))), tools_.exe_dir, false,
+            [err](const std::string& l) { if (l.rfind("@error ", 0) == 0) *err = widen(l.substr(7)); },
+            [w, err](DWORD code) {
+                if (code != 0 && err->empty()) *err = L"The download ended with code " + std::to_wstring(code) + L".";
+                PostMessageW(w, kMsgDlss, 0, reinterpret_cast<LPARAM>(new std::wstring(code == 0 ? L"" : *err)));
+            }, &e))
+        MessageBoxW(wnd_, e.c_str(), kAppName, MB_ICONWARNING);
+}
+
 void App::update_settings() {
+    settings::set_dlss(settings_, dlss_state(tools_), [this] { download_dlss(); });
     GameItem* g = sel();
     if (!g) { settings::set_game(settings_, L"", L"", L"Add a game to the library first."); return; }
     evaluate(*g);
@@ -1038,6 +1074,8 @@ void App::play(GameItem& g) {
     const std::wstring log_path = join(g.lay.data, L"logs\\" + widen(g.def->log));
     std::wstring cmd = quote(g.exe) + L" --game " + quote(g.lay.game) + L" --ini " + quote(g.lay.game_ini) + L" --log " + quote(log_path);
     if (!game_args_.empty()) cmd += L" " + game_args_;
+    // the game program is built into <data>\program: point it at the library's downloaded DLSS files (inherited environment)
+    if (dlss_state(tools_) == 2) SetEnvironmentVariableW(L"NXRT_UPSCALE_DLSS_DLL", dlss_dir(tools_).c_str());
     std::vector<wchar_t> buf(cmd.begin(), cmd.end());
     buf.push_back(0);
     STARTUPINFOW si{sizeof si};
@@ -2064,6 +2102,14 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
             refresh();
             InvalidateRect(wnd_, nullptr, FALSE);
             InvalidateRect(cards_, nullptr, FALSE);
+            return 0;
+        }
+        case kMsgDlss: {
+            std::unique_ptr<std::wstring> s(reinterpret_cast<std::wstring*>(l));
+            dlss_child_.wait();
+            if (!s->empty()) MessageBoxW(wnd_, s->c_str(), kAppName, MB_ICONWARNING);
+            update_settings();
+            start_requirements();
             return 0;
         }
         case kMsgReqs: {

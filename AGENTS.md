@@ -1713,3 +1713,5 @@ vkCreateDevice the extensions with commands are probed (mesh, EDS3, vertex input
 `[upscale] mode = dlss` runs, else the percentages. Streamline: pre-exposure, game exposure texture, bias-current-colour mask, MV-jittered flag, one
 viewport per history key. Not mapped: DLSS preset, low-res-MV flag (handled by the input pass). `gfx_scene` capture tests are flaky here (3 of 7 failed
 once, 1 of 7 on a rerun, unrelated).
+
+**Session 2026-11-10 (DLSS WP0/WP2/WP4, `runtime/docs/DLSS_PLAN.md` status line).** `[dlss_pass]` (nvn_replay.cpp `dlss_pass_*`, `evaluate_dlss_impl`) replaces a game's own upscaler dispatch with the temporal backend; when the backend cannot run the game's pass runs unchanged. OoT defaults stay inert (`motion = none`) until its MV/depth/jitter bindings are traced on a capture (needs the extracted game; this checkout has only the `.nup`). Library: DLSS check row, Download DLSS (fetch_dlss.py `--accept-license`), Play sets `NXRT_UPSCALE_DLSS_DLL`. `package.ps1 -Streamline` needs `$SlSha256` filled on the first real download. Tests: gfx_nvn_dlss 7/7, `tools/release/tests/test_fetch_dlss.py` ok. Nothing run with real NVIDIA DLLs.

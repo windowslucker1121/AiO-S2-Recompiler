@@ -429,7 +429,7 @@ constexpr int kPadH = 300;    // height of the diagram area (96 dpi)
 constexpr UINT_PTR kPadTimer = 77, kRumbleTimer = 78;
 
 // ---- the panel ------------------------------------------------------------------------------------------------------------------------
-enum class RowKind { heading, option, binding_head, binding, add_binding, note, pad_test };
+enum class RowKind { heading, option, binding_head, binding, add_binding, note, pad_test, dlss_dl };
 struct Row {
     RowKind kind;
     int opt = -1;                   // options() index
@@ -450,6 +450,7 @@ public:
     ~Panel() { DeleteObject(field_); }
     LRESULT on(UINT m, WPARAM w, LPARAM l);
     void set_fonts(const Fonts& f) { fonts_ = f; rebuild(); }
+    void set_dlss(int state, std::function<void()> dl) { dlss_ = state; dlss_dl_ = std::move(dl); }
     void set_game(const std::wstring& title, const std::wstring& path, const std::wstring& why) {
         title_ = title;
         path_ = path;
@@ -496,6 +497,8 @@ private:
     int next_id_ = kIdBase;
     HBRUSH field_ = nullptr;
     std::wstring saved_note_;
+    int dlss_ = 0;
+    std::function<void()> dlss_dl_;
 };
 
 std::string Panel::value_of(const Opt& o) const {
@@ -596,6 +599,15 @@ void Panel::rebuild() {
             if (o[i].choices.empty()) {
                 p->on = v == "1" || lower(v) == "true" || lower(v) == "on";
                 p->ctl = make_button(L"", 0);
+            } else if (dlss_ != 2 && std::string(o[i].section) == "upscale" && std::string(o[i].key) == "mode") {
+                std::vector<Choice> c;   // DLSS / DLAA need the DLLs and an RTX card
+                for (const Choice& ch : o[i].choices) if (std::string(ch.value) != "dlss" && std::string(ch.value) != "dlaa") c.push_back(ch);
+                p->ctl = make_combo(*p, c, v);
+                if (dlss_ == 1) {
+                    Row d{RowKind::dlss_dl};
+                    d.textv = L"NVIDIA DLSS";
+                    add(d, S(48))->ctl = make_button(L"Download DLSS", 2);
+                }
             } else p->ctl = make_combo(*p, o[i].choices, v);
         }
     }
@@ -736,6 +748,8 @@ void Panel::place() {
             put(r.ctl3, S(520), y + S(6), S(32), S(32));
         } else if (r.kind == RowKind::add_binding) {
             put(r.ctl, S(32), y + S(8), S(160), S(34));
+        } else if (r.kind == RowKind::dlss_dl) {
+            put(r.ctl, right - S(280), y + (r.h - S(34)) / 2, S(280), S(34));
         } else if (r.kind == RowKind::pad_test) {
             put(r.ctl, S(32 + 440), y + S(8 + 150), S(234), S(34));
         }
@@ -776,6 +790,10 @@ void Panel::set_bindings(const std::string& section, const std::vector<std::pair
 void Panel::command(int id, int code, HWND ctl) {
     (void)id;
     for (Row& r : rows_) {
+        if (r.kind == RowKind::dlss_dl && ctl == r.ctl) {
+            if (code == BN_CLICKED && dlss_dl_) dlss_dl_();
+            return;
+        }
         if (r.kind == RowKind::pad_test && ctl == r.ctl) {
             if (code != BN_CLICKED || !xi_.set || pad_idx_ < 0) return;
             XVib v{0xFFFF, 0xFFFF};
@@ -923,6 +941,8 @@ void Panel::paint(HDC hdc) {
                     text(g, o.label, font, gp::RectF(Sf(32), y + Sf(10), lw, Sf(20)), kText);
                     text(g, o.hint, little, gp::RectF(Sf(32), y + Sf(32), lw, Sf(18)), kMuted);
                 } else text(g, o.label, font, gp::RectF(Sf(32), y, lw, static_cast<float>(r.h)), kText, gp::StringAlignmentNear, gp::StringAlignmentCenter);
+            } else if (r.kind == RowKind::dlss_dl) {
+                text(g, r.textv, font, gp::RectF(Sf(32), y, W - Sf(32) - Sf(320), static_cast<float>(r.h)), kText, gp::StringAlignmentNear, gp::StringAlignmentCenter);
             } else if (r.kind == RowKind::pad_test) {
                 paint_pad(g, y + Sf(8), font, bold, little);
             } else if (r.kind == RowKind::binding) {
@@ -1082,6 +1102,10 @@ void set_fonts(HWND panel, const Fonts& f) { if (Panel* p = panel_of(panel)) p->
 
 void set_game(HWND panel, const std::wstring& title, const std::wstring& controls_ini, const std::wstring& why_not) {
     if (Panel* p = panel_of(panel)) p->set_game(title, controls_ini, why_not);
+}
+
+void set_dlss(HWND panel, int state, std::function<void()> download) {
+    if (Panel* p = panel_of(panel)) p->set_dlss(state, std::move(download));
 }
 
 }  // namespace setup::settings

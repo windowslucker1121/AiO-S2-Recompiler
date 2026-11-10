@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "nvn_app.h"
+#include "nvn_dlss_pass.h"
 #include "nvn_impl.h"
 #include "nxrt/extras.h"
 NXTEST_GROUP(gfx_nvn_dlss)
@@ -354,4 +355,70 @@ NXTEST(evaluate_dlss_falls_back_to_the_plain_path_when_the_sdk_dlls_are_missing)
         check_exact_copy(c, run_eval(c, gradient));
     }
     extras::set_settings(saved);
+}
+
+// ---- [dlss_pass] (nvn_dlss_pass.h) ----------------------------------------------------------------------------------------------------------
+
+NXTEST(dlss_pass_config_parses_every_key) {
+    DlssPassStrings k;
+    k.match = "fea98fe7, f90d726d";
+    k.color = "tex0";
+    k.depth = "depth_rt";
+    k.motion = "tex2";
+    k.output = "img1";
+    k.jitter = "ubo:3:20,21";
+    k.mv_scale = "-0.5,2";
+    k.reset = "ubo:4:7";
+    k.depth_reversed = "0";
+    const DlssPassCfg c = parse_dlss_pass(k);
+    CHECK(c.valid());
+    CHECK_EQ(c.match.size(), 2u);
+    CHECK(c.match[1] == "f90d726d");
+    CHECK(c.color.kind == DlssPassBind::Tex && c.color.n == 0);
+    CHECK(c.depth.kind == DlssPassBind::DepthRt);
+    CHECK(c.motion.kind == DlssPassBind::Tex && c.motion.n == 2);
+    CHECK(c.output.kind == DlssPassBind::Img && c.output.n == 1);
+    CHECK_EQ(c.jitter_slot, 3);
+    CHECK_EQ(c.jitter_word[0], 20);
+    CHECK_EQ(c.jitter_word[1], 21);
+    CHECK(c.mv_scale[0] == -0.5f && c.mv_scale[1] == 2.0f);
+    CHECK_EQ(c.reset_slot, 4);
+    CHECK_EQ(c.reset_word, 7);
+    CHECK(!c.depth_reversed);
+    // none / absent / malformed values leave the optional parts off; no match or no output is invalid (the game's passes then never change)
+    DlssPassStrings e;
+    e.match = "aa";
+    e.color = "tex0";
+    e.output = "img0";
+    e.motion = "none";
+    e.jitter = "proj";
+    e.reset = "ubo:99:1";
+    const DlssPassCfg d = parse_dlss_pass(e);
+    CHECK(d.valid());
+    CHECK(d.motion.kind == DlssPassBind::None);
+    CHECK_EQ(d.jitter_slot, -1);
+    CHECK_EQ(d.reset_slot, -1);
+    CHECK(d.depth_reversed);
+    CHECK(!parse_dlss_pass(DlssPassStrings{}).valid());
+}
+
+// The backend cannot run (mode off / DLLs missing / no motion binding): the first match's dispatch is NOT replaced and the other passes are not skipped.
+NXTEST(dlss_pass_runs_the_game_pass_when_the_backend_is_unavailable) {
+    DlssPassStrings k;
+    k.match = "aa,bb";
+    k.color = "tex0";
+    k.output = "img1";
+    const DlssPassCfg c = parse_dlss_pass(k);
+    DlssPassState st;
+    bool ok = false;
+    int calls = 0;
+    auto eval = [&] { ++calls; return ok; };
+    CHECK(dlss_pass_decide(c, st, "aa12", 5, eval) == DlssPassAction::RunGamePass);
+    CHECK(dlss_pass_decide(c, st, "bb34", 5, eval) == DlssPassAction::RunGamePass);   // no success this frame: not skipped
+    CHECK(dlss_pass_decide(c, st, "cc56", 5, eval) == DlssPassAction::RunGamePass);   // not a match: never touched
+    CHECK_EQ(calls, 1);
+    ok = true;
+    CHECK(dlss_pass_decide(c, st, "aa12", 6, eval) == DlssPassAction::Replaced);
+    CHECK(dlss_pass_decide(c, st, "bb34", 6, eval) == DlssPassAction::SkipPass);
+    CHECK(dlss_pass_decide(c, st, "bb34", 7, eval) == DlssPassAction::RunGamePass);   // the next present has not evaluated yet
 }
