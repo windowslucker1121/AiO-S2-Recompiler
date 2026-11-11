@@ -464,8 +464,8 @@ public:
         add(L"STATIC", L"", SS_LEFT | SS_SUNKEN, 12, 32, 594, 58, kPads);
         button(L"Test rumble", kTest, 12, 96, 120);
         label(L"Face buttons:", 12, 132, 100);
-        add(L"BUTTON", L"By label (Xbox A = Switch A)", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 120, 130, 230, 22, kLabel);
-        add(L"BUTTON", L"By position (bottom = Switch B)", BS_AUTORADIOBUTTON, 360, 130, 240, 22, kPosition);
+        add(L"BUTTON", L"By label: marked A = the game's A", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 120, 130, 230, 22, kLabel);
+        add(L"BUTTON", L"By position: bottom = the game's B", BS_AUTORADIOBUTTON, 360, 130, 240, 22, kPosition);
         SendMessageW(item(s.pad.label_abxy ? kLabel : kPosition), BM_SETCHECK, BST_CHECKED, 0);
         struct Row { int id, val; const wchar_t* name; int lo, hi, v; };
         const Row rows[] = {
@@ -551,7 +551,7 @@ public:
                 if (row < 0) { text(kStatus, "Select a console button first."); break; }
                 rebind = row;
                 host().begin_pad_capture();
-                text(kStatus, std::string("Press a controller button (or pull a trigger) for Switch ") + kSwitchBtns[row].name + " ...");
+                text(kStatus, std::string("Press a controller button (or pull a trigger) for the game's ") + kSwitchBtns[row].name + " ...");
                 break;
             }
             case kReset:
@@ -587,7 +587,7 @@ public:
                           p.rumble ? "yes" : "no", pressed.empty() ? "nothing pressed" : pressed.c_str());
             t += b;
         }
-        if (t.empty()) t = "No controller connected. Xbox, PlayStation, Switch Pro and most other controllers work as soon as they are plugged in.";
+        if (t.empty()) t = "No controller connected. Xbox, PlayStation and most other controllers work as soon as they are plugged in.";
         if (t != last_pads) {
             last_pads = t;
             text(kPads, t);
@@ -597,7 +597,7 @@ public:
             if (host().pad_capture_result(&src)) {
                 const uint64_t bit = hid::btn(kSwitchBtns[rebind].bit);
                 change([src, bit](Settings& s) { pad_assign(&s.pad, src, bit); });
-                text(kStatus, std::string(kPadSrcNames[static_cast<int>(src)]) + " now presses Switch " + kSwitchBtns[rebind].name + ".");
+                text(kStatus, std::string(kPadSrcNames[static_cast<int>(src)]) + " now presses the game's " + kSwitchBtns[rebind].name + ".");
                 rebind = -1;
                 refresh();
             } else if (!host().pad_capturing()) {

@@ -13,9 +13,9 @@
 #include "play/play_sync.h"
 #include "play/play_types.h"
 #include "test_framework.h"
-#include "play_fixture/mpr_play_fixture.h"
+#include "play_fixture/sample_play_fixture.h"
 NXTEST_GROUP(play_sync)
-NXTEST_GROUP_FIXTURE(nxtest::mpr_play::install, nxtest::mpr_play::remove)
+NXTEST_GROUP_FIXTURE(nxtest::sample_play::install, nxtest::sample_play::remove)
 
 namespace {
 

@@ -58,7 +58,7 @@ constexpr const char* kAstcNames[] = {"Fast", "High (sharper, built in the backg
 constexpr int kAstcCount = static_cast<int>(sizeof kAstcValues / sizeof kAstcValues[0]);
 constexpr Trig kTrigChoices[] = {Trig::Press, Trig::Tap, Trig::Hold, Trig::Toggle, Trig::DoubleTap};
 // The Button prompts combo on the Controller tab, in PromptStyle order.
-constexpr const char* kPromptLabels[kPromptStyleCount] = {"Switch (the game's own)", "Xbox", "PlayStation", "Keyboard and mouse",
+constexpr const char* kPromptLabels[kPromptStyleCount] = {"The game's own", "Xbox", "PlayStation", "Keyboard and mouse",
                                                           "Auto (follows the last used device)"};
 
 struct SwitchButton {
@@ -446,7 +446,7 @@ void prompts_row(const LiveStatus& live, Page& p) {
         }
         ImGui::EndCombo();
     }
-    tip("The button icons in the game's prompts: the game's own Switch icons, Xbox, PlayStation, keyboard and mouse, or Auto to follow the device you used last.");
+    tip("The button icons in the game's prompts: the game's own icons, Xbox, PlayStation, keyboard and mouse, or Auto to follow the device you used last.");
     if (prompts.style == PromptStyle::Auto) {
         ImGui::SameLine();
         ImGui::TextDisabled("showing %s", cstr(live.prompt_now));
@@ -470,7 +470,7 @@ std::string sources_text(uint32_t bits) {
 void pads_group(UiHost& host, const LiveStatus& live) {
     ImGui::SeparatorText("Connected gamepads");
     if (live.pad_list.empty()) {
-        ImGui::TextWrapped("No gamepad connected. Xbox, PlayStation, Switch Pro and most other controllers work as they are plugged in (SDL gamepad "
+        ImGui::TextWrapped("No gamepad connected. Xbox, PlayStation and most other controllers work as they are plugged in (SDL gamepad "
                            "database); they all drive the same console pad.");
         return;
     }
@@ -561,11 +561,11 @@ void pad_tab(UiHost& host, const LiveStatus& live, Page& p) {   // the Gamepad t
 
     ImGui::SeparatorText("Layout");
     const bool by_label = pad.label_abxy;
-    if (ImGui::RadioButton("Buttons by label (Xbox A = Switch A)", by_label) && !by_label) {
+    if (ImGui::RadioButton("Buttons by label: the button marked A is the game's A", by_label) && !by_label) {
         pad.label_abxy = true;
         mark(p);
     }
-    if (ImGui::RadioButton("Buttons by position (bottom button = Switch B)", !by_label) && by_label) {
+    if (ImGui::RadioButton("Buttons by position: the bottom button is the game's B", !by_label) && by_label) {
         pad.label_abxy = false;
         mark(p);
     }
@@ -592,7 +592,7 @@ void pad_tab(UiHost& host, const LiveStatus& live, Page& p) {   // the Gamepad t
     if (slider("Rumble strength", &pad.rumble_scale, 0.0, 2.0, "%.2f")) mark(p);
     ImGui::EndDisabled();
     if (ImGui::Checkbox("Gyro (six-axis sensor)", &pad.gyro)) mark(p);
-    tip("Passes the controller's motion sensor to the game (DualSense, DualShock 4, Switch Pro). Controllers without one send a resting pad.");
+    tip("Passes the controller's motion sensor to the game (DualSense, DualShock 4 and other pads with a gyro). Controllers without one send a resting pad.");
     ImGui::BeginDisabled(!pad.gyro);
     if (slider("Gyro scale", &pad.gyro_scale, 0.1, 4.0, "%.2f", ImGuiSliderFlags_Logarithmic)) mark(p);
     ImGui::EndDisabled();
@@ -1029,7 +1029,7 @@ void resolution_group(Page& p) {
 
 // The game's quality preset (kDisplayOptQuality): picking one writes its view distance, texture LOD bias and anisotropy; changing one of
 // those afterwards makes it Custom.
-constexpr const char* kQualityIds[] = {"switch2", "high", "ultra", "custom"};
+constexpr const char* kQualityIds[] = {"console", "high", "ultra", "custom"};
 constexpr const char* kQualityNames[] = {"Console", "High", "Ultra", "Custom"};
 constexpr int kQualityCount = 4;
 
@@ -1306,7 +1306,7 @@ void console_group(UiHost& host, const LiveStatus& live, Page& p) {
     if (want_docked != live.docked) {
         ImGui::SameLine();
         if (ImGui::SmallButton(want_docked ? "Switch to docked now (experimental)" : "Switch to handheld now (experimental)")) host.set_docked_now(want_docked);
-        tip("Sends the console's operation-mode change to the running game, as plugging a Switch into its dock does. Whether the game changes its "
+        tip("Sends the console's operation-mode change to the running game, as docking the console does. Whether the game changes its "
             "picture is up to the game; the next start uses the choice above in any case.");
     }
 }
@@ -1529,7 +1529,7 @@ void bindings_tab(UiHost& host, Page& p) {
 // ---- console layout ------------------------------------------------------------------------------------------------------------------
 
 void switch_tab(Page& p) {
-    // The cycling actions by the game's names (title E: beam_next and beam_prev ... beam_1 to beam_4).
+    // The cycling actions by the game's names (generic: set_a_next and set_a_prev ... set_a_1 to set_a_4).
     const std::string help = std::string("What each action presses on the console pad: buttons A B X Y L R ZL ZR PLUS MINUS UP DOWN LEFT RIGHT LSTICK RSTICK "
                                          "and stick directions LS_UP LS_DOWN LS_LEFT LS_RIGHT RS_UP RS_DOWN RS_LEFT RS_RIGHT, joined by +. ") +
                              act_info(Act::SetANext).name + " and " + act_info(Act::SetAPrev).name + " have no fixed output (they pick " +
@@ -1672,7 +1672,7 @@ void poll_pad_capture(UiHost& host, Page& p) {
         if (p.pad_rebind >= 0 && p.pad_rebind < kSwitchButtonCount) {
             const SwitchButton& t = kSwitchButtons[p.pad_rebind];
             if (pad_assign(&p.edit.pad, src, hid::btn(t.bit))) mark(p);
-            set_notice(p, std::string(kPadSrcLabels[static_cast<int>(src)]) + " now presses Switch " + t.name + ".", false);
+            set_notice(p, std::string(kPadSrcLabels[static_cast<int>(src)]) + " now presses the game's " + t.name + ".", false);
         }
         p.pad_rebind = -1;
     } else if (p.pad_rebind >= 0 && !host.pad_capturing()) {
@@ -1711,7 +1711,7 @@ void draw_settings_page(UiHost& host) {
     const LiveStatus live = host.status();
 
     if (host.capturing()) ImGui::TextColored(kYellow, "Press the key or mouse button for the binding, Escape cancels");
-    else if (host.pad_capturing()) ImGui::TextColored(kYellow, "Press a button on the controller (or pull a trigger) for Switch %s",
+    else if (host.pad_capturing()) ImGui::TextColored(kYellow, "Press a button on the controller (or pull a trigger) for the game's %s",
                                                       p.pad_rebind >= 0 && p.pad_rebind < kSwitchButtonCount ? kSwitchButtons[p.pad_rebind].name : "?");
     else if (!p.notice.empty()) ImGui::TextColored(p.notice_warn ? kOrange : ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "%s", p.notice.c_str());
     else {

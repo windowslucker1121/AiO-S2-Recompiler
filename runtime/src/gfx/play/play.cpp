@@ -170,7 +170,7 @@ public:
     bool pad_look(bool gyro_enabled) const {
         return std::abs(right_y_.load(std::memory_order_relaxed)) > 650 || (gyro_enabled && gyro_pitch_.load(std::memory_order_relaxed) > 0.02f);
     }
-    // The right stick as the game gets it (dead zone, invert and sensitivity applied), -1..1, + = right and up: the alternate body's camera (title E: the morph ball camera) orbits with it.
+    // The right stick as the game gets it (dead zone, invert and sensitivity applied), -1..1, + = right and up: the alternate scheme's camera orbits with it.
     void right_stick(float* x, float* y) const {
         *x = right_x_f_.load(std::memory_order_relaxed);
         *y = right_y_f_.load(std::memory_order_relaxed);
@@ -901,7 +901,7 @@ int update_hook(::Ctx*, uint64_t, void*) {
     ft::mark("main.update");
     // frame pacing (S18): the limiter waits here, before the input is sampled, so the picture shown is the one simulated one render time
     // earlier. The wait for frames still in flight comes first, then the limiter's schedule.
-    // All of it runs once per presented frame: the game's main loop runs more iterations than it presents frames (title A ~79 against ~50 a
+    // All of it runs once per presented frame: the game's main loop runs more iterations than it presents frames (one game ~79 against ~50 a
     // second), and per iteration the limiter took several slots per frame while the in-flight list (one id per sim_begin, one popped per
     // present) filled up until wait_in_flight held the main thread for presents that only come after more main-loop work.
     const bool frame_start = extras::pace_boundary_due();
@@ -948,7 +948,7 @@ int update_hook(::Ctx*, uint64_t, void*) {
             st.engine->set_settings(s, now);
             apply_frame_cap(s);
             display_tuning(s.display);
-            if (const GamePlay* gp = game_play(); gp && gp->settings_changed) gp->settings_changed(s);     // the game's display options, lock-on
+            if (const GamePlay* gp = game_play(); gp && gp->settings_changed) gp->settings_changed(s);     // the game's display options and its own settings
             extras::set_settings(s.extras);
             extras::hdr_refresh_levels();
             nvn::set_upscaler_replace_enabled(s.display.upscaler_replace);
@@ -1703,7 +1703,7 @@ bool start(const StartOptions& opt) {
         display_tuning(st.settings.display);
         if (gp && gp->install_render) gp->install_render(st.base, st.settings.display, ww, wh);   // the game's display options, tone curve
     }
-    // the frame boundary, then the game's input, camera, lock-on and menu hooks (hooks of one address run in registration order)
+    // the frame boundary, then the game's input, camera, targeting and menu hooks (hooks of one address run in registration order)
     if (gp && gp->frame_update) st.hook_update = hook_add_entry(st.base + gp->frame_update, &update_hook);
     else NXLOG_W(kTag, "the game (%s) names no frame update: play mode runs from its presents (present_frame)", game::info().id);
     if (gp && gp->install) gp->install(st.base, &g_game_host, st.settings);

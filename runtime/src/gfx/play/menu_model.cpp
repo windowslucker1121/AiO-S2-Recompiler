@@ -152,11 +152,11 @@ std::vector<MenuItem> build_menu(const MenuOptions& o) {
         v.push_back(b.cmd("&Test rumble", MenuAction::TestRumble));
         v.push_back(b.check("G&yro (motion sensor)", [](Settings& s) -> bool& { return s.pad.gyro; }));
         v.push_back(b.sub("Face &buttons", {
-            b.radio("By &label (Xbox A = Switch A)", [](const Settings& s) { return s.pad.label_abxy; }, [](Settings& s) { s.pad.label_abxy = true; }),
-            b.radio("By &position (bottom button = Switch B)", [](const Settings& s) { return !s.pad.label_abxy; },
+            b.radio("By &label: the button marked A is the game's A", [](const Settings& s) { return s.pad.label_abxy; }, [](Settings& s) { s.pad.label_abxy = true; }),
+            b.radio("By &position: the bottom button is the game's B", [](const Settings& s) { return !s.pad.label_abxy; },
                     [](Settings& s) { s.pad.label_abxy = false; }),
         }));
-        static const char* const kPrompt[] = {"&Switch (the game's own)", "&Xbox", "&PlayStation", "&Keyboard and mouse", "&Auto (the device used last)"};
+        static const char* const kPrompt[] = {"&The game's own", "&Xbox", "&PlayStation", "&Keyboard and mouse", "&Auto (the device used last)"};
         std::vector<MenuItem> prompts;
         for (int i = 0; i < kPromptStyleCount; ++i) {
             const PromptStyle ps = static_cast<PromptStyle>(i);

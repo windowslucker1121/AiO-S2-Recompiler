@@ -69,7 +69,7 @@ bool hud_perspective(float* aspect, double display_aspect, float* fov_degrees) {
 
 bool hud_ortho(float* left, float* right, float* bottom, float* top, double display_aspect) {
     if (!left || !right || !bottom || !top || !(display_aspect > 0)) return false;
-    // The retail ball HUD stores left = 8 and right = -8 (reversed): the width is the absolute difference and the order is kept.
+    // A HUD may store left = 8 and right = -8 (reversed): the width is the absolute difference and the order is kept.
     const double span = static_cast<double>(*right) - *left;
     const double w = std::fabs(span);
     const double h = std::fabs(static_cast<double>(*top) - *bottom);

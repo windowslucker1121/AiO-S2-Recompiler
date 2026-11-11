@@ -17,11 +17,11 @@
 //   smooth = 4                    real mode: the step is the mean of the last N frame times (1 = raw); a jump of more than 50 % restarts it
 //   pace = 1                      hold the frame until the minimum step has passed (stops an uncapped limiter from running the game faster)
 //   movie_real = 1                the movie list's clock is real elapsed time (audio plays in real time), not the step
-//   fix_friction = 1              per-tick float constants (Load::ScaledFloat; title E: the in-air walk friction, 3.5 per 1/60 s) scaled by the step
+//   fix_friction = 1              per-tick float constants (Load::ScaledFloat; for example an in-air walk friction, 3.5 per 1/60 s) scaled by the step
 //   fix_render_timings = 1        the render-timing clock (Sites::tick_render_timings) advances by the step (texture scroll, UV animation, water)
 //   fix_streaming = 1             texture streaming ages its entries by the step instead of 1/60
-//   fix_budget = 1                the background-work budget after the tick (title E: 14 ms) scales with the step
-//   fix_stuck_tracker = 1         a per-tick sampler (Sites::per_tick_sampler; title E: the player's "am I stuck" test, 20 samples, one per tick) takes one sample
+//   fix_budget = 1                the background-work budget after the tick (for example 14 ms) scales with the step
+//   fix_stuck_tracker = 1         a per-tick sampler (Sites::per_tick_sampler; for example a player "am I stuck" test, 20 samples, one per tick) takes one sample
 //                                 per 1/60 s of game time, so its window keeps its length at more than 60 ticks per second.
 //   log_every = 0                 log one line of frame statistics every N frames (0 = off)
 //   csv = <file>                  write one line per frame: frame, host time (s), measured elapsed, step used, sum of steps, movie frames delivered, render-timing clock

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// NVN scene oracle 2: a triangle drawn with two REAL translated shaders of title E (a position-only vertex shader
+// NVN scene oracle 2: a triangle drawn with two REAL translated shaders of a game (a position-only vertex shader
 // and a constant-magenta fragment shader, found in work/shader_cache). Checks the whole draw path: program binding, vertex input,
 // pipeline, viewport flip for the upper-left window origin, pass handling. Skipped when the survey data is not on this machine.
 #include "nvn_app.h"

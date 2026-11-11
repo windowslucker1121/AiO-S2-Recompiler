@@ -434,7 +434,7 @@ NXTEST(gs_passthrough_copies_the_input_vertices) {
 }
 
 // Skinned meshes: the vertex shader edfebf23 bitcasts its Location 1 input (RGBA8UI bone indices) to integers. The console hands it the raw bits;
-// a scaled float format (3 becomes 3.0) made every bone index but 0 wrong, and with it the matrix palette lookup (the first person arm cannon
+// a scaled float format (3 becomes 3.0) made every bone index but 0 wrong, and with it the matrix palette lookup (the first person weapon
 // sat out of the picture, characters were torn; docs/S4f.md). The patch makes the input an integer vector and bitcasts it back.
 NXTEST(int_attributes_give_the_shader_raw_bits) {
     if (const char* why = absent_input()) {

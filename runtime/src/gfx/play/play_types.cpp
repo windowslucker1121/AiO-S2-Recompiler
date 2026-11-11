@@ -86,7 +86,7 @@ bool parse_trig(const std::string& s, Trig* out) {
 // ---- button prompts ---------------------------------------------------------------------------------------------------------------
 
 namespace {
-const char* const kPromptNames[] = {"switch", "xbox", "playstation", "keyboard", "auto"};
+const char* const kPromptNames[] = {"console", "xbox", "playstation", "keyboard", "auto"};
 static_assert(sizeof(kPromptNames) / sizeof(kPromptNames[0]) == kPromptStyleCount, "one name per PromptStyle");
 
 // Every spelling parse_prompt_style accepts (the canonical names are in the table too).
@@ -95,7 +95,8 @@ struct PromptAlias {
     PromptStyle style;
 };
 const PromptAlias kPromptAliases[] = {
-    {"switch", PromptStyle::Switch},          {"xbox", PromptStyle::Xbox},           {"playstation", PromptStyle::PlayStation},
+    {"console", PromptStyle::Console},        {"game", PromptStyle::Console},        {"own", PromptStyle::Console},
+    {"switch", PromptStyle::Console},         {"xbox", PromptStyle::Xbox},           {"playstation", PromptStyle::PlayStation},
     {"ps", PromptStyle::PlayStation},         {"ps4", PromptStyle::PlayStation},     {"ps5", PromptStyle::PlayStation},
     {"dualsense", PromptStyle::PlayStation},  {"keyboard", PromptStyle::Keyboard},   {"kbm", PromptStyle::Keyboard},
     {"keyboard_mouse", PromptStyle::Keyboard}, {"mouse", PromptStyle::Keyboard},     {"auto", PromptStyle::Auto},

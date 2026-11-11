@@ -7,7 +7,7 @@
 //   window + gfx::Device + gfx::Renderer             // window size and present mode come from play::display()
 //   nvn::install_backend({... limiter = play::limiter(), keep_aspect = play::display().keep_aspect})
 //   play::start({...});                              // input source, hooks, overlay page; the game may run from here
-// What is about one game (the frame-boundary site, raw mouse aim, camera look, lock-on, display hooks, menu widgets, context detection, F1
+// What is about one game (the frame-boundary site, raw mouse aim, camera look, targeting, display hooks, menu widgets, context detection, F1
 // entries) comes from the registered game module's play table (nxrt/game.h, src/gfx/play/play_game.h; docs/GAME_BOUNDARY.md). The game must
 // have been lifted with entry hooks at those sites (the game: recomp/games/oot/main.sites). Without them the window still
 // opens but nothing is pumped (a warning says so after a few seconds).
