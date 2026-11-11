@@ -1810,8 +1810,8 @@ void App::paint_steps(gp::Graphics& g, const GameItem& s) {
     int todo = 0, total = 0;
     for (int i = 0; i < S_COUNT; ++i) { total += s.planned(i) ? 1 : 0; todo += s.planned(i) && !(s.running && s.run[i].finished) ? 1 : 0; }
     std::wstring head = L"Setup";
-    if (s.running) head += L" · step " + std::to_wstring(std::min(total, total - todo + 1)) + L" of " + std::to_wstring(total);
-    else if (!todo) head += L" · done";
+    // no step counter: steps run side by side and each row carries its own state; the header only says when all are done
+    if (!s.running && !todo) head += L" · done";
     text(g, head, bold, gp::RectF(x + Sf(20), y0 + Sf(14), w - Sf(200), Sf(24)), kText, gp::StringAlignmentNear, gp::StringAlignmentCenter);
     const std::wstring link = details_ ? L"Hide output" : L"Show output";
     details_rect_ = {static_cast<LONG>(x + w - Sf(150)), static_cast<LONG>(y0 + Sf(10)), static_cast<LONG>(x + w - Sf(16)), static_cast<LONG>(y0 + Sf(42))};
