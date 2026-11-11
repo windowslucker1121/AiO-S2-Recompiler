@@ -150,13 +150,13 @@ NXTEST(lm_single_packet_all_fields) {
     chunk_bytes(chunks, 3, {0x2A, 0x00, 0x00, 0x00});   // LineNumber 42, u32 little endian
     chunk(chunks, 4, "main.cpp");                       // FileName
     chunk(chunks, 5, "boot");                           // FunctionName
-    chunk(chunks, 6, "Metroid");                        // ModuleName
+    chunk(chunks, 6, "GameMod");                        // ModuleName
     std::vector<uint8_t> p = packet(0x3 /* Head | Tail */, 1 /* Info */, chunks);
     nxsvc::Reply r = logger.call(0, nxsvc::Args().buf_a(p.data(), p.size()));
     CHECK_EQ(r.result, 0u);
     CHECK_EQ(count_lines(cap, "guestlog"), 1);
     int at = -1;
-    CHECK_EQ(count_lines(cap, "guestlog: [Metroid] main.cpp:42 boot: hello world", &at), 1);
+    CHECK_EQ(count_lines(cap, "guestlog: [GameMod] main.cpp:42 boot: hello world", &at), 1);
     if (at >= 0) CHECK(cap.levels[static_cast<size_t>(at)] == LogLevel::Info);
 }
 

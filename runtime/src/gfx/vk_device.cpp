@@ -891,7 +891,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     if (x_cp) dev_exts.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
     // tensor-core HMMA of translated compute shaders (the cooperative-matrix variant of a block, vk_coopmat_probe.cpp)
     const bool x_cm = config_get_bool("gfx", "cooperative_matrix", true) && add_ext(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME, &acm);
-    // [gfx] unified_layouts (VK_KHR_unified_image_layouts; default off: no GPU time measured in OoT, AGENTS.md P5): every layout the runtime
+    // [gfx] unified_layouts (VK_KHR_unified_image_layouts; default off: no GPU time measured in the game, AGENTS.md P5): every layout the runtime
     // names goes to the driver as GENERAL (vk_unified_layouts.cpp)
     VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR auil = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR};
     const bool x_uil = config_get_bool("gfx", "unified_layouts", false) && add_ext("VK_KHR_unified_image_layouts", &auil);

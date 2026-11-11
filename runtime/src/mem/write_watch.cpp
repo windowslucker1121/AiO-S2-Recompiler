@@ -209,7 +209,7 @@ bool release_page(Region* r, uint64_t page) {
     // for a long time on a busy machine, and giving up early would pass a fault on that is ours (seen as an unhandled access violation).
     // While a release is counted in, the wait does not look at the protection ([mem] ww_quiet_wait, default on): VirtualQuery in a pool's
     // section view takes ~2.4 ms under the process's address space lock, which the releaser's VirtualProtect needs exclusive. With the
-    // game's job workers and main thread writing one page at once (Kokiri outside), their queries starved the release: 20-60 ms per fault
+    // game's job workers and main thread writing one page at once (village outside), their queries starved the release: 20-60 ms per fault
     // and 100-150 ms frames. The protection is read once the count is zero (the release's effect is visible then).
     static const bool quiet = nxrt::config_get_bool("mem", "ww_quiet_wait", true);
     for (int i = 0;; ++i) {

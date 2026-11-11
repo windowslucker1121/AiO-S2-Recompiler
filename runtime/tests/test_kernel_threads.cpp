@@ -473,7 +473,7 @@ NXTEST(priority_and_core_mask_svcs) {
 
     ::Ctx c7{};
     c7.x[0] = h;
-    c7.x[1] = 8;                                             // ideal core 8: the SVC takes core numbers 0..7 (Switch 2 has six application cores)
+    c7.x[1] = 8;                                             // ideal core 8: the SVC takes core numbers 0..7 (platform 2 has six application cores)
     c7.x[2] = 1;
     CHECK_EQ(svc_rc(&c7, 0x0F), k::kInvalidCoreId);
 
@@ -849,7 +849,7 @@ NXTEST(config_switch_console_cores) {
     end_case();
 }
 
-// Switch 2 has six application cores (cores 0..5, mask 0x3f); Switch 1 has three, and the SVC maps what is outside them onto the last one.
+// platform 2 has six application cores (cores 0..5, mask 0x3f); platform 1 has three, and the SVC maps what is outside them onto the last one.
 NXTEST(core_mask_svcs_with_six_cores_on_switch2) {
     {
         nxtest::ScopedPlatform sw2(nxrt::game::Platform::Switch2);
@@ -858,7 +858,7 @@ NXTEST(core_mask_svcs_with_six_cores_on_switch2) {
         REQUIRE(h);
         ::Ctx s{};
         s.x[0] = h;
-        s.x[1] = 5;                                          // ideal core 5, a core only Switch 2 has
+        s.x[1] = 5;                                          // ideal core 5, a core only platform 2 has
         s.x[2] = 0x20;
         CHECK_EQ(svc_rc(&s, 0x0F), k::kOk);
         ::Ctx m{};
@@ -883,8 +883,8 @@ NXTEST(core_mask_svcs_with_six_cores_on_switch2) {
         CHECK_EQ(svc_rc(&beyond, 0x0F), k::kInvalidCombination);
         end_case();
     }
-    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);   // the test game may be a Switch 2 title (oot): say which console is meant
-    begin();                                                 // the same request on Switch 1 (three cores): core 5 is outside the mask it can honour
+    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);   // the test game may be a platform 2 title (oot): say which console is meant
+    begin();                                                 // the same request on platform 1 (three cores): core 5 is outside the mask it can honour
     const uint32_t h = make_thread(fn_idle, 0, 44, 0, "pm3");
     REQUIRE(h);
     ::Ctx s{};
@@ -897,7 +897,7 @@ NXTEST(core_mask_svcs_with_six_cores_on_switch2) {
 
 // ---- system tick and sleeping ------------------------------------------------------------------------------------------------------------------
 
-// The tick rate is cached at first use (kernel::tick_hz), so the Switch 2 rate is checked in a child process that picks the platform first.
+// The tick rate is cached at first use (kernel::tick_hz), so the platform 2 rate is checked in a child process that picks the platform first.
 NXTEST_CHILD(kernel_threads_switch2_tick) {
     nxtest::use_platform_for_process(nxrt::game::Platform::Switch2);
     if (k::tick_hz() != k::kTickHzSwitch2 || k::kTickHzSwitch2 != 31250000ull) return 10;
@@ -907,7 +907,7 @@ NXTEST_CHILD(kernel_threads_switch2_tick) {
     const uint64_t b = k::system_tick();
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count();
     const double hz = static_cast<double>(b - a) / secs;
-    if (hz < 31250000.0 * 0.9 || hz > 31250000.0 * 1.1) return 11;     // ticks per wall second at the Switch 2 rate (a Switch 1 rate is 39% lower)
+    if (hz < 31250000.0 * 0.9 || hz > 31250000.0 * 1.1) return 11;     // ticks per wall second at the platform 2 rate (a platform 1 rate is 39% lower)
     nxrt::svc_init();
     ::Ctx c{};
     nxrt::svc_dispatch(&c, 0x1E);                                      // GetSystemTick answers in the same ticks

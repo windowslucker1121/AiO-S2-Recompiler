@@ -4,7 +4,7 @@
     set NXRT_NVN_DUMP_COVERAGE=work\\nvn\\coverage.tsv ; build\\release\\nxrt_gfx_tests.exe gfx_nvn_impl      (the test dumps name, ret, args, sources, implemented)
     python scripts\\gen_nvn_coverage_doc.py work\\nvn\\coverage.tsv [work\\nvn\\mpr_used_nvn.txt] > docs\\S4d_coverage.md
 
-mpr_used_nvn.txt (optional) lists the NVN functions that Metroid Prime Remastered calls (names with callers in main.elf outside
+mpr_used_nvn.txt (optional) lists the NVN functions that title E calls (names with callers in main.elf outside
 its function loader, from the IDA database); those rows get a 'game' mark.
 """
 import csv, re, sys

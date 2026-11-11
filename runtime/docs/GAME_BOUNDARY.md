@@ -1,10 +1,9 @@
 # The game boundary
 
 The runtime, the recompiler and the offline tools know no game. A game module brings what one title supplies: its identity, file names,
-title facts, frame-step sites and play-mode hooks. The only modules in the repository are `runtime/games/oot` (the Ocarina of Time port)
+title facts, frame-step sites and play-mode hooks. The only modules in the repository are `runtime/games/oot` (the game port)
 and `runtime/games/generic` (the runtime for experimental builds of any dump: identity from the manifest at start, no hooks).
-This file describes the boundary. The ports the code was first written for (Metroid Prime Remastered, Super Mario Odyssey, Donkey Kong
-Bananza, Pokopia) are removed; some code and tests still carry their vocabulary (below).
+This file describes the boundary. The ports the code was first written for (title E, title G, title B, title A) are removed; some code and tests still carry their vocabulary (below).
 
 Three kinds of game knowledge:
 
@@ -82,17 +81,17 @@ The recompiler (`nxrecomp/`) has no game knowledge. `0x7100000000` there is the 
 
 ## Gaps
 
-These are still shaped by the first game the base was written for (Metroid Prime Remastered, removed). None of them blocks a new
+These are still shaped by the first game the base was written for (title E, removed). None of them blocks a new
 game from building; they limit what it can reuse.
 
 - Play-mode vocabulary. The base's action and context slots are generic: `Ctx` is All, Play, Alt (the alternate body), Map, Menu,
   Inspect; the game actions are Primary, Target, Secondary, Jump, AltForm, LookHold, Map, Pause, Confirm, Back, the selects SetA1..4 /
   SetB1..4 and the cycle SetANext / SetAPrev; `GameFrame` carries `cycle_index` / `cycle_mask`. A game names them through
   `play::GameVocabulary` (in `GameDefaults`). Without a game the slots keep generic names and the game actions have no factory output.
-  The test fixture `runtime/tests/play_fixture` rebuilds the old Metroid vocabulary for the play_config and play_engine groups. Fixed in
+  The test fixture `runtime/tests/play_fixture` rebuilds the old title E vocabulary for the play_config and play_engine groups. Fixed in
   the base: the number and kinds of slots (four-member sets A and B, one alternate body, one inspect context) and the `[aim]` (lock-on)
   and `[camera]` sections.
-- `[tweaks]` names Metroid's features. `skip_intro`, `skip_boot_logos`, `fast_menus`, `glow_color` and the per-part glow keys are base
+- `[tweaks]` names title E's features. `skip_intro`, `skip_boot_logos`, `fast_menus`, `glow_color` and the per-part glow keys are base
   settings code (`play_fastboot.h`, `play_tweaks.h`); no game module uses the glow keys now.
 - Code that moved out of a game module keeps namespace `nxrt::play`.
 - Test tooling vocabulary: `tt::GameState` fields (morph, beam, visor, missiles), the hash over them (`tt_core.cpp`) and the item names
@@ -139,4 +138,4 @@ No code per game: the game module's `config_defaults` names the pass. Recipe for
 3. Name where the game keeps its jitter (`jitter = ubo:<slot>:<word>,<word>`), `mv_scale`, `reset` and `depth_reversed`.
 4. Run with `[upscale] mode = dlss` (or `dlaa`, `fsr3`): the log says `dlss pass: ...` and `EvaluateDlss: ... by <backend>`. With the mode off or the DLLs missing the
    game's pass runs untouched. Without a motion binding (`motion = none`) nothing is replaced yet (camera-derived vectors are not built for this route).
-Keys: `runtime/docs/CONFIG.md` (`dlss_pass`). OoT's defaults are in `runtime/games/oot/oot_data.cpp` (motion not identified, so inert).
+Keys: `runtime/docs/CONFIG.md` (`dlss_pass`). The game's defaults are in `runtime/games/oot/oot_data.cpp` (motion not identified, so inert).

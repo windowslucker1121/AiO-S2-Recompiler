@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Play mode pad mapping (src/gfx/play/pad_map.cpp): SDL gamepad state to the Switch pad. Pure functions, no SDL calls.
+// Play mode pad mapping (src/gfx/play/pad_map.cpp): SDL gamepad state to the console pad. Pure functions, no SDL calls.
 #include "test_framework.h"
 
 #include <cmath>
@@ -24,9 +24,9 @@ enum : uint32_t {
     kLeftShoulder, kRightShoulder, kDpadUp, kDpadDown, kDpadLeft, kDpadRight, kMisc1,
 };
 
-// Labels as the Xbox and PlayStation pads report them (position SOUTH, EAST, WEST, NORTH), and as a Nintendo pad does.
+// Labels as the Xbox and PlayStation pads report them (position SOUTH, EAST, WEST, NORTH), and as a console-layout pad does.
 const uint8_t kXboxLabels[4] = {0, 1, 2, 3};     // A B X Y; PlayStation cross circle square triangle are the same
-const uint8_t kNintendoLabels[4] = {1, 0, 3, 2}; // B A Y X
+const uint8_t kConsoleLabels[4] = {1, 0, 3, 2}; // B A Y X
 
 // Maps one raw state with the given settings.
 hid::NpadInput run(const platform::GamepadRaw& raw, const play::PadSettings& cfg) {
@@ -42,7 +42,7 @@ platform::GamepadRaw pad_buttons(uint32_t buttons) {
     return raw;
 }
 
-// Switch buttons for one face button press (position SOUTH..NORTH) on a pad with the given printed labels.
+// Console buttons for one face button press (position SOUTH..NORTH) on a pad with the given printed labels.
 uint64_t face(uint32_t pos, const uint8_t labels[4], bool label_mode) {
     platform::GamepadRaw raw;
     raw.buttons = 1u << pos;
@@ -107,7 +107,7 @@ NXTEST(every_sdl_button_maps) {
 }
 
 NXTEST(xbox_and_playstation_labels) {
-    // Label mode: the printed label names the Switch button. Position mode: SOUTH B, EAST A, WEST Y, NORTH X.
+    // Label mode: the printed label names the console button. Position mode: SOUTH B, EAST A, WEST Y, NORTH X.
     const uint64_t by_label[4] = {hid::btn(hid::kBtnA), hid::btn(hid::kBtnB), hid::btn(hid::kBtnX), hid::btn(hid::kBtnY)};
     const uint64_t by_pos[4] = {hid::btn(hid::kBtnB), hid::btn(hid::kBtnA), hid::btn(hid::kBtnY), hid::btn(hid::kBtnX)};
     for (uint32_t p = 0; p < 4; ++p) {
@@ -119,12 +119,12 @@ NXTEST(xbox_and_playstation_labels) {
     CHECK_EQ(face(kSouth, kXboxLabels, false), hid::btn(hid::kBtnB));
 }
 
-NXTEST(nintendo_labels_same_in_both_modes) {
-    // A Nintendo pad prints B, A, Y, X on SOUTH, EAST, WEST, NORTH. Both modes must give the same Switch buttons.
+NXTEST(console_labels_same_in_both_modes) {
+    // A console-layout pad prints B, A, Y, X on SOUTH, EAST, WEST, NORTH. Both modes must give the same console buttons.
     const uint64_t expect[4] = {hid::btn(hid::kBtnB), hid::btn(hid::kBtnA), hid::btn(hid::kBtnY), hid::btn(hid::kBtnX)};
     for (uint32_t p = 0; p < 4; ++p) {
-        CHECK_MSG(face(p, kNintendoLabels, true) == expect[p], "label mode, position " + std::to_string(p));
-        CHECK_MSG(face(p, kNintendoLabels, false) == expect[p], "position mode, position " + std::to_string(p));
+        CHECK_MSG(face(p, kConsoleLabels, true) == expect[p], "label mode, position " + std::to_string(p));
+        CHECK_MSG(face(p, kConsoleLabels, false) == expect[p], "position mode, position " + std::to_string(p));
     }
 }
 

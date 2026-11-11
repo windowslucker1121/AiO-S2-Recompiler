@@ -8,7 +8,7 @@
 //     and BGR families, DEPTH24 -> D32, R11G11B10F fallback to R16G16B16A16_SFLOAT).
 //   refs/SuperMarioWonderRecomp/docs/nvn/TILING.md: block-linear storage counts in blocks of bytes_per_block.
 //   the texture formats games use; tests/gfx/test_nvn_format.cpp checks them.
-// Where smo and Wonder disagree on a Vulkan layout, the row carries a comment saying which one was used.
+// Where smo-recomp and SuperMarioWonderRecomp disagree on a Vulkan layout, the row carries a comment saying which one was used.
 // Row i is the NVNformat value i + 1 (NONE is 0, LARGE is a sentinel and has no row).
 
 #include "nvn_format.h"
@@ -138,10 +138,10 @@ constexpr FormatInfo kTable[] = {
     // Packed colour (0x39..0x40). RGB5 and RGB5A1 use the GL REV bit layout (R in the low bits, A in the top bit) of smo.
     {"RGBA4", NVN_FORMAT_RGBA4, 2, 1, 1, kAspectColor, 4, false, false, false, false, false, false, false, false,
      VK_FORMAT_A4B4G4R4_UNORM_PACK16, VK_FORMAT_UNDEFINED},
-    // RGB5 has no alpha: bit 15 is unused. Wonder maps it to A1R5G5B5, which swaps R and B against smo's layout. Unverified on hardware.
+    // RGB5 has no alpha: bit 15 is unused. SuperMarioWonderRecomp maps it to A1R5G5B5, which swaps R and B against smo's layout. Unverified on hardware.
     {"RGB5", NVN_FORMAT_RGB5, 2, 1, 1, kAspectColor, 3, false, false, false, false, false, false, false, false,
      VK_FORMAT_A1B5G5R5_UNORM_PACK16, VK_FORMAT_UNDEFINED},
-    // Wonder maps RGB5A1 to A1R5G5B5 (R and B swapped against smo's REV layout). Unverified on hardware.
+    // SuperMarioWonderRecomp maps RGB5A1 to A1R5G5B5 (R and B swapped against smo's REV layout). Unverified on hardware.
     {"RGB5A1", NVN_FORMAT_RGB5A1, 2, 1, 1, kAspectColor, 4, false, false, false, false, false, false, false, false,
      VK_FORMAT_A1B5G5R5_UNORM_PACK16, VK_FORMAT_UNDEFINED},
     {"RGB565", NVN_FORMAT_RGB565, 2, 1, 1, kAspectColor, 3, false, false, false, false, false, false, false, false,

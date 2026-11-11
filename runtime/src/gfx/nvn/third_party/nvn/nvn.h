@@ -22,7 +22,7 @@
 
 // PROVENANCE (recorded 2026-11-08; also runtime/THIRD_PARTY_NOTICES.md, "NVN header (MIT)"):
 //   - Author: h1k421 (MIT licence above). The declarations were reconstructed by the author from the DWARF debug information of a
-//     retail game (Darksiders II), as the original note below says. They are not Nintendo SDK source or documentation.
+//     retail game (Darksiders II), as the original note below says. They are not platform SDK source or documentation.
 //   - Copied into this repository from the mp1r-practice-mod repository, file src_framework/nvn/nvn.h. That repository as a whole is
 //     GPL-2.0; this file carries its own MIT notice, which is kept unchanged above.
 //   - Content: only interface declarations (types, enums, structs, function pointer typedefs) the runtime needs to answer the game's NVN

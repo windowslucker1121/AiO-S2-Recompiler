@@ -15,12 +15,12 @@ Output (default `<repo root>\work\audit\`): `census_<game>.tsv` and `census_<gam
 - Summary: counts per stage, tensor (HMMA/IMMA/BMMA/LDSM/MOVM), ray tracing (TTU*), mesh/task (ISBERD/ISBEWR and blocks whose control stage value
   is above 5), every undecodable opcode with count and example block, partially decoded rows.
 - The first run builds `sassdecode` (`dotnet build`, seconds). `sassdecode --census` is the C# mode behind it; add `--jobs N` to the wrapper
-  to change the thread count (default 6, below-normal priority). Pokopia's 99,012 blocks take about 2 minutes.
-- Corpus layouts read: Pokopia's (`extract_generic.py`: `unique.tsv`, `code/`, `ctrl/`) and the runtime dump (`NXRT_NVN_DUMP_MISSING`:
+  to change the thread count (default 6, below-normal priority). Title A's 99,012 blocks take about 2 minutes.
+- Corpus layouts read: title A's (`extract_generic.py`: `unique.tsv`, `code/`, `ctrl/`) and the runtime dump (`NXRT_NVN_DUMP_MISSING`:
   `manifest.tsv`, `code_<h>.bin`, `ctrl_<h>.bin`; duplicate manifest rows are folded).
 - Counts are per distinct code block, not per draw.
 
 Other games' corpora:
 
-- Nintendo EPD engine (BFSHA/BNSH, zstd): `tools\shaders\scripts\extract_generic.py --romfs <romfs> --out <dir>` handles the Shader/ folder, then the census on that folder.
-- Unreal Engine (Yoshi demo): shaders are in Oodle-compressed IoStore/pak; no extractor.
+- The platform EPD engine (BFSHA/BNSH, zstd): `tools\shaders\scripts\extract_generic.py --romfs <romfs> --out <dir>` handles the Shader/ folder, then the census on that folder.
+- Unreal Engine (title I demo): shaders are in Oodle-compressed IoStore/pak; no extractor.

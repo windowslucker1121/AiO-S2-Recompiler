@@ -12,13 +12,13 @@ Ryujinx IR. So the comparison is made on what each side does with a word, not on
 git clone https://github.com/seedds/nxnative refs\nxnative                     # once, read-only reference
 powershell -File tools\shaders\xcheck\scripts\setup_nxnative.ps1            # stages the 3 Ryujinx projects into tools\shaders\third_party\nxnative
 dotnet build tools\shaders\xcheck\tool\xcheck.csproj -c Release
-tools\shaders\build\bin\Release\net10.0\xcheck.exe [--out work\xcheck] [--jobs 6] [--no-nvdisasm] [--only pkp|dkb|mkw]     # decoder diff
+tools\shaders\build\bin\Release\net10.0\xcheck.exe [--out work\xcheck] [--jobs 6] [--no-nvdisasm] [--only a|b|c]     # decoder diff
 tools\shaders\build\bin\Release\net10.0\xcheck.exe --layout [--out work\xcheck]                                          # NVN2 control/SPH statistics
 ```
 
-(or `dotnet run --project tools\shaders\xcheck\tool -c Release -- <options>`). Corpora default to `work\shaders\corpus` (Pokopia,
-`pkp`), `work\shaders_dkb\corpus` (Bananza, `dkb`) and `work\mkw\shader_dump` (Mario Kart World, `mkw`); `--corpus pkp=<dir>` overrides one.
-The default run takes about two hours on 6 threads: the scans (247 M Pokopia instructions) 6 minutes, level 2 (1.9 M exemplar words x 112 bit flips, each run through nxnative's emitters) 12 minutes, and nvdisasm on the 1.9 M level-0 words about 100 minutes (`--no-nvdisasm` skips it and the adjudication; the words are the only thing nvdisasm sees in level 0). nvdisasm is
+(or `dotnet run --project tools\shaders\xcheck\tool -c Release -- <options>`). Corpora default to `work\shaders\corpus` (title A,
+`a`), `work\shaders_b\corpus` (title B, `b`) and `work\c\shader_dump` (title C, `c`); `--corpus a=<dir>` overrides one.
+The default run takes about two hours on 6 threads: the scans (247 M title A instructions) 6 minutes, level 2 (1.9 M exemplar words x 112 bit flips, each run through nxnative's emitters) 12 minutes, and nvdisasm on the 1.9 M level-0 words about 100 minutes (`--no-nvdisasm` skips it and the adjudication; the words are the only thing nvdisasm sees in level 0). nvdisasm is
 `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvdisasm.exe` (`NVDISASM` overrides).
 
 ## What is compared
@@ -34,7 +34,7 @@ A *form* is an opcode plus our modifier list and operand kinds. Exemplars per fo
 cover so that every bit that is ever set in the corpus is set in at least one exemplar (about 100 words per form at most). Exemplar choice
 depends on thread scheduling, so a rerun can list a few other bits for the rarest forms; the form-level rows do not change.
 
-A level-2 bit is *live* when it takes both values among the corpus instructions of its opcode (counts in `n_pkp/n_dkb/n_mkw` are the instructions
+A level-2 bit is *live* when it takes both values among the corpus instructions of its opcode (counts in `n_a/n_b/n_c` are the instructions
 with the bit set). A disagreement on a bit that has one value in every corpus instruction cannot affect these games and is closed automatically as
 *unexercised*. Everything else is adjudicated by nvdisasm; see `disagreements.tsv` column `auto`.
 
@@ -60,7 +60,7 @@ it. `open` rows are the ones nobody has looked at.
 
 ## First full run (2026-11-04)
 
-Pokopia 246,687,408 instructions in 99,012 blocks, Bananza 1,966,040 in 2,151, Mario Kart World 3,665,720 in 5,705; 203 opcode rows, 1,315 forms, 1,912,824
+Title A 246,687,408 instructions in 99,012 blocks, title B 1,966,040 in 2,151, title C 3,665,720 in 5,705; 203 opcode rows, 1,315 forms, 1,912,824
 exemplar words, 22,512 (opcode, bit) cells. nxnative's table has an entry for every opcode of the three corpora.
 
 | | rows | fixed | justified |
@@ -86,12 +86,12 @@ The 34 fixed rows are 13 decoder defects, fixed in 12 commits (`git log --onelin
 | constant buffer offsets >= 0x8000 print signed (c[0x9][-0x5a44]) | 219 words | none (text only) |
 | fp32 immediates >= 1e9 print as %.20e | 1 | none |
 | packed-half constant buffer operand prints `c[0x7] [0xf0]` | 7 words | none |
-| P2R/R2P byte select is bits 76..77, R2P spells it on the source | 109 words; 1,656 / 1,271 mkw instructions with bit 76 / 77 set | R2P front end now reads the source suffix |
+| P2R/R2P byte select is bits 76..77, R2P spells it on the source | 109 words; 1,656 / 1,271 c instructions with bit 76 / 77 set | R2P front end now reads the source suffix |
 | **LEA.HI.SX32** had no third source and no sign extension | 28 words | **changed**: sign of Ra instead of 0 as the high word; hwcheck passes on the RTX 3080 |
 | **TEX .F16.RN/.RZ** not decoded | 2 words | **changed**: front end rejects it (was a full precision sample) |
-| **TMML** decoded like TEX (.EF, a P0 destination, no .LOD) | 3,045 mkw instructions | **changed**: no spurious P0 = true; .LOD accepted |
-| SURED undecoded | 1 mkw instruction | none (front end still rejects it) |
-| ISBEWR undecoded, ISBERD modifier order and unsigned offset | 634 mkw instructions | none (task/mesh stages are rejected before the front end) |
+| **TMML** decoded like TEX (.EF, a P0 destination, no .LOD) | 3,045 c instructions | **changed**: no spurious P0 = true; .LOD accepted |
+| SURED undecoded | 1 c instruction | none (front end still rejects it) |
+| ISBEWR undecoded, ISBERD modifier order and unsigned offset | 634 c instructions | none (task/mesh stages are rejected before the front end) |
 | memory order has 16 values (we had 5), access size 7 / LDC has no 128-bit | rare combinations | none (the front end ignores them) |
 | I2FP rounding 1/2 are INVALID | 0 live | none |
 | TLD/TXD reserved dimension codes, SURED/SULD INVALID6/7 | 0 live | none |

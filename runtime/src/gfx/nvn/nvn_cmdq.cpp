@@ -670,7 +670,7 @@ void install_all() {
     hook(vkCmdSetScissorWithCount, o_scc, &h_scc); hook(vkCmdSetBlendConstants, o_bc, &h_bc); hook(vkCmdCopyBuffer, o_cpb, &h_cpb);
     hook(vkCmdClearAttachments, o_cla, &h_cla); hook(vkCmdUpdateBuffer, o_upd, &h_upd); hook(vkCmdPipelineBarrier2, o_pb2, &h_pb2);
     hook(vkCmdBeginRendering, o_br, &h_br);
-    // [nvn] cmd_thread_copies (default off): image copies/clears and push descriptors queued too. Paired windows at 1080: Kokiri outside replay
+    // [nvn] cmd_thread_copies (default off): image copies/clears and push descriptors queued too. Paired windows at 1080: village outside replay
     // -0.56 ms (8/8) but fps +0.1; first scene replay +0.8 / +0.5 ms and fps -1.5 / -0.4 (median, two runs): the recorder falls behind there
     static const bool more = config_get_bool("nvn", "cmd_thread_copies", false);
     if (more) {

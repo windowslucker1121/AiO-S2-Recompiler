@@ -99,9 +99,9 @@ def nso_to_elf(d):
 
 
 def sdk_version(module):
-    """The NintendoSDK a module was built with, from the version its own middleware tags carry
-    ("NintendoSDK_<library>-<major>_<minor>_<micro>-Release"), as "7.3.2.0"; None when it carries none."""
-    found = {m.groups() for m in re.finditer(rb'NintendoSDK_[A-Za-z0-9]+-(\d+)_(\d+)_(\d+)-Release', module)}
+    """The SDK a module was built with, from the version its own middleware tags carry
+    ("SDK_<library>-<major>_<minor>_<micro>-Release"), as "7.3.2.0"; None when it carries none."""
+    found = {m.groups() for m in re.finditer(rb'SDK_[A-Za-z0-9]+-(\d+)_(\d+)_(\d+)-Release', module)}
     if len(found) != 1:
         return None
     return '%s.%s.%s.0' % tuple(x.decode() for x in found.pop())

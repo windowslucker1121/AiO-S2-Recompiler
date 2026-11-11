@@ -4,10 +4,10 @@
 //
 // Inputs (docs/S14.md, "Temporal upscaling"):
 //   colour   the HDR scene the tone-map draw samples (the same interception as the spatial scene upscaler, nvn_replay.cpp)
-//   depth    the depth target of the G-buffer pass (D24S8 in Pokopia), reversed-Z, NDC z = depth (NVN depth mode NEAR_IS_ZERO)
+//   depth    the depth target of the G-buffer pass (D24S8 in title A), reversed-Z, NDC z = depth (NVN depth mode NEAR_IS_ZERO)
 //   camera   the G-buffer vertex shaders' uniform block c3 (NVN uniform slot 0 of the vertex stage): floats 0..15 the view-projection
 //            (column-major, jittered), floats 52..67 the view matrix. The projection is VP * inverse(V); its z-column x / y terms are the
-//            sub-pixel jitter (zero without the game's TAA, about +-1 / width with [pkp] game_taa).
+//            sub-pixel jitter (zero without the game's TAA, about +-1 / width with [<game>] game_taa).
 //   motion   made here by a compute pass from depth, the current jittered and the previous unjittered view-projection (camera motion only).
 // The projection jitter is added by the runtime (temporal_jitter_block): the game's own TAA jitter does not reach the scene camera.
 #pragma once
@@ -59,7 +59,7 @@ bool temporal_wanted();   // a temporal mode is selected
 // A G-buffer draw: `words` is the vertex stage's uniform slot 0 (bytes / 4 words). Keeps the first block that holds a valid camera this frame.
 void temporal_note_gbuffer(const uint32_t* words, size_t n_words);
 bool temporal_camera_ready();   // a camera was kept since the last evaluation
-// The scene camera's jitter. Pokopia's own TAA jitter (0x7102574a18, written into a view object's projection at +0xc0) never reaches the
+// The scene camera's jitter. title A's own TAA jitter (0x7102574a18, written into a view object's projection at +0xc0) never reaches the
 // G-buffer camera block (its view-projection stays unjittered with the enable forced, run b7), so the runtime jitters every vertex uniform
 // slot 0 block that holds a valid camera: adds a Halton(2, 3) offset of the frame (8 phases, +-0.5 px of width x height) to the view-projection in
 // `words` (a copy the draw then binds). False: not a camera block, already jittered, or [upscale] jitter = 0.

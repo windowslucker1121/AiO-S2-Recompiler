@@ -68,7 +68,7 @@ class GameConfig:
 class GenericConfig(GameConfig):
     """The neutral config of a title without a port (experimental builds, runtime/games/generic): nothing about the game, only what every
     Switch program has in common."""
-    # rtld's process entry (offset 0) has no FDE, symbol or direct branch, so discovery never roots it (as the oot and pkp configs say)
+    # rtld's process entry (offset 0) has no FDE, symbol or direct branch, so discovery never roots it (as the oot config and title A's said)
     extra_entries = {'rtld': [0x0]}
 
 

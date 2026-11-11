@@ -4,12 +4,12 @@ its block, only from the use lists of its own sources; for an operation with sid
 went unused that is wrong: it stays in the program (IsUnused keeps it) but its sources now look unused, so the optimizer
 removes their definitions while it still reads them, and the SPIR-V reads variables nothing assigns. GlobalToStorage
 makes such calls: a RED (atomic without result) through a global address becomes "r = call ...; copy r" and the copy is
-dead. Seen in OoT's GPU culling 4c1e8564 (AGENTS.md A17): the RED.E.MAX that writes the work-group count of each indirect
+dead. Seen in the game's GPU culling 4c1e8564 (AGENTS.md A17): the RED.E.MAX that writes the work-group count of each indirect
 dispatch record got an undefined address high word and value, so every GPU-culled dispatch and mesh draw got x = 0. Now
 the walk stops at operations with side effects. It also stops at the Ampere front end's cooperative-matrix HMMA
 (ampere-coopmat-instruction.patch) while another of its destination registers is still used: that operation has one
 destination per D register, and a dead copy of one of them took the whole multiply-add out of its sources' use lists,
-so the loads of its A and B registers were removed (OoT's network pass f90d726d lost its weight loads). The Ryujinx code
+so the loads of its A and B registers were removed (the game's network pass f90d726d lost its weight loads). The Ryujinx code
 in the context lines is MIT.
 --- a/Translation/Optimizations/Optimizer.cs	2026-11-07 12:02:46.270009800 +0100
 +++ b/Translation/Optimizations/Optimizer.cs	2026-11-07 12:02:46.356854300 +0100

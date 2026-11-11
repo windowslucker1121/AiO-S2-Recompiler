@@ -1,4 +1,4 @@
-# Ocarina of Time: game knowledge for the AI test tooling's states (tools/ai/states.py: states, save_state, load_state).
+# The game: game knowledge for the AI test tooling's states (tools/ai/states.py: states, save_state, load_state).
 # A state is the game's own save data plus the steps that bring a fresh start of the exe back to the moment (no process snapshot).
 # {data} = the checkout that has game/oot (this one, or the main checkout of a worktree); {root} = this checkout.
 # Step kinds: route = "<name>", wait_for = {wait_for arguments}, input = [send_input steps, posted to the window], sleep = seconds,

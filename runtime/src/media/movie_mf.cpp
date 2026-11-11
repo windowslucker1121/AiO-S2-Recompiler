@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// movie:: (Nintendo's multimedia library, a port of Android's stagefright) on Windows Media Foundation. See include/nxrt/movie.h.
+// movie:: (the platform's multimedia library, a port of Android's stagefright) on Windows Media Foundation. See include/nxrt/movie.h.
 //
 // The protocol the game speaks was worked out for smo-recomp (runtime/services/nnmovie_mf.c, GPL-3.0, same library in another game):
 // the Extractor/Decoder objects, the buffer model of the decoder, the two-pool index scheme, the "token" trick that lets the source
@@ -1494,12 +1494,12 @@ bool install_movie_hle() {
     static std::once_flag once;
     static bool ok = false;
     std::call_once(once, [] {
-        // Switch 2's movie:: (Pokopia's subsdk0) is a compatibility layer with virtual Extractor/Decoder objects over nn::movie and
-        // nn::codec: these Switch 1 handlers (a marker where it keeps a vtable) would break it. There the decoders answer on the host
+        // platform 2's movie:: (title A's subsdk0) is a compatibility layer with virtual Extractor/Decoder objects over nn::movie and
+        // nn::codec: these platform 1 handlers (a marker where it keeps a vtable) would break it. There the decoders answer on the host
         // one level down instead (src/media/video_codec.cpp).
-        // [media] movie is not read there: Media Foundation never takes these imports on Switch 2.
+        // [media] movie is not read there: Media Foundation never takes these imports on platform 2.
         if (game::info().platform == game::Platform::Switch2) {
-            NXLOG_I("movie", "Switch 2: movie:: stays in subsdk0 (nn::movie demuxer, nn::codec decoders on the host); [media] movie is ignored");
+            NXLOG_I("movie", "platform 2: movie:: stays in subsdk0 (nn::movie demuxer, nn::codec decoders on the host); [media] movie is ignored");
             return;
         }
         const std::string mode = config_get_str("media", "movie", "mf");

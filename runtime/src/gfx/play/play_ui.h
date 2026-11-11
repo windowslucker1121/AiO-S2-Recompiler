@@ -41,7 +41,7 @@ struct LiveStatus {
     const char* window_mode = "";      // "windowed" "borderless" "exclusive" (what the window is, not what the settings ask)
     float refresh_hz = 0;              // refresh rate of the display the window is on
     int width = 0, height = 0;         // window size in pixels
-    EngineOut out;                     // what the keyboard and mouse press on the Switch pad right now
+    EngineOut out;                     // what the keyboard and mouse press on the console pad right now
     double pitch_deg = 0;              // the aim's pitch
     uint64_t input_calls = 0;          // the game's per-tick player-input calls seen (GameHost::input_tick; 0: the game has not reached gameplay)
     std::vector<PadLive> pad_list;     // every open pad, in the platform's order
@@ -84,7 +84,7 @@ public:
     virtual void set_docked_now(bool docked) { (void)docked; }
 };
 
-// Draws the menu: pages Input (gamepad, keyboard and mouse, Switch layout, live view), Graphics (display, picture, advanced), Audio, Debug and About,
+// Draws the menu: pages Input (gamepad, keyboard and mouse, console layout, live view), Graphics (display, picture, advanced), Audio, Debug and About,
 // plus a Game page when the registered game has tweaks of its own. Call between ImGui::Begin / End of the window. Everything is laid out in units
 // of the font size, so it follows the overlay's UI scale (overlay.cpp). Keeps its editing state in a function-local static (one page per process).
 void draw_settings_page(UiHost& host);

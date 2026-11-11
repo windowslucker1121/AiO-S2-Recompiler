@@ -93,7 +93,7 @@ uint32_t thread_create(const ThreadParams& p) {
     t->prio = p.prio;
     int core = p.core == -2 ? 0 : p.core;
     const int top = app_core_count() - 1;
-    t->ideal_core = core > top ? top : core;             // Switch 1: the fourth (system) core maps onto core 2
+    t->ideal_core = core > top ? top : core;             // platform 1: the fourth (system) core maps onto core 2
     t->core_mask = 1ull << (t->ideal_core < 0 ? 0 : t->ideal_core);
 
     // TLS region (read through TPIDRRO_EL0) and the static TLS block (TPIDR_EL0). The nn::os convention keeps the thread pointer at
@@ -120,7 +120,7 @@ uint32_t thread_create(const ThreadParams& p) {
         NXLOG_E("thread", "handle table full");
         return 0;
     }
-    // SDK 22 (Ocarina of Time) names the owner of an nn::os mutex by the 32-bit value the kernel keeps at TLS +0x110
+    // SDK 22 (the game) names the owner of an nn::os mutex by the 32-bit value the kernel keeps at TLS +0x110
     // (SdkMutexType::IsLockedByCurrentThread compares the mutex word with it). Left at 0, every unlocked mutex looked like the caller's and
     // pthread_mutex_lock aborted at boot. The handle is unique, non-zero and free of the waiters bit; older SDKs do not read the slot.
     *reinterpret_cast<uint32_t*>(t->tls + 0x110) = t->handle;
@@ -230,13 +230,13 @@ bool thread_set_priority(KThread& t, int hos_prio) {
     return true;
 }
 
-// Application cores: 3 on Switch 1 (cores 0..2), 6 on Switch 2 (cores 0..5, the game's NPDM ThreadInfo).
+// Application cores: 3 on platform 1 (cores 0..2), 6 on platform 2 (cores 0..5, the game's NPDM ThreadInfo).
 int app_core_count() { return game::info().platform == game::Platform::Switch2 ? 6 : 3; }
 
 bool thread_set_core_mask(KThread& t, int ideal, uint64_t mask) {
     const int n = app_core_count();
     uint64_t usable = mask & ((1ull << n) - 1);
-    if (n == 3 && (mask & 8)) usable |= 4;   // Switch 1: the system core maps onto core 2
+    if (n == 3 && (mask & 8)) usable |= 4;   // platform 1: the system core maps onto core 2
     if (!usable) return false;
     if (ideal == -2) ideal = 0;
     if (ideal == -1) {                                 // IdealCoreDontCare: the first core of the mask

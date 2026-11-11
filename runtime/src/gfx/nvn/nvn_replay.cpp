@@ -326,7 +326,7 @@ bool gw_settled(uint64_t addr, uint64_t size) {
 }
 
 // ---- uniform updates without a pass break ([nvn] ubo_update_cpu) ------------------------------------------------------------------
-// nvnCommandBufferUpdateUniformBuffer is a GPU-ordered write between draws (OoT: ~800 per frame). As vkCmdUpdateBuffer it ends the
+// nvnCommandBufferUpdateUniformBuffer is a GPU-ordered write between draws (the game: ~800 per frame). As vkCmdUpdateBuffer it ends the
 // render pass and needs two full barriers each time. Instead the replay writes the bytes into game memory when it records the update, and
 // every uniform binding of such a buffer ("update range") is bound from a snapshot of its bytes taken when the draw is recorded (upload
 // ring, one per version of the range). Game memory at record time then holds what the GPU would hold at that point in the queue, provided
@@ -479,7 +479,7 @@ uint32_t g_key_attr_count = 0;
 uint8_t g_key_binding[16] = {};
 // Occlusion counter (NVN_COUNTER_TYPE_SAMPLES_PASSED): ResetCounter starts a Vulkan occlusion query outside any pass; it stays active across
 // the passes that follow (the console counts continuously); ReportCounter ends it and copies its 64-bit result into the report.
-// [nvn] occlusion_in_pass (default on; OoT makes ~700 reset/draw/report triples per frame, and each one ended the render pass twice): only
+// [nvn] occlusion_in_pass (default on; the game makes ~700 reset/draw/report triples per frame, and each one ended the render pass twice): only
 // draws pass samples, and draws are inside passes, so the query is begun inside the pass instead: at ResetCounter when a pass is open, else
 // when the next pass begins (g_occ_want), on a slot reset beforehand (runs of slots are reset whenever the replay is outside a pass anyway).
 // A pass that ends ends the query with it ("part"); the next pass begins another part. The report ends the active part, and its write and the
@@ -511,7 +511,7 @@ bool occlusion_in_pass_on() {
 }
 
 // [nvn] occ_defer (cpuperf_ab_what name occ_defer): the reports wait for the end of the submission (or a reset of their slots) instead of
-// the end of their pass: one barrier triple per submission instead of one per pass with reports (~45 per frame in Kokiri outside). Only the
+// the end of their pass: one barrier triple per submission instead of one per pass with reports (~45 per frame in village outside). Only the
 // CPU reads them, after the submission's serial; a GPU command of the same submission that read a report word would see the old value.
 bool occ_defer_on();
 // The reports of the pass that just ended (outside any pass now): their {0, timestamp} words, then the query results over the counters.
@@ -537,8 +537,8 @@ void occ_flush_pending() {
     g_occ_pend.clear();
 }
 
-// [nvn] occ_batch (default on; cpuperf_ab_what occ_batch): the same writes as above in a few commands. OoT makes ~1,450 occlusion reports
-// per frame in Kokiri outside; each was one vkCmdUpdateBuffer of its {0, timestamp} words and one vkCmdCopyQueryPoolResults of its count,
+// [nvn] occ_batch (default on; cpuperf_ab_what occ_batch): the same writes as above in a few commands. the game makes ~1,450 occlusion reports
+// per frame in village outside; each was one vkCmdUpdateBuffer of its {0, timestamp} words and one vkCmdCopyQueryPoolResults of its count,
 // ~2,900 transfer commands that the GPU runs one after another. Now the report words are written into the upload ring by the CPU and copied
 // with one vkCmdCopyBuffer per destination buffer (one region per report), the query results of each run of consecutive slots are copied
 // into the upload ring with one vkCmdCopyQueryPoolResults, and from there into the reports with one more region copy per destination.
@@ -907,7 +907,7 @@ bool same_image(Texture* a, Texture* b) { return a == b || (a && b && a->gpu && 
 // then ends without a barrier when it only wrote its attachments. Any other caller gets a full barrier, also for passes ended earlier
 // without one.
 // [nvn] write_defer (default on): GPU-ordered memory writes (do_write_memory: counter reports, report values, events) recorded while a
-// render pass is open used to end the pass (vkCmdUpdateBuffer is not allowed inside one): ~34 per frame in OoT's first scene, each splitting
+// render pass is open used to end the pass (vkCmdUpdateBuffer is not allowed inside one): ~34 per frame in the game's first scene, each splitting
 // a 1920x1080 pass and draining the GPU twice. They wait until the pass ends instead, with one pair of barriers for all of them. What reads
 // them is the CPU after the submission (or the replay's own report bookkeeping, which is kept at record time); a draw of the same pass that
 // read such a word in game memory would see the old value.
@@ -985,7 +985,7 @@ void end_pass(bool to_pass = false, std::source_location loc = std::source_locat
 }
 
 // ---- submission chunks ([nvn] submit_chunk_draws) ------------------------------------------------------------------------------------
-// A frame's main submission (OoT: ~13,000 draws) used to reach the GPU only when all of it was recorded, so recording and GPU execution of
+// A frame's main submission (the game: ~13,000 draws) used to reach the GPU only when all of it was recorded, so recording and GPU execution of
 // it ran one after the other. With chunks, what is recorded so far goes to the GPU (frame_chunk, no wait) whenever enough draws and
 // dispatches have been recorded since the last part, at a point where no render pass is open: between passes (ensure_pass) or between
 // commands outside a pass (run_list). [nvn] submit_chunk_pass_draws (default 256) additionally ends a long pass for it (the pass then goes on with
@@ -1118,7 +1118,7 @@ bool memo_pass_keep() {
 }
 
 // [nvn] pass_pre_layout (default on; cpuperf_ab_what name pre_layout): a pass break for a texture that a draw samples while it is still in
-// the attachment layout of an earlier pass. In Kokiri outside at 1080 prepare_textures ended ~45 open passes per frame, nearly all for depth
+// the attachment layout of an earlier pass. In village outside at 1080 prepare_textures ended ~45 open passes per frame, nearly all for depth
 // images left in DEPTH_STENCIL_ATTACHMENT (the shadow maps, sampled through the A7 pool arrays) and some colour targets. An image that ended
 // an open pass so once (g_break_prone, by its TexGpu) is put into its sampled layout when the next pass begins and it is not one of that
 // pass's attachments: outside any pass, next to the pass's own layout changes. A layout change keeps the contents, so a wrong guess costs
@@ -1135,7 +1135,7 @@ bool attachment_layout(VkImageLayout l) { return l == VK_IMAGE_LAYOUT_COLOR_ATTA
 // [nvn] uil_retag (default on; cpuperf_ab_what uil_retag), with [gfx] unified_layouts: the driver keeps every image in GENERAL
 // (vk_unified_layouts.cpp), so a layout change is only the dependency its barrier carries. An image left in an attachment layout by an
 // earlier pass whose end recorded a full barrier (it is not in g_pending, the passes that ended without one) already has that dependency
-// for its attachment writes: it is re-tagged as sampled without a barrier, and the open pass goes on. In Kokiri outside ~40 passes per
+// for its attachment writes: it is re-tagged as sampled without a barrier, and the open pass goes on. In village outside ~40 passes per
 // frame ended for such layout changes alone (prepare_textures). Not for images the CPU wrote (an upload follows), images in other layouts
 // (transfer writes, storage writes of a draw in the open pass), or attachments of the open pass.
 uint64_t g_uil_retags = 0, g_uil_retag_kept_open = 0;   // statistics
@@ -1874,7 +1874,7 @@ PoolSet* pool_set_create(const PoolBinding& pb, PoolSet& st) {
 
 // [nvn] pool_sync_cache (default on): a texture entry whose texture object, image views (tex_view_stamp), view info and binding are what its
 // written view was found for is kept without asking for the view again. The sync runs again whenever an image is created (several times
-// per frame in Kokiri outside), and each run asked every live entry for its view: ~4% of the render thread.
+// per frame in village outside), and each run asked every live entry for its view: ~4% of the render thread.
 bool pool_sync_cache_on() {
     static const bool on = nxrt::config_get_bool("nvn", "pool_sync_cache", true);
     return on && ab_on(kAbPoolSync);
@@ -1950,10 +1950,10 @@ PoolSet* pool_set_sync(const PoolBinding& pb) {
         const uint32_t n = std::min<uint32_t>(kPoolTextures, count);
         st.live.clear();
         const bool cache = pool_sync_cache_on();
-        // with the cache, only the ids ever registered (an unused entry has no view and stays the stand-in it was written as): OoT's pool
+        // with the cache, only the ids ever registered (an unused entry has no view and stays the stand-in it was written as): the game's pool
         // has tens of thousands of entries and the walk over all of them was a quarter of the sync
-        // depth sets: only the ids that can hold a view (OoT: a few hundred of ~32k registered ids; the walk over all of them was ~5% of the
-        // render thread in Kokiri outside, the sync runs whenever an image is made)
+        // depth sets: only the ids that can hold a view (the game: a few hundred of ~32k registered ids; the walk over all of them was ~5% of the
+        // render thread in village outside, the sync runs whenever an image is made)
         static const bool depth_ids = nxrt::config_get_bool("nvn", "pool_sync_depth_ids", true);
         const bool by_cand = cache && pb.depth && depth_ids && ab_on(kAbPoolDepthIds);
         if (by_cand) {
@@ -2318,7 +2318,7 @@ int storage_slot_for(int nvn_stage, int c0_offset) {
         case kGeometry: base = 0x410; break;
         case kFragment: base = 0x510; break;
         case kCompute: base = 0x310; break;
-        // task 0x650 (four slots past the 0x110 + 0x100 * i pattern), mesh 0x770 (six past). Measured in OoT's first scene (A15): the task
+        // task 0x650 (four slots past the 0x110 + 0x100 * i pattern), mesh 0x770 (six past). Measured in the game's first scene (A15): the task
         // shader dereferences a pointer from c[0] 0x670, and the game's task slot 2 is the only bound buffer of pointers. The same mesh
         // program family reads its GPU-written record buffer (count at word 3) at 0x770 where the game binds it at mesh slot 0 (depth
         // prepass, mesh a24d8406) and at 0x790 where it binds it at slot 2 (colour pass, b8b873e5); every other slot fits the same way.
@@ -2514,7 +2514,7 @@ BufRef held_or_pool(uint64_t addr, uint64_t size, int why, bool flush) {
 // ---- global memory (A17): coherence of shaders that reach the pools through pointers -------------------------------------------
 // Shaders with the harness's "gmem" token resolve some of their memory accesses at run time through the guest page table, whose device
 // addresses point at the imported pools themselves, not at the device-local pool copies (Mirror) or compute shadows the replay binds
-// for ordinary storage buffers. What such a shader reaches is not known on the CPU; its pointers come from its uniform blocks (OoT's GPU
+// for ordinary storage buffers. What such a shader reaches is not known on the CPU; its pointers come from its uniform blocks (the game's GPU
 // culling 4c1e8564: c[4][i * 16 + 0xe0] and +0x80/+0xa0), so every 64-bit word of the stage's bound uniform blocks that points into an
 // imported pool stands for kGmemWindow bytes from its page on:
 //  (a) before such a shader runs (dispatch or draw of any stage), compute results held only in a pool copy there go back to the pool (it
@@ -2574,8 +2574,8 @@ void gmem_before_op(bool compute) {
         const bool w_st = s->refl.global_writes;
         if (w_st) {
             // The stage's own storage descriptors (the c[0] table a pointer shader reads its buffer addresses from): a store or atomic
-            // through them is a write of the bound range like any storage binding's. OoT's culling root writes the mesh draws' indirect
-            // records so (797045e000 in the Deku Tree capture); without this the capture's write list missed them and every replay loop
+            // through them is a write of the bound range like any storage binding's. the game's culling root writes the mesh draws' indirect
+            // records so (797045e000 in the giant tree capture); without this the capture's write list missed them and every replay loop
             // added its counts to the previous loop's (an ever denser leaf crown).
             for (int k = 0; k < 16; ++k) {
                 const GState::Bind& b = S.ssbo[st][k];
@@ -2756,7 +2756,7 @@ void out_draw_bindings() {
 // state binds, draws, counters and uniform updates: render target changes, dispatches, copies, clears, barriers), with the buffer bindings
 // those commands make tracked on the side, and the reads of their draws are settled now, outside the pass. The draws then find their
 // ranges servable or no longer held and keep the pass open. Each distinct range is checked once per scan. Off by default: paired A/B in the first
-// scene and on a Kokiri walk showed no gain (33.8 vs 34.7 fps, 28.7 vs 29.4): the bytes copied stay the same, only the pass breaks move.
+// scene and on a village walk showed no gain (33.8 vs 34.7 fps, 28.7 vs 29.4): the bytes copied stay the same, only the pass breaks move.
 const RecordReader* g_rd_cur[kMaxDepth + 2] = {};   // the reader of the command being run, per list depth (run_list)
 int g_rd_depth = -1;
 uint64_t g_la_scans = 0, g_la_settled = 0;            // statistics
@@ -2987,7 +2987,7 @@ void sh_barrier_once() {
     g_sh_barrier = true;
 }
 
-// [nvn] fill_ahead (default on; cpuperf_ab_what fill_ahead): a run of dispatches (OoT's culling submission: ~150 per frame, ~70 of them
+// [nvn] fill_ahead (default on; cpuperf_ab_what fill_ahead): a run of dispatches (the game's culling submission: ~150 per frame, ~70 of them
 // tiny ones that each copy a few CPU-written pages into the pool copy first) paid a full barrier, the copy and a second full barrier
 // before each dispatch that needed pages. At the first dispatch of a run the storage ranges of the dispatches that follow (up to the first
 // command that is not a dispatch, a barrier or state) are looked up from the command list, and their pages the copy does not hold are copied
@@ -3277,7 +3277,7 @@ bool tsr_jitter(uint32_t* words, size_t n_words) {
 }
 
 // True when `n` bytes at `addr` lie in a memory pool backed by host memory, so a trace may print them: a virtual (sparse) pool's addresses
-// (0x2000_0000_0000 and up in OoT: storage buffer 8 of compute 54ecc4b4) are not mapped on the host, and reading them faulted.
+// (0x2000_0000_0000 and up in the game: storage buffer 8 of compute 54ecc4b4) are not mapped on the host, and reading them faulted.
 bool host_readable(uint64_t addr, uint64_t n) {
     const PoolHit h = pool_lookup(addr);
     return h.pool && !h.pool->is_virtual && h.pool->base && h.offset + n <= h.pool->size;
@@ -3291,7 +3291,7 @@ VkDescriptorBufferInfo g_c0_made = {};   // the c[0] header compute_c0 made for 
 // the dispatch's work-group counts x, y, z), the push constant area (ShaderControl::c0_push bytes of SmallState::push_cs), the uniform block and
 // storage buffer descriptors {address, size} of the bound compute slots, then their texture and image handles. The shader reaches the
 // descriptors and handles through its bindings (the translator maps them); the copy keeps any plain read of those words right.
-// The header words: OoT's sky-lighting pass 16a42858 (spherical harmonics of the sky panorama, dispatched 1x1x1 with 32x32 invocations) reads
+// The header words: the game's sky-lighting pass 16a42858 (spherical harmonics of the sky panorama, dispatched 1x1x1 with 32x32 invocations) reads
 // c[0] 0x4 as the row width in groups and 0x4 * 0x8 as the sample count; left zero, it divided by zero, its inf/NaN went into the ambient term of
 // every material and whole frames came out white (A12). False: not an NVN2 compute program, or no room.
 // The pool address table of this frame (A17, nvn_gpu_pool.cpp): 32-byte entries {guest address, size, device address, 0} sorted by guest
@@ -3350,10 +3350,10 @@ constexpr VkDeviceSize kComputeC0Bytes = 0x1000;
 // pointers checks only the storage slots whose binding may differ from the pool before the page table: a result held in the pool copy or a
 // shadow (out_overlaps), a virtual pool. As graphics_c0 does for draws. The other slots are bound to the pool copy or a shadow made from the
 // pool or from a current copy, so the page table (the pool) holds the same bytes there; gmem_before_op has sent held results near the
-// shader's uniform pointers back already. Before, every slot was checked for every 32-bit pointer access: OoT's culling/HiZ chain
-// (a17259b2 x6, a68b51f9, d89e74b6, 39a1f760, 5d8324bd: 11 storage slots each) took ~0.33 ms per dispatch at 1080 (Kokiri outside, ~3.3 ms
+// shader's uniform pointers back already. Before, every slot was checked for every 32-bit pointer access: the game's culling/HiZ chain
+// (a17259b2 x6, a68b51f9, d89e74b6, 39a1f760, 5d8324bd: 11 storage slots each) took ~0.33 ms per dispatch at 1080 (village outside, ~3.3 ms
 // per frame in the submission the game's main thread waits on), ~0.04 ms with the slot loop skipped. Shaders that store or do atomics
-// through pointers ("gmemw", OoT's culling root 4c1e8564) keep every slot: their stores must reach the binding that is copied back.
+// through pointers ("gmemw", the game's culling root 4c1e8564) keep every slot: their stores must reach the binding that is copied back.
 bool cs_gmem_held_on();
 bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_table = true, bool held_mask = false) {
     if (!c.nvn2 || c.stage != 5 || c.c0_table > n) return false;
@@ -3486,8 +3486,8 @@ uint64_t graphics_c0_build_raw(bool old_table) {
 // [nvn] c0_persist (default on; cpuperf_ab_what c0_persist): the graphics c[0] tables of pointer shaders live in a persistent buffer, one
 // slot per distinct content, written once and never changed, so a descriptor set that binds one can be reused (memo) and kept (set_keep)
 // like any read-only set: the table's content hash is part of the set's signature. Before, every such set was built for every draw (~1,000
-// per frame in Kokiri outside). When the buffer is full a new one starts (an era, also in the signature, so no set of an older era is found
-// again); the buffer of the era before the previous one is destroyed after the GPU is done with it (OoT's first scene fills an era in ~100 s).
+// per frame in village outside). When the buffer is full a new one starts (an era, also in the signature, so no set of an older era is found
+// again); the buffer of the era before the previous one is destroyed after the GPU is done with it (the game's first scene fills an era in ~100 s).
 constexpr size_t kC0Slots = 8192;            // 32 MiB per era
 struct C0Store {
     gfx::Buffer buf, prev;
@@ -4130,7 +4130,7 @@ void support_for_draw(const ProgLayout& pl, bool compute) {
 
 // ---- descriptor set reuse ([nvn] set_reuse) ---------------------------------------------------------------------------------------
 // build_set resolves every binding of a set (pool lookups, held results, mirror state, texture views) before it can look the set up in
-// g_set_cache, and OoT binds the same resources again for most draws. Graphics sets that only read get a signature of their raw inputs
+// g_set_cache, and the game binds the same resources again for most draws. Graphics sets that only read get a signature of their raw inputs
 // (the GState words their bindings read, the texture handles, the support buffer); with the same signature and nothing changed since the
 // signature was taken, the set built then is bound again without any resolve. "Nothing changed" is the resolve epoch: it moves with every
 // command other than state binds and draws (copies, dispatches, uniform updates, barriers, ...), every new pass (attachments, layouts,
@@ -4300,7 +4300,7 @@ uint64_t g_memo_ext[2] = {};   // mem::ww::changes() and out_version() as the la
 // registry: a pool registered over bound addresses (aliasing pools) resolves them elsewhere; and mem::ww::changes(): a write fault, file read or
 // mapping change on a tracked page of a pool copy makes the copy no longer serve it, so a uniform block there resolves to the pool now.
 // changes() moves before the page's bits go; faults() (used before 2026-11-10) moved only after the release's VirtualProtect, and a memo hit
-// in between still bound the copy (set_reuse = verify: 1 in 2.5 M hits in Kokiri outside).
+// in between still bound the copy (set_reuse = verify: 1 in 2.5 M hits in village outside).
 uint64_t memo_epoch_now(uint64_t* tg_out = nullptr, uint64_t* ob_out = nullptr) {
     const uint64_t tg = memo_pass_keep() ? g_tex_image_gen.load(std::memory_order_relaxed) ^ 0x5bd1e995ull : g_tex_state_gen.load(std::memory_order_relaxed), ob = out_bytes_total();
     if (tg_out) *tg_out = tg;
@@ -4311,8 +4311,8 @@ uint64_t memo_epoch_now(uint64_t* tg_out = nullptr, uint64_t* ob_out = nullptr) 
 uint64_t g_memo_clr[3] = {}, g_memo_last[3] = {};            // statistics: memo clears by the resolve epoch, texture state, results sent back
 
 // ---- persistent, validated descriptor sets ([nvn] set_keep) ---------------------------------------------------------------------------
-// The set memo above lives for one resolve epoch, and the epoch moves ~120 times per frame in Kokiri (compute storage writes, results sent
-// back, texture image events, commands), so ~80% of OoT's read-only sets were resolved again every time, although ~70% of its draws come from
+// The set memo above lives for one resolve epoch, and the epoch moves ~120 times per frame in the village (compute storage writes, results sent
+// back, texture image events, commands), so ~80% of the game's read-only sets were resolved again every time, although ~70% of its draws come from
 // command lists recorded once and submitted every frame with the same raw inputs. A kept set lives across submissions in persistent pools,
 // keyed by the same signature, together with what each of its bindings depended on when it was resolved (KDep). Instead of being dropped
 // when anything changes, it is checked when it is found: the pools still those (pool registry generation), each uniform block's copy-or-pool
@@ -4382,7 +4382,7 @@ bool set_keep_on() {
 }
 
 // [nvn] set_keep_writes (default off): sets with storage buffers the shader writes, or storage images, are kept too (cpuperf_ab_what keep_writes).
-// Off: no gain in Kokiri (paired, replay -0.1 ms): most such sets bind per-frame storage addresses and never repeat.
+// Off: no gain in the village (paired, replay -0.1 ms): most such sets bind per-frame storage addresses and never repeat.
 bool keep_writes_on() {
     static const bool on = nxrt::config_get_bool("nvn", "set_keep_writes", false);
     return on && ab_on(kAbKeepWrites);
@@ -4752,7 +4752,7 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
         }
         if (!ds && (reusable & (1u << set)) && set_keep_on()) {
             // not put in the memo: a kept set is checked at every use (its checks see changes the memo's epoch does not: with kept sets in the
-            // memo, set_reuse = verify found a burst of stale memo hits right after the area load in Kokiri)
+            // memo, set_reuse = verify found a burst of stale memo hits right after the area load in the village)
             ds = keep_lookup_or_build(pl, set, g_keep_sig, mode);
         } else if (!ds && keep_only & (1u << set)) {   // writes storage: kept and checked, never in the memo (its writes are noted per draw)
             set_signature(pl, set);
@@ -5960,7 +5960,7 @@ void do_draw_indirect(const P_DrawIndirect& p) {
 // (DrawMeshTasksIndirect; VK_NV_mesh_shader's layout, which NVN2's API mirrors: inferred, the driver is not in the game) get their count copied
 // into {count, 1, 1} records in the upload ring first (outside the pass).
 // [nvn] mesh_copy_ahead (default on; cpuperf_ab_what mesh_ahead): the {count, first} -> {count, 1, 1} copies of a pass's mesh draws are
-// recorded before the pass begins, all under one barrier pair, instead of ending the pass (and two full barriers) at each such draw (Kokiri
+// recorded before the pass begins, all under one barrier pair, instead of ending the pass (and two full barriers) at each such draw (village
 // outside: ~26 pass breaks per frame). The records come from earlier work (the culling submission); the look-ahead stops at the first command
 // of the pass that may write memory (a draw whose program stores to storage buffers, images or through pointers, counter reports, uniform
 // updates, render target changes, ...), so nothing writes a record between its copy and its draw. A draw checks that its records resolve to
@@ -6234,16 +6234,16 @@ std::string g_cs_missing;   // the untranslated block(s) of the bound compute pr
 
 void do_copy_texture_texture(const P_CopyTexTex& p);
 
-// The game's own upscaler replaced on the PC (game modules set these as defaults, game::Info::config_defaults). OoT renders the 3D scene at a
-// low internal size and builds the output with a chain of compute dispatches, one of them a small neural network on the Switch 2's tensor
+// The game's own upscaler replaced on the PC (game modules set these as defaults, game::Info::config_defaults). the game renders the 3D scene at a
+// low internal size and builds the output with a chain of compute dispatches, one of them a small neural network on the console's tensor
 // cores; on a PC GPU that is neither needed nor cheap to emulate, and the chain reads its resources through the per-program c[0] table the
 // runtime does not know (A10). [nvn] upscaler_skip = program hash prefixes (comma list): those dispatches are left out. [nvn] upscaler_replace
 // = the program whose dispatch starts the chain: it becomes a linearly filtered scaled copy from [nvn] upscaler_src to [nvn] upscaler_dst.
 // Source: texN / imgN (a compute binding; default tex0) or depth_rt = colour target 0 of the latest draw that had a depth target (the 3D
-// scene: OoT's last scene draw renders into the HDR target the network pass reads). Destination: imgN (a compute image binding) or
+// scene: the game's last scene draw renders into the HDR target the network pass reads). Destination: imgN (a compute image binding) or
 // fs:<hash prefix>:texN = the texture the LAST draw of the previous frame with that fragment shader sampled at binding N (the frame's final
 // composite reads the upscaler's output; earlier draws with the same shader in a frame do not count). Empty upscaler_replace: off.
-// [nvn] upscaler_fallback (OoT default on): the copy stands in only while a pass of the chain cannot run (its pipeline is still building in
+// [nvn] upscaler_fallback (`oot` default on): the copy stands in only while a pass of the chain cannot run (its pipeline is still building in
 // the background, its shader is waiting for translation or untranslated); once every pass runs, the game's own chain does (A10/A12: the
 // chain gives the sharper, anti-aliased picture at ~2 ms of GPU time on an RTX 4080). The fragment shader's network pipeline fea98fe7 takes
 // 2-3 minutes to build the first time: without the fallback the 3D scene would stay black that long.
@@ -6390,7 +6390,7 @@ bool upscaler_dispatch(const std::string& hash) {
 
 // [nvn] pass_copy = <hash prefix>:<src>:<dst>[,...]: each dispatch of such a compute program becomes a linearly filtered scaled copy from its
 // binding src (texN / imgN) to its image binding dst (imgN), whatever else the upscaler override does. For passes whose translation is known
-// to be wrong, so the picture stays usable (OoT: the network variants f90d726d / 02dcb888 the game picks at internal scales 0.75 / 0.667).
+// to be wrong, so the picture stays usable (the game: the network variants f90d726d / 02dcb888 the game picks at internal scales 0.75 / 0.667).
 struct PassCopy {
     std::string prefix;
     bool src_img = false;
@@ -6626,7 +6626,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     bind_sets(*pl, VK_PIPELINE_BIND_POINT_COMPUTE);
     if (g_shadowing && fill_ahead_on()) fill_ahead();   // the coming dispatches' pages copied in with this one's
     if (indirect && g_c0_made.buffer && ind.ok) {
-        // The CPU's copy of the arguments is stale when a dispatch of this frame wrote them (GPU-driven culling chains: OoT's mesh draws are
+        // The CPU's copy of the arguments is stale when a dispatch of this frame wrote them (GPU-driven culling chains: the game's mesh draws are
         // counted by compute 328a6c18, which is itself dispatched indirectly): the header gets the counts the GPU dispatches with.
         end_pass();
         memory_barrier(F->cb);
@@ -7949,7 +7949,7 @@ void run_list(const CmdList& list, int depth) {
 
 // ---- texture look-ahead ([nvn] tex_lookahead) -------------------------------------------------------------------------------------
 // At a camera cut or an area entry a frame first uses hundreds of textures. The background preparation (nvn_texprep.h) only starts a job
-// when the game binds a texture with nvnCommandBufferBindTexture* or registers a big one; OoT's materials name theirs by handles in uniform
+// when the game binds a texture with nvnCommandBufferBindTexture* or registers a big one; the game's materials name theirs by handles in uniform
 // blocks and handle expressions, so the render thread read, hashed and untiled (BC7 cache read) nearly all of them itself, one after the
 // other, as its draws reached them (~3 ms each, 0.25-1.2 s per cut). Here a thread of its own walks every submission when the game submits
 // it (the render thread replays it later: the previous frame is usually still in flight), with the bindings that matter for textures
@@ -8162,7 +8162,7 @@ bool ab_out_delta_on() { return ab_on(kAbOutDelta); }  // out_delta (nvn_gpu_poo
 // loading screen a few more) AND the game still stalling: a present gap over 100 ms in the last 1.5 s. A light screen that presents
 // steadily (the title screen, a menu) is paced again within 1.5 s, so it does not run at 1000 fps; so is any frame with 16+ draws.
 // A movie is never loading: while the game reads decoded pictures (nn::codec, last read under 1 s ago) the frames stay paced. A movie
-// frame draws only a few quads, and OoT's players advance one picture per presented frame: unpaced, the 5-minute intro ran at ~250
+// frame draws only a few quads, and the game's players advance one picture per presented frame: unpaced, the 5-minute intro ran at ~250
 // pictures/s for 20 s (and for 1.5 s after each stall) while its voice lines, started along the movie's timeline, piled up (A11).
 void note_frame_for_pacing() {
     static const bool on = nxrt::config_get_bool("display", "unpaced_loading", true);
@@ -8189,7 +8189,7 @@ void note_frame_for_pacing() {
     const bool movie = movie_seen != clk::time_point{} && now - movie_seen < std::chrono::seconds(1);
     low = per < 16 && !movie ? low + 1 : 0;
     if (low == 1) low_since = now;
-    // A loading screen presents steadily but its loading still advances once per frame (Pokopia: 14 s at 60 fps before the title), so a
+    // A loading screen presents steadily but its loading still advances once per frame (title A: 14 s at 60 fps before the title), so a
     // run of light frames stays unpaced for up to [display] unpaced_loading_s (20) seconds even without stalls.
     static const double max_s = nxrt::config_get_double("display", "unpaced_loading_s", 20.0);
     const bool want = low >= 3 && (now - last_stall < std::chrono::milliseconds(1500) ||

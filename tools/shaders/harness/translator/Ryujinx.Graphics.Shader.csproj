@@ -38,12 +38,12 @@
     <ShaderPatch Include="spirv-pixld-instemit.patch" File="Instructions/InstEmit.cs" />
     <!-- Ampere front end (D4): SSA room for the uniform registers UR/UP, kept as extra Flag registers. -->
     <ShaderPatch Include="ampere-uniform-registers.patch" File="Decoders/RegisterConsts.cs" />
-    <!-- Call arguments stay locals (SPIR-V GenerateCall); then: ballots/votes/shuffles are not folded into other blocks (OoT A18). See the patch headers. -->
+    <!-- Call arguments stay locals (SPIR-V GenerateCall); then: ballots/votes/shuffles are not folded into other blocks (the game A18). See the patch headers. -->
     <ShaderPatch Include="spirv-call-args.patch" File="StructuredIr/AstOptimizer.cs" Then="structured-subgroup-propagation.patch" Then2="structured-propagation-distance.patch" />
     <ShaderPatch Include="spirv-g2s-c0-base.patch" File="Translation/Optimizations/GlobalToStorage.cs" />
     <!-- Ampere front end: bindless handles the draw determines (NVN2 material tables); see the patch header. -->
     <ShaderPatch Include="ampere-bindless-handle-expr.patch" File="Translation/Optimizations/BindlessElimination.cs" />
-    <!-- Goto elimination: a break/continue enclosed by a later do-while keeps its loop (OoT A8 endless loops); see the patch header. -->
+    <!-- Goto elimination: a break/continue enclosed by a later do-while keeps its loop (the game A8 endless loops); see the patch header. -->
     <ShaderPatch Include="structured-goto-loop-exits.patch" File="StructuredIr/GotoElimination.cs" />
     <!-- Structurizer check hooks (NXRT_HARNESS_CFG_CHECK, off by default): StructuredCfgCheck.cs. -->
     <ShaderPatch Include="structured-program-cfg-check.patch" File="StructuredIr/StructuredProgram.cs" Then="structured-coopmat-vector-dest.patch" Then2="structured-program-cfg-structurizer.patch" />
@@ -54,11 +54,11 @@
     <!-- Task/mesh programs (AmpereMesh.cs): end-of-program epilogue at the return of main, task payload pointers.
          Then: float Clamp/Min/Max as NClamp/NMin/NMax (FMNMX / .SAT NaN semantics); same file, applied after it. -->
     <ShaderPatch Include="ampere-mesh-instructions.patch" File="CodeGen/Spirv/Instructions.cs" Then="spirv-nan.patch" />
-    <!-- Optimizer.RemoveNode: the dead-use walk stops at calls and atomics, which stay (see the patch header; OoT culling A17). -->
+    <!-- Optimizer.RemoveNode: the dead-use walk stops at calls and atomics, which stay (see the patch header; the game culling A17). -->
     <ShaderPatch Include="optimizer-remove-node-side-effects.patch" File="Translation/Optimizations/Optimizer.cs" />
-    <!-- Shared small-integer stores: the CAS loop keeps the word an integer (see the patch header; OoT mesh programs). -->
+    <!-- Shared small-integer stores: the CAS loop keeps the word an integer (see the patch header; the game mesh programs). -->
     <ShaderPatch Include="shared-small-int-cas-integer.patch" File="Translation/HelperFunctionManager.cs" />
-    <!-- Block order for the structurizer: non-loop edges forward, loops contiguous (BlockOrder.cs; OoT register pressure). -->
+    <!-- Block order for the structurizer: non-loop edges forward, loops contiguous (BlockOrder.cs; the game register pressure). -->
     <ShaderPatch Include="cfg-block-order.patch" File="Translation/ControlFlowGraph.cs" />
   </ItemGroup>
 

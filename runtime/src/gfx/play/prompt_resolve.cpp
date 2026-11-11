@@ -17,7 +17,7 @@ std::string lower_ascii(std::string s) {
     return s;
 }
 
-// The Switch button bit an icon stands for; the d-pad icon stands for "up" (any direction will do for the glyph of the whole cross).
+// The console button bit an icon stands for; the d-pad icon stands for "up" (any direction will do for the glyph of the whole cross).
 uint64_t button_bit(Btn b) {
     using namespace hid;
     switch (b) {
@@ -36,7 +36,7 @@ uint64_t button_bit(Btn b) {
     }
 }
 
-// The pad source that presses Switch button `bit`, in this order: the lowest source whose remap is exactly that bit; the lowest source
+// The pad source that presses console button `bit`, in this order: the lowest source whose remap is exactly that bit; the lowest source
 // with a remap that contains it; the source whose built-in button it is, if that source is not remapped. False: nothing presses it.
 bool source_for_button(const PadSettings& pad, bool label_abxy, uint64_t bit, PadSrc* out) {
     for (int i = 0; i < kPadSrcCount; ++i) {
@@ -60,8 +60,8 @@ bool source_for_button(const PadSettings& pad, bool label_abxy, uint64_t bit, Pa
     return false;
 }
 
-// Pad icons: the Xbox or PlayStation button that presses the Switch button. The icon names the physical button (South is the Xbox A,
-// cross), so it is the same whatever the label question says; the label question only decides which source a Switch button comes from.
+// Pad icons: the Xbox or PlayStation button that presses the console button. The icon names the physical button (South is the Xbox A,
+// cross), so it is the same whatever the label question says; the label question only decides which source a console button comes from.
 // Stick clicks and the d-pad have no icon of their own here: "" (the game keeps its icon). The d-pad icon is always the d-pad.
 const char* pad_name(PromptStyle style, const PadSettings& pad, bool label_abxy, Btn b) {
     const bool xbox = style == PromptStyle::Xbox;
@@ -172,7 +172,7 @@ PromptStyle auto_style(LastDevice last, int last_pad_kind, int connected_pad_kin
         switch (k) {
             case 2: return PromptStyle::PlayStation;
             case 3: return PromptStyle::Switch;
-            default: return PromptStyle::Xbox;     // Xbox pads and every pad that is neither a PlayStation nor a Switch pad
+            default: return PromptStyle::Xbox;     // Xbox pads and every pad that is neither a PlayStation nor a console pad
         }
     };
     switch (last) {

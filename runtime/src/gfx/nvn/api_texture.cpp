@@ -379,7 +379,7 @@ void fill_sparse_layout(const TextureBuilderInfo& b, NVNtextureSparseTileLayout*
     layout->tileHeight = shape[1];
     layout->tileDepth = shape[2];
     // Word 0: how many levels, from the base, are whole sparse tiles (NVN numTiledLevels); the smaller levels form the mip tail.
-    // Games size per-level tile tables by it (Mario Kart World's virtual textures index level 0's entry unconditionally).
+    // Games size per-level tile tables by it (title C's virtual textures index level 0's entry unconditionally).
     const bool is3d = b.target == NVN_TEXTURE_TARGET_3D;
     int tiled = 0;
     for (int l = 0; l < (b.levels > 0 ? b.levels : 1); ++l) {

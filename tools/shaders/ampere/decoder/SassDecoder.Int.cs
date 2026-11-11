@@ -36,7 +36,7 @@ namespace Nx.Shaders.Ampere
                 if (x) c.Add(c.Pr(87, 90), c.Pr(77, 80));
             });
             // LEA [NAK] 0x011: .HI 80, .X 74, shift 75..80, neg A 72, carry-out 81, carry-in 87 (.X). .HI with bit 73 is .SX32 (sign-extended 32-bit high
-            // part): no third source is printed [xcheck probe, Pokopia LEA.HI.SX32 R12, R5, R5, 0x19]
+            // part): no third source is printed [xcheck probe, title A LEA.HI.SX32 R12, R5, R5, 0x19]
             Op9(0x011, c =>
             {
                 c.Op = "LEA"; bool hi = c.B(80), x = c.B(74), sx = hi && c.B(73); c.Mod(hi, "HI"); c.Mod(x, "X"); c.Mod(sx, "SX32"); IntSrcMods(c, true, true, false); c.ImmK = ImmKind.Hex;

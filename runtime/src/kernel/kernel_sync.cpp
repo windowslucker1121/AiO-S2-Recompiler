@@ -75,7 +75,7 @@ void unlock_mutex(uint64_t addr) {
     wake_thread(*next);
 }
 
-// Monotonic nanoseconds from the system tick (19.2 MHz on Switch 1, 31.25 MHz on Switch 2: tick_hz()). Split so the product cannot overflow.
+// Monotonic nanoseconds from the system tick (19.2 MHz on platform 1, 31.25 MHz on platform 2: tick_hz()). Split so the product cannot overflow.
 int64_t now_ns() {
     const uint64_t t = system_tick(), hz = tick_hz();
     return static_cast<int64_t>(t / hz * 1000000000ull + t % hz * 1000000000ull / hz);
@@ -301,7 +301,7 @@ uint32_t signal_process_wide_key(uint64_t key, int32_t count) {
 }
 
 // value is the whole x2: types 0-2 compare its low 32 bits with the word at addr; type 3 (WaitIfEqual64, SDK 22: nn::os::WaitForAddress(long
-// const*, long) behind std::atomic_wait, Ocarina of Time) compares all 64 bits with the 8-byte aligned doubleword there.
+// const*, long) behind std::atomic_wait, the game) compares all 64 bits with the 8-byte aligned doubleword there.
 uint32_t wait_for_address(uint64_t addr, uint32_t type, int64_t value64, int64_t timeout_ns) {
     if (addr & (type == 3 ? 7 : 3)) return kInvalidAddress;
     if (type > 3) return kInvalidEnum;

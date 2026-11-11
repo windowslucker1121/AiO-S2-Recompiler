@@ -54,6 +54,6 @@ Result on this machine: ORACLE PASS (332 cases, 0 failed; 5,944 / 5,926 / 5,940 
 | `include/`, `src/`, `cli/`, `tests/` | written for this project from the layout rules below | GPL-3.0-or-later |
 | `ref/RyuTilingRef`, `scripts/setup_ryujinx.ps1` | reference generator calling Ryujinx.Graphics.Texture; pattern from SuperMarioWonderRecomp `tools/maxwell` | MIT (Ryujinx Team and Contributors; BelmanteGu) |
 | staged `third_party/ryubing` (not committed) | Ryubing `a82350bb77` via `refs\ryubing` | MIT |
-| layout rules | `Ryujinx.Graphics.Texture` (`SizeCalculator.cs`, `LayoutConverter.cs`, `BlockLinearLayout.cs`), `refs\deko3d`, Wonder `docs/nvn/TILING.md` | read as documentation; no code copied |
+| layout rules | `Ryujinx.Graphics.Texture` (`SizeCalculator.cs`, `LayoutConverter.cs`, `BlockLinearLayout.cs`), `refs\deko3d`, SuperMarioWonderRecomp `docs/nvn/TILING.md` | read as documentation; no code copied |
 
 `ref/LAYOUT_NOTES.md` records the exact rules and the one place the first draft was wrong (`docs/debug/003.md`).

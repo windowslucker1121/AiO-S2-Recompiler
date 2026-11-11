@@ -2,7 +2,7 @@
 // The SDK's string and memory functions (strlen, strcmp, memcpy, ...) as host code.
 //
 // A game module imports these from the SDK module, so every call goes through host_import into the lifted musl code, which works one byte
-// (or one word) per lifted instruction sequence. Pokopia's boot spends seconds in one name lookup loop that calls strlen and strncmp from a
+// (or one word) per lifted instruction sequence. title A's boot spends seconds in one name lookup loop that calls strlen and strncmp from a
 // worker while the main thread waits for it (a 2-3.4 s frame before the title). The host's own CRT does the same work with vector
 // instructions. Guest pointers are host pointers (the guest address space is mapped 1:1), so the handlers call the CRT on x0..x2 directly.
 // A write into a page the write tracker armed faults and is handled the same way as a write by lifted code.

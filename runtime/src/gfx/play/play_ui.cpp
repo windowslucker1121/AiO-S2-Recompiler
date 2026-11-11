@@ -72,7 +72,7 @@ constexpr SwitchButton kSwitchButtons[] = {
     {"LEFT", hid::kBtnLeft},   {"RIGHT", hid::kBtnRight}, {"LSTICK", hid::kBtnStickL}, {"RSTICK", hid::kBtnStickR},
 };
 constexpr int kSwitchButtonCount = static_cast<int>(sizeof kSwitchButtons / sizeof kSwitchButtons[0]);
-static_assert(kSwitchButtonCount == 16, "the Switch pad has 16 buttons in the status view");
+static_assert(kSwitchButtonCount == 16, "the console pad has 16 buttons in the status view");
 
 // The working copy and the editing state of the page. One page per process.
 struct Page {
@@ -82,7 +82,7 @@ struct Page {
     Ctx ctx = Ctx::All;                // the context shown in the Bindings tab
     int rebind = -1;                       // index into edit.bindings of the row waiting for an input; -1 = none
     bool link_pitch = true;                // Mouse tab: moving the horizontal sensitivity moves the vertical one too (local, not saved)
-    bool out_tab_open = false;             // the Switch layout tab was open last frame; its fields are refilled when it opens
+    bool out_tab_open = false;             // the console layout tab was open last frame; its fields are refilled when it opens
     char out_text[kActCount][128] = {};    // the text of each output field
     std::string out_err[kActCount];        // parse error of each field; empty when its text is valid
     bool aspect_custom = false;            // Display tab: the Custom aspect entry is picked (local, not saved)
@@ -93,7 +93,7 @@ struct Page {
     double monitors_at = -1e9;
     std::vector<std::string> audio_devices;   // Audio page: output device names, read when the page opens and by its Refresh button
     bool audio_loaded = false;
-    int pad_rebind = -1;                   // Gamepad tab: the Switch button (index into kSwitchButtons) waiting for a pad button; -1 = none
+    int pad_rebind = -1;                   // Gamepad tab: the console button (index into kSwitchButtons) waiting for a pad button; -1 = none
     bool want_apply = false;               // auto-apply: a change waits until no control is held any more
 };
 
@@ -181,7 +181,7 @@ void poll_capture(UiHost& host, Page& p) {
     }
 }
 
-// Fills the Switch layout fields from the working copy. Also clears their errors.
+// Fills the console layout fields from the working copy. Also clears their errors.
 void refresh_out_text(Page& p) {
     for (int a = 1; a < kActCount; ++a) {   // Act::None has no row
         const std::string text = output_text(p.edit.out[a]);
@@ -362,14 +362,14 @@ constexpr const char* kPadSrcLabels[kPadSrcCount] = {
 };
 static_assert(sizeof kPadSrcLabels / sizeof kPadSrcLabels[0] == 16, "one label per controller button");
 
-// The choices of a controller button: Default, Nothing, then the single Switch buttons in kSwitchButtons order.
+// The choices of a controller button: Default, Nothing, then the single console buttons in kSwitchButtons order.
 constexpr const char* kPadChoiceNames[] = {
     "Default", "Nothing",
     "A", "B", "X", "Y", "L", "R", "ZL", "ZR", "Plus", "Minus",
     "D-pad up", "D-pad down", "D-pad left", "D-pad right", "Left stick click", "Right stick click",
 };
 constexpr int kPadChoiceCount = static_cast<int>(sizeof kPadChoiceNames / sizeof kPadChoiceNames[0]);
-static_assert(kPadChoiceCount == 2 + kSwitchButtonCount, "one choice per Switch button, plus Default and Nothing");
+static_assert(kPadChoiceCount == 2 + kSwitchButtonCount, "one choice per console button, plus Default and Nothing");
 constexpr const char* kPadCustomLabel = "Custom (edit in controls.ini)";
 
 // The value a choice stores.
@@ -387,10 +387,10 @@ int pad_choice_of(uint64_t v) {
 }
 
 void pad_buttons_group(Page& p) {
-    ImGui::TextWrapped("What each controller button presses on the Switch pad. Default keeps the built-in layout.");
+    ImGui::TextWrapped("What each controller button presses on the console pad. Default keeps the built-in layout.");
     if (ImGui::BeginTable("pad_buttons", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
         ImGui::TableSetupColumn("Controller button");
-        ImGui::TableSetupColumn("Presses on the Switch pad");
+        ImGui::TableSetupColumn("Presses on the console pad");
         ImGui::TableHeadersRow();
         for (int i = 0; i < kPadSrcCount; ++i) {
             uint64_t& v = p.edit.pad.remap[i];
@@ -453,7 +453,7 @@ void prompts_row(const LiveStatus& live, Page& p) {
     }
 }
 
-constexpr const char* kPadKindNames[] = {"Gamepad", "Xbox", "PlayStation", "Nintendo"};
+constexpr const char* kPadKindNames[] = {"Gamepad", "Xbox", "PlayStation", "Console layout"};
 
 // The controller buttons (PadSrc bits) as text: "A / Cross (bottom), LB / L1".
 std::string sources_text(uint32_t bits) {
@@ -471,7 +471,7 @@ void pads_group(UiHost& host, const LiveStatus& live) {
     ImGui::SeparatorText("Connected gamepads");
     if (live.pad_list.empty()) {
         ImGui::TextWrapped("No gamepad connected. Xbox, PlayStation, Switch Pro and most other controllers work as they are plugged in (SDL gamepad "
-                           "database); they all drive the same Switch pad.");
+                           "database); they all drive the same console pad.");
         return;
     }
     if (ImGui::BeginTable("pads", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
@@ -500,14 +500,14 @@ void pads_group(UiHost& host, const LiveStatus& live) {
     tip("Half a second of rumble on every connected pad, at the strength set below.");
 }
 
-// Press-to-rebind: one row per Switch button with the controller buttons that press it now. Rebind waits for a press on any pad; that button then
-// presses this Switch button, and the button that pressed it before takes over the old job of the pressed one (a swap, so nothing is lost).
+// Press-to-rebind: one row per console button with the controller buttons that press it now. Rebind waits for a press on any pad; that button then
+// presses this console button, and the button that pressed it before takes over the old job of the pressed one (a swap, so nothing is lost).
 void pad_rebind_group(UiHost& host, Page& p) {
     ImGui::SeparatorText("Button mapping");
-    ImGui::TextWrapped("Choose Rebind and press a button on the controller (or pull a trigger): it then presses that Switch button, and the two buttons swap "
+    ImGui::TextWrapped("Choose Rebind and press a button on the controller (or pull a trigger): it then presses that console button, and the two buttons swap "
                        "jobs. Nothing is pressed in the game while it waits; it gives up after 8 seconds.");
     if (ImGui::BeginTable("pad_rebind", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-        ImGui::TableSetupColumn("Switch button", ImGuiTableColumnFlags_WidthFixed, px(120.0f));
+        ImGui::TableSetupColumn("Console button", ImGuiTableColumnFlags_WidthFixed, px(120.0f));
         ImGui::TableSetupColumn("Pressed by");
         ImGui::TableSetupColumn("##rebind", ImGuiTableColumnFlags_WidthFixed, px(150.0f));
         ImGui::TableHeadersRow();
@@ -749,7 +749,7 @@ void hdr_group(Page& p) {
     const int mode = static_cast<int>(h.mode);
     const bool mode_open = ImGui::BeginCombo("Mode##hdr_mode", kHdrModeNames[mode]);
     tip("Off keeps the SDR picture, Auto uses HDR when the display and Windows offer it, On runs the HDR pipeline even without an HDR display. "
-        "Native is On with the levels the game declares for an HDR TV on Switch 2.");
+        "Native is On with the levels the game declares for an HDR TV on the console.");
     if (mode_open) {
         for (int i = 0; i < 4; ++i) {
             if (ImGui::Selectable(kHdrModeNames[i], i == mode) && i != mode) {
@@ -1030,7 +1030,7 @@ void resolution_group(Page& p) {
 // The game's quality preset (kDisplayOptQuality): picking one writes its view distance, texture LOD bias and anisotropy; changing one of
 // those afterwards makes it Custom.
 constexpr const char* kQualityIds[] = {"switch2", "high", "ultra", "custom"};
-constexpr const char* kQualityNames[] = {"Switch 2 (console)", "High", "Ultra", "Custom"};
+constexpr const char* kQualityNames[] = {"Console", "High", "Ultra", "Custom"};
 constexpr int kQualityCount = 4;
 
 void quality_preset_combo(Page& p, const GamePlay* gp) {
@@ -1044,7 +1044,7 @@ void quality_preset_combo(Page& p, const GamePlay* gp) {
         }
         ImGui::EndCombo();
     }
-    tip("Sets the view distance, texture LOD bias and anisotropy together. Switch 2 is the console's picture.");
+    tip("Sets the view distance, texture LOD bias and anisotropy together. Console is the console's own picture.");
 }
 
 void picture_group(Page& p) {
@@ -1209,7 +1209,7 @@ const std::vector<CfgUi>& cfg_console() {
           {"3840x2160", "3840 x 2160"}},
          "The display resolution the game is told about (GetDefaultDisplayResolution). A game may size its output by it or ignore it."},
         {"am.graphics_scale", "Graphics scaling level", "10", false, {{"10", "Level 0 (full quality)"}, {"20", "Level 1"}, {"30", "Level 2"}},
-         "The Switch 2 graphics scaling answer: higher levels ask the game for a lighter picture (lower dynamic-resolution ceilings)."},
+         "The console's graphics scaling answer: higher levels ask the game for a lighter picture (lower dynamic-resolution ceilings)."},
     };
     return v;
 }
@@ -1526,11 +1526,11 @@ void bindings_tab(UiHost& host, Page& p) {
                        "Bindings of a context win over the 'all' layer for the same input. Action 'none' switches an input off in that context.");
 }
 
-// ---- Switch layout ------------------------------------------------------------------------------------------------------------------
+// ---- console layout ------------------------------------------------------------------------------------------------------------------
 
 void switch_tab(Page& p) {
-    // The cycling actions by the game's names (mpr: beam_next and beam_prev ... beam_1 to beam_4).
-    const std::string help = std::string("What each action presses on the Switch pad: buttons A B X Y L R ZL ZR PLUS MINUS UP DOWN LEFT RIGHT LSTICK RSTICK "
+    // The cycling actions by the game's names (title E: beam_next and beam_prev ... beam_1 to beam_4).
+    const std::string help = std::string("What each action presses on the console pad: buttons A B X Y L R ZL ZR PLUS MINUS UP DOWN LEFT RIGHT LSTICK RSTICK "
                                          "and stick directions LS_UP LS_DOWN LS_LEFT LS_RIGHT RS_UP RS_DOWN RS_LEFT RS_RIGHT, joined by +. ") +
                              act_info(Act::SetANext).name + " and " + act_info(Act::SetAPrev).name + " have no fixed output (they pick " +
                              act_info(Act::SetA1).name + " to " + act_info(Act::SetA4).name + ").";
@@ -1595,7 +1595,7 @@ void status_tab(const LiveStatus& live) {
         else ImGui::Text("ProcessInput calls: %llu", static_cast<unsigned long long>(live.input_calls));
     }
 
-    ImGui::SeparatorText("Switch pad output");
+    ImGui::SeparatorText("Console pad output");
     for (int i = 0; i < kSwitchButtonCount; ++i) {
         const bool on = (live.out.buttons & hid::btn(kSwitchButtons[i].bit)) != 0;
         ImGui::PushID(i);
@@ -1620,7 +1620,7 @@ void status_tab(const LiveStatus& live) {
 
 // ---- Controls and Game --------------------------------------------------------------------------------------------------------------
 
-// The Input page: the button prompt style on top, then the gamepads, the keyboard and mouse, the Switch layout and the live view.
+// The Input page: the button prompt style on top, then the gamepads, the keyboard and mouse, the console layout and the live view.
 void input_page(UiHost& host, const LiveStatus& live, Page& p) {
     prompts_row(live, p);
     ImGui::Spacing();
@@ -1637,7 +1637,7 @@ void input_page(UiHost& host, const LiveStatus& live, Page& p) {
             }
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Switch layout")) {
+        if (ImGui::BeginTabItem("Console layout")) {
             if (!p.out_tab_open) refresh_out_text(p);
             p.out_tab_open = true;
             switch_tab(p);

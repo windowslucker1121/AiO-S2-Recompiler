@@ -121,7 +121,7 @@ void run_frames(play::UiHost& host, int n) {
 }
 
 // The page has two levels of tabs: the pages (Input, Graphics, Audio, Debug, About, and the game's own) in the "settings_pages" bar, and inside
-// the Input page the "input_tabs" bar (Gamepad, Keyboard and mouse, Switch layout, Live view), inside Graphics the "graphics_tabs" bar (Display,
+// the Input page the "input_tabs" bar (Gamepad, Keyboard and mouse, console layout, Live view), inside Graphics the "graphics_tabs" bar (Display,
 // Picture, Advanced). A tab bar's id is its name hashed with the top of the ID stack where it is drawn: the window for the pages, the open page's
 // tab for a nested bar. A tab's id is its label hashed with the tab bar's id as the seed (the tab bar is on the ID stack while its tabs are drawn).
 ImGuiID pages_bar_id() {
@@ -167,7 +167,7 @@ bool visit_tab(play::UiHost& host, ImGuiID bar_id, const char* name) {
 // page's own tabs are opened in turn the same way. Returns false when a tab did not open.
 bool draw_all_tabs(play::UiHost& host) {
     static const char* const kPages[] = {"Input", "Graphics", "Audio", "Debug", "About"};
-    static const char* const kInputTabs[] = {"Gamepad", "Keyboard and mouse", "Switch layout", "Live view"};
+    static const char* const kInputTabs[] = {"Gamepad", "Keyboard and mouse", "Console layout", "Live view"};
     static const char* const kGraphicsTabs[] = {"Display", "Picture", "Advanced"};
     bool ok = true;
     run_frames(host, 1);
@@ -298,7 +298,7 @@ NXTEST(fps_flip_after_load_draws_without_apply) {
 // ---- the menu's own behaviour: pad press-to-rebind, auto-apply, [config] rows, the Debug page --------------------------------------------------
 
 namespace {
-// The id of the "Rebind" button of Switch button row `row` on the Gamepad tab: the tab's id, then the table (instance 0 has the table's id), then
+// The id of the "Rebind" button of console button row `row` on the Gamepad tab: the tab's id, then the table (instance 0 has the table's id), then
 // PushID(row), then the label.
 ImGuiID rebind_button_id(int row) {
     const ImGuiID gamepad_tab = tab_id(input_bar_id(), "Gamepad");

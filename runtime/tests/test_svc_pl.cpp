@@ -137,7 +137,7 @@ NXTEST(pl_shared_memory_handle_and_contents) {
     CHECK_EQ(mem[7], uint8_t(enc));
     // The font data at 8 is the TTF file, byte for byte (the service stores it plain, as Switchbrew describes).
     CHECK(std::equal(ttf.begin(), ttf.end(), mem + 8));
-    // Slot 5 (Nintendo Extended) at the offset GetSharedMemoryAddressOffset reports: header just before it, same TTF.
+    // Slot 5 (the console's extended symbols) at the offset GetSharedMemoryAddressOffset reports: header just before it, same TTF.
     const uint64_t off5 = expected_offset(5, ttf.size());
     CHECK_EQ(mem[off5 - 8], 0x7Fu);
     CHECK(std::equal(ttf.begin(), ttf.end(), mem + off5));
@@ -280,7 +280,7 @@ NXTEST(pl_unknown_command_answers_stub) {
     CHECK_EQ(r.result, nxrt::kernel::kStubService);
 }
 
-// Switch 2 pl:u 2000 / 2010 (Eglantine NX2_NOTES row 36): the built-in fonts as plain TTF. 2010 takes the font type in the first byte and
+// platform 2 pl:u 2000 / 2010 (Eglantine NX2_NOTES row 36): the built-in fonts as plain TTF. 2010 takes the font type in the first byte and
 // answers 24 bytes: u32 found at 0, descriptor at 8 {u32 flags, u32 offset, u32 size, u32}. The offset must hold the same bytes
 // GetSharedMemoryAddressOffset points at (the shared memory is plain TTF behind its 8-byte header).
 NXTEST(pl_switch2_built_in_font_data) {
@@ -310,7 +310,7 @@ NXTEST(pl_switch2_built_in_font_data) {
     CHECK_EQ(none.get<uint32_t>(16), 0u);
 }
 
-// chat:u (Switch 2 GameChat): cmd 0 opens a session, whose cmd 1 returns an event handle.
+// chat:u (platform 2 GameChat): cmd 0 opens a session, whose cmd 1 returns an event handle.
 NXTEST(chat_u_opens_a_session_with_an_event) {
     nxsvc::Env env;
     nxsvc::Session s = nxsvc::connect("chat:u");

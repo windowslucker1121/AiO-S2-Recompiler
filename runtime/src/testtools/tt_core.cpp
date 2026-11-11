@@ -46,7 +46,7 @@ struct State {
     int exit_code = -1;
     std::string out, script, regions_file, trace_path, record_path, replay_path;
     uint64_t seed = 0x5EED5EEDull;
-    uint64_t step_ticks = 320000;            // 1/60 s of system ticks (kernel::tick_hz: 19.2 MHz Switch 1, 31.25 MHz Switch 2), set by init()
+    uint64_t step_ticks = 320000;            // 1/60 s of system ticks (kernel::tick_hz: 19.2 MHz platform 1, 31.25 MHz platform 2), set by init()
     Source src = Source::Hook;
     uint32_t svc_n = 0;
     std::vector<Region> hash_regions;
@@ -537,7 +537,7 @@ bool virtual_tick(uint64_t* ticks) {
 bool virtual_sleep(int64_t ns) {
     State& s = S();
     if (!s.on || !s.det) return false;
-    // nanoseconds to system ticks at the platform's rate (Switch 2 runs at 31.25 MHz: the 19.2 MHz factor made its sleeps 39% short)
+    // nanoseconds to system ticks at the platform's rate (platform 2 runs at 31.25 MHz: the 19.2 MHz factor made its sleeps 39% short)
     const uint64_t hz = kernel::tick_hz();
     const uint64_t add = ns > 0 ? static_cast<uint64_t>(ns) / 1000000000ull * hz + static_cast<uint64_t>(ns) % 1000000000ull * hz / 1000000000ull : 0;
     const DWORD ft = s.frame_tid.load(std::memory_order_relaxed);

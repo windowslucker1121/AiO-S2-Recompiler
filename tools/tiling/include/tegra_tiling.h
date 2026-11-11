@@ -26,9 +26,9 @@ struct TextureDesc {
     uint32_t gob_blocks_y = 1;                  // block height in GOBs of level 0, power of two 1..32
     uint32_t gob_blocks_z = 1;                  // block depth in GOBs of level 0, power of two 1..32 (3D)
     uint32_t linear_stride_align = 4;           // 1 = tight rows, 4 = Ryujinx
-    // GOB-internal byte order. false: Maxwell (Switch 1): offset bits 4..8 = y0, x4, y1, y2, x5 (x = byte column).
-    // true: Switch 2 (T239): bits 4..8 = y0, y1, x4, y2, x5 (16-byte pieces of rows 0-3 of one 32-byte half first),
-    // found on Pokopia's GT1G RGBA8 and BC7 textures (the only order of the 120 that decodes them cleanly).
+    // GOB-internal byte order. false: Maxwell (platform 1): offset bits 4..8 = y0, x4, y1, y2, x5 (x = byte column).
+    // true: platform 2 (T239): bits 4..8 = y0, y1, x4, y2, x5 (16-byte pieces of rows 0-3 of one 32-byte half first),
+    // found on title A's GT1G RGBA8 and BC7 textures (the only order of the 120 that decodes them cleanly).
     bool gob_switch2 = false;
 };
 

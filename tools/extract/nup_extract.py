@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""nup_extract: turns a NUP package (.nup: a decrypted Switch 1/2 dump, base game plus updates and DLC in one file; format:
+"""nup_extract: turns a NUP package (.nup: a decrypted platform 1/2 dump, base game plus updates and DLC in one file; format:
 https://github.com/a55uka/nup/blob/meow/SPEC.md) into the extracted layout the lifter, the runtime and the library app read:
   <out>/base/exefs/                 the base game's ExeFS (always)
   <out>/updates/<version>/exefs/    the newest update's ExeFS

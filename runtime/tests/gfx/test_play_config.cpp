@@ -16,7 +16,7 @@
 #include "test_framework.h"
 #include "play_fixture/mpr_play_fixture.h"
 NXTEST_GROUP(play_config)
-// The checks are written against Metroid Prime Remastered's play vocabulary and factory controls.ini (play_fixture/mpr_play_fixture.h).
+// The checks are written against title E's play vocabulary and factory controls.ini (play_fixture/mpr_play_fixture.h).
 NXTEST_GROUP_FIXTURE(nxtest::mpr_play::install, nxtest::mpr_play::remove)
 
 // A REQUIRE with a message (test_framework.h has REQUIRE only).
@@ -1615,7 +1615,7 @@ NXTEST(pad_right_deadzone_default_kept_without_pad_deadzone) {
     CHECK(near(s.pad.right_deadzone, 0.10));
 }
 
-// ---- the alternate body's camera (mpr: the morph ball camera, S48): [mouse] alt_camera, alt_sensitivity ------------------------------------
+// ---- the alternate body's camera (title E: the morph ball camera, S48): [mouse] alt_camera, alt_sensitivity ------------------------------------
 
 NXTEST(alt_camera_defaults_on) {
     const MouseSettings d = default_settings().mouse;
@@ -1677,7 +1677,7 @@ NXTEST(alt_sensitivity_keeps_a_separate_vertical) {
 }
 
 NXTEST(ball_camera_keys_with_the_mpr_vocabulary) {
-    // the group's fixture is Metroid Prime Remastered's vocabulary: its words for the alternate body's camera keys
+    // the group's fixture is title E's vocabulary: its words for the alternate body's camera keys
     REQUIRE(std::string(key_alt_camera()) == "ball_camera");
     REQUIRE(std::string(key_alt_sens()) == "ball_sensitivity");
     REQUIRE(std::string(key_alt_yaw()) == "morph_yaw");

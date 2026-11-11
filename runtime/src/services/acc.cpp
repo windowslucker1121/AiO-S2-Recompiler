@@ -172,7 +172,7 @@ std::shared_ptr<ipc::Service> make_manager(const Uid& u) {
                       [](ipc::Request&, ipc::Response&) -> uint32_t { return kNsaRegistrationRequired; });
         }
         // 170 LoadNetworkServiceLicenseKindAsync / EnsureIdTokenCacheForOnlinePlayAsync (nn::account::LoadNetworkServiceLicenseInfoAsync,
-        // slot 0x60): an async context that is done and failed like the others, so the game reads "no Switch Online licence".
+        // slot 0x60): an async context that is done and failed like the others, so the game reads "no online-service licence".
         s.add_cmd(170, "LoadNetworkServiceLicenseKindAsync", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
             rsp.push_object(make_license_async_context());
             return 0;

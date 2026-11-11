@@ -885,7 +885,7 @@ NXTEST(failures_return_false_without_crashing) {
     const TextureBuilderInfo bad[] = {
         make_info(NVN_TEXTURE_TARGET_2D, 16, 16, 1, 1, NVN_FORMAT_NONE),
         make_info(NVN_TEXTURE_TARGET_3D, 33, 33, 0, 1, NVN_FORMAT_RGBA8),
-        make_info(NVN_TEXTURE_TARGET_BUFFER, 0, 1, 1, 1, NVN_FORMAT_RGBA8),   // a buffer texture has a layout (Switch 2 start-up) but needs a width
+        make_info(NVN_TEXTURE_TARGET_BUFFER, 0, 1, 1, 1, NVN_FORMAT_RGBA8),   // a buffer texture has a layout (platform 2 start-up) but needs a width
         make_info(NVN_TEXTURE_TARGET_2D, 0, 16, 1, 1, NVN_FORMAT_RGBA8),
         make_info(NVN_TEXTURE_TARGET_2D_ARRAY, 16, 16, 0, 1, NVN_FORMAT_RGBA8),
     };

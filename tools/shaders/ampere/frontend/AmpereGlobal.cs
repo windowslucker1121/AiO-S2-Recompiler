@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Global memory accesses whose address the translator cannot trace to one storage descriptor (A17, AGENTS.md). Ryujinx's GlobalToStorage
-// dropped them (loads read 0, stores and atomics vanished); 3,485 of OoT's blocks had such accesses, among them the counters of its GPU
+// dropped them (loads read 0, stores and atomics vanished); 3,485 of the game's blocks had such accesses, among them the counters of its GPU
 // culling, so every GPU-culled draw got zero work. Two steps now resolve them at run time:
 //  1. Like the Lichii emulator (zortos293/Lichii, global_memory_to_storage_buffer_pass.cpp and DefineGlobalMemoryFunctions): the address is
 //     checked against every storage descriptor slot of the stage's c[0] ({address, size} words); the first range that holds it is used.
@@ -46,7 +46,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         // draw or dispatch: nvn_replay.cpp gmem_slot_masks): bit k = candidate k. The runtime sets the slots whose binding is not the pool
         // itself where it matters: a result held only in the device-local copy, a compute shadow, a buffer in a virtual pool (which the page
         // table cannot map). With the mask 0 (most draws) the access goes straight to the page table and skips the 16-slot search, which
-        // cost more than the walk (OoT's fern mesh draw: 2.4 ms with the search for every word). Index: compute 0, a graphics stage its
+        // cost more than the walk (the game's fern mesh draw: 2.4 ms with the search for every word). Index: compute 0, a graphics stage its
         // descriptors' c[0] base >> 8 (vertex 1 ... fragment 5, task 6, mesh 7).
         public const int SlotMaskC0 = 0xfc0;
         static int SlotMaskWord(int[] w) => (SlotMaskC0 + 4 * (_compute ? 0 : ((w[0] * 4) >> 8) & 7)) / 4;
@@ -313,7 +313,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         // ---- Compute: the page cache with marked slots (2026-11-10) ----------------------------------------------------------------------
         // Compute bindings are the pool copy or a shadow, so the runtime marked every bound slot (SlotMaskC0 word 0 never 0) and no compute
-        // access ever took the inline fast path: every 32-bit word of OoT's HiZ / culling pointer shaders (submission #3, the one the game's
+        // access ever took the inline fast path: every 32-bit word of the game's HiZ / culling pointer shaders (submission #3, the one the game's
         // main thread waits on) called its helper, searched the slots and walked the table. Now the helper hands main a walk's span only when
         // no marked slot overlaps it, so a cached span can never hide a marked binding, and compute call sites test the cache alone (no
         // "mask is 0" condition). The runtime marks only the slots whose binding may differ from the pool (nvn_replay.cpp
@@ -393,9 +393,9 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             // Atomics other than add, exchange and compare-and-swap as a compare-and-swap loop. The device address points into a game memory
             // pool, which is host memory imported into Vulkan, and a GPU atomic on system memory is a PCIe atomic operation: PCIe has only
-            // fetch-add, swap and compare-and-swap, so min/max/and/or/xor there did nothing. Seen in OoT's culling 4c1e8564: its RED.E.MAX
+            // fetch-add, swap and compare-and-swap, so min/max/and/or/xor there did nothing. Seen in the game's culling 4c1e8564: its RED.E.MAX
             // of each indirect dispatch record's work-group count left x at 0 (every GPU-culled dispatch and mesh draw empty) while the
-            // counts' atomic adds next to it landed; as a CAS loop the records get 65, 66, 1, 20 (capture deku150).
+            // counts' atomic adds next to it landed; as a CAS loop the records get 65, 66, 1, 20 (capture tree150).
             Func<Operand, Operand, Operand> combine = baseInst switch
             {
                 IrInstruction.AtomicMaxU32 => c.IMaximumU32,
@@ -439,7 +439,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         // ---- Out-of-line helpers and the inline fast path ---------------------------------------------------------------------------------
         // Ryujinx makes one helper function per access kind and calls it for every 32-bit word; the driver inlined each call, so a pointer
-        // shader carried the whole candidate search and page walk once per word (OoT's fern mesh fbb731e2: 253 calls, 1.26 MB of code,
+        // shader carried the whole candidate search and page walk once per word (the game's fern mesh fbb731e2: 253 calls, 1.26 MB of code,
         // 255 registers, 20 s to compile). Now (each can be switched off for measuring):
         //  - the helpers are marked DontInline (NVIDIA's compiler keeps one copy) and take their in arguments by value;
         //  - a plain 32-bit load calls its helper only on the slow path: at the call site the page cache (CacheMemory, main's own) is
@@ -496,7 +496,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         // ---- Vector loads (LDG.64 / LDG.128) --------------------------------------------------------------------------------------------
         // The front end splits a vector load into 32-bit loads (the IR is scalar). Through the fast path each word then made its own
-        // cache test and its own 32-bit load: four load instructions where the SASS has one (OoT's gpt mesh blocks: 66 LDG.128 of light
+        // cache test and its own 32-bit load: four load instructions where the SASS has one (the game's gpt mesh blocks: 66 LDG.128 of light
         // probe records per lane, scattered over memory). The words of one load carry a tag {group, word count, word}; at word 0 the back
         // end loads the whole vector through the cached span (an aligned LDG.128 / .64 never crosses a 4 KiB page) and the other words take
         // their lane from it when word 0 hit; after a miss they go their own way as before.

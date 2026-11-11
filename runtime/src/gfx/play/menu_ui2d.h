@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// The menu pointer on Nintendo UI2D layouts (nn::ui2d, the BFLYT layout library of first-party games) and the button controls built on
-// them: the ui2d adapter of the menu pointer engine (menu_pointer.h). Written against a Nintendo nn::ui2d game; every
+// The menu pointer on the SDK's UI2D layouts (nn::ui2d, the BFLYT layout library of first-party games) and the button controls built on
+// them: the ui2d adapter of the menu pointer engine (menu_pointer.h). Written against an nn::ui2d game; every
 // guest address and offset comes from the game's config ([menu] by default, see runtime/docs/menu_pointer.md for each one's evidence).
 //
 // Those games already drive their buttons with a pointer: a button group's pointer update (Config::group_update) takes a position in

@@ -37,7 +37,7 @@ def analyse(img):
     words = img.words()
     exact = {}                                        # start -> {'E': end, 'S': end}
     for f in eh.all_fdes(img)[0]:
-        # a zero-length FDE says nothing about the extent (Ocarina of Time 2.0.0 main has three, on called code): the start
+        # a zero-length FDE says nothing about the extent (the game 2.0.0 main has three, on called code): the start
         # then comes from its callers and the end from the next start
         if f.end > f.start:
             exact.setdefault(f.start, {})['E'] = f.end
@@ -77,7 +77,7 @@ def analyse(img):
             f = containing(pc)
             if f is not None and ts <= t < te and not (f <= t < ends[f]):
                 tail.add(t)
-    # ADR targets: a static function whose address is taken with one ADR (a callback next to its user: Ocarina of Time's printf-style
+    # ADR targets: a static function whose address is taken with one ADR (a callback next to its user: the game's printf-style
     # formatter gets its output function so) is named by nothing else. LLVM also points ADR at the base label of a jump table, which
     # follows the dispatching BR inside the function: so a target counts only outside exact functions and right after RET/RETAA/RETAB/B.
     adr = set()
@@ -97,7 +97,7 @@ def analyse(img):
     # bytes up to the end of the MOD0 record (7 words) are data, and a relocated pointer to the module base (R at 0)
     # is not a function. Only for an NSO (img.mod0 != 0).
     # Word 1 is the MOD0 offset and the record is data wherever it is: right after the two words, the header runs to its end; SDK 22
-    # modules (Ocarina of Time) put it after .text, and "up to the end of MOD0" then covered all of .text and dropped every start that
+    # modules (the game) put it after .text, and "up to the end of MOD0" then covered all of .text and dropped every start that
     # only a BL, a relocation or a tail call names (and every gap function).
     nso = img.mod0 != 0
     mod0 = img.u32(4) if nso else 0

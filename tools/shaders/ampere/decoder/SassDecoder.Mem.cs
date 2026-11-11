@@ -161,7 +161,7 @@ namespace Nx.Shaders.Ampere
                 c.Add(new Operand(OperandKind.Attr, Offset: (long)c.F(64, 8) << 2));
                 if (loc == 2 || c.I(32, 8) != 255) c.Add(c.R(32));
             });
-            // IPA 0x526: IPA with the attribute indexed by a uniform register, a[URn+addr] (URn at 24..29, otherwise as 0x326). Seen in OoT's
+            // IPA 0x526: IPA with the attribute indexed by a uniform register, a[URn+addr] (URn at 24..29, otherwise as 0x326). Seen in the game's
             // light-probe cube filter 471bac84 (IPA.PASS R39, a[UR4+0x84]: one varying per cube face in a loop over the faces) [nvdisasm]
             Op12(0x526, c =>
             {
@@ -184,7 +184,7 @@ namespace Nx.Shaders.Ampere
                 c.Op = "ISBERD"; c.Mod(c.B(79), "O"); c.Mod(76, 2, null, "PATCH", "PRIM", "ATTR"); c.Mod(c.B(78), "SKEW"); c.Mod(74, 2, null, "U16", "32", "INVALID3");
                 c.Dst = 1; c.Add(c.R(16), MemOp(c, c.I(24, 8), null, -1, (long)c.F(40, 16)));
             });
-            // ISBEWR 0x927 (store to the internal stage buffer; task and mesh shaders, Mario Kart World): ISBEWR.O.<ATTR>[.SKEW][.U16|.32] [Ra+off], Rb.
+            // ISBEWR 0x927 (store to the internal stage buffer; task and mesh shaders, title C): ISBEWR.O.<ATTR>[.SKEW][.U16|.32] [Ra+off], Rb.
             // Bit 79 must be set (nvdisasm prints ???0 otherwise), the space field 76..77 only has 3 = ATTR [xcheck probe]
             Op12(0x927, c =>
             {

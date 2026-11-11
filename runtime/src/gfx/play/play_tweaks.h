@@ -9,7 +9,7 @@
 //   ball_glow  = auto | off | R,G,B
 //   gun_glow   = auto | off | R,G,B
 //   suit_color = off | R,G,B               the suit's paint, the morph ball and the spider ball with it (S45; texture recolour that keeps the
-//                                           detail and shading of every texel; Metroid Prime Remastered: the game module)
+//                                           detail and shading of every texel; title E: the game module)
 //   gun_color  = off | R,G,B               the arm cannon's shell (first person, every suit and beam)
 //
 // R, G and B are 0..255 (sRGB, as a colour picker shows them). (#RRGGBB is accepted by parse_glow_rgb, but the settings file reads a '#' after

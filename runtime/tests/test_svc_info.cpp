@@ -49,8 +49,8 @@ constexpr uint32_t kInfoThreadTickCountOld = 0xF0000002u;
 constexpr uint32_t kInfoThreadTickCount = 25;
 constexpr uint64_t kInvalidCombination = 0xE801;
 constexpr uint64_t kInvalidHandle = 0xE401;
-constexpr uint64_t kTotalMemory = 0xCD500000ull;          // Switch 1 application (svc_info.cpp kTotalMemoryAvailable)
-constexpr uint64_t kTotalMemorySwitch2 = 0x2A0000000ull;  // Switch 2 application: 10.5 GiB
+constexpr uint64_t kTotalMemory = 0xCD500000ull;          // platform 1 application (svc_info.cpp kTotalMemoryAvailable)
+constexpr uint64_t kTotalMemorySwitch2 = 0x2A0000000ull;  // platform 2 application: 10.5 GiB
 constexpr uint64_t kGolden = 0x9E3779B97F4A7C15ull;
 constexpr uint64_t kAllCores = 0xFFFFFFFFFFFFFFFFull;
 
@@ -63,7 +63,7 @@ uint64_t used_memory() { return nxrt::svc_current_heap_size() + nxrt::services::
 // GetInfo: InfoType 0 to 23 with their documented or chosen values.
 
 NXTEST(info_core_and_priority_masks) {
-    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);   // three application cores (the Switch 2 mask is checked below)
+    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);   // three application cores (the platform 2 mask is checked below)
     Result r = call(kSvcGetInfo, 0);
     CHECK_EQ(r.rc, 0u);
     CHECK_EQ(r.x1, 0x7u);
@@ -88,7 +88,7 @@ NXTEST(info_alias_and_heap_regions) {
 }
 
 NXTEST(info_total_and_used_memory) {
-    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);   // the Switch 1 application size (Switch 2: info_switch2_total_memory)
+    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);   // the platform 1 application size (platform 2: info_switch2_total_memory)
     Result r = call(kSvcGetInfo, 6);
     CHECK_EQ(r.rc, 0u);
     CHECK_EQ(r.x1, kTotalMemory);
@@ -151,13 +151,13 @@ NXTEST(info_random_entropy_subtypes_distinct_and_stable) {
 }
 
 NXTEST(info_random_entropy_bad_subtype) {
-    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);   // four subtypes on Switch 1, eight on Switch 2 (below)
+    nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);   // four subtypes on platform 1, eight on platform 2 (below)
     Result r = call(kSvcGetInfo, 11, 0, 4);
     CHECK_EQ(r.rc, kInvalidCombination);
     CHECK_EQ(r.x1, 0u);
 }
 
-// Switch 2 profile: six application cores (mask 0x3f) and eight RandomEntropy subtypes / core numbers (Switch 1: three cores, four subtypes).
+// platform 2 profile: six application cores (mask 0x3f) and eight RandomEntropy subtypes / core numbers (platform 1: three cores, four subtypes).
 NXTEST(info_switch2_core_mask_entropy_subtypes_and_core_numbers) {
     nxtest::ScopedPlatform sw2(nxrt::game::Platform::Switch2);
     Result r = call(kSvcGetInfo, 0);

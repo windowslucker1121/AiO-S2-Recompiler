@@ -2,10 +2,10 @@
 
 ## What this project is
 
-An unofficial, non-commercial, open-source tool set that statically recompiles the program code of a Nintendo Switch 2 game from a dump
-the player made of their own copy, so that the player can run that copy on their own Windows PC. It is an interoperability and
-preservation project. It is not affiliated with, endorsed by or sponsored by Nintendo, The Pokémon Company, Creatures Inc., GAME FREAK
-inc. or any other publisher or rights holder.
+An unofficial, non-commercial, open-source tool set that statically recompiles the program code of a console game from a dump the
+player made of their own copy, so that the player can run that copy on their own Windows PC. It is an interoperability and
+preservation project. It is not affiliated with, endorsed by or sponsored by the console maker or any game developer, publisher or
+other rights holder; the non-affiliation and trademark notice that names them is in `README.md` ("Legal notice and trademarks").
 
 ## Disclaimer
 
@@ -27,8 +27,8 @@ are responsible for using it lawfully where you live. Nothing here is legal advi
 - No game code, game files or game assets: no executables, RomFS data, shaders or shader caches, textures, models, audio, movies,
   fonts, text or save files of any game.
 - No encryption keys, title keys, firmware or system files.
-- No Nintendo SDK code, headers or documentation.
-- No Nintendo or game logos, icons, box art or screenshots of games.
+- No SDK code, headers or documentation of the console maker.
+- No logos, icons or box art of the console maker or of any game, and no screenshots of games.
 - No links to games, keys or firmware, and no help to obtain them other than dumping your own copy.
 
 The repository holds facts needed for interoperability: title IDs, build IDs, file hashes, code offsets and function names, and notes
@@ -42,10 +42,11 @@ bundles that contain game data to issues.
 
 ## Trademarks
 
-Nintendo, Nintendo Switch and Nintendo Switch 2 are trademarks of Nintendo. The Legend of Zelda and Ocarina of Time are trademarks of
-Nintendo. Pokémon is a trademark of Nintendo, Creatures Inc. and GAME FREAK inc. Other names are trademarks of their owners.
-They are used only nominatively: to say which hardware a dump comes from and which game a module supports. Their use does not mean
-that any rights holder endorses or is connected with this project. The project's apps and icons use no Nintendo or game logos or art.
+The trademark and non-affiliation notice is in `README.md` ("Legal notice and trademarks"); it is the only place where the repository
+names the console maker in its own words. Everywhere else (code, comments, logs, documentation, tests, tools, manifests, CI) games are named only
+by short neutral ids (such as `oot`) and the consoles as "platform 1" / "platform 2"; identifiers that file formats, system interfaces
+or third-party APIs require stay as they are. Names of upstream open-source projects stay where they credit code taken from them. The
+project's apps, icons and packages use no trademarks, logos or art of the console maker or of any game.
 
 ## DLSS
 

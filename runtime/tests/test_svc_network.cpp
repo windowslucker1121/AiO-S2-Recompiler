@@ -52,7 +52,7 @@ NXTEST(nifm_no_connection) {
     for (uint32_t h : ev.copy) kernel::handle_close(h);
 }
 
-// Sockets exist and do nothing (Ocarina of Time's gRPC probes IPv6 with a UDP socket and aborts when Socket fails): Socket hands out a
+// Sockets exist and do nothing (the game's gRPC probes IPv6 with a UDP socket and aborts when Socket fails): Socket hands out a
 // descriptor, the commands that would need a network fail with ENETDOWN, Close frees it once.
 NXTEST(bsd_socket_exists_but_has_no_network) {
     nxsvc::Env env;

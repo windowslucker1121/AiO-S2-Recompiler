@@ -86,7 +86,7 @@ namespace Nx.Shaders.Ampere
                 string r = o.IndexIsUReg ? URegName(o.IndexReg) : RegName(o.IndexReg);
                 idx = o.Offset != 0 ? r + "+" + Hex(o.Offset) : r;
             }
-            // the 16-bit offset field is printed signed by nvdisasm: c[0x9][-0x5a44] for 0xa5bc [xcheck: Pokopia FFMA/FMUL/MOV words]
+            // the 16-bit offset field is printed signed by nvdisasm: c[0x9][-0x5a44] for 0xa5bc [xcheck: title A FFMA/FMUL/MOV words]
             else idx = Hex(o.Offset is >= 0x8000 and <= 0xffff ? o.Offset - 0x10000 : o.Offset);
             return bank + (half ? " [" : "[") + idx + "]";
         }

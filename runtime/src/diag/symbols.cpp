@@ -231,8 +231,8 @@ bool read_file(const std::string& path, std::string& text) {
 }
 
 // The path the linker recorded for the exe's PDB (CodeView record in the debug directory), with .map as the extension: the build
-// folder, where pkp.map sits, when the exe was copied somewhere else (the play folder) without its map. Empty when there is none
-// (the package flavour links with /PDBALTPATH:pkp.pdb: a bare name, which the caller resolves against the exe folder anyway).
+// folder, where <id>.map sits, when the exe was copied somewhere else (the play folder) without its map. Empty when there is none
+// (the package flavour links with /PDBALTPATH:<id>.pdb: a bare name, which the caller resolves against the exe folder anyway).
 std::string map_path_from_debug_directory() {
     const auto* base = reinterpret_cast<const unsigned char*>(GetModuleHandleA(nullptr));
     if (!base) return {};

@@ -4,7 +4,7 @@
 // constant: the entry hook on the frame update computes the step, mid hooks load it into the registers that held the 1/60 immediates, and a
 // few per-frame counters that are not driven by that dt (render timings, texture streaming, a per-tick friction, the background-work budget,
 // the movie clock) are corrected. The mechanism is the game's own business only through Sites: the registered game (nxrt/game.h) lists
-// where those places are (Ocarina of Time: games/oot/oot_core.cpp, the same addresses as recomp/games/oot/main.sites).
+// where those places are (the game: games/oot/oot_core.cpp, the same addresses as recomp/games/oot/main.sites).
 //
 // Configuration, section [time] (env NXRT_TIME_<KEY>):
 //   mode = real | fixed | off     real (default): the step is the measured frame time, clamped and smoothed.
@@ -17,11 +17,11 @@
 //   smooth = 4                    real mode: the step is the mean of the last N frame times (1 = raw); a jump of more than 50 % restarts it
 //   pace = 1                      hold the frame until the minimum step has passed (stops an uncapped limiter from running the game faster)
 //   movie_real = 1                the movie list's clock is real elapsed time (audio plays in real time), not the step
-//   fix_friction = 1              per-tick float constants (Load::ScaledFloat; Metroid: the in-air walk friction, 3.5 per 1/60 s) scaled by the step
+//   fix_friction = 1              per-tick float constants (Load::ScaledFloat; title E: the in-air walk friction, 3.5 per 1/60 s) scaled by the step
 //   fix_render_timings = 1        the render-timing clock (Sites::tick_render_timings) advances by the step (texture scroll, UV animation, water)
 //   fix_streaming = 1             texture streaming ages its entries by the step instead of 1/60
-//   fix_budget = 1                the background-work budget after the tick (Metroid: 14 ms) scales with the step
-//   fix_stuck_tracker = 1         a per-tick sampler (Sites::per_tick_sampler; Metroid: the player's "am I stuck" test, 20 samples, one per tick) takes one sample
+//   fix_budget = 1                the background-work budget after the tick (title E: 14 ms) scales with the step
+//   fix_stuck_tracker = 1         a per-tick sampler (Sites::per_tick_sampler; title E: the player's "am I stuck" test, 20 samples, one per tick) takes one sample
 //                                 per 1/60 s of game time, so its window keeps its length at more than 60 ticks per second.
 //   log_every = 0                 log one line of frame statistics every N frames (0 = off)
 //   csv = <file>                  write one line per frame: frame, host time (s), measured elapsed, step used, sum of steps, movie frames delivered, render-timing clock
@@ -90,13 +90,13 @@ struct Sites {
     double render_counter_wrap = 0;     // the counter is kept modulo this (0 = no wrap)
     uint64_t movie_update = 0;          // entry: s0 = the movie clock's delta seconds (0 = none)
     uint64_t per_tick_sampler = 0;      // entry, handled: a function that must run once per 1/60 s of game time; x0 stays as the result (0 = none)
-    // A game that takes its step from data instead of immediates (Ocarina of Time: a frame-step scale it derives from a target fps): called on
+    // A game that takes its step from data instead of immediates (the game: a frame-step scale it derives from a target fps): called on
     // the frame_update entry after the step of this frame is known, in real and fixed mode only. c: the guest context at that entry (x0 = this).
     void (*apply_step)(::Ctx* c, uint64_t game_base, float dt) = nullptr;
-    // fps_limit = auto: true caps at [display] auto_fps (default 100; 0 = the display's refresh rate; the step follows real time). false keeps the console's 60 ([display]
-    // console_fps): for a game that still advances something one unit per frame (OoT's movie pictures), so it never runs above 60.
+    // fps_limit = auto: true caps at [display] auto_fps (default 100; 0 = the display's refresh rate; the step follows real time). false keeps
+    // the console's 60 ([display] console_fps): for a game that still advances something one unit per frame (the game's movie pictures).
     bool cap_at_display_rate = true;
-    // The game's movie player shows one decoded picture per frame (OoT): while the game reads pictures (nn::codec, the last one under 0.5 s ago)
+    // The game's movie player shows one decoded picture per frame (the game): while the game reads pictures (nn::codec, the last one under 0.5 s ago)
     // the step is the console's 1/60, so the event timeline that starts the voice lines stays with the pictures (A11).
     bool fixed_step_during_movies = false;
 };

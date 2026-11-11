@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))                 # Metroid-Prime
+ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))                 # repository root
 E2E = os.path.join(ROOT, 'recomp', 'oracle', 'e2e')
 GUEST = os.path.abspath(os.path.join(HERE, '..', 'lift', 'guest'))
 sys.path.insert(0, E2E)

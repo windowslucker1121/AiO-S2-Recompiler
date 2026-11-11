@@ -38,7 +38,7 @@ struct TickSource {
         return ns * 192 / 10000;
     }
 
-    uint64_t Frequency() const { return nxrt::kernel::tick_hz(); }   // the console tick (Constants::TargetTimerFrequency on Switch 1)
+    uint64_t Frequency() const { return nxrt::kernel::tick_hz(); }   // the console tick (Constants::TargetTimerFrequency on platform 1)
 };
 
 class AudioRendererManager {

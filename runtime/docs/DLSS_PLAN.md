@@ -1,7 +1,7 @@
 # DLSS for every game: plan (draft, 2026-11-10)
 
 Status (2026-11-10, branch feat/dlss-wp1): WP1 done (d58ee2c). WP2 mechanism done (`[dlss_pass]`, CONFIG.md, GAME_BOUNDARY.md);
-OoT defaults are inert (`motion = none`): its depth / motion-vector / jitter inputs are not identified (this machine has no extracted game
+`oot` defaults are inert (`motion = none`): its depth / motion-vector / jitter inputs are not identified (this machine has no extracted game
 and no capture). WP0 code done: `tools/release/fetch_dlss.py` (licence flag, pinned sha256, test), `package.ps1 -Streamline` (its
 `$SlSha256` and zip name are still to fill on the first real download), LEGAL.md section. WP4 done in the library: This PC "DLSS" row,
 Settings hides DLSS/DLAA until the files are there and offers "Download DLSS" (licence dialog first); Play passes the folder as
@@ -17,24 +17,24 @@ with no per-game code. A game may at most add *data*: config defaults or manifes
 | **NVN2 DLSS API** | `src/gfx/nvn/api_dlss.cpp` | All 57 `nvnDlss*` calls + `nvnCommandBufferEvaluateDlss`, object layouts from the SDK. Records `Op::EvaluateDlss` |
 | Native evaluate in the replay | `nvn_replay.cpp` `do_evaluate_dlss` | Drains the recorder thread (`cmdq::drain`), runs `temporal_evaluate_native` on the game's own colour/depth/MV/jitter, blits into the game's output rect; bilinear blit when DLSS is off or missing |
 | Capture/replay of `EvaluateDlss` | `nvn_capture.cpp` | Textures are captured |
-| Camera-derived path (no game MVs) | `temporal.cpp`, hook in `nvn_replay.cpp` (`temporal_gbuffer_note`, `temporal_for_draw`) | Runtime-made camera MVs + runtime jitter, inserted before the tone-map draw. **Game-specific**: camera = Pokopia's uniform layout (VP floats 0..15, view 52..67), tone map found by MPR/Pokopia SPIR-V patterns (`hdr_is_tonemap`) |
+| Camera-derived path (no game MVs) | `temporal.cpp`, hook in `nvn_replay.cpp` (`temporal_gbuffer_note`, `temporal_for_draw`) | Runtime-made camera MVs + runtime jitter, inserted before the tone-map draw. **Game-specific**: camera = title A's uniform layout (VP floats 0..15, view 52..67), tone map found by title E/title A SPIR-V patterns (`hdr_is_tonemap`) |
 | Settings | `[upscale] mode = dlss / dlaa`, `quality`, `dlss_dll` (CONFIG.md); library Settings page lists DLSS/DLAA | Done |
 | Getting `nvngx_dlss.dll` | `fetch_dlss.py` (pinned NVIDIA GitHub tag v310.9.16 + sha256) and the Tauri launcher's "Download DLSS" | **Removed** in a069ac5 with the old launcher; no package ships `sl.*.dll` now |
 
-OoT: it resolves the `nvnDlss*` procs at boot (`work/run/boot31`) but no run log has a `DLSS network` line: it never initialises a
+The game: it resolves the `nvnDlss*` procs at boot (`work/run/boot31`) but no run log has a `DLSS network` line: it never initialises a
 network. Its upscaler is its own compute chain in `main` (fea98fe7 / f90d726d / 49659bca / 02dcb888, A12/A22).
 
 ## 2. Three routes, ordered by how generic they are
 
-**Route A: the game calls NVN2 DLSS (fully generic).** Every Switch 2 title that uses the console's DLSS hands over colour, depth,
+**Route A: the game calls NVN2 DLSS (fully generic).** Every platform 2 title that uses the console's DLSS hands over colour, depth,
 motion vectors, jitter, MV scale and history reset itself. The runtime maps it 1:1 to PC DLSS. Code exists, never run on a real
 title. This is the main deliverable.
 
 **Route B: the game has its own temporal upscaler / TAA pass (generic engine, per-game data).** Replace that pass's dispatch or
 draw with DLSS. The inputs are named in config, not code, extending the existing generic `[nvn] upscaler_replace / pass_copy`
-mechanism. OoT is the pilot.
+mechanism. The game is the pilot.
 
-**Route C: the game has no temporal data (generic heuristics, research).** Runtime-made camera MVs + runtime jitter, as the Pokopia
+**Route C: the game has no temporal data (generic heuristics, research).** Runtime-made camera MVs + runtime jitter, as the title A
 path does, but with the camera block and the tone map found automatically. Camera motion only: animated objects ghost. Last.
 
 ## 3. Work packages
@@ -69,7 +69,7 @@ path does, but with the camera block and the tone map found automatically. Camer
 5. Map the remaining inputs: exposure texture / pre-exposure (`sl::kBufferTypeExposure`, `preExposure`), bias-current-colour
    mask (`kBufferTypeBiasCurrentColorHint`), MV-jittered and low-res-MV flags (bits 2/4 of the network flags), DLSS preset
    (`kNPreset` -> `DLSSOptions::dlaaPreset/qualityPreset...`). Several network instances: Streamline viewport per `history_key`.
-6. Find a test title: any Switch 2 game in reach that calls `nvnDlssNetworkInitialize` (log line `DLSS network ...`). Without one,
+6. Find a test title: any platform 2 game in reach that calls `nvnDlssNetworkInitialize` (log line `DLSS network ...`). Without one,
    the synthetic test + a capture-replay test are the evidence; say so in AGENTS.md.
 
 ### WP2: generic "replace a pass with DLSS" (Route B)
@@ -90,8 +90,8 @@ Steps: (1) reuse the binding resolver of `upscaler_replace` / `pass_copy`; (2) f
 `temporal_evaluate_native` (one code path with Route A); (3) a `[nvn] trace_frame` helper that lists each candidate pass's
 bindings (format, size, render vs output size) so finding the inputs for a new game takes a capture and minutes, not reverse
 engineering; (4) document the recipe in GAME_BOUNDARY.md.
-**OoT pilot**: on capture `20261108-221243-drs-drs1080`, identify the chain's colour, depth, MV and jitter inputs (f05596b9 /
-54ecc4b4 / 4c60af1f read them; A10 lists the bindings). Unknown so far whether OoT writes per-pixel MVs; if it does not, use
+**The game pilot**: on capture `20261108-221243-drs-drs1080`, identify the chain's colour, depth, MV and jitter inputs (f05596b9 /
+54ecc4b4 / 4c60af1f read them; A10 lists the bindings). Unknown so far whether the game writes per-pixel MVs; if it does not, use
 `motion = none`. Measure quality (SSIM vs the game's own network) and GPU time (the network is ~2 ms; DLSS on a 4080 ~0.5-1 ms
 at 1080p -> 1440p).
 
@@ -100,7 +100,7 @@ at 1080p -> 1440p).
   product with a few reconstructed positions reproduces that draw's depth (check on the GPU once per new program); remember the
   (program, slot, offset) per game in `pipeline_keys`-style cache.
 - Tone-map point: first full-screen draw that reads the main HDR colour target and writes an 8-bit / display target; replace the
-  MPR/Pokopia SPIR-V patterns.
+  Title E/title A SPIR-V patterns.
 - Jitter: runtime adds Halton jitter to the found VP (exists: `temporal_jitter_block`) and sets negative LOD bias on samplers.
 - Expectation: ghosting on animated meshes; offer only as "DLAA (experimental)" per game.
 
@@ -116,14 +116,14 @@ at 1080p -> 1440p).
 
 1. WP1.1-1.3 (test, render-thread interplay, device extensions): small, de-risks everything. ~1-2 days.
 2. WP0 (packaging + download): ~1 day + the licence decision.
-3. WP2 with OoT as pilot: the visible result on the game we have. ~3-5 days (most of it identifying the inputs).
+3. WP2 with the game as pilot: the visible result on the game we have. ~3-5 days (most of it identifying the inputs).
 4. WP1.4-1.6 and WP4: polish. ~2 days.
 5. WP3: only if a title without NVN DLSS and without its own TAA needs it.
 
 ## 5. Risks / open questions
 - No local title is known to call NVN2 DLSS: Route A can only be proven synthetically until one is found.
 - Streamline in front of `vkCreateDevice` may drop or reorder features this runtime relies on (WP1.3).
-- OoT may have no per-pixel motion vectors (its network could be spatial + its own history); then Route B for OoT needs Route C's
+- The game may have no per-pixel motion vectors (its network could be spatial + its own history); then Route B for the game needs Route C's
   camera MVs and quality drops.
 - Licence: user decision on shipping the Streamline binaries and the download flow (WP0).
 - Non-NVIDIA GPUs: unaffected; FSR 3 shares every input path, so Route B/C work for FSR 3 too at no extra cost.
