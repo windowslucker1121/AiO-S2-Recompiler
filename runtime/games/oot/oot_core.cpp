@@ -78,7 +78,7 @@ const timestep::Sites& step_sites() {
         timestep::Sites s;
         s.frame_update = kFrameUpdate;
         s.apply_step = &apply_step;
-        // fps_limit = auto follows the display's refresh rate. The movie player shows one picture per frame, so while a movie shows the
+        // fps_limit = auto caps at [display] auto_fps (100). The movie player shows one picture per frame, so while a movie shows the
         // limiter holds the console's 60 anyway (play.cpp movie_cap, timestep::movie_showing). Measured 2026-11-09 at 1920x1080:
         // the house scene 64 fps uncapped with a 1% low of 48-53 (vs 60 / 41-44 capped).
         s.cap_at_display_rate = true;

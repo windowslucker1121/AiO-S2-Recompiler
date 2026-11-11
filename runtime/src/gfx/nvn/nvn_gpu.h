@@ -72,6 +72,8 @@ bool download_texture(Texture* t);
 // nvnMemoryPoolInvalidateMappedRange / nvnBufferInvalidateMappedRange: the CPU is about to read [addr, +size), which the GPU may have
 // written. Compute results the back end holds in video memory there are copied back first (waits for the GPU). Any thread.
 void cpu_will_read(uint64_t addr, uint64_t size);
+void flush_copy_cpu_wrote(uint64_t addr, uint64_t n);   // [nvn] flush_copy: a CPU flush of pool memory (any thread)
+void flush_copy_enable(bool on);                        // cpuperf_ab (flush_copy)
 
 // nvnDeviceSetWindowOriginMode / nvnDeviceSetDepthMode: the replay needs them to place viewports and the depth range.
 void set_window_modes(int origin_mode, int depth_mode);

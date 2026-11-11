@@ -25,4 +25,16 @@ size_t capture_stack(const CONTEXT* ctx, uint64_t* frames, size_t max) {
     return n;
 }
 
+// The sampler walks threads it suspended at any instruction: an unwind through a half-built frame (lifted code, a fiber switch) can
+// read bad memory. A fault ends the walk with the frames found so far instead of the process.
+size_t capture_stack_guarded(const CONTEXT* ctx, uint64_t* frames, size_t max) {
+    size_t n = 0;
+    __try {
+        n = capture_stack(ctx, frames, max);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        n = 0;
+    }
+    return n;
+}
+
 }  // namespace nxrt::detail

@@ -18,6 +18,7 @@
 #include <intrin.h>
 #pragma comment(lib, "Synchronization.lib")   // WaitOnAddress / WakeByAddressSingle
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -111,12 +112,31 @@ void ph_set(uint32_t v) {   // 1 barrier, 2 nothing
 
 // Room for a packet of `payload` bytes; the returned pointer is the payload. commit() publishes it.
 uint64_t g_wr = 0;   // producer's write position (== g_head between packets)
+// [nvn] cmd_publish_batch (default 32; cpuperf_ab_what cmd_batch): commit() makes the queued packets visible to the recorder only every N
+// packets (or 4 KiB), and before every drain, a full ring and a placeholder. Every packet used to store the shared head word and read the
+// recorder's tail word: ~20k cache-line transfers per frame between the two threads (the render thread's atomic loads in reserve()).
+uint64_t g_tail_seen = 0;    // the recorder's tail as the producer last read it (only grows): the free space is at least this much
+uint64_t g_pub = 0;          // what g_head holds (producer side)
+uint32_t g_unpub = 0;        // packets since the last publish
+uint32_t g_pub_batch = 1;    // set from the config at install, 1 in cpuperf_ab off windows
+uint32_t g_pub_batch_cfg = 1;
+inline void publish() {
+    if (g_pub == g_wr) return;
+    g_pub = g_wr;
+    g_unpub = 0;
+    g_head.store(g_wr, std::memory_order_release);
+    if (g_sleeping.load(std::memory_order_seq_cst)) WakeByAddressSingle(&g_head);
+}
 uint8_t* reserve(ExecFn fn, size_t payload) {
     const size_t size = (sizeof(PacketHdr) + payload + 15) & ~size_t{15};
     for (;;) {
         size_t at = static_cast<size_t>(g_wr % kRingBytes);
         const size_t need = (at + size > kRingBytes) ? (kRingBytes - at) + size : size;
-        if (g_wr + need - g_tail.load(std::memory_order_acquire) <= kRingBytes) {
+        if (g_wr + need - g_tail_seen > kRingBytes) {
+            publish();   // the recorder must see everything before the producer waits for room
+            g_tail_seen = g_tail.load(std::memory_order_acquire);
+        }
+        if (g_wr + need - g_tail_seen <= kRingBytes) {
             if (at + size > kRingBytes) {   // wrap
                 reinterpret_cast<PacketHdr*>(g_ring + at)->fn = nullptr;
                 g_wr += kRingBytes - at;
@@ -133,12 +153,12 @@ uint8_t* reserve(ExecFn fn, size_t payload) {
     }
 }
 void commit() {
-    g_head.store(g_wr, std::memory_order_release);
     ++g_packets;
-    if (g_sleeping.load(std::memory_order_seq_cst)) WakeByAddressSingle(&g_head);
+    if (++g_unpub >= g_pub_batch || g_wr - g_pub >= 4096) publish();
 }
 
 void drain_now() {
+    publish();
     if (g_ph) { ++g_ph_forced; ph_set(1); }
     if (g_tail.load(std::memory_order_acquire) == g_wr) return;
     ++g_drains;
@@ -726,6 +746,8 @@ void begin_submission(bool on) {
         g_ring = static_cast<uint8_t*>(VirtualAlloc(nullptr, kRingBytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
         if (!g_ring) { NXLOG_W(kTag, "no memory for the command ring: cmd_thread stays off"); return; }
         install_all();
+        g_pub_batch_cfg = static_cast<uint32_t>(std::clamp<int64_t>(config_get_int("nvn", "cmd_publish_batch", 32), 1, 4096));
+        g_pub_batch = g_pub_batch_cfg;
         NXLOG_I(kTag, "cmd_thread: vkCmd* calls of the render thread are recorded by the nvn-recorder thread (16 MiB ring)");
     }
     if (!g_ring) return;
@@ -740,6 +762,17 @@ void begin_submission(bool on) {
 
 void set_copies(bool on) { g_copies_q.store(on, std::memory_order_relaxed); }
 void set_desc(bool on) { g_desc_q.store(on, std::memory_order_relaxed); }
+void apply_render_priority(bool on) {
+    static const std::string mode = config_get_str("nvn", "render_priority", "highest");
+    int p = THREAD_PRIORITY_NORMAL;
+    if (on) p = mode == "time_critical" ? THREAD_PRIORITY_TIME_CRITICAL : mode == "above_normal" ? THREAD_PRIORITY_ABOVE_NORMAL : mode == "normal" ? THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_HIGHEST;
+    static int last = -100;
+    if (p == last) return;
+    last = p;
+    SetThreadPriority(GetCurrentThread(), p);
+    if (g_thread.joinable()) SetThreadPriority(g_thread.native_handle(), p);
+}
+void set_publish_batch(bool on) { g_pub_batch = on ? g_pub_batch_cfg : 1; }
 void desc_stats(uint64_t* queued, uint64_t* direct) { *queued = g_uds_queued; *direct = g_uds_direct; }
 
 bool queuing() { return g_ring && queue_here(); }
@@ -753,6 +786,7 @@ bool ph_insert(VkCommandBuffer cb) {
     g_ph = &a->state;
     ++g_ph_n;
     commit();
+    publish();   // the recorder holds at the placeholder until it is decided
     return true;
 }
 void ph_resolve(bool barrier) { ph_set(barrier ? 1 : 2); }

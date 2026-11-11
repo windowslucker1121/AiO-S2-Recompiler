@@ -511,7 +511,7 @@ it back into +0x2c8 after every frame), so it advanced 1/60 s per presented fram
 (entry hook on the same function, before the calc) now writes scale = measured frame time * 60 and the nearest whole rate into +0x2c8
 (`timestep::Sites::apply_step`, the game side `oot_core.cpp`). Movies: the movie player shows one decoded picture per frame, so while the game
 reads nn::codec pictures the step stays 1/60 (`Sites::fixed_step_during_movies`: the event timeline that starts the voice lines stays with the
-pictures, A11), and `fps_limit = auto` follows the display rate for the game since 2026-11-09 (`Sites::cap_at_display_rate = true`; movies stay at 60 through the movie cap; uncapped measured at 1080: the house scene 64 fps, 1% low 48-53, first scene 50-62, village ~36). `oot` default `[time] min_rate = 10`: steps up
+pictures, A11), and `fps_limit = auto` caps at `[display] auto_fps` (100) since 2026-11-11 (display rate 2026-11-09 .. 11-10; `Sites::cap_at_display_rate = true`; movies stay at 60 through the movie cap; uncapped measured at 1080: the house scene 64 fps, 1% low 48-53, first scene 50-62, village ~36). `oot` default `[time] min_rate = 10`: steps up
 to 1/10 s, slower frames slow the game down; hitches over 100 ms are clamped (in a 40 s walk with pipeline builds game time was 84% of real
 time, in steady play 100%). `game_main` reads `[time]` again after the game's config defaults. `[time] mode = off` restores the retail step;
 `[time] csv = <file>` logs per frame host time, step, game time and movie pictures. **Measured (RTX 4080):** W held 2 s from
@@ -1315,6 +1315,24 @@ Pitfalls seen: the occlusion change cut 670 render passes per frame to 45 (each 
 similar per-op pass breaks first (`nvn.cnt.pass_breaks`, `gp:gap` counts). `gp:` timings with `prof.gpu_passes` drain the GPU at every
 stamp: compare runs with the same setting. The replay of a capture runs with `compute_out_lazy` off by default (pass
 `nvn.compute_out_lazy: 1` to test the game's path) and its CPU profile is not the game's.
+
+**Session 2026-11-11 (fps100: default cap 100, flush copies, render-thread caches).** Exe of `perf/fps100` (from f3eb44a + the
+neutral-names merge), village outside / first scene / house at 1920x1080 uncapped, alone, paired `cpuperf_ab = 300` windows. Disk state
+checked first: the lifted libraries were current (a re-lift rewrote 0 files), the shared shader cache current (no translator change since
+C1), only the main checkout's exe was old (17c15ea). Kept (all default on, CONFIG.md): `[display] auto_fps` (fps_limit = auto caps at 100
+for real-time-step games; movies stay at 60; log `frame cap: 100.00 fps`); `[nvn] flush_copy` (the ~300 CPU_CACHED MapPhysicalMemory
+pools outside the heap's primary view get device-local copies kept current by the game's flushes, vertex and index reads only: village
+GPU busy 18.8 -> 14.8 ms, +2.75 fps; first scene through the intro: 7,242 pages cleared by flushes, pictures normal; off in capture
+replays); `cmd_publish_batch` (replay -0.44 ms); `render_priority = highest` for the render and recorder threads (+0.4 fps); `servable_cache`
+(replay -0.84 ms; verify 0 differences in 29 M + 23 M hits, `mem::ww::owner_clears()` is new for it); `keep_memo` (+0.4 fps). All of them
+on vs off in one run: **village 51.7 -> 56.2 fps** (19/19, 1% low 31.3 -> 34.2), **first scene +5.9 fps** (27/27), **house 87.0 -> 93.0**
+(30/30; 96 fps with the default auto cap). Village capture replay: features on vs off pixel-identical. Dropped: `sig_tex` (kept sets keyed by
+image: replay +0.4 ms), `memo_nt`, a physical-address memo, `compute_out_lazy = 0` (GPU +6 ms), translator mesh direct outputs (GPU
+-0.14 ms). New measurement key `[nvn] exp_op_cost` (render-thread ms per command kind and per shader pair with phases). The village is
+render-thread bound (replay ~17.4 ms); the next design (not built) is in PERFORMANCE.md "What is open". Pitfalls: replays launched through
+`replay_capture` need the shader-cache environment (`NXRT_NVN_SHADER_*`), else draws are skipped and the picture misses its foliage; a
+sampler stack walk could crash the process (`capture_stack_guarded` now); PowerShell `Set-Content -Encoding utf8` writes a BOM (one commit
+message has it).
 
 **Lifted-code compilation (D1-L, 2026-11-08):** the lifted code is built with `/O2 -march=x86-64-v3` (`NX_LIFT_OPT`, `NX_ISA` in
 `recomp/cmake/NxRecomp.cmake`; it was `/O1` = -Os and baseline x86-64, where every FMADD was a CRT `fmaf` call). `-ffp-contract=off`

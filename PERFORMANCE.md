@@ -3,7 +3,7 @@
 Living document for the frame-rate work. Detailed per-session notes, with every key, measurement and pitfall, stay in
 `AGENTS.md` ("Performance work" and the "Session 2026-11-xx" paragraphs). Config keys are in `runtime/docs/CONFIG.md`.
 This file is the overview: where we are, how we measure, what paid, what did not, and what is next.
-Last update: 2026-11-10, branch `feat/perf-generic-runtime`.
+Last update: 2026-11-11, branch `perf/fps100`.
 
 ## Goal and constraints (from the user)
 
@@ -15,18 +15,22 @@ Last update: 2026-11-10, branch `feat/perf-generic-runtime`.
 - The full shader preparation (~3 h) runs only at the very end. So do the release build (`oot.exe`, `recomp_library.exe`) and the
   area-load frame work.
 
-## Where we are (2026-11-10, RTX 4080, Ryzen 7 5800X3D, 1920x1080, uncapped)
+## Where we are (2026-11-11, RTX 4080, Ryzen 7 5800X3D, 1920x1080, uncapped)
 
-| Scene | Start of plan D (854x480) | First 1080 runs (W7) | 2026-11-09 evening | Now |
-|---|---|---|---|---|
-| Village outside | 21-24 | ~16 | 36.6 | **~49.6** (G1 run; P5 merged after it, not yet measured together) |
-| First scene (intro village) | 34-39 | 25-43 | 50-62 | **~62-66** |
-| The house scene | 47-52 | 31-33 | 64 | **~79-83** |
+| Scene | Start of plan D (854x480) | First 1080 runs (W7) | 2026-11-09 evening | 2026-11-10 (G1) | Now (fps100) |
+|---|---|---|---|---|---|
+| Village outside | 21-24 | ~16 | 36.6 | ~49.6 | **56.2**, 1% low 34.2 (same run, fps100 features off: 51.7 / 31.3; 19/19 pairs) |
+| First scene (intro village) | 34-39 | 25-43 | 50-62 | ~62-66 | **+5.9 fps** over the whole intro (27/27 pairs; 59.3 -> 62.7 in its late part) |
+| The house scene | 47-52 | 31-33 | 64 | ~79-83 | **93.0** (off: 87.0; 30/30); 96 fps with the default `auto` cap of 100 |
 
-- Village frame: ~20 ms. The **render thread replay is ~18.5 ms per frame** and the **GPU is busy ~19.7 ms per frame**. Both have to
-  drop under ~15 ms for a steady 60.
-- The game's main thread (G) is ~10 ms busy per frame. It caps near ~95 fps and is not the limit.
-- Frame cap: `fps_limit = auto` follows the display's refresh rate for the game. Movies are always held at 60 (`movie_cap`).
+- Village frame: ~17.5 ms. The **render thread replay is ~17.4 ms per frame** (the limit) and the **GPU is busy ~14.8 ms per frame**
+  (was ~18.8 before flush_copy). For 100 fps both must reach ~9-10 ms; the house scene is there (replay 9.3, GPU 9.8).
+- The game's main thread (G) is ~10 ms busy per frame. It caps near ~95 fps.
+- Render thread in the village (exp_op_cost, per frame): DrawElements 10.0 ms for ~2,100 draws (bind_sets 4.2, out_before_op 1.0,
+  prepare_textures 1.2, the rest decode / pipeline and layout lookups / dynamic state / texture resolve), command-list overhead ~2.5,
+  dispatches 0.9, mesh draws 0.9, occlusion reports 1.1. Most draws change the program, so set-level memos help little.
+- Frame cap: `fps_limit = auto` caps at `[display] auto_fps` (default **100**, 0 = the display's refresh rate) for the game since
+  2026-11-11 (fps100). Movies are always held at 60 (`movie_cap`); with `vsync = 1` the display still bounds it.
 
 ## How to measure
 
@@ -115,6 +119,9 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | R7 | `memo_storage_check` | correctness for the newly reusable storage sets |
 | P5 | `fill_ahead` (copy-ins of a run of dispatches under one barrier pair); `mesh_copy_ahead` (mesh-indirect record copies before the pass) | +0.75 fps (30/30), GPU −0.34 ms |
 | G1 | `occ_batch`: ~1,450 occlusion reports per frame written with a few multi-region copies instead of ~2,900 tiny transfer commands | **Village 43.3 → 49.6 fps**, GPU −3.1 ms; first scene 62 → 65.8; house 78.4 → 82.8 |
+| fps100 | `flush_copy`: device-local copies of the ~300 CPU_CACHED pools outside the heap's primary view (vertex/index data), kept current by the game's flushes | village GPU busy 18.8 → 14.8 ms, +2.75 fps (16/17), 1% low +2.9 |
+| fps100 | `cmd_publish_batch` (recorder ring published every 32 packets); `render_priority = highest` for the render and recorder threads | replay −0.44 ms; +0.4 fps (13/17) |
+| fps100 | `servable_cache` (out_servable answers keyed by change counters, verify clean); `keep_memo` (kept sets enter the epoch memo) | replay −0.84 ms (16/16), +2 fps; replay −0.11 ms, +0.4 fps |
 
 Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
 - F1's set: 3,419 gpt corpus blocks plus 12 runtime blocks; backup `gpt_backup_v9`.
@@ -168,8 +175,24 @@ Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
   - robustness (already off);
   - FP16 (no gain on Ada).
 - **Kernel / game side:** WaitOnAddress instead of SRW condition variables (worse), wake spin (no fps).
+- **fps100 (2026-11-11), village outside paired windows:** `sig_tex` (kept sets keyed by image instead of handle: replay +0.4 ms, off);
+  a separate memo for texture-free sets (`memo_nt`: replay +0.13 ms, removed); a per-slot memo of `physical_buffer_address` (noise,
+  removed); `compute_out_lazy = 0` with the GPU headroom flush_copy gave (GPU +6 ms, 47 fps); mesh shaders with direct outputs and the
+  early primitive count (`NXRT_HARNESS_MESH_DIRECT` + `MESH_EARLY_COUNT`, private cache): GPU busy −0.14 ms only.
 
 ## What is open, by expected gain
+
+**fps100's design for the next step (render thread 17.4 -> ~9 ms; not built):**
+1. Draw-level translation cache keyed by program + raw bindings + targets, valid while one coherence epoch holds: skips bind_sets,
+   prepare_textures and out_before_op (~6.4 ms per frame if everything hits).
+2. That needs scoped invalidation first: the set-memo epoch moves ~29 times per frame today (resolve epoch ~9, texture image events
+   ~17, results sent back ~3); per-resource versions (held-result ranges, TexGpu images, pool page runs) instead of one global epoch.
+   A first step (`memo_nt`, a texture-free memo) did not pay: the uniform and storage sets are kept sets, not memo misses.
+3. Resolve-ahead thread (like tex_lookahead): decode, handle lookups, pipeline keys and set signatures one submission ahead (~3.5 ms).
+4. Parallel recording of passes into secondary command buffers: the only route that halves the replay, but texture layouts and the
+   held-result state are sequential per draw; a pre-pass would have to plan layouts.
+GPU side after that (village busy 14.8 ms): the three gpt foliage mesh draws ~3.3 ms, barriers ~2.9 ms (B1's tracker gave -0.8 ms
+of it but cost the render thread +3.2 ms: running it on the recorder thread would keep the GPU gain), culling submission #3 ~4.2 ms.
 
 1. **gpt pointer pre-raster stages** (~6.9 ms before F1, now less).
    - The draws' own work is ~9 ms per frame in total.

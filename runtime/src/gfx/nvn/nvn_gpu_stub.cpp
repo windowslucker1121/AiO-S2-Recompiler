@@ -37,6 +37,8 @@ void texture_bound(Texture*) {}
 void texture_registered(Texture*) {}
 bool download_texture(Texture*) { return false; }
 void cpu_will_read(uint64_t, uint64_t) {}
+void flush_copy_cpu_wrote(uint64_t, uint64_t) {}
+void flush_copy_enable(bool) {}
 void set_window_modes(int, int) {}
 uint64_t timestamp_ns() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
