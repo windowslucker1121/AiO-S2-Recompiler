@@ -199,6 +199,16 @@ took 25 min for 117,981 parts (both raster sets); a forced second one loads the 
   `setup_keynames.inc`), Audio; edits the game folder's `controls.ini` in place (only changed keys). User preference: minimal text.
   Test route: `recomp\scripts\nx_env.cmd work\build\library\build.cmd` (standalone build, needs game-build's fetched Vulkan and SDL
   headers), `recomp_library.exe --add <dump>`, `runtime\apps\setup\tests\winshot.py` (shot, cmd ids of the `Id` enum, close).
+  **Setup steps run by dependency (2026-11-11, user):** `kStepDeps` + `App::schedule`: after Extract, Build / Find shaders / List programs
+  run at once; Translate after Find + Build; Compile after Translate + List + Build. Per-step state in `GameItem::run[]` (`StepRun`), a
+  progress bar per running step in the steps list (NM_CUSTOMDRAW), overall = mean of the step fractions. Close/Cancel never block the UI
+  thread; children still running 20 s after a stop are killed (`Child::kill`). **Cancel of `--prepare-shaders` was minutes** (user had to
+  kill it): workers sit 13-70 s per gmem pipeline part in the driver and cancel was only read after a program finished. Now
+  `gpl_prepare` polls progress every 100 ms; after a cancel and 2 s grace it saves the pipeline cache + state and calls
+  `ShaderPrepareOptions::abandon` (game_main: print the result line, `TerminateProcess`, no back end teardown, which costs 10+ s).
+  Cancel during the ~12 s device start is only seen after it. Test caution: a state file whose `translated_with` differs from the
+  library's translator makes Translate move `shader_cache\spirv` aside and delete it (`retranslate_all`): never point a test data
+  folder's `spirv` at a cache you need (a junction survived: `remove_all` takes the junction only).
   Not checked yet: Play running the setup and then the game; two games queued. Next: build a game from the library (lift + compile as a
   queue step), release layout `games\<id>\game.toml` next to the exe.
   **Release package / CI (2026-11-08):** `.github/workflows/release.yml` builds `tools/release/package.ps1` on `windows-latest` (tag

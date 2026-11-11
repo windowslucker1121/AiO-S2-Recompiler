@@ -1299,7 +1299,7 @@ bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
     std::atomic<uint64_t> done{0}, prepared{0}, missing{0}, failed{0}, parts{0}, released{0};
     std::atomic<bool> cancel{false};
     std::atomic<size_t> next{0};
-    std::atomic<int> busy_max{0}, busy_now{0};
+    std::atomic<int> busy_max{0}, busy_now{0}, alive{0};
     std::mutex progress_mu;
     auto report = [&] {
         if (!o.progress) return;
@@ -1372,26 +1372,43 @@ bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
             done.fetch_add(1);
             report();
         }
+        alive.fetch_sub(1);
     };
+    // The calling thread only watches: it reports progress and notices a cancel while every worker may sit inside the driver.
+    bool abandon_now = false;
     {
         std::vector<std::thread> pool;
-        for (int t = 1; t < threads; ++t) pool.emplace_back(work);
-        work();
-        for (auto& t : pool) t.join();
+        alive.store(threads);
+        for (int t = 0; t < threads; ++t) pool.emplace_back(work);
+        while (alive.load() > 0 && !cancel.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::lock_guard<std::mutex> lk(progress_mu);
+            if (o.progress && !o.progress(done.load(), r.programs)) cancel.store(true);
+        }
+        if (cancel.load()) {
+            for (int i = 0; i < 20 && alive.load() > 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            abandon_now = alive.load() > 0 && o.abandon;
+        }
+        if (abandon_now) for (auto& t : pool) t.detach();   // they reference this frame's locals: the hook below ends the process
+        else for (auto& t : pool) t.join();
     }
-    // Nothing is creating pipelines now: drop what is left (a stopped run's shaders, parts of programs whose modules failed).
-    module_cache_clear();
-    {
-        std::lock_guard<std::mutex> lk(g_mu);
-        g_libs.clear();
+    if (!abandon_now) {
+        // Nothing is creating pipelines now: drop what is left (a stopped run's shaders, parts of programs whose modules failed).
+        module_cache_clear();
+        {
+            std::lock_guard<std::mutex> lk(g_mu);
+            g_libs.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lk(uses_mu);
+            for (auto& [h, u] : uses)
+                if (u.si) shader_cache().release_stub_spirv(u.si);
+        }
+        NXLOG_I(kTag, "shader preparation: %llu shaders released as their last program finished, %d threads busy at most",
+                static_cast<unsigned long long>(released.load()), busy_max.load());
+    } else {
+        NXLOG_I(kTag, "shader preparation stopped: %d workers still in the driver, the process ends without waiting", alive.load());
     }
-    {
-        std::lock_guard<std::mutex> lk(uses_mu);
-        for (auto& [h, u] : uses)
-            if (u.si) shader_cache().release_stub_spirv(u.si);
-    }
-    NXLOG_I(kTag, "shader preparation: %llu shaders released as their last program finished, %d threads busy at most",
-            static_cast<unsigned long long>(released.load()), busy_max.load());
     g_discard.store(false);
     // Kept also when stopped: a resumed preparation then finds what this one compiled in the cache.
     uint64_t cache_bytes = 0;
@@ -1412,6 +1429,7 @@ bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
     NXLOG_I(kTag, "shader preparation: %llu programs, %llu parts (%llu under 2 ms), raster flags %s, %.1f s; pipeline cache %llu bytes%s",
             static_cast<unsigned long long>(r.programs), static_cast<unsigned long long>(r.parts), static_cast<unsigned long long>(r.fast_parts),
             prepare_rasters_setting().c_str(), r.seconds, static_cast<unsigned long long>(cache_bytes), complete ? "" : "; not complete");
+    if (abandon_now) o.abandon(r);      // ends the process; the stuck workers still use this frame's locals
     return true;
 }
 

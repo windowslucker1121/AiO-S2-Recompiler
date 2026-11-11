@@ -476,6 +476,8 @@ bool run_shader_prepare(const nxrt::nvn::ShaderPrepareOptions& po, nxrt::nvn::Sh
     bd.register_entry_points = false;
     if (!nxrt::nvn::install_backend(bd)) { *err = "the graphics back end did not start"; return false; }
     const bool ok = nxrt::nvn::prepare_shaders(po, pr);
+    // stopped: the cache and state are written; tearing the back end down takes 10+ s the player would wait through
+    if (ok && pr->cancelled && po.abandon) po.abandon(*pr);
     if (!ok) *err = pr->error;
     nxrt::nvn::shutdown_backend();
     dev.reset();
@@ -488,6 +490,21 @@ bool run_shader_prepare(const nxrt::nvn::ShaderPrepareOptions& po, nxrt::nvn::Sh
 HANDLE g_cancel_event = nullptr;
 bool cancel_requested() { return g_cancel_event && WaitForSingleObject(g_cancel_event, 0) == WAIT_OBJECT_0; }
 
+void print_prepare_done(const nxrt::nvn::ShaderPrepareResult& pr) {
+    std::printf("prepare: done programs=%llu prepared=%llu missing=%llu failed=%llu parts=%llu fast=%llu seconds=%.1f%s\n", static_cast<unsigned long long>(pr.programs),
+                static_cast<unsigned long long>(pr.prepared), static_cast<unsigned long long>(pr.missing_shaders), static_cast<unsigned long long>(pr.failed),
+                static_cast<unsigned long long>(pr.parts), static_cast<unsigned long long>(pr.fast_parts), pr.seconds, pr.cancelled ? " cancelled" : "");
+}
+
+// After a cancel with compile threads stuck in the GPU driver: flush and end the process at once, exit code 3 (cancelled). TerminateProcess,
+// not exit: the driver's DLL detach could wait for locks those threads hold.
+[[noreturn]] void end_process_now() {
+    std::fflush(stdout);
+    nxrt::log_flush();
+    TerminateProcess(GetCurrentProcess(), 3);
+    for (;;) Sleep(1000);
+}
+
 int prepare_shaders_main(bool if_needed, bool check_only, bool force, int threads, const std::string& programs) {
     nxrt::nvn::ShaderPrepareOptions po;
     po.only_if_needed = if_needed;
@@ -495,6 +512,7 @@ int prepare_shaders_main(bool if_needed, bool check_only, bool force, int thread
     po.force = force;
     po.programs_file = programs;
     po.threads = threads;
+    po.abandon = [](const nxrt::nvn::ShaderPrepareResult& r) { print_prepare_done(r); end_process_now(); };
     auto last = std::chrono::steady_clock::now();
     po.progress = [&](uint64_t done, uint64_t total) {
         if (cancel_requested()) return false;
@@ -512,9 +530,7 @@ int prepare_shaders_main(bool if_needed, bool check_only, bool force, int thread
     if (!ok) { std::printf("prepare: error %s\n", err.c_str()); rc = 1; }
     else if (pr.already_ready) std::printf("prepare: ready\n");
     else if (check_only) std::printf("prepare: needed %s\n", pr.needed_why.empty() ? "not prepared yet" : pr.needed_why.c_str());
-    else std::printf("prepare: done programs=%llu prepared=%llu missing=%llu failed=%llu parts=%llu fast=%llu seconds=%.1f%s\n", static_cast<unsigned long long>(pr.programs),
-                     static_cast<unsigned long long>(pr.prepared), static_cast<unsigned long long>(pr.missing_shaders), static_cast<unsigned long long>(pr.failed),
-                     static_cast<unsigned long long>(pr.parts), static_cast<unsigned long long>(pr.fast_parts), pr.seconds, pr.cancelled ? " cancelled" : "");
+    else print_prepare_done(pr);
     std::fflush(stdout);
     if (ok && pr.cancelled) rc = 3;
     nxrt::shutdown();
@@ -743,6 +759,7 @@ int main(int argc, char** argv) {
                     nxrt::nvn::ShaderPrepareOptions po;
                     po.only_if_needed = true;
                     po.progress = progress;
+                    po.abandon = [](const nxrt::nvn::ShaderPrepareResult&) { end_process_now(); };
                     nxrt::nvn::ShaderPrepareResult pr;
                     std::string err;
                     const bool ok = run_shader_prepare(po, &pr, &err);

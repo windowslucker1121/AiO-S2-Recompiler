@@ -62,8 +62,8 @@ constexpr wchar_t kAppName[] = L"Recomp Library";
 #ifndef RECOMP_LIBRARY_REPO
 #define RECOMP_LIBRARY_REPO "https://github.com/windowslucker1121/AiO-S2-Recompiler"
 #endif
-constexpr UINT kMsgLine = WM_APP + 1;     // wParam: GameItem*, lParam: std::string* (one output line of its running step)
-constexpr UINT kMsgExit = WM_APP + 2;     // wParam: GameItem*, lParam: exit code
+constexpr UINT kMsgLine = WM_APP + 1;     // wParam: StepRun*, lParam: std::string* (one output line of that step)
+constexpr UINT kMsgExit = WM_APP + 2;     // wParam: StepRun*, lParam: exit code
 constexpr UINT kMsgCheck = WM_APP + 3;    // wParam: GameItem*, lParam: std::string* (the prepare check's answer)
 constexpr UINT kMsgDlss = WM_APP + 5;     // lParam: std::wstring* (empty: DLSS downloaded, else the error)
 constexpr UINT kMsgReqs = WM_APP + 4;     // lParam: std::vector<Check>* (the PC's checks, made on a thread)
@@ -91,6 +91,75 @@ enum Page { P_LIB, P_GAME, P_SET, P_PC, P_COUNT };
 enum StepId { S_EXTRACT, S_BUILD, S_CORPUS, S_TRANSLATE, S_PROGRAMS, S_PREPARE, S_COUNT };
 const wchar_t* kStepName[S_COUNT] = {L"Extract the game files", L"Build the game program", L"Find the game's shaders", L"Translate the shaders",
                                      L"List the shader programs", L"Compile the shaders for your graphics card"};
+const wchar_t* kStepShort[S_COUNT] = {L"extract", L"build", L"corpus", L"translate", L"programs", L"prepare"};
+// What a step needs finished first (a dependency that is not part of the job counts as finished): everything needs the extracted dump,
+// TRANSLATE the shader corpus and the built exe, PREPARE the translations, the program list and the exe.
+const std::vector<int> kStepDeps[S_COUNT] = {{}, {S_EXTRACT}, {S_EXTRACT}, {S_CORPUS, S_BUILD}, {S_EXTRACT}, {S_TRANSLATE, S_PROGRAMS, S_BUILD}};
+
+struct GameItem;
+// One step of a game's job: its child process and progress. Steps run in parallel when their dependencies are done.
+struct StepRun {
+    GameItem* g = nullptr;
+    int id = 0;
+    Child child;
+    bool planned = false, started = false, finished = false, ok = false, result_ok = false;
+    uint64_t done = 0, total = 0;
+    std::string phase;                   // the @progress label (game_build.py: verify, lift, compile, link, finish)
+    std::string error;
+    std::chrono::steady_clock::time_point t0;
+    // first progress report of the step: the rate counts from here, so a resumed step (done > 0 at once) is not taken as fast
+    bool seen = false;
+    uint64_t done0 = 0;
+    std::chrono::steady_clock::time_point t1;
+    bool running() const { return started && !finished; }
+    void reset() { started = finished = ok = result_ok = seen = false; done = total = done0 = 0; phase.clear(); error.clear(); }
+    // Seconds left, -1 while there is no fair guess yet (under 20 s or under 2% of the work measured).
+    int secs_left() const {
+        const auto now = std::chrono::steady_clock::now();
+        if (id == S_BUILD) {   // phases with their own counts: the weighted fraction over the whole step
+            const double f = fraction(), secs = std::chrono::duration<double>(now - t0).count();
+            return f >= 0.05 && f < 1 && secs > 20 ? static_cast<int>(secs / f * (1 - f)) : -1;
+        }
+        const double secs = std::chrono::duration<double>(now - t1).count();
+        if (!seen || !total || done <= done0 || done >= total || secs < 20 || (done - done0) * 50 < total) return -1;
+        // ponytail: linear rate; the preparation does the expensive programs first, so early guesses run long
+        return static_cast<int>(secs / static_cast<double>(done - done0) * static_cast<double>(total - done));
+    }
+    // How far the step is, 0..1. The game build reports its phases one after another, each 0..total of its own:
+    // weighted into one range so the bar never jumps back and the time estimate looks at the whole step.
+    double fraction() const {
+        if (!total) return 0;
+        const double part = static_cast<double>(std::min(done, total)) / static_cast<double>(total);
+        // ponytail: fixed weights (compile dominates, lift ~1/5 on 16 cores); measure the phases' times if the estimate drifts
+        static const struct { const char* name; double from, w; } kBuild[] = {
+            {"verify", 0.00, 0.02}, {"lift", 0.02, 0.20}, {"compile", 0.22, 0.73}, {"link", 0.95, 0.04}, {"finish", 0.99, 0.01}};
+        if (id == S_BUILD)
+            for (const auto& p : kBuild)
+                if (phase == p.name) return p.from + p.w * part;
+        return part;
+    }
+};
+
+std::wstring thousands(uint64_t v) {
+    std::wstring d = std::to_wstring(v);
+    for (int i = static_cast<int>(d.size()) - 3; i > 0; i -= 3) d.insert(static_cast<size_t>(i), L",");
+    return d;
+}
+std::wstring left_text(int left) {
+    if (left < 0) return L"";
+    if (left < 60) return L"under a minute left";
+    if (left < 5400) return L"about " + std::to_wstring((left + 59) / 60) + L" min left";
+    return L"about " + std::to_wstring(left / 3600) + L" h " + std::to_wstring(left / 60 % 60) + L" min left";
+}
+// "42% · 1,234 of 39,363 · about 5 min left" (the counts only for the shader steps, which count blocks / programs)
+std::wstring step_detail(const StepRun& r) {
+    if (!r.total) return L"Running...";
+    std::wstring t = std::to_wstring(static_cast<int>(r.fraction() * 100)) + L"%";
+    if (r.id == S_CORPUS || r.id == S_TRANSLATE || r.id == S_PREPARE) t += L" · " + thousands(std::min(r.done, r.total)) + L" of " + thousands(r.total);
+    const std::wstring l = left_text(r.secs_left());
+    if (!l.empty()) t += L" · " + l;
+    return t;
+}
 
 struct GameItem {
     std::string id;
@@ -110,43 +179,20 @@ struct GameItem {
     bool checking_prep = false;
     Child check_child;
     // its job
-    bool queued = false, running = false, cancel_requested = false, force_prepare = false, result_ok = false;
+    bool queued = false, running = false, cancel_requested = false, force_prepare = false;
+    bool stopping = false;               // no new steps start; the running ones were asked to stop (a step failed, or Cancel)
+    bool killed = false;
+    std::chrono::steady_clock::time_point stop_at;
     bool play_after = false;             // Play pressed before the setup was done: start the game when it is
-    int cur = -1;
-    uint64_t done = 0, total = 0;
-    std::string phase;                   // the @progress label (game_build.py: verify, lift, compile, link, finish)
-    std::chrono::steady_clock::time_point t0;
-    // first progress report of the step: the rate counts from here, so a resumed step (done > 0 at once) is not taken as fast
-    bool seen = false;
-    uint64_t done0 = 0;
-    std::chrono::steady_clock::time_point t1;
-    // Seconds left in the running step, -1 while there is no fair guess yet (under 20 s or under 2% of the work measured).
-    int secs_left() const {
-        const auto now = std::chrono::steady_clock::now();
-        if (cur == S_BUILD) {   // phases with their own counts: the weighted fraction over the whole step
-            const double f = step_fraction(), secs = std::chrono::duration<double>(now - t0).count();
-            return f >= 0.05 && f < 1 && secs > 20 ? static_cast<int>(secs / f * (1 - f)) : -1;
-        }
-        const double secs = std::chrono::duration<double>(now - t1).count();
-        if (!seen || !total || done <= done0 || done >= total || secs < 20 || (done - done0) * 50 < total) return -1;
-        // ponytail: linear rate; the preparation does the expensive programs first, so early guesses run long
-        return static_cast<int>(secs / static_cast<double>(done - done0) * static_cast<double>(total - done));
+    StepRun run[S_COUNT];
+    // How far the whole job is, 0..1: finished and not needed steps count as done.
+    double overall() const {
+        double sum = 0;
+        for (const StepRun& r : run) sum += (!r.planned || r.finished) ? 1 : r.started ? std::min(r.fraction(), 0.999) : 0;
+        return sum / static_cast<double>(S_COUNT);
     }
-    // How far the running step is, 0..1. The game build reports its phases one after another, each 0..total of its own:
-    // weighted into one range so the bar never jumps back and the time estimate looks at the whole step.
-    double step_fraction() const {
-        if (!total) return 0;
-        const double part = static_cast<double>(std::min(done, total)) / static_cast<double>(total);
-        // ponytail: fixed weights (compile dominates, lift ~1/5 on 16 cores); measure the phases' times if the estimate drifts
-        static const struct { const char* name; double from, w; } kBuild[] = {
-            {"verify", 0.00, 0.02}, {"lift", 0.02, 0.20}, {"compile", 0.22, 0.73}, {"link", 0.95, 0.04}, {"finish", 0.99, 0.01}};
-        if (cur == S_BUILD)
-            for (const auto& p : kBuild)
-                if (phase == p.name) return p.from + p.w * part;
-        return part;
-    }
+    int nrunning() const { int n = 0; for (const StepRun& r : run) n += r.running(); return n; }
     std::string error;
-    Child child;
     std::deque<std::wstring> log;
     std::vector<Check> checks;           // its own checks (disk, program, dump)
     bool in_library() const { return !cfg.source.empty(); }
@@ -221,9 +267,13 @@ private:
     void start_prepare_check(GameItem& g);
     void enqueue(GameItem& g, bool force_prepare);
     void run_queue();
-    void next_step(GameItem& g);
-    void step_line(GameItem& g, const std::string& l);
-    void step_exit(GameItem& g, DWORD code);
+    void schedule(GameItem& g);
+    void start_step(GameItem& g, int s);
+    void fail_job(GameItem& g, const std::string& error);
+    void request_stop(GameItem& g);
+    void finish_job(GameItem& g);
+    void step_line(StepRun& r, const std::string& l);
+    void step_exit(StepRun& r, DWORD code);
     void cancel(GameItem& g);
     void log(GameItem& g, const std::wstring& s);
     bool write_game_ini(GameItem& g);
@@ -274,6 +324,7 @@ private:
     std::vector<std::unique_ptr<GameItem>> games_;
     std::deque<GameItem*> queue_;
     GameItem* active_ = nullptr;
+    bool closing_ = false;                // the window closes when the running job has stopped
     std::vector<Check> sys_checks_;
     bool checks_running_ = false;
     std::wstring game_args_;
@@ -479,9 +530,9 @@ Status App::status_of(const GameItem& g) const {
         s.color = kAccentHi;
         s.text = g.cancel_requested ? L"Stopping" : L"Setting up";
         s.progress = 0;
-        if (g.total) {
-            // the steps as one bar: each step a fifth
-            s.progress = (static_cast<double>(std::max(g.cur, 0)) + g.step_fraction()) / static_cast<double>(S_COUNT);
+        // the steps as one bar: each step an equal share
+        s.progress = g.overall();
+        if (s.progress > 0) {
             wchar_t b[32];
             std::swprintf(b, 32, L" \u00B7 %d%%", static_cast<int>(s.progress * 100));
             s.text += b;
@@ -887,49 +938,88 @@ void App::run_queue() {
     queue_.pop_front();
     g.queued = false;
     g.running = true;
-    g.cur = -1;
+    g.stopping = g.killed = false;
     active_ = &g;
-    next_step(g);
+    evaluate(g);   // the plan of this job: the steps to run; it is not recomputed while they run (each step looks again just before it starts)
+    for (int i = 0; i < S_COUNT; ++i) {
+        g.run[i].reset();
+        g.run[i].g = &g;
+        g.run[i].id = i;
+        g.run[i].planned = g.need[i] || (i == S_PREPARE && g.force_prepare);
+    }
+    schedule(g);
 }
 
-void App::next_step(GameItem& g) {
-    evaluate(g);
-    int s = -1;
-    for (int i = g.cur + 1; i < S_COUNT; ++i)
-        if (g.need[i] || (i == S_PREPARE && g.force_prepare)) { s = i; break; }
-    auto finish = [&](const std::string& error) {
-        g.running = false;
-        g.cur = -1;
-        g.error = error;
-        if (active_ == &g) active_ = nullptr;
-        evaluate(g);
-        if (error.empty()) { g.prep_check.clear(); start_prepare_check(g); }
-        if (g.play_after) {
-            g.play_after = false;
-            if (error.empty() && g.ready()) play(g);
+// Starts every planned step whose dependencies are finished; ends the job when nothing runs and nothing can start.
+void App::schedule(GameItem& g) {
+    if (!g.running) return;
+    for (bool started = true; started && !g.stopping;) {
+        started = false;
+        for (int i = 0; i < S_COUNT && !g.stopping; ++i) {
+            StepRun& r = g.run[i];
+            if (!r.planned || r.started) continue;
+            bool ready = true;
+            for (int d : kStepDeps[i]) ready &= !g.run[d].planned || g.run[d].finished;
+            if (!ready) continue;
+            start_step(g, i);
+            started = true;
         }
-        refresh();
-        InvalidateRect(wnd_, nullptr, FALSE);
-        InvalidateRect(cards_, nullptr, FALSE);
-        run_queue();
-    };
-    if (s < 0) { log(g, L"--- finished ---"); finish({}); return; }
+    }
+    int pending = 0;
+    for (const StepRun& r : g.run) pending += r.planned && !r.started;
+    if (g.nrunning()) return;
+    if (pending && !g.stopping) fail_job(g, "internal error: a step waits for one that is not coming");
+    if (!pending && !g.stopping) log(g, L"--- finished ---");
+    finish_job(g);
+}
+
+void App::request_stop(GameItem& g) {
+    if (!g.stopping) { g.stopping = true; g.stop_at = std::chrono::steady_clock::now(); }
+    for (StepRun& r : g.run) if (r.running()) r.child.cancel();
+}
+
+void App::fail_job(GameItem& g, const std::string& error) {
+    if (g.error.empty()) g.error = error;
+    g.play_after = false;
+    request_stop(g);   // the others stop too: what they did is kept, Prepare continues later
+}
+
+void App::finish_job(GameItem& g) {
+    g.running = false;
+    g.stopping = g.killed = false;
+    if (g.cancel_requested) g.error.clear();
+    if (active_ == &g) active_ = nullptr;
+    evaluate(g);
+    if (g.error.empty() && !g.cancel_requested) { g.prep_check.clear(); start_prepare_check(g); }
+    if (g.play_after) {
+        g.play_after = false;
+        if (g.error.empty() && g.ready()) play(g);
+    }
+    refresh();
+    InvalidateRect(wnd_, nullptr, FALSE);
+    InvalidateRect(cards_, nullptr, FALSE);
+    run_queue();
+    if (closing_ && !active_) DestroyWindow(wnd_);
+}
+
+void App::start_step(GameItem& g, int s) {
+    StepRun& r = g.run[s];
+    r.started = true;
+    // another look at the state: an earlier step may have made this one unnecessary (an extraction that kept the built program, ...)
+    evaluate(g);
+    if (!g.need[s] && !(s == S_PREPARE && g.force_prepare)) { r.finished = r.ok = true; return; }
+    auto fail = [&](const std::string& e) { r.finished = true; fail_job(g, e); };
     if ((s != S_EXTRACT && !g.gid.ok) || (s == S_EXTRACT && source_kind(g.cfg.source) != SourceKind::nup)) {
-        finish(s == S_EXTRACT ? "the dump folder is not a game folder" : "the game files are not there");
+        fail(s == S_EXTRACT ? "the dump folder is not a game folder" : "the game files are not there");
         return;
     }
-    if (s == S_BUILD && (!g.build.ok || tools_.python.empty())) { finish("this package cannot build the game program"); return; }
+    if (s == S_BUILD && (!g.build.ok || tools_.python.empty())) { fail("this package cannot build the game program"); return; }
     if ((s == S_TRANSLATE || s == S_PREPARE) && !g.exe_ok()) {
         log(g, L"--- the game program is not built: " + g.exe + L" ---");
-        finish("the game program is not built yet");
+        fail("the game program is not built yet");
         return;
     }
-    g.cur = s;
-    g.done = g.total = 0;
-    g.phase.clear();
-    g.t0 = std::chrono::steady_clock::now();
-    g.seen = false;
-    g.result_ok = false;
+    r.t0 = std::chrono::steady_clock::now();
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     const std::wstring jobs = std::to_wstring(hw > 3 ? hw - 2 : 1);
     std::wstring exe, args;
@@ -974,23 +1064,24 @@ void App::next_step(GameItem& g) {
         args = game_cmd(g, g.force_prepare ? L"--prepare-shaders --force" : L"--prepare-shaders --if-needed");
         event = true;
     }
-    if (exe.empty()) { finish("Python is missing (This PC page)"); return; }
+    if (exe.empty()) { fail("Python is missing (This PC page)"); return; }
     log(g, L"> " + std::wstring(kStepName[s]));
     fs::create_directories(g.lay.data, ec);
     HWND w = wnd_;
-    GameItem* gp_ = &g;
+    StepRun* rp = &r;
     std::wstring err;
-    if (!g.child.start(exe, args, g.lay.data, event,
-                       [w, gp_](const std::string& l) { PostMessageW(w, kMsgLine, reinterpret_cast<WPARAM>(gp_), reinterpret_cast<LPARAM>(new std::string(l))); },
-                       [w, gp_](DWORD c) { PostMessageW(w, kMsgExit, reinterpret_cast<WPARAM>(gp_), static_cast<LPARAM>(c)); }, &err)) {
+    if (!r.child.start(exe, args, g.lay.data, event,
+                       [w, rp](const std::string& l) { PostMessageW(w, kMsgLine, reinterpret_cast<WPARAM>(rp), reinterpret_cast<LPARAM>(new std::string(l))); },
+                       [w, rp](DWORD c) { PostMessageW(w, kMsgExit, reinterpret_cast<WPARAM>(rp), static_cast<LPARAM>(c)); }, &err)) {
         log(g, L"  " + err);
-        finish(narrow(err));
+        fail(narrow(err));
         return;
     }
     refresh();
 }
 
-void App::step_line(GameItem& g, const std::string& l) {
+void App::step_line(StepRun& r, const std::string& l) {
+    GameItem& g = *r.g;
     unsigned long long a = 0, b = 0;
     char label[64] = {};
     bool progress = false;
@@ -1000,23 +1091,25 @@ void App::step_line(GameItem& g, const std::string& l) {
     else if (std::sscanf(l.c_str(), "prepare: %llu %llu", &a, &b) == 2) progress = true;
     if (progress) {
         // a new tree of the extraction starts its own count; the build's phases share one step-wide fraction and clock
-        if (label[0] && b != g.total && g.cur != S_BUILD) { g.t0 = std::chrono::steady_clock::now(); g.seen = false; }
-        if (!g.seen) { g.seen = true; g.done0 = a; g.t1 = std::chrono::steady_clock::now(); }
-        g.phase = label;
-        g.done = a;
-        g.total = b;
+        if (label[0] && b != r.total && r.id != S_BUILD) { r.t0 = std::chrono::steady_clock::now(); r.seen = false; }
+        if (!r.seen) { r.seen = true; r.done0 = a; r.t1 = std::chrono::steady_clock::now(); }
+        r.phase = label;
+        r.done = a;
+        r.total = b;
         return;
     }
-    if (l.rfind("@error ", 0) == 0 || l.rfind("translate: error ", 0) == 0 || l.rfind("prepare: error ", 0) == 0) g.error = l.substr(l.find(' ') + 1);
+    if (l.rfind("@error ", 0) == 0 || l.rfind("translate: error ", 0) == 0 || l.rfind("prepare: error ", 0) == 0) r.error = l.substr(l.find(' ') + 1);
     if (l.rfind("@result", 0) == 0 || l.rfind("translate: done", 0) == 0 || l.rfind("prepare: done", 0) == 0 || l == "prepare: ready")
-        g.result_ok = l.find("cancelled") == std::string::npos;
-    log(g, widen(l));
+        r.result_ok = l.find("cancelled") == std::string::npos;
+    log(g, (g.nrunning() > 1 ? L"[" + std::wstring(kStepShort[r.id]) + L"] " : L"") + widen(l));
 }
 
-void App::step_exit(GameItem& g, DWORD code) {
-    g.child.wait();
-    const int s = g.cur;
-    bool ok = code == 0 && (!g.cancel_requested || g.result_ok || s == S_PROGRAMS || s == S_CORPUS);
+void App::step_exit(StepRun& r, DWORD code) {
+    GameItem& g = *r.g;
+    const int s = r.id;
+    r.child.wait();
+    const bool cancelled = g.cancel_requested || g.stopping;
+    bool ok = code == 0 && (!cancelled || r.result_ok || s == S_PROGRAMS || s == S_CORPUS);
     if (ok) {
         if (s == S_EXTRACT) g.st.extracted_from = nup_stamp(g.cfg.source);
         else if (s == S_BUILD) { ok = file_exists(g.exe); if (ok) g.st.built_for = game_id_of(g.lay.game).text() + "|" + g.build.stamp; }
@@ -1026,24 +1119,13 @@ void App::step_exit(GameItem& g, DWORD code) {
         else if (s == S_PREPARE) { g.prep_check = L"ready"; g.force_prepare = false; }
         save_state(g.lay.state_file, g.st);
     }
-    log(g, L"  exit code " + std::to_wstring(code));
-    if (!ok || g.cancel_requested) {
-        g.play_after = false;
-        std::string e;
-        if (!g.cancel_requested) e = g.error.empty() ? narrow(std::wstring(kStepName[s])) + " ended with code " + std::to_string(code) + " (see Output)" : g.error;
-        g.running = false;
-        g.cur = -1;
-        g.error = e;
-        if (active_ == &g) active_ = nullptr;
-        evaluate(g);
-        refresh();
-        InvalidateRect(wnd_, nullptr, FALSE);
-        InvalidateRect(cards_, nullptr, FALSE);
-        run_queue();
-        return;
-    }
-    g.error.clear();
-    next_step(g);
+    r.finished = true;
+    r.ok = ok;
+    log(g, (g.nrunning() > 0 ? L"[" + std::wstring(kStepShort[s]) + L"] " : L"") + L"  exit code " + std::to_wstring(code));
+    if (!ok && !cancelled)
+        fail_job(g, r.error.empty() ? narrow(std::wstring(kStepName[s])) + " ended with code " + std::to_string(code) + " (see Output)" : r.error);
+    refresh();
+    schedule(g);
 }
 
 void App::cancel(GameItem& g) {
@@ -1055,7 +1137,8 @@ void App::cancel(GameItem& g) {
     } else if (g.running) {
         g.play_after = false;
         g.cancel_requested = true;
-        g.child.cancel();
+        request_stop(g);
+        schedule(g);   // ends the job at once when nothing runs
     }
     refresh();
     InvalidateRect(cards_, nullptr, FALSE);
@@ -1349,7 +1432,9 @@ void App::refresh() {
     const bool game_page = page_ == P_GAME;
     if (g) {
         for (int i = 0; i < S_COUNT; ++i) {
-            std::wstring t = (g->running && i == g->cur) ? L"Running..." : step_state_text(g->need[i], g->why[i]);
+            const StepRun& r = g->run[i];
+            std::wstring t = g->running && r.running() ? L"Running..." : g->running && r.started && r.finished && r.ok ? L"Done"
+                                                                                                               : step_state_text(g->need[i], g->why[i]);
             ListView_SetItemText(steps_, i, 1, const_cast<wchar_t*>(t.c_str()));
         }
         bool en = false;
@@ -1557,20 +1642,18 @@ void App::paint_game_header(gp::Graphics& g, const RECT& rc) {
     std::wstring pt;
     COLORREF pc = kMuted;
     bool bar = false;
-    if (s->running && s->cur >= 0) {
+    if (s->running) {
         bar = true;
-        pt = L"Step " + std::to_wstring(s->cur + 1) + L" of " + std::to_wstring(S_COUNT) + L": " + kStepName[s->cur];
-        // the shader steps count blocks / programs: show how many
-        if ((s->cur == S_CORPUS || s->cur == S_TRANSLATE || s->cur == S_PREPARE) && s->total) {
-            auto th = [](uint64_t v) { std::wstring d = std::to_wstring(v); for (int i = static_cast<int>(d.size()) - 3; i > 0; i -= 3) d.insert(i, L","); return d; };
-            pt += L"  ·  " + th(std::min(s->done, s->total)) + L" of " + th(s->total);
+        // one running step: its name and detail; several: each with its percent
+        std::wstring names;
+        const StepRun* one = nullptr;
+        for (const StepRun& r : s->run) {
+            if (!r.running()) continue;
+            one = &r;
+            names += (names.empty() ? L"" : L", ") + std::wstring(kStepName[r.id]) + L" " + std::to_wstring(static_cast<int>(r.fraction() * 100)) + L"%";
         }
-        const int left = s->secs_left();
-        if (left >= 0) {
-            if (left < 60) pt += L"  ·  under a minute left";
-            else if (left < 5400) pt += L"  ·  about " + std::to_wstring((left + 59) / 60) + L" min left";
-            else pt += L"  ·  about " + std::to_wstring(left / 3600) + L" h " + std::to_wstring(left / 60 % 60) + L" min left";
-        }
+        if (s->nrunning() == 1) pt = std::wstring(kStepName[one->id]) + L"  \u00B7  " + step_detail(*one);
+        else pt = names;
         if (s->play_after) pt += L"  \u00B7  the game starts when it is done";
         if (s->cancel_requested) pt = L"Stopping...";
     } else if (s->queued) {
@@ -1811,7 +1894,27 @@ LRESULT App::notify(NMHDR* n) {
                     const Level lv = static_cast<Level>(it.lParam);
                     cd->clrText = lv == Level::ok ? kOk : lv == Level::warn ? kWarn : lv == Level::bad ? kBad : kMuted;
                 } else if (const GameItem* g = sel(); g && i < S_COUNT) {
-                    cd->clrText = (g->running && i == g->cur) ? kAccentHi : g->need[i] ? kWarn : kOk;
+                    const StepRun& r = g->run[i];
+                    if (g->running && r.running()) {
+                        // a progress bar with the numbers on it
+                        RECT rc{};
+                        ListView_GetSubItemRect(steps_, i, 1, LVIR_BOUNDS, &rc);
+                        gp::Graphics gr(cd->nmcd.hdc);
+                        gr.SetSmoothingMode(gp::SmoothingModeAntiAlias);
+                        gr.SetTextRenderingHint(gp::TextRenderingHintClearTypeGridFit);
+                        gp::SolidBrush bg(C(kCard));
+                        gr.FillRectangle(&bg, gp::Rect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top));
+                        const gp::RectF tr(static_cast<float>(rc.left) + Sf(4), static_cast<float>(rc.top) + Sf(3),
+                                           static_cast<float>(rc.right - rc.left) - Sf(10), static_cast<float>(rc.bottom - rc.top) - Sf(6));
+                        gp::SolidBrush track(C(kLine)), fillb(C(kAccent));
+                        fill_round(gr, tr, Sf(5), track);
+                        const float f = static_cast<float>(std::min(r.fraction(), 1.0));
+                        if (f > 0) fill_round(gr, gp::RectF(tr.X, tr.Y, std::max(Sf(10), tr.Width * f), tr.Height), Sf(5), fillb);
+                        gp::Font font(cd->nmcd.hdc);
+                        text(gr, step_detail(r), font, tr, kText, gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+                        return CDRF_SKIPDEFAULT;
+                    }
+                    cd->clrText = (g->running && r.started && r.finished && r.ok) ? kOk : g->need[i] ? kWarn : kOk;
                 }
             }
             return CDRF_NEWFONT;
@@ -2097,6 +2200,12 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
         case WM_NOTIFY: return notify(reinterpret_cast<NMHDR*>(l));
         case WM_TIMER:
             if (active_) {
+                // a stop that takes too long (a child that does not react): end the processes
+                if (active_->stopping && !active_->killed && std::chrono::steady_clock::now() - active_->stop_at > std::chrono::seconds(20)) {
+                    active_->killed = true;
+                    for (StepRun& r : active_->run) if (r.running()) r.child.kill();
+                }
+                InvalidateRect(steps_, nullptr, FALSE);
                 InvalidateRect(cards_, nullptr, FALSE);
                 RECT side{0, 0, S(kSideW), 10000};
                 InvalidateRect(wnd_, &side, FALSE);
@@ -2109,10 +2218,10 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
             return 0;
         case kMsgLine: {
             std::unique_ptr<std::string> s(reinterpret_cast<std::string*>(l));
-            step_line(*reinterpret_cast<GameItem*>(w), *s);
+            step_line(*reinterpret_cast<StepRun*>(w), *s);
             return 0;
         }
-        case kMsgExit: step_exit(*reinterpret_cast<GameItem*>(w), static_cast<DWORD>(l)); return 0;
+        case kMsgExit: step_exit(*reinterpret_cast<StepRun*>(w), static_cast<DWORD>(l)); return 0;
         case kMsgCheck: {
             std::unique_ptr<std::string> s(reinterpret_cast<std::string*>(l));
             GameItem& g = *reinterpret_cast<GameItem*>(w);
@@ -2144,12 +2253,15 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
         }
         case WM_CLOSE:
             if (active_) {
+                if (closing_) return 0;   // already stopping: the window goes when the last step has ended
                 if (MessageBoxW(wnd_, L"A game is being prepared. Stop it and close? What is done is kept; Prepare continues later.", kAppName,
                                 MB_YESNO | MB_ICONQUESTION) != IDYES)
                     return 0;
                 queue_.clear();
-                cancel(*active_);
-                active_->child.wait();
+                closing_ = true;
+                SetWindowTextW(wnd_, (std::wstring(kAppName) + L" - stopping...").c_str());
+                cancel(*active_);   // the window goes when the last step has ended (finish_job), after 20 s the processes are ended
+                return 0;
             }
             DestroyWindow(wnd_);
             return 0;

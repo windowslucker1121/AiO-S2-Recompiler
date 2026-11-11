@@ -922,6 +922,12 @@ void Child::cancel() {
     else if (proc_) TerminateProcess(proc_, 3);
 }
 
+void Child::kill() {
+    if (!running_) return;
+    if (job_) TerminateJobObject(job_, 3);
+    else if (proc_) TerminateProcess(proc_, 3);
+}
+
 void Child::wait() {
     if (thread_.joinable()) thread_.join();
     for (HANDLE* h : {&proc_, &pipe_, &event_, &job_})

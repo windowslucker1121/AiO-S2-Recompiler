@@ -49,6 +49,7 @@ void backend_trace_next_frame();
 // Shader preparation (S24): compiles the shader parts of every program in a list before the game runs, so the driver already has them when the
 // game asks. The list is written by the setup tool from the player's own game files (<shader cache folder>/../programs.bin, "MPRPRG01").
 // Needs the back end installed (any mode; `register_entry_points = false` is enough) and an open shader cache.
+struct ShaderPrepareResult;
 struct ShaderPrepareOptions {
     std::string programs_file;                                    // empty: programs.bin next to the shader cache folder
     bool only_if_needed = false;                                  // do nothing when the state file says this GPU and driver were prepared already
@@ -56,6 +57,9 @@ struct ShaderPrepareOptions {
     bool check_only = false;                                      // only say whether a preparation is needed (already_ready, needed_why)
     int threads = 0;                                              // 0: all hardware threads but two
     std::function<bool(uint64_t done, uint64_t total)> progress;  // called often; returning false cancels
+    // Called after a cancel when some workers are still inside the driver (a pipeline part can take a minute and cannot be interrupted),
+    // once the pipeline cache and the state file are written. It must end the process (TerminateProcess) and not return; unset: wait for them.
+    std::function<void(const ShaderPrepareResult&)> abandon;
 };
 struct ShaderPrepareResult {
     uint64_t programs = 0;          // in the list

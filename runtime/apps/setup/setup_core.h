@@ -142,6 +142,7 @@ public:
     bool start(const std::wstring& exe, const std::wstring& args, const std::wstring& cwd, bool with_cancel_event,
                std::function<void(const std::string&)> on_line, std::function<void(DWORD)> on_exit, std::wstring* err);
     void cancel();
+    void kill();   // ends the child (its process tree) now, whatever it does
     bool running() const { return running_.load(); }
     void wait();
 private:
