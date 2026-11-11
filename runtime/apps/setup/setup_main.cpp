@@ -175,7 +175,7 @@ std::wstring span_text(double secs) {
 }
 // "42% · 1,234 of 39,363" (the counts only for the shader steps, which count blocks / programs)
 std::wstring step_counts(const StepRun& r) {
-    if (!r.total) return L"Starting";
+    if (!r.total) return L"Working";
     std::wstring t = std::to_wstring(static_cast<int>(r.fraction() * 100)) + L"%";
     if (r.id == S_CORPUS || r.id == S_TRANSLATE || r.id == S_PREPARE) t += L" · " + thousands(std::min(r.done, r.total)) + L" of " + thousands(r.total);
     return t;
@@ -1866,7 +1866,8 @@ void App::paint_steps(gp::Graphics& g, const GameItem& s) {
         if (state == kRunning) {
             sub = step_counts(r);
             const int left = r.secs_left();
-            right = left >= 0 ? span_text(left) + L" left" : L"Estimating…";
+            // no rate yet: the estimate the total uses, so the two always agree
+            right = (left >= 0 ? span_text(left) : span_text(s.remaining(i, sp))) + L" left";
         } else if (state == kPending) {
             sub = s.why[i].rfind(L"after", 0) == 0 ? L"" : s.why[i];
             right = span_text(s.remaining(i, sp));
