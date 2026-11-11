@@ -731,9 +731,19 @@ uint64_t physical_buffer_address(uint64_t gpu_address, uint64_t size) {
     // distinct ranges). The answer depends only on the pool registry and the virtual pools' mappings: both counters are in the entry.
     struct Memo { uint64_t addr = 0, size = 0, gen = ~0ull, phys = 0; };
     thread_local Memo memo[256];
-    const uint64_t gen = pool_registry_generation() * 0x9e3779b97f4a7c15ull ^ g_vmap_gen.load(std::memory_order_acquire);
+    // and the last ordinary (not virtual) pool the thread found: per-frame uniform ring addresses are new every frame but lie in a few pools
+    struct Last { uint64_t lo = 0, hi = 0, gen = ~0ull; };
+    thread_local Last last;
+    const uint64_t pgen = pool_registry_generation();
+    if (last.gen == pgen && gpu_address >= last.lo && gpu_address < last.hi) return gpu_address;
+    const uint64_t gen = pgen * 0x9e3779b97f4a7c15ull ^ g_vmap_gen.load(std::memory_order_acquire);
     Memo& mm = memo[(gpu_address >> 8 ^ gpu_address >> 17 ^ size) & 255];
     if (mm.gen == gen && mm.addr == gpu_address && mm.size == size) return mm.phys;
+    const PoolHit hit = pool_lookup(gpu_address);
+    if (hit.pool && !hit.pool->is_virtual) {   // an ordinary pool: the address is its own answer
+        last = {hit.pool->gpu_base, hit.pool->gpu_base + hit.pool->size, pgen};
+        return gpu_address;
+    }
     const uint64_t r = physical_buffer_address_uncached(gpu_address, size);
     mm = {gpu_address, size, gen, r};
     return r;

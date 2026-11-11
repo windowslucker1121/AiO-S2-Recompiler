@@ -42,6 +42,14 @@ option(NXRT_FAST_CPU "Release runtime: -march=x86-64-v3 and ThinLTO" ON)
 if(NXRT_FAST_CPU AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options("$<$<CONFIG:Release>:-march=x86-64-v3>" "$<$<CONFIG:Release>:/clang:-ffp-contract=off>" "$<$<CONFIG:Release>:-flto=thin>")
 endif()
+# Profile-guided optimisation of the runtime (opt-in, like the lifted code's NX_PGO): "generate" instruments it (link the game exe with
+# GAME_LLVM_PROFILE_LIB and run it with [prof] llvm_profile_at_s and LLVM_PROFILE_FILE), a path uses that merged .profdata.
+set(NXRT_PGO "" CACHE STRING "runtime PGO: empty (off), generate, or the path of a merged .profdata")
+if(NXRT_PGO STREQUAL "generate")
+    add_compile_options("/clang:-fprofile-instr-generate")
+elseif(NXRT_PGO)
+    add_compile_options("/clang:-fprofile-instr-use=${NXRT_PGO}" -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled -Wno-backend-plugin)
+endif()
 
 option(NXRT_BUILD_GFX "Build the graphics shell (SDL3 + Vulkan + NVN front end, src/gfx, cmake/gfx.cmake)" ON)
 # Game modules (games/<id>/, docs/GAME_BOUNDARY.md): the title-specific code a game exe links. The test executables register one of them, so

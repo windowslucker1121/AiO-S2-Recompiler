@@ -833,6 +833,17 @@ __declspec(noinline) TexGpu* tex_or_null_make(Texture* t, float want_scale) {
     const uint64_t tc0 = nxrt::hitch_ticks();
     TexGpu* g = create_texture_gpu(t, want_scale);
     if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderTexCreate, nxrt::hitch_ticks() - tc0);
+    {   // [nvn] tex_create_log = P (diagnosis): from present P on, one line per new image (at most 400): which textures make images in steady play
+        static const int64_t from = nxrt::config_get_int("nvn", "tex_create_log", 0);
+        static int logged = 0;
+        if (from > 0 && static_cast<int64_t>(counters().presents.load(std::memory_order_relaxed)) >= from && logged < 400) {
+            ++logged;
+            NXLOG_I(kTag, "tex_create_log: t%u %ux%ux%u %s L%u layers %u %s+0x%llx storage %llu KiB flags 0x%x present %llu", t->id, t->b.width, t->b.height, t->b.depth,
+                    t->fmt ? t->fmt->name : "?", t->levels, t->layers, t->vpool ? "vpool" : t->mem ? "mem" : "none",
+                    static_cast<unsigned long long>(t->vpool ? t->voffset : 0), static_cast<unsigned long long>(t->storage_size >> 10),
+                    static_cast<unsigned>(t->b.flags), static_cast<unsigned long long>(counters().presents.load(std::memory_order_relaxed)));
+        }
+    }
     return g->failed ? nullptr : g;
 }
 
@@ -2254,6 +2265,15 @@ VkSampler sampler_for(const SamplerInfo& game_sampler) {
 void tex_destroy(TexGpu* g) {
     if (!g) return;
     if (--g->refs > 0) return;   // another texture object over the same storage still uses the image
+    {   // [nvn] tex_create_log (diagnosis): the images destroyed too
+        static const int64_t from = nxrt::config_get_int("nvn", "tex_create_log", 0);
+        static int logged = 0;
+        if (from > 0 && static_cast<int64_t>(counters().presents.load(std::memory_order_relaxed)) >= from && logged < 400) {
+            ++logged;
+            NXLOG_I(kTag, "tex_create_log: destroy image %ux%u format %d gpu_written %d present %llu", g->base.width, g->base.height, static_cast<int>(g->format),
+                    g->gpu_written ? 1 : 0, static_cast<unsigned long long>(counters().presents.load(std::memory_order_relaxed)));
+        }
+    }
     {
         std::lock_guard<std::mutex> lk(g_live_mu);
         if (!g_live_set.erase(g)) return;   // already destroyed by tex_shutdown
