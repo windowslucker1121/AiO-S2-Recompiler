@@ -55,8 +55,10 @@
 #include "nxrt/timestep.h"
 #include "nxrt/tt.h"
 #include "menu_mouse.h"
+#include "play_capture.h"
 #include "play_engine.h"
 #include "play_game.h"
+#include "play_sync.h"
 #include "play_selftest.h"
 #include "play_types.h"
 #include "play_vpad.h"
@@ -226,7 +228,13 @@ struct G {
     std::thread::id pump_thread;
     uint64_t base = 0;                   // set by load: [play] game_base, default the game's Info::main_base
     uint32_t hook_update = 0;            // the frame boundary (the game's GamePlay::frame_update)
-    bool capture_mouse = true, quit_on_close = true, log_status = false;
+    bool capture_mouse = true, quit_on_close = true, log_status = false;   // capture_mouse: [play] capture_mouse (false: [mouse] capture = off)
+    MouseCapture capture;                // who holds the mouse (play_capture.h); main thread
+    bool was_captured = false;           // for the log line on each change
+    MouseCapture::Frame cap_frame;       // the last frame's inputs, for the clicks handled before this frame's are known
+    bool mouse_stick = false;            // the game takes the mouse as its right stick (GamePlay::mouse_stick_rad_s)
+    SettingsFile file;                   // controls.ini shared with the library and editors (play_sync.h)
+    uint64_t last_file_poll_ms = 0;
     int bug_key = 0;                     // [bug] key: the bug capture hotkey's SDL scancode (0 = none)
     bool pointer_draw = false;         // [play] pointer_draw: the menu pointer is also drawn into the frame (screenshots show it); a test aid
     bool late_sample = true;           // pump the window's events again right before the mouse counts are taken (S11: the counts are as new as ProcessInput)
@@ -458,7 +466,7 @@ void vib_sink(uint32_t slot, int hand, const hid::VibrationValue& v, void*) {
     if (st.dirty) {
         std::string err;
         std::lock_guard<std::mutex> lk(st.mu);
-        if (!save_settings(st.path, st.settings, &err)) NXLOG_W(kTag, "cannot save %s: %s", st.path.c_str(), err.c_str());
+        if (!st.file.save(st.settings, &err)) NXLOG_W(kTag, "cannot save %s: %s", st.path.c_str(), err.c_str());
         st.dirty = false;
     }
     nvn::backend_flush_caches();                    // the pipeline cache; this path does not shut the back end down
@@ -616,6 +624,20 @@ void handle_event(const input::Event& e, uint64_t now) {
     }
     if (st.overlay && st.overlay->handle_event(e)) return;
     const bool menu_blocked = st.overlay && st.overlay->visible();
+    // The mouse capture (play_capture.h): the click that captures and its release never reach the game; the release key lets the mouse go.
+    if (st.window) {
+        MouseCapture::Frame cf = st.cap_frame;
+        cf.focused = platform::focused();
+        cf.minimized = platform::minimized();
+        cf.overlay = menu_blocked;
+        if (e.type == EventType::MouseButtonDown && st.capture.on_button_down(e.u.button.button, cf)) {
+            input::mouse_delta_take();
+            return;
+        }
+        if (e.type == EventType::MouseButtonUp && st.capture.eat_release(e.u.button.button)) return;
+        if (e.type == EventType::KeyDown || e.type == EventType::KeyUp)
+            st.capture.on_key(e.u.key.scancode, e.type == EventType::KeyDown, (e.flags & input::kFlagRepeat) != 0);
+    }
     if ((e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) || e.type == EventType::MouseButtonDown || e.type == EventType::MouseWheel)
         st.last_dev = LastDevice::KeyboardMouse;
     switch (e.type) {
@@ -677,6 +699,7 @@ void handle_event(const input::Event& e, uint64_t now) {
             }
             break;
         case EventType::WindowFocusLost:
+            st.capture.on_focus_lost();
             audio::set_muted(st.window && st.settings.audio.mute_unfocused);
             st.engine->release_all(now);
             st.mouse1 = false;
@@ -687,8 +710,11 @@ void handle_event(const input::Event& e, uint64_t now) {
             audio::set_muted(false);
             st.limiter.reset_schedule();
             break;
-        case EventType::WindowRestored:
         case EventType::WindowMinimized:
+            st.capture.release("minimized");
+            st.limiter.reset_schedule();
+            break;
+        case EventType::WindowRestored:
             st.limiter.reset_schedule();
             break;
         case EventType::GamepadAdded:
@@ -805,6 +831,71 @@ void poll_pads(uint64_t now) {
     st.source_owner->set_pad(pf);
 }
 
+// ---- the mouse capture's hints and the settings file ----------------------------------------------------------------------------------
+void apply_capture_settings(const Settings& s) {
+    G& st = g();
+    st.capture.set_mode(st.capture_mouse ? s.mouse.capture : CaptureMode::Off);
+    st.capture.set_release_key(s.mouse.release_key);
+}
+
+void capture_hint(CaptureHint h) {
+    G& st = g();
+    if (h == CaptureHint::None || !st.overlay) return;
+    if (h == CaptureHint::Captured) {
+        const int k = st.capture.release_key();
+        std::string key = k == SDL_SCANCODE_LALT ? std::string("Alt") : k ? input_name(InputId{InKind::Key, k}) : std::string();
+        st.overlay->show_toast(key.empty() ? std::string("Alt+Tab releases the mouse") : key + " releases the mouse", 3.0);
+    } else {
+        st.overlay->show_toast(st.mouse_stick ? "Click to control the camera with the mouse" : "Click to use the mouse in the game", 4.0);
+    }
+}
+
+// Let the mouse go now (the menu bar opened, the library takes over). Main thread.
+void release_mouse_now(const char* why) {
+    G& st = g();
+    st.capture.release(why);
+    if (st.window && platform::relative_mouse()) platform::set_relative_mouse(false);
+}
+
+// Once a second on the window thread: someone else (the library's Settings page, an editor) changed the settings file. The keys they changed
+// are taken over into the settings in force (the game's own live state stays) and applied like a change from the menu.
+void poll_settings_file() {
+    G& st = g();
+    static const bool on = config_get_bool("play", "watch_settings", true);
+    if (!on) return;
+    const uint64_t t = SDL_GetTicks();
+    if (t - st.last_file_poll_ms < 1000) return;
+    st.last_file_poll_ms = t;
+    Settings disk;
+    std::string err;
+    const SettingsFile::Poll r = st.file.poll(&disk, &err);
+    if (r == SettingsFile::Poll::Unreadable) {
+        NXLOG_W(kTag, "%s was changed by another program but cannot be read (%s): kept the settings in force", st.path.c_str(), err.c_str());
+        return;
+    }
+    if (r != SettingsFile::Poll::Changed) return;
+    const Settings base = st.file.base();
+    const std::vector<IniChange> ch = ini_diff(format_settings(base), format_settings(disk));
+    std::string keys;
+    for (size_t i = 0; i < ch.size() && i < 8; ++i) {
+        if (!keys.empty()) keys += ", ";
+        keys += "[" + ch[i].section + "]" + (ch[i].kind == IniChange::Kind::Section ? std::string() : " " + ch[i].key);
+    }
+    if (ch.size() > 8) keys += ", ...";
+    std::lock_guard<std::mutex> lk(st.mu);
+    const Settings cur = st.have_pending ? st.pending : st.settings;
+    Settings merged;
+    if (!merge_settings(base, disk, cur, &merged)) {
+        NXLOG_W(kTag, "the outside change of %s does not merge: taking the file as it is", st.path.c_str());
+        merged = disk;
+    }
+    st.file.accept(disk);
+    if (ch.empty()) return;
+    st.pending = merged;
+    st.have_pending = true;
+    NXLOG_I(kTag, "%s was changed by another program: %zu change%s taken over (%s)", st.path.c_str(), ch.size(), ch.size() == 1 ? "" : "s", keys.c_str());
+}
+
 int update_hook(::Ctx*, uint64_t, void*) {
     G& st = g();
     ft::mark("main.update");
@@ -875,13 +966,25 @@ int update_hook(::Ctx*, uint64_t, void*) {
             // The windowed size is live while the window is windowed; in fullscreen it is the size the window goes back to (the next start).
             if (st.window && (s.display.width != old_w || s.display.height != old_h) && platform::fullscreen_mode() == platform::FullscreenMode::Windowed)
                 platform::set_window_size(s.display.width, s.display.height);
+            apply_capture_settings(s);
             std::string err;
-            if (!save_settings(st.path, s, &err)) NXLOG_W(kTag, "cannot save %s: %s", st.path.c_str(), err.c_str());
+            bool external = false;
+            Settings merged;
+            if (!st.file.save(s, &err, &external, &merged)) NXLOG_W(kTag, "cannot save %s: %s", st.path.c_str(), err.c_str());
             else NXLOG_I(kTag, "settings applied and saved to %s", st.path.c_str());
+            if (external) {   // another program changed the file meanwhile: its keys were kept, take them over too
+                NXLOG_I(kTag, "%s was changed by another program meanwhile: its changes were kept and are applied", st.path.c_str());
+                std::lock_guard<std::mutex> lk2(st.mu);
+                if (!st.have_pending) {
+                    st.pending = merged;
+                    st.have_pending = true;
+                }
+            }
         }
     }
 
     apply_unfocused_mute();
+    if (on_pump_thread) poll_settings_file();
 
     // The native menu bar: on the window in windowed mode, off in fullscreen. The in-game menu (the overlay's panel, F1 / the pad chord) is the
     // menu only where the bar is not: [gfx] overlay_menu = fullscreen (default), always or never.
@@ -907,6 +1010,7 @@ int update_hook(::Ctx*, uint64_t, void*) {
     if (st.engine) st.engine->frame_tick();
     // A game without an input hook that takes the mouse as its right stick (GamePlay::mouse_stick_rad_s): every frame is play.
     const bool mouse_stick = gp && gp->mouse_stick_rad_s > 0;
+    st.mouse_stick = mouse_stick;
     if (mouse_stick) {
         st.last_pi_ns.store(now);
         st.last_pi_frame.store(st.frames.load());
@@ -962,12 +1066,25 @@ int update_hook(::Ctx*, uint64_t, void*) {
     st.overlay_was_visible = overlay_visible;
 
     if (st.window) {
-        const bool want = st.capture_mouse && platform::focused() && !platform::minimized() && !overlay_visible && playing &&
-                          st.capture_state.load() == 0 && !hid::jc2_mouse_wants_pointer();
+        // [mouse] capture (play_capture.h): click (default) captures after a click into the picture and never by itself after a release
+        MouseCapture::Frame cf;
+        cf.focused = platform::focused();
+        cf.minimized = platform::minimized();
+        cf.overlay = overlay_visible;
+        cf.playing = playing;
+        cf.held_back = st.capture_state.load() != 0 || hid::jc2_mouse_wants_pointer();
+        st.cap_frame = cf;
+        const bool want = st.capture.want_relative(cf);
         if (want != platform::relative_mouse()) {
             platform::set_relative_mouse(want);
             if (want) input::mouse_delta_take();      // nothing that piled up before the capture
         }
+        if (st.capture.captured() != st.was_captured) {
+            st.was_captured = st.capture.captured();
+            if (st.was_captured) NXLOG_I(kTag, "mouse captured (a click into the picture; [mouse] release_key lets it go)");
+            else NXLOG_I(kTag, "mouse released (%s)", st.capture.last_release());
+        }
+        capture_hint(st.capture.take_hint(cf, true));
     }
     {   // the map: dragging with the left button rotates it (the left stick), with the middle button moves it (the right stick); the speed is the pointer's speed
         static float px = 0, py = 0;
@@ -1307,6 +1424,52 @@ extras::Settings merge_env(const extras::Settings& from_file) {
     return r;
 }
 
+// The library (recomp_library.exe) started the game: NXRT_LIBRARY_EXE names it, NXRT_LIBRARY_GAME the game id. Its Settings page edits the same
+// controls.ini; the game takes the changes over live (poll_settings_file).
+std::wstring library_exe() {
+    wchar_t buf[MAX_PATH * 2];
+    const DWORD n = GetEnvironmentVariableW(L"NXRT_LIBRARY_EXE", buf, MAX_PATH * 2);
+    if (n == 0 || n >= MAX_PATH * 2) return {};
+    return std::wstring(buf, n);
+}
+bool library_exe_ok() {
+    const std::wstring exe = library_exe();
+    if (exe.empty()) return false;
+    const DWORD a = GetFileAttributesW(exe.c_str());
+    const bool ok = a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+    if (!ok) NXLOG_W(kTag, "NXRT_LIBRARY_EXE names no file: the settings dialogs of the game are used");
+    return ok;
+}
+bool open_library(int tab) {
+    const std::wstring exe = library_exe();
+    if (exe.empty()) return false;
+    std::wstring id;
+    {
+        wchar_t buf[256];
+        const DWORD n = GetEnvironmentVariableW(L"NXRT_LIBRARY_GAME", buf, 256);
+        if (n > 0 && n < 256) id.assign(buf, n);
+        else for (const char* p = game::info().id; p && *p; ++p) id += static_cast<wchar_t>(*p);
+    }
+    release_mouse_now("library opened");
+    std::wstring cmd = L"\"" + exe + L"\" --game " + id + L" --page 2 --tab " + std::to_wstring(tab);
+    std::wstring dir = exe;
+    const size_t slash = dir.find_last_of(L"\\/");
+    dir = slash == std::wstring::npos ? std::wstring() : dir.substr(0, slash);
+    AllowSetForegroundWindow(ASFW_ANY);    // the library (single instance) brings its window to the front
+    STARTUPINFOW si = {sizeof si};
+    PROCESS_INFORMATION pi = {};
+    std::vector<wchar_t> line(cmd.begin(), cmd.end());
+    line.push_back(L'\0');
+    if (!CreateProcessW(exe.c_str(), line.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.empty() ? nullptr : dir.c_str(), &si, &pi)) {
+        NXLOG_W(kTag, "cannot start the library (%lu)", GetLastError());
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    NXLOG_I(kTag, "library settings opened (tab %d)", tab);
+    return true;
+}
+
 }  // namespace
 
 // The native menu bar (win_menu.h) with play mode's own actions.
@@ -1322,13 +1485,17 @@ void install_menu_bar() {
     h.save_now = [](std::string* err) {
         G& s = g();
         Settings cur = g_host.settings();
-        if (!save_settings(s.path, cur, err)) return false;
+        bool external = false;
+        Settings merged;
+        if (!s.file.save(cur, err, &external, &merged)) return false;
+        if (external) g_host.apply(merged);   // another program's changes were kept: take them over
         NXLOG_I(kTag, "settings saved to %s (menu)", s.path.c_str());
         return true;
     };
     h.reload = [](std::string* err) {
         Settings fresh;
         if (!load_settings(g().path, &fresh, err)) return false;
+        g().file.note_current();             // the file as it is now is what the game has
         fresh.fps = g_host.settings().fps;   // the counter is live state, as the in-game page keeps it
         g_host.apply(fresh);
         NXLOG_I(kTag, "settings reloaded from %s (menu)", g().path.c_str());
@@ -1349,6 +1516,8 @@ void install_menu_bar() {
     };
     if (const GamePlay* gp = game_play()) h.display_options = gp->display_options;
     h.upscaler_configured = nvn::upscaler_replace_configured();
+    h.menu_opened = [] { release_mouse_now("menu bar opened"); };
+    if (library_exe_ok()) h.open_library = [](int tab) { return open_library(tab); };
     if (!win_menu_install(platform::native_hwnd(), platform::native_window(), &g_host, h)) NXLOG_W(kTag, "no menu bar on the game window");
 }
 
@@ -1358,6 +1527,7 @@ bool load() {
     if (st.loaded) return st.load_ok;
     st.loaded = true;
     st.path = config_get_str("play", "controls", "controls.ini");
+    st.file.set_path(st.path);
     std::string err;
     const bool existed = GetFileAttributesA(st.path.c_str()) != INVALID_FILE_ATTRIBUTES;
     st.load_ok = load_settings(st.path, &st.settings, &err);
@@ -1381,6 +1551,7 @@ bool load() {
         else
             NXLOG_W(kTag, "cannot save the upgraded %s: %s", st.path.c_str(), e3.c_str());
     }
+    st.file.note_current();   // what the game read (or wrote): the base its own saves and the outside changes are measured against
     // [config]: restart-only runtime keys the menu set. Each becomes [section] key unless the game ini or the environment sets it (a game module's
     // own default is replaced). Read before anything else reads them: the device, the services' profile and the back end start after this.
     {
@@ -1423,6 +1594,7 @@ bool load() {
     if (config_has("audio", "device")) st.settings.audio.device = config_get_str("audio", "device", "default");
     else config_set("audio", "device", st.settings.audio.device.c_str());
     st.capture_mouse = config_get_bool("play", "capture_mouse", true);
+    apply_capture_settings(st.settings);
     st.late_sample = config_get_bool("play", "late_sample", true);
     st.quit_on_close = config_get_bool("play", "quit_on_close", true);
     st.log_status = config_get_bool("play", "log_status", false);
@@ -1514,6 +1686,7 @@ bool start(const StartOptions& opt) {
                 const std::string title = std::string(game::info().short_title && *game::info().short_title ? game::info().short_title : "Game") + " menu###nxrt_menu";
                 st.overlay->add_panel(title, [] { draw_settings_page(g_host); });
                 st.overlay->install_on_renderer();
+                st.overlay->set_restore_mouse(false);   // the capture state machine decides when the mouse is taken again (play_capture.h)
                 apply_fps_counter(st.settings.fps);
             }
         }
@@ -1565,7 +1738,7 @@ void stop() {
     if (st.dirty) {
         std::string err;
         std::lock_guard<std::mutex> lk(st.mu);
-        save_settings(st.path, st.settings, &err);
+        st.file.save(st.settings, &err);
         st.dirty = false;
     }
     st.limiter.set_pre_frame_hook(nullptr, nullptr);

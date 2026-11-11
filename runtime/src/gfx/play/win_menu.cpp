@@ -154,6 +154,17 @@ void on_command(int id) {
         }
         return;
     }
+    if (st.hooks.open_library) {
+        int tab = -1;
+        if (m->action == MenuAction::LibrarySettings) tab = 0;
+        else if (m->action == MenuAction::GamepadDialog) tab = 2;
+        else if (m->action == MenuAction::KeyboardDialog) tab = 3;
+        if (tab >= 0) {
+            if (st.hooks.open_library(tab)) return;
+            NXLOG_W(kTag, "the library did not start: the game's own dialog opens instead");
+            if (m->action == MenuAction::LibrarySettings) return;
+        }
+    }
     switch (m->action) {
         case MenuAction::SaveSettings: {
             std::string err;
@@ -214,6 +225,7 @@ LRESULT CALLBACK subclass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
             // that loop and tell the freeze watchdog that the process is alive.
             SetTimer(h, kMenuLoopTimer, 250, nullptr);
             diag_progress();
+            if (S().hooks.menu_opened) S().hooks.menu_opened();
             break;
         case WM_EXITMENULOOP:
             KillTimer(h, kMenuLoopTimer);
@@ -1092,6 +1104,7 @@ bool win_menu_install(void* hwnd, void* sdl_window, UiHost* host, const WinMenuH
     o.bug_capture = static_cast<bool>(hooks.capture_bug);
     o.bug_key = hooks.bug_key;
     o.fps_key = hooks.fps_key;
+    o.library = static_cast<bool>(hooks.open_library);
     st.model = build_menu(o);
     st.bar = CreateMenu();
     for (const MenuItem& m : st.model) {

@@ -72,6 +72,14 @@ public:
     };
     void set_counter(const CounterConfig& c);
 
+    // A short message near the top of the picture for `seconds` (play mode: how to take or let go of the mouse). Any thread; a new one replaces
+    // the old, an empty text takes it away. Not drawn into screenshots.
+    void show_toast(const std::string& text, double seconds = 3.0);
+
+    // Showing the menu lets the relative mouse go and hiding it takes it back (the default). Off: the caller decides about the mouse (play mode's
+    // capture state machine, play_capture.h, never takes the mouse back by itself).
+    void set_restore_mouse(bool on);
+
     // A drawn arrow at a window pixel (test aid, S28: a screenshot of the game's own frame does not contain the OS cursor). Any thread.
     void set_pointer(bool show, float x, float y, bool in_screenshots);
 

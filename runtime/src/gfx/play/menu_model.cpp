@@ -127,6 +127,10 @@ std::vector<MenuItem> build_menu(const MenuOptions& o) {
     // ---- Game
     {
         std::vector<MenuItem> v;
+        if (o.library) {
+            v.push_back(b.cmd("Se&ttings...", MenuAction::LibrarySettings));
+            v.push_back(b.sep());
+        }
         v.push_back(b.cmd("&Save settings now", MenuAction::SaveSettings));
         v.push_back(b.cmd("&Reload settings from the file", MenuAction::ReloadSettings));
         v.push_back(b.cmd("&Open the settings file", MenuAction::OpenSettingsFile));

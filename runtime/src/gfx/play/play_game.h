@@ -73,7 +73,7 @@ struct GamePlay {
     unsigned display_options = 0;    // kDisplayOpt* bits: which of the options above the game's display hooks apply (0: none)
     uint64_t frame_update = 0;       // entry hook site (offset in main): once per rendered frame, on the main thread; 0 = play mode is never pumped
     // A game without an input hook (no GameHost::input_tick calls): > 0 makes the mouse turn the camera through the right stick. Every frame
-    // then counts as play (the mouse is captured while the window has the focus) and the mouse's turn rate ([mouse] yaw_rad / pitch_rad per
+    // then counts as play (the mouse is captured after a click into the picture, [mouse] capture) and the mouse's turn rate ([mouse] yaw_rad / pitch_rad per
     // count) is this many radians per second at full stick.
     double mouse_stick_rad_s = 0;
     // Before the frame-boundary hook is added: hooks that do not need the host (display options, the tone curve). window_w/h: the client size.

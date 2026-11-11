@@ -21,6 +21,7 @@ enum class MenuAction {
     GraphicsDialog, DockNow, HandheldNow,
     DebugInfo, LogWindow, OpenLogFile, OpenLogFolder, CopyDebugReport, DebugOverlay, OverlayMenu,
     About, MenuHelp,
+    LibrarySettings,   // Game > Settings...: the library's Settings page (only when the game was started from the library)
 };
 
 struct MenuItem {
@@ -45,6 +46,7 @@ struct MenuOptions {
     bool bug_capture = true;           // the bug capture hotkey exists
     std::string bug_key = "F9";
     std::string fps_key = "F2";
+    bool library = false;              // the game was started from the library: Game > Settings... and the Input dialogs open its Settings page
 };
 
 // The top-level menus: Game, Input, Graphics, Audio, Debug, Help.

@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "nxrt/extras.h"
+#include "play_capture.h"
 #include "play_fastboot.h"
 #include "play_tweaks.h"
 
@@ -120,6 +121,8 @@ struct MouseSettings {
     bool invert_x = false;
     bool menu_cursor = true;                       // in menus the mouse is a pointer: cursor, hover, click, right click, wheel
     bool wheel_cycles = true;                       // the wheel cycles set A (mpr: the beams; the SetANext / SetAPrev bindings stay either way)
+    CaptureMode capture = CaptureMode::Click;      // [mouse] capture: click (default), auto or off (play_capture.h)
+    int release_key = 226;                         // [mouse] release_key: the SDL scancode that lets the mouse go (Left Alt), 0 = none
 };
 // ---- pad button remapping ------------------------------------------------------------------------------------------------------------
 // The physical buttons of an SDL gamepad, named by position (the face buttons by where they sit, so the names do not depend on the printed

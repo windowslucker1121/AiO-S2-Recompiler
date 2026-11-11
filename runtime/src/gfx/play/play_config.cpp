@@ -307,6 +307,23 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             if (k == "menu_cursor") return set_bool(&s->mouse.menu_cursor);
             if (k == "menu_touch") return true;   // legacy key, dead since it never did anything: accepted and ignored
             if (k == key_wheel_cycles()) return set_bool(&s->mouse.wheel_cycles);
+            if (k == "capture") {
+                if (!parse_capture_mode(v.c_str(), &s->mouse.capture)) {
+                    *msg = "capture must be click, auto or off, got '" + v + "'";
+                    return false;
+                }
+                return true;
+            }
+            if (k == "release_key") {
+                if (lower(v) == "none" || v.empty()) { s->mouse.release_key = 0; return true; }
+                InputId id;
+                if (!parse_input(v, &id) || id.kind != InKind::Key) {
+                    *msg = "release_key must be a keyboard key name (Left Alt, Right Ctrl, F8 ...) or none, got '" + v + "'";
+                    return false;
+                }
+                s->mouse.release_key = id.code;
+                return true;
+            }
             break;
         case Sec::Aim:
             if (k == "lock_mode") {
@@ -881,6 +898,8 @@ std::string format_settings(const Settings& s) {
     kv("invert_x", flag(s.mouse.invert_x));
     kv("menu_cursor", flag(s.mouse.menu_cursor));
     kv(key_wheel_cycles(), flag(s.mouse.wheel_cycles));
+    kv("capture", capture_mode_name(s.mouse.capture));
+    kv("release_key", s.mouse.release_key ? input_name(InputId{InKind::Key, s.mouse.release_key}) : std::string("none"));
 
     o += "\n[aim]\n";
     kv("lock_mode", lock_mode_name(s.aim.lock_mode));
