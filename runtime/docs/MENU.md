@@ -33,7 +33,7 @@ while a dialog is open.** They change settings through the same host as everythi
 they come to the front.
 
 - **Gamepad**: the connected controllers and what is pressed on each, Test rumble, face-button layout, dead zones, trigger threshold, rumble
-  strength, gyro scale, rumble and gyro on/off, and the button mapping: select a Switch button, Rebind, press a button on the controller (or
+  strength, gyro scale, rumble and gyro on/off, and the button mapping: select a console button, Rebind, press a button on the controller (or
   pull a trigger); the button that had the job takes over the old job of the pressed one (a swap). Built-in layout resets all of them.
   Sliders apply when they are let go.
 - **Keyboard and mouse bindings**: the bindings of a context (a game that does not report play or menu, like the game for now, uses the `menu`

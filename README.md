@@ -1,11 +1,11 @@
 # AiO S2 Recompiler
 
-An all-in-one, open-source tool set that runs games for the Nintendo Switch 2 console that **you own** natively on Windows. It statically recompiles the
-game's program code from your own dump into PC code, and its runtime and shader translator do the rest. One library app manages every
+An all-in-one, open-source tool set that runs console games **you own** natively on Windows. It statically recompiles the game's
+program code from your own dump into PC code, and its runtime and shader translator do the rest. One library app manages every
 supported game.
 
-Unofficial. Not affiliated with or endorsed by Nintendo or any publisher. The repository contains no game files, keys, firmware or
-Nintendo code, and the app never downloads any. See [LEGAL.md](LEGAL.md).
+Unofficial and not affiliated with any console maker or publisher (see [Legal notice and trademarks](#legal-notice-and-trademarks)).
+The repository contains no game files, keys, firmware or SDK code, and the app never downloads any. See [LEGAL.md](LEGAL.md).
 
 ## What it does
 
@@ -59,5 +59,16 @@ GPL-3.0 ([LICENSE](LICENSE)). Third-party code keeps its own licence; notices ar
 [nxrecomp](https://github.com/drakolordx7/nxrecomp) and work from Ryujinx, Mesa, smo-recomp, ScarletNX, ssbu-recomp,
 SuperMarioWonderRecomp, yuzu/Eden, libnx and others named in those notices.
 
-Nintendo Switch 2 and the game names are trademarks of their owners. They are used only to say which hardware and games the project
-works with.
+## Legal notice and trademarks
+
+This README is the only place where the project names the console maker in its own words (identifiers that file formats, system
+interfaces or third-party APIs require aside).
+
+- AiO S2 Recompiler is an unofficial, non-commercial, open-source project. It is **not affiliated with, endorsed, sponsored or approved
+  by Nintendo** or by any game developer, publisher or other rights holder.
+- Nintendo and Nintendo Switch 2 are trademarks of Nintendo. Game titles that the library shows for your own dumps are read from those
+  dumps and are trademarks of their owners. Such names are used only to say which hardware and which dumps the tools work with; the
+  project's own name, apps, icons and package names use no Nintendo or game names, logos, icons or artwork.
+- The repository and the release packages contain no game code or assets, no keys, no firmware and no Nintendo SDK code or
+  documentation. You need your own legally made dump of a game you own; the project does not help you obtain games, keys or firmware.
+- Rights holders: see "Takedown requests and rights-holder concerns" in [LEGAL.md](LEGAL.md).

@@ -23,7 +23,7 @@ has the id, otherwise from the SDK client proxy (address given).
 | IApplicationFunctions | 141 TryPopFromFriendInvitationStorageChannel | 128-2 (no data) | nn::friends::TryPopFriendInvitationNotificationInfo (0x75003d89f0, slot 0x1B8) reads 128-2 as "none" and returns false; any other failure aborts |
 | ILibraryAppletCreator / accessor | MyPage applet 0x100001A (friend invitation) | created; Start ends it at once, GetResult 128-22 (cancelled) | nn::friends::StartFriendInvitation / StartSendingFriendInvitation (0x75003e32a0, 0x75003e33b0) run it with arg kind 8 / 9; creating must succeed (CreateMyPageApplet aborts otherwise). Cancelled makes the friends call return 121-30 (0x3C79): the game ignores it for StartFriendInvitation (main 0x7101b2a5a0) and takes its failure branch for StartSending (main 0x7101b2a7ec). Offline: no invitation sent. The friends service itself gets no invitation IPC from these calls |
 | IManagerForApplication | 3 LoadIdTokenCacheDeprecated, 4 LoadIdTokenCache | 124-200 NetworkServiceAccountRegistrationRequired | no NSA token; SDK wrapper returns it to the game |
-| IManagerForApplication | 170 LoadNetworkServiceLicenseKindAsync | async context: done, GetResult fails (110-300) | offline, no Switch Online licence |
+| IManagerForApplication | 170 LoadNetworkServiceLicenseKindAsync | async context: done, GetResult fails (110-300) | offline, no online-service licence |
 | IAsyncNetworkServiceLicenseKindContext | 100 GetNetworkServiceLicenseKind | success, u32 0 (none) | SDK aborts if it fails (0x750018c634) |
 
 ## Library applets title A can launch

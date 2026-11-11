@@ -658,8 +658,8 @@ recorded (`frame_chunk`, nvn_gpu.cpp; ~2.4 parts per frame in the game, long pas
 set_reuse` (default on): read-only graphics descriptor sets are bound again without resolving when their raw inputs and the resolve epoch
 are unchanged (15-20% of the sets in game; `verify` mode found no difference); the per-draw held-result checks of the bound buffers
 (`out_draw_bindings`) are skipped under the same condition. Paired A/B in one run (`[nvn] cpuperf_ab = 300`, ftrace marks `cpuperf.on/off`):
-first scene 30.1 -> 34.0 fps (chunks alone) and 29.1 -> 32.8 (both), village walk 26.9 -> 32.3 (chunks) and 31.1 -> 35.3 (both), Link's
-house (static view) 46.6 -> 48.2 (both). Most of the gain is the chunks; set reuse adds ~1-2 fps where the render thread matters. After it
+first scene 30.1 -> 34.0 fps (chunks alone) and 29.1 -> 32.8 (both), village walk 26.9 -> 32.3 (chunks) and 31.1 -> 35.3 (both), the house
+scene (static view) 46.6 -> 48.2 (both). Most of the gain is the chunks; set reuse adds ~1-2 fps where the render thread matters. After it
 the first scene and the house are GPU-bound (P ~ frame time). The biggest render-thread item left is `out_overlaps` (nvn_gpu_pool.cpp, ~15%
 of nvn-render samples, its own loop under a mutex), then build_set (~20%, half of it pool_lookup / resolve_in_pool / out_add).
 After the merge with the coherence work (1769f1f), all of it on vs off in one run: first scene 36.7 -> 39.2 fps, village walk 36.0 -> 43.0.
@@ -679,8 +679,8 @@ pipelines, 120-200k of whole ones` (first scene). (3) The game's nvnSyncWait wai
 submissions behind the newest, ~220 of ~320 calls per 10 s actually wait; its window acquire syncs are always signaled already
 (`nvn: nvnSyncWait over 10 s on ...` lines). Changes: `out_fetch` submits and waits with the compute-out lock free (`[nvn]
 out_fetch_unlocked`; entries marked fetching, found again by id; neutral in fps: guard faults are rare now, the render thread's lock waits
-were < 0.01 ms per frame both ways). **Interval index** (`[nvn] out_index`): the held-result overlap questions (~17 M per 10 s in Link's
-house, ~35 entries) are answered from sorted merged page intervals rebuilt when their version moves (~45k rebuilds / 10 s, ~0.2-0.4 ms per
+were < 0.01 ms per frame both ways). **Interval index** (`[nvn] out_index`): the held-result overlap questions (~17 M per 10 s in the house
+scene, ~35 entries) are answered from sorted merged page intervals rebuilt when their version moves (~45k rebuilds / 10 s, ~0.2-0.4 ms per
 frame), plus per-op page dedupe and a no-overlap cache for the pointer windows in `gmem_before_op` (~60% hits). Paired windows (`[nvn]
 out_index_ab = 300`, 854x480): the house scene 47.5 -> 51.8 fps, render-thread replay 20.5 -> 17.9 ms, 1% low 34.4 -> 34.8; village outside
 21.2 -> 23.8 fps, median frame 46.6 -> 36.4 ms (1% low 15.7 -> 14.7); first scene 50-260 s 26.5 -> 28.9 fps, replay 35.3 -> 29.1 ms, and in

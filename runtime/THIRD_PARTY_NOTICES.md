@@ -7,7 +7,7 @@ from the platform: no game, SDK or firmware code or data is part of the reposito
 
 The repository is a fork of drakolordx7's switch2-recomp / nxrecomp code base (recompiler, runtime, tools and launcher; first commit
 "Initial public release of the runtime, recompiler, tools and launcher (no game code or data)"), released under GPL-3.0.
-featureJosh's port of title A is another fork of the same code base, also GPL-3.0, and is used as a reference. Code taken from these
+featureJosh/pokopia-recomp is another fork of the same code base, also GPL-3.0, and is used as a reference. Code taken from these
 projects stays under GPL-3.0, the licence of this repository (`LICENSE` at the root; `recomp/LICENSE`, `runtime/LICENSE` and
 `launcher/LICENSE` are the same text), and keeps its authors' copyright.
 
