@@ -42,6 +42,7 @@
 #include "nvn_gpu_internal.h"
 #include "nvn_mirror_cap.h"
 #include "nvn_arch_exp.h"
+#include "nvn_capture.h"
 
 namespace nxrt::nvn::be {
 
@@ -1218,7 +1219,8 @@ std::atomic<uint64_t> g_fc_flush_pages{0}, g_fc_gpu_pages{0}, g_fc_copied{0}, g_
 int g_fc_on = -1;                                 // cpuperf_ab can switch it per window (flush_copy_enable)
 
 bool fc_mode() {
-    static const bool on = config_get_bool("nvn", "flush_copy", true);
+    // a capture replay rewrites the captured memory every loop without flushes: no flush copies there
+    static const bool on = config_get_bool("nvn", "flush_copy", !capture::replaying());
     return on;
 }
 bool fc_active() { return fc_mode() && g_fc_on != 0; }
