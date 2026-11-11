@@ -550,10 +550,12 @@ bool any_valid(const Region* r, uint64_t first, uint64_t count) {
 }
 bool page_banned(const Region* r, uint64_t page) { return !r || page >= r->npages || test(r->ban.get(), page); }
 
+std::atomic<uint64_t> g_owner_clears{0};
+uint64_t owner_clears() { return g_owner_clears.load(std::memory_order_acquire); }
 void invalidate(Region* r, uint64_t first, uint64_t count) {
     if (!r || first >= r->npages) return;
     count = std::min(count, r->npages - first);
-    if (count) set_bits(r->valid.get(), first, count, false);
+    if (count) { g_owner_clears.fetch_add(1, std::memory_order_acq_rel); set_bits(r->valid.get(), first, count, false); }
 }
 
 void set_guard_handler(GuardHandler fn) { g_guard_fn.store(fn, std::memory_order_release); }

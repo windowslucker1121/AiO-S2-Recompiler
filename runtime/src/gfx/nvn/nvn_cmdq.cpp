@@ -762,6 +762,16 @@ void begin_submission(bool on) {
 
 void set_copies(bool on) { g_copies_q.store(on, std::memory_order_relaxed); }
 void set_desc(bool on) { g_desc_q.store(on, std::memory_order_relaxed); }
+void apply_render_priority(bool on) {
+    static const std::string mode = config_get_str("nvn", "render_priority", "highest");
+    int p = THREAD_PRIORITY_NORMAL;
+    if (on) p = mode == "time_critical" ? THREAD_PRIORITY_TIME_CRITICAL : mode == "above_normal" ? THREAD_PRIORITY_ABOVE_NORMAL : mode == "normal" ? THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_HIGHEST;
+    static int last = -100;
+    if (p == last) return;
+    last = p;
+    SetThreadPriority(GetCurrentThread(), p);
+    if (g_thread.joinable()) SetThreadPriority(g_thread.native_handle(), p);
+}
 void set_publish_batch(bool on) { g_pub_batch = on ? g_pub_batch_cfg : 1; }
 void desc_stats(uint64_t* queued, uint64_t* direct) { *queued = g_uds_queued; *direct = g_uds_direct; }
 

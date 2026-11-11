@@ -1644,7 +1644,12 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
     return stale || fc_stale;
 }
 
+void srv_note_submit();
+void srv_note_mirror_gone();
+void srv_log();
 void mirror_begin_submit(Frame& f, bool on) {
+    srv_note_submit();   // fresh bits are per submission (servable_cache)
+    srv_log();
     fc_begin_submit(f);
     for (Mirror* m : g_fresh_mirrors) {           // fresh pages are current for one submission
         for (size_t i = 0; i < static_cast<size_t>((m->npages + 63) / 64); ++i) m->fresh[i].store(0, std::memory_order_relaxed);
@@ -1738,6 +1743,7 @@ void snaps_forget_locked(Mirror* m);   // below
 void mirror_destroy(PoolGpu* p) {
     Mirror* m = p->mirror;
     if (!m) return;
+    srv_note_mirror_gone();
     p->mirror = nullptr;
     snaps_forget_locked(m);
     g_fresh_mirrors.erase(std::remove(g_fresh_mirrors.begin(), g_fresh_mirrors.end(), m), g_fresh_mirrors.end());
@@ -2517,8 +2523,50 @@ bool out_overlaps_window(uint64_t page, uint64_t size) {
     return r;
 }
 
+// [nvn] servable_cache (default on; verify: both, mismatches counted): out_servable's true answers are remembered per (address, size) while
+// nothing that clears a page's valid, armed, newer-in-the-copy or fresh bit has happened since (mem::ww::changes / owner_clears, the
+// held-result version, the submission, the pool registry, mirror destruction). The draws of the village outside ask it ~4,000 times per
+// frame for the same few storage ranges over held results, each a walk over the range's pages (a 9.9 MB binding: 2,400 pages).
+uint64_t g_srv_submits = 0, g_srv_mirror_gone = 0;
+void srv_note_submit() { ++g_srv_submits; }
+void srv_note_mirror_gone() { ++g_srv_mirror_gone; }
+uint64_t g_srv_hits = 0, g_srv_bad = 0, g_srv_raced = 0;
+bool out_servable_uncached(uint64_t addr, uint64_t size);
+int servable_cache_mode() {
+    static const int m = [] { const std::string v = config_get_str("nvn", "servable_cache", "on"); return v == "verify" ? 2 : (v == "off" || v == "0" || v == "false") ? 0 : 1; }();
+    return m;
+}
+void srv_log() {
+    static uint32_t last = 0;
+    const uint32_t now = presents_now();
+    if (servable_cache_mode() && now - last >= 1200) { last = now; NXLOG_I(kTag, "servable_cache: %llu hits, %llu verify differences (%llu more raced with a page release)", (unsigned long long)g_srv_hits, (unsigned long long)g_srv_bad, (unsigned long long)g_srv_raced); }
+}
+std::atomic<bool> g_srv_ab{true};
+void servable_cache_enable(bool on) { g_srv_ab.store(on, std::memory_order_relaxed); }
 bool out_servable(uint64_t addr, uint64_t size) {
     if (!out_lazy() || !g_mirror_on || !size) return false;
+    const int mode = servable_cache_mode();
+    if (!mode || !g_srv_ab.load(std::memory_order_relaxed) || !on_render_thread()) return out_servable_uncached(addr, size);
+    struct Srv { uint64_t addr = 0, size = 0, k = 0; };
+    static Srv memo[1024];
+    const uint64_t changes0 = mem::ww::changes();
+    const uint64_t k = ((changes0 * 0x9e3779b97f4a7c15ull ^ mem::ww::owner_clears()) * 1099511628211ull ^ out_version() * 31 ^ g_srv_submits * 131) * 1099511628211ull ^
+                       pool_registry_generation() * 0x51ed27ull ^ g_srv_mirror_gone * 0x2545f491ull;
+    Srv& e = memo[((addr >> 4) ^ (addr >> 20) ^ size * 7) & 1023];
+    if (e.addr == addr && e.size == size && e.k == k) {
+        ++g_srv_hits;
+        if (mode == 2 && !out_servable_uncached(addr, size)) {
+            if (mem::ww::changes() != changes0) { ++g_srv_raced; return false; }   // a page release began on another thread meanwhile: not stale
+            if (g_srv_bad++ < 16) NXLOG_W(kTag, "servable_cache verify: %llx +%llx was servable, is not now", static_cast<unsigned long long>(addr), static_cast<unsigned long long>(size));
+            return false;
+        }
+        return true;
+    }
+    const bool r = out_servable_uncached(addr, size);
+    if (r) e = Srv{addr, size, k};
+    return r;
+}
+bool out_servable_uncached(uint64_t addr, uint64_t size) {
     MemoryPool* mp = nullptr;
     PoolGpu* pg = nullptr;
     uint64_t poff = 0;

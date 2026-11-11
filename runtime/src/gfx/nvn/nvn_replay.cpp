@@ -241,14 +241,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbVrs = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbViUpload = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbSigTex = 1ull << 45 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbVrs = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbViUpload = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbSigTex = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57 };
 uint64_t ab_mask() {
     static const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"vrs", kAbVrs}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"vi_upload", kAbViUpload}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"sig_tex", kAbSigTex}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"vrs", kAbVrs}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"vi_upload", kAbViUpload}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"sig_tex", kAbSigTex}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -1184,6 +1184,9 @@ void pre_layout_note(Texture* t) {
 }
 // Starts a pass on the current render targets if none is open for them. False when there is nothing to render to.
 void bind_skip_reset();   // below (bind_sets)
+extern uint64_t g_oc_ph[6];
+bool exp_op_cost_on();
+struct OcPhase { int i; uint64_t t0; explicit OcPhase(int k) : i(k), t0(exp_op_cost_on() ? __rdtsc() : 0) {} ~OcPhase() { if (t0) g_oc_ph[i] += __rdtsc() - t0; } };
 void pass_lookahead();   // below: settles the reads of the coming draws before the pass begins
 void mesh_copies_ahead();   // below (do_draw_mesh): the {count, 1, 1} records of the pass's mesh draws, before it begins
 bool ensure_pass(bool depth_ro = false) {
@@ -4457,6 +4460,10 @@ void keep_begin_submit() {
     }
 }
 
+// [nvn] render_priority (default "highest"; cpuperf_ab_what render_prio): the render and recorder threads run above the game's own threads.
+// Guest threads take Windows priorities up to TIME_CRITICAL from their console priorities (kernel/sched.cpp) while the render thread, the
+// frame's critical path, ran at NORMAL. "normal" keeps it as before.
+void render_priority_apply(bool on) { cmdq::apply_render_priority(on); }
 bool sig_tex_on() {
     static const bool on = nxrt::config_get_bool("nvn", "sig_tex", false);
     return on && ab_on(kAbSigTex);
@@ -5363,7 +5370,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             }
         }
     }
-    gmem_before_op(false);   // A17: held results back, ranges its pointers name written
+    { OcPhase ph(2); gmem_before_op(false); }   // A17: held results back, ranges its pointers name written
     upscaler_note_draw(S.stage[kFragment]);   // [nvn] upscaler_dst = fs:...: where the replaced upscaler writes
     {   // [nvn] trace_fs_draws = PREFIX (NXRT_NVN_TRACE_FS_DRAWS): trace the draws with this fragment shader where they happen, in any frame, at
         // most [nvn] trace_fs_draws_max (default 8): the bindings and uniform words of a draw that takes the GPU down in the frame it first appears in.
@@ -5408,7 +5415,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         for (const BindingDesc& d : pl->bindings) g_prog_writes |= d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         attach_targets(false);
         g_want_depth_ro = samples_depth_target(*pl);
-        prepare_textures(*pl);
+        { OcPhase ph(0); prepare_textures(*pl); }
         if (g_trace) {   // [nvn] trace_dump_tex: also the block-compressed level 0 as the GPU holds it, to compare with the prepared data
             static const std::string dump_dir = nxrt::config_get_str("nvn", "trace_dump_tex", "");
             static std::unordered_map<uint32_t, bool> raw_done;
@@ -5426,7 +5433,9 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         scene_upscale_for_draw(*pl);
     }
     if (g_fb_seen || (g_dirty & (kDesc | kPipe))) feedback_prepare(*pl);
-    if (!ensure_pass(g_want_depth_ro)) { log_once("draw-no-target", "draw without a usable render target skipped"); return false; }
+    bool ep_ok;
+    { OcPhase ph(3); ep_ok = ensure_pass(g_want_depth_ro); }
+    if (!ep_ok) { log_once("draw-no-target", "draw without a usable render target skipped"); return false; }
     if (g_prog_writes || g_xfb_active) g_pass_unsafe = true;
     const VkPrimitiveTopology topo = mesh ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : vk_topology(mode);
     if ((g_dirty & kPipe) || topo != g_pipe_topo || !g_pipe) {
@@ -5594,10 +5603,10 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             note_unsupported("transform feedback into an address outside every pool");
         }
     }
-    set_dynamic_state(g_dirty, topo, indexed, index_type);
+    { OcPhase ph(5); set_dynamic_state(g_dirty, topo, indexed, index_type); }
     if (g_dirty & kDesc) {
         support_for_draw(*pl, false);
-        bind_sets(*pl, VK_PIPELINE_BIND_POINT_GRAPHICS);
+        { OcPhase ph(1); bind_sets(*pl, VK_PIPELINE_BIND_POINT_GRAPHICS); }
     }
     if (pl->push_bytes && g_gen_tcs) {
         // the pass-through control shader's tessellation levels (NVN's fixed SetInner/OuterTessellationLevels), every draw: cheap, and
@@ -7519,7 +7528,64 @@ bool op_keeps_sets(Op op) {
     }
 }
 
+// [nvn] exp_op_cost (measurement only): render-thread ticks per command kind and, for draws and dispatches, per (fragment or compute
+// shader, vertex or mesh shader); logged every 10 s as ms per present.
+struct OpCost { uint64_t ticks = 0, n = 0, ph[6] = {}; };
+uint64_t g_oc_ph[6] = {};   // ticks of phases of the current op: prepare_textures, bind_sets, gmem_before_op, ensure_pass, out_before_op, set_dynamic_state
+OpCost g_oc_op[256];
+std::unordered_map<uint64_t, OpCost> g_oc_prog;
+std::unordered_map<uint64_t, std::string> g_oc_name;
+bool exp_op_cost_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "exp_op_cost", false);
+    return on;
+}
+void op_cost_log() {
+    static uint64_t last_pres = 0;
+    static auto last = std::chrono::steady_clock::now();
+    static uint64_t last_tsc = __rdtsc();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(10)) return;
+    const uint64_t pres = counters().presents.load(std::memory_order_relaxed);
+    const double fr = static_cast<double>(std::max<uint64_t>(1, pres - last_pres));
+    const uint64_t tsc = __rdtsc();
+    const double tpms = static_cast<double>(tsc - last_tsc) / std::max(1.0, std::chrono::duration<double, std::milli>(now - last).count());
+    last = now; last_pres = pres; last_tsc = tsc;
+    std::vector<std::pair<uint64_t, int>> ops;
+    for (int i = 0; i < 256; ++i) if (g_oc_op[i].n) ops.push_back({g_oc_op[i].ticks, i});
+    std::sort(ops.rbegin(), ops.rend());
+    std::string a;
+    for (size_t i = 0; i < ops.size() && i < 14; ++i) {
+        char t[96];
+        std::snprintf(t, sizeof t, " op%d %.3f ms/%.0f", ops[i].second, ops[i].first / tpms / fr, g_oc_op[ops[i].second].n / fr);
+        a += t;
+    }
+    NXLOG_I(kTag, "exp_op_cost per present by op:%s", a.c_str());
+    std::vector<std::pair<uint64_t, uint64_t>> pr;
+    for (const auto& [k, v] : g_oc_prog) pr.push_back({v.ticks, k});
+    std::sort(pr.rbegin(), pr.rend());
+    std::string b;
+    for (size_t i = 0; i < pr.size() && i < 24; ++i) {
+        char t[360];
+        const OpCost& c = g_oc_prog[pr[i].second];
+        char t2[160];
+        std::snprintf(t2, sizeof t2, " pt %.3f bs %.3f gm %.3f ep %.3f ob %.3f ds %.3f", c.ph[0] / tpms / fr, c.ph[1] / tpms / fr, c.ph[2] / tpms / fr, c.ph[3] / tpms / fr,
+                      c.ph[4] / tpms / fr, c.ph[5] / tpms / fr);
+        std::snprintf(t, sizeof t, " [%s %.3f ms %.0fx%s]", g_oc_name[pr[i].second].c_str(), pr[i].first / tpms / fr, c.n / fr, t2);
+        b += t;
+    }
+    NXLOG_I(kTag, "exp_op_cost per present by program:%s", b.c_str());
+    {
+        double ph[6] = {};
+        for (const auto& [k, v] : g_oc_prog) for (int i = 0; i < 6; ++i) ph[i] += v.ph[i];
+        NXLOG_I(kTag, "exp_op_cost phases of draws and dispatches per present: prepare_textures %.3f, bind_sets %.3f, gmem_before_op %.3f, ensure_pass %.3f, out_before_op %.3f, dynamic state %.3f ms",
+                ph[0] / tpms / fr, ph[1] / tpms / fr, ph[2] / tpms / fr, ph[3] / tpms / fr, ph[4] / tpms / fr, ph[5] / tpms / fr);
+    }
+    for (auto& o : g_oc_op) o = OpCost{};
+    g_oc_prog.clear();
+}
+
 void run_list(const CmdList& list, int depth) {
+    if (depth == 0 && exp_op_cost_on()) op_cost_log();
     if (depth > kMaxDepth) { log_once("depth", "CallCommands nesting too deep"); return; }
     struct RdRestore { int d; ~RdRestore() { g_rd_depth = d - 1; } } rd_restore{depth};   // pass_lookahead: back to the caller's reader
     counters().lists_replayed.fetch_add(1, std::memory_order_relaxed);
@@ -7547,6 +7613,26 @@ void run_list(const CmdList& list, int depth) {
     }
     for (RecordReader r(list); r.next();) {
         struct XsOp { uint64_t t0 = 0; ~XsOp() { if (t0) g_xs_draw_ticks += __rdtsc() - t0; } } xs_op;
+        struct OcOp {
+            uint64_t t0 = 0; int op = 0;
+            ~OcOp() {
+                if (!t0) return;
+                const uint64_t dt = __rdtsc() - t0;
+                g_oc_op[op & 255].ticks += dt; ++g_oc_op[op & 255].n;
+                const bool dr = op == static_cast<int>(Op::DrawArrays) || op == static_cast<int>(Op::DrawElements) || op == static_cast<int>(Op::DrawIndirect) ||
+                                op == static_cast<int>(Op::DrawMeshTasks);
+                const bool cs = op == static_cast<int>(Op::Dispatch) || op == static_cast<int>(Op::DispatchIndirect);
+                if (!dr && !cs) { for (uint64_t& x : g_oc_ph) x = 0; return; }
+                const ShaderInfo* a = cs ? S.stage[kCompute] : S.stage[kFragment];
+                const ShaderInfo* b = cs ? nullptr : (S.stage[kMesh] ? S.stage[kMesh] : S.stage[kVertex]);
+                const uint64_t k = reinterpret_cast<uint64_t>(a) * 31 ^ reinterpret_cast<uint64_t>(b);
+                OpCost& c = g_oc_prog[k];
+                c.ticks += dt; ++c.n;
+                for (int i = 0; i < 6; ++i) { c.ph[i] += g_oc_ph[i]; g_oc_ph[i] = 0; }
+                if (c.n == 1) g_oc_name[k] = std::string(cs ? "cs " : "") + (a ? a->hash.substr(0, 8) : "-") + (b ? "/" + b->hash.substr(0, 8) : "");
+            }
+        } oc_op;
+        if (exp_op_cost_on()) { oc_op.t0 = __rdtsc(); oc_op.op = static_cast<int>(r.op()); }
         if (exp_static_on()) {
             const Op o = r.op();
             const bool dr = o == Op::DrawArrays || o == Op::DrawElements || o == Op::DrawIndirect || o == Op::DrawMeshTasks;
@@ -7565,7 +7651,7 @@ void run_list(const CmdList& list, int depth) {
         chunk_at_op();
         if (!op_keeps_sets(r.op())) { desc_epoch_bump(kBumpOp); ++g_bump_op[static_cast<size_t>(r.op()) & 255]; }
         mark_dirty(r);
-        if (out_lazy()) out_before_op(r);                                                   // compute shadows: results back to the pool first
+        if (out_lazy()) { OcPhase ph(4); out_before_op(r); }                                                   // compute shadows: results back to the pool first
         else if (out_any() && !compute_out_may_wait(r.op())) flush_compute_out(kOutOther);
         switch (r.op()) {
             case Op::Nop: break;
@@ -8341,6 +8427,7 @@ void replay_begin_submit(Frame& f) {
         bool on = true;
         if (ab > 0) on = ((counters().presents.load() / static_cast<uint64_t>(ab)) & 1) != 0;
         static const int64_t cab = config_get_int("nvn", "cpuperf_ab", 0);
+        if (cab <= 0) render_priority_apply(true);
         if (cab > 0) {
             const bool con = ((counters().presents.load() / static_cast<uint64_t>(cab)) & 1) != 0;
             if (con != g_cpu_ab_on) {   // the render thread's CPU time so far (ms) with each switch: CPU cost per window when the GPU limits the fps
@@ -8352,6 +8439,8 @@ void replay_begin_submit(Frame& f) {
             cmdq::set_desc(ab_on(kAbCmdDesc));
             cmdq::set_publish_batch(ab_on(kAbCmdBatch));
             flush_copy_enable(ab_on(kAbFlushCopy));
+            render_priority_apply(ab_on(kAbRenderPrio));
+            servable_cache_enable(ab_on(kAbSrvCache));
             handle_cache_enable(ab_on(kAbHandleCache));
             alloc_batch_enable(ab_on(kAbAllocBatch));
             overlap_pos_enable(ab_on(kAbOverlapPos));

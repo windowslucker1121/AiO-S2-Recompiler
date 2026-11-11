@@ -13,6 +13,7 @@ bool enabled();                       // [nvn] cmd_thread (read once)
 // switches queuing on or off for what follows (paired windows).
 void begin_submission(bool on);
 void set_copies(bool on);             // [nvn] cmd_thread_copies under cpuperf_ab (cmd_copies): image copies and clears queued or drained
+void apply_render_priority(bool on);   // [nvn] render_priority: the calling (render) thread and the recorder; on false: NORMAL
 void set_publish_batch(bool on);       // [nvn] cmd_publish_batch under cpuperf_ab (cmd_batch)
 void set_desc(bool on);               // [nvn] cmd_thread_desc under cpuperf_ab (cmd_desc): descriptor set updates queued or made at once
 void desc_stats(uint64_t* queued, uint64_t* direct);

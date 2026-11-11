@@ -108,6 +108,9 @@ uint64_t faults();     // write faults handled so far (statistics; counted after
 // Moves before a thread other than the owner (a write fault, a file read, a mapping change) clears a page's valid or armed state, so an
 // owner that caches decisions made from those bits (the NVN set memo) sees every such clear that began before it reads this.
 uint64_t changes();
+// Moves whenever the owner clears valid bits itself (invalidate): with changes(), a cached "all valid or armed" answer can only be stale
+// when one of the two moved.
+uint64_t owner_clears();
 uint64_t fault_waits(); // rounds a fault spent waiting for another thread's release of the same page (statistics; stays 0 for foreign faults)
 
 }  // namespace nxrt::mem::ww
