@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Switch 2 Joy-Con 2 mouse ("Nmouse" / "Jcms") from the PC mouse. The hid service reports one virtual Joy-Con 2 (R) that works as a
+// platform 2 platform 2 controller mouse ("Nmouse" / "Jcms") from the PC mouse. The hid service reports one virtual platform 2 controller (R) that works as a
 // mouse and writes its state into the game's Nmouse transfer memory (layout: docs/hid_mouse_sw2.md). The play layer feeds it the host
 // pointer once per frame; whoever owns the mouse camera asks here whether it must hand the mouse over.
 //
 // Config: [input] jc2_mouse = auto | on | off (default auto).
-//   off   no Joy-Con 2 mouse is listed; the game never sees one.
-//   on    the mouse is always the Joy-Con 2 mouse in play: play mode never captures it for the camera.
-//   auto  the Joy-Con 2 mouse is on its surface whenever the mouse is not captured by the camera. The camera owner releases it with
+//   off   no platform 2 controller mouse is listed; the game never sees one.
+//   on    the mouse is always the platform 2 controller mouse in play: play mode never captures it for the camera.
+//   auto  the platform 2 controller mouse is on its surface whenever the mouse is not captured by the camera. The camera owner releases it with
 //         jc2_mouse_request(true) (for example while the game is placing objects or using Rock Smash, once that can be detected).
 //
 // Handover contract for the camera code:
 //   * every frame, before taking mouse counts: if jc2_mouse_active() is true, do not turn the camera with the mouse (drop the counts);
 //   * to give the mouse to the game in auto mode, call jc2_mouse_request(true) and later jc2_mouse_request(false); play mode then stops
-//     capturing (relative mode off) while jc2_mouse_wants_pointer() is true, and the Joy-Con 2 mouse goes on its surface.
+//     capturing (relative mode off) while jc2_mouse_wants_pointer() is true, and the platform 2 controller mouse goes on its surface.
 // All functions are thread safe and cheap.
 #pragma once
 #include <cstdint>
@@ -39,7 +39,7 @@ void jc2_mouse_feed(const HostMouse& m);
 void jc2_mouse_request(bool want);
 // Play mode: true = do not capture the mouse for the camera (mode on, or auto with a request).
 bool jc2_mouse_wants_pointer();
-// True while the virtual Joy-Con 2 mouse is on its surface (the game sees mouse input): the camera must not use the mouse counts.
+// True while the virtual platform 2 controller mouse is on its surface (the game sees mouse input): the camera must not use the mouse counts.
 bool jc2_mouse_active();
 
 }  // namespace nxrt::hid

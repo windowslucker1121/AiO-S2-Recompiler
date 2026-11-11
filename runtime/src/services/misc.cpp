@@ -248,8 +248,8 @@ std::shared_ptr<Service> make_mm() {
 
 // ---- hwopus -----------------------------------------------------------------------------------------------------------------------
 // Decoded with libopus when the runtime has it (NXRT_HAVE_OPUS, runtime/cmake/media_deps.cmake). Without it the decoders open and
-// "decode" to silence of the right length, so titles that need one (Mario Kart World opens one at boot and aborts on a refusal) run
-// with their Opus voices muted; the length comes from the packet's TOC byte (RFC 6716 section 3.1). Input: Nintendo's 8-byte header
+// "decode" to silence of the right length, so titles that need one (title C opens one at boot and aborts on a refusal) run
+// with their Opus voices muted; the length comes from the packet's TOC byte (RFC 6716 section 3.1). Input: the platform's 8-byte header
 // (u32 big-endian payload size, u32 final range) then the Opus packet. Output: s16 interleaved.
 
 // Samples per channel at `rate` of one Opus packet (0 when the header or TOC is unusable).
@@ -344,7 +344,7 @@ std::shared_ptr<Service> make_hwopus_decoder(uint32_t rate, uint32_t channels) {
 std::shared_ptr<Service> make_hwopus() {
     return make_iface("IHardwareOpusDecoderManager", [](Service& s) {
         // Open*(params..., work buffer size, transfer memory). Raw arguments start with {s32 sample rate, s32 channels}: the old forms'
-        // own fields and the Ex forms' OpusParametersEx alike (Ryujinx reads it from the request data; OoT's cmd 4 has no buffer).
+        // own fields and the Ex forms' OpusParametersEx alike (Ryujinx reads it from the request data; the game's cmd 4 has no buffer).
         // A buffer is looked at only when the raw data has no rate.
         auto open = [](bool ex) -> Handler {
             return [ex](Request& req, Response& rsp) -> uint32_t {
@@ -465,7 +465,7 @@ std::shared_ptr<Service> make_aoc() {
 }
 
 // ---- caps:u (caps:su is in album.cpp) --------------------------------------------------------------------------------------------
-// Album reading: lists are empty (Pokopia main imports no album list or load function, only nn::album::SaveScreenshot).
+// Album reading: lists are empty (title A main imports no album list or load function, only nn::album::SaveScreenshot).
 Handler album_list() {
     return [](Request& req, Response& rsp) -> uint32_t {
         zero_buffer(req.out_buf(0));
@@ -827,7 +827,7 @@ CmdNames htc_tenv_cmds() { return {{0, "GetServiceInterface"}}; }
 }  // namespace
 
 // ---- registration ------------------------------------------------------------------------------------------------------------------
-// stpl:u (Switch 2 stream play / GameShare): nn::streamplay::detail::GetUserService opens it and calls cmd 0 for the user service object.
+// stpl:u (platform 2 stream play / GameShare): nn::streamplay::detail::GetUserService opens it and calls cmd 0 for the user service object.
 // GameShare is not available here, but the two IUserService commands the SDK sends at start-up abort the process on any failure
 // (sdk 0x75006b9744 and 0x75006ad634: AbortImpl), so they answer "nothing to share" instead of failing:
 //   300 GetHidSharedMemory (sdk proxy 0x75006b78f4, caller GetUserService 0x75006b95f0): out {u64 size, u64 offset} + a copy handle.
@@ -838,10 +838,10 @@ CmdNames htc_tenv_cmds() { return {{0, "GetServiceInterface"}}; }
 // The format, from HidSharedMemoryAccessor's readers (sdk 0x75006b0980..0x75006b24a0), for up to three guests (IsGuestIdValid: id < 3):
 // pads at 0, 0x24000 per guest pad id (0, 1, 32 = handheld) and 0xC000 per guest inside it (u32 NpadStyleSet at +0, pad ring at +0x28
 // of 33 x 0x38 entries, six-axis rings from +0x2490 every 0xE80, controller colours at +0x7B90); touch screens at 0x6C000, 0x6000 per
-// guest; Jcms rings at 0x7E000, 0x1800 per (pad 0/1, Joy-Con type 0/1) and 0x800 per guest. The readers reach 0x84000. "No GameShare
+// guest; Jcms rings at 0x7E000, 0x1800 per (pad 0/1, controller type 0/1) and 0x800 per guest. The readers reach 0x84000. "No GameShare
 // session" is all zero: every style set 0 (GetGuestPadStyleSet: no pad) and every ring count 0 (the state readers return 0 entries).
 //
-// Hosting a GameShare session (Pokopia: main 0x7101132f60 state 1 nn::streamplay::Initialize, state 2 OpenSessionWithMatchmakeSupport).
+// Hosting a GameShare session (title A: main 0x7101132f60 state 1 nn::streamplay::Initialize, state 2 OpenSessionWithMatchmakeSupport).
 // A console with no guests around shows the matchmaking applet and the player backs out of it; am.cpp ends that applet (0x1000024 /
 // 0x1030024) as cancelled, the SDK returns 0x3D1F and the game (main 0x7101133704) goes back quietly, without the error applet, and
 // tears the session down (nn::streamplay::Finalize). Before that applet every IUserService command on the way must succeed: a failure
@@ -970,16 +970,16 @@ std::shared_ptr<ipc::Service> make_streamplay_user() {
     return s;
 }
 
-// ---- chat:u (Switch 2 GameChat) -----------------------------------------------------------------------------------------------------
-// nn::chat::Initialize (the SDK of newer Switch 2 titles runs it at boot, e.g. Mario Kart World 1.8.0) opens "chat:u" and waits in sm until
+// ---- chat:u (platform 2 GameChat) -----------------------------------------------------------------------------------------------------
+// nn::chat::Initialize (the SDK of newer platform 2 titles runs it at boot, e.g. title C 1.8.0) opens "chat:u" and waits in sm until
 // the service exists; Eglantine NX2_NOTES rows 123-124. Cmd 0 opens a session the SDK keeps using, so it has to be an object; the session's
 // cmd 1 (u32 2 in) returns a copy handle the SDK waits on: an event that never fires (nobody is chatting). Every other command is not
 // implemented and is logged by the stub. The rest of GameChat's start-up (nn::chat::gsv::Initialize: GraphicsSupervisor 1201 / 1202,
-// then camera 601 / 602) is not answered yet: docs/switch2_services_xcheck.md rows 124-127.
+// then camera 601 / 602) is not answered yet: docs/platform2_services_xcheck.md rows 124-127.
 std::shared_ptr<ipc::Service> make_chat_session() {
     auto ev = std::make_shared<ServiceEvent>(false);
     return make_iface("chat:u session", [ev](Service& s) {
-        s.add_cmd(1, "GetEvent (Switch 2, name ours)", [ev](Request& req, Response& rsp) -> uint32_t {
+        s.add_cmd(1, "GetEvent (platform 2, name ours)", [ev](Request& req, Response& rsp) -> uint32_t {
             NXLOG_I("chat", "chat:u session cmd 1 (arg %u): an event that never fires", req.arg<uint32_t>(0));
             const uint32_t h = ev->new_handle();
             if (!h) return kNotSupported;
@@ -991,7 +991,7 @@ std::shared_ptr<ipc::Service> make_chat_session() {
 
 std::shared_ptr<ipc::Service> make_chat_user() {
     auto s = std::make_shared<ipc::Service>("chat:u");
-    s->add_cmd(0, "OpenSession (Switch 2, name ours)", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+    s->add_cmd(0, "OpenSession (platform 2, name ours)", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
         rsp.push_object(make_chat_session());
         return 0;
     });

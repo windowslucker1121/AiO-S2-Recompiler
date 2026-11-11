@@ -7,7 +7,7 @@
 //   --corpus  <corpus dir> [--jobs 4]   decode the whole corpus (every unique block's program range), counts only.
 //   --dump    <code.bin> <ctrl.bin>      print one block.
 //   --census  <corpus dir> --out <census.tsv> [--blocks <blocks.tsv>] [--examples K] [--all-blocks] [--jobs 4]
-//             instruction census of a corpus (Pokopia layout: unique.tsv + code/ + ctrl/; runtime dump layout: manifest.tsv + code_<h>.bin
+//             instruction census of a corpus (title A layout: unique.tsv + code/ + ctrl/; runtime dump layout: manifest.tsv + code_<h>.bin
 //             + ctrl_<h>.bin, duplicate rows folded): one row per opcode + modifier combination with its count, the number of distinct
 //             blocks containing it, blocks per stage, example block hashes (K smallest, default 5; --all-blocks lists every one),
 //             a decode class (ok | partial = a modifier or form the decoder flagged as unknown | undecoded = unknown opcode) and, for
@@ -164,7 +164,7 @@ static class Program
         public ulong ExLo, ExHi;
     }
 
-    /// Corpus rows as (code hash, code path, ctrl path): Pokopia layout (unique.tsv) or runtime dump layout (manifest.tsv, duplicates folded).
+    /// Corpus rows as (code hash, code path, ctrl path): title A layout (unique.tsv) or runtime dump layout (manifest.tsv, duplicates folded).
     static List<(string hash, string code, string ctrl)> CorpusRows(string dir)
     {
         var rows = new List<(string, string, string)>();

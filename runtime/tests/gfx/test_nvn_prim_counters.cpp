@@ -2,7 +2,7 @@
 // NVN primitive counters: NVN_COUNTER_TYPE_PRIMITIVES_GENERATED (13) and NVN_COUNTER_TYPE_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN (14). The
 // replay counts them on the CPU (nvn_replay.cpp, count_primitives): 13 for every draw, 14 only for draws inside a transform feedback
 // section. The table of primitives per draw mode is checked directly (primitives_for, nvn_enums.cpp). The draws use the real
-// position-only vertex shader a656883b0cdb8ebc and the magenta fragment shader 062cfa5657f5388d of Metroid Prime Remastered
+// position-only vertex shader a656883b0cdb8ebc and the magenta fragment shader 062cfa5657f5388d of title E
 // (work/shader_cache); the scene test skips itself when that data is not on this machine.
 #include <cstdio>
 #include <cstring>

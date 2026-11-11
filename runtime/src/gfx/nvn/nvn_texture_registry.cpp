@@ -257,7 +257,7 @@ Ref<Texture> texture_registry_find_alias(const Texture* t) {
     };
     std::lock_guard<std::mutex> lk(g_mu);
     if (t->vpool) {
-        // A texture in a virtual pool has no host storage: the same storage is the same pool and offset. OoT renders its depth into one
+        // A texture in a virtual pool has no host storage: the same storage is the same pool and offset. the game renders its depth into one
         // texture object and samples the same range through another (the water / terrain blend layer reads the scene depth so).
         for (Texture* o : g_virtual) {
             if (o->vpool.get() != t->vpool.get() || o->voffset != t->voffset || !same_layout(o)) continue;

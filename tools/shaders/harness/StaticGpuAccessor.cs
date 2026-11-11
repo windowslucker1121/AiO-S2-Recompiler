@@ -61,7 +61,7 @@ namespace SpirvHarness
             _localX = _localY = _localZ = 1;
             if (Program.IsNvn2(ctrl))
             {
-                // NVN2 (Switch 2) control section, docs/AMPERE.md section 3: work group +0x58..+0x60, shared memory +0x64 (+0x50 is the local
+                // NVN2 (platform 2) control section, docs/AMPERE.md section 3: work group +0x58..+0x60, shared memory +0x64 (+0x50 is the local
                 // memory size, non-zero exactly when the SASS has LDL/STL; docs/nvn2_layout_xcheck.md).
                 if (stage == ShaderStage.Compute)
                 {
@@ -256,7 +256,7 @@ namespace SpirvHarness
             return false;
         }
 
-        // NVN keeps the draw's base vertex, base instance and draw index in c[0] at 0x640/0x644/0x648 and NVN2 shaders read them (OoT's
+        // NVN keeps the draw's base vertex, base instance and draw index in c[0] at 0x640/0x644/0x648 and NVN2 shaders read them (the game's
         // UI glyph pass picks its glyph records with instance + c[0][0x644]); the runtime does not write them, so Ryujinx's
         // DrawParametersReplace reads the Vulkan built-ins (gl_BaseVertex, gl_BaseInstance, gl_DrawID) instead.
         public bool QueryHasConstantBufferDrawParameters()
@@ -271,7 +271,7 @@ namespace SpirvHarness
         public int QueryComputeSharedMemorySize() => _sharedSize;  // 0: the translator uses 4 KB (never happens here)
 
         // Sizes of bindless arrays: pool sizes are draw-time state; a fixed bound makes the SPIR-V valid.
-        // With pool arrays: the sampler id has 12 bits (4096), the texture array covers 65536 ids (OoT's pool: see nvn_pool_sets.cpp; ids past
+        // With pool arrays: the sampler id has 12 bits (4096), the texture array covers 65536 ids (the game's pool: see nvn_pool_sets.cpp; ids past
         // the end are clamped by the translator, the runtime warns when a pool is larger).
         public const int PoolTextureArrayLength = 65536, PoolSamplerArrayLength = 4096;
         public int QuerySamplerArrayLengthFromPool() { DrawTimeQueries.Add("poolSize"); return 4096; }

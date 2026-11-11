@@ -122,7 +122,7 @@ size_t nvnQueueBuilderGetMemorySize(const NVNqueueBuilder* b) { return rd<uint64
 void nvnQueueBuilderSetCommandFlushThreshold(NVNqueueBuilder* b, size_t threshold) { wr<uint64_t>(b, kQFlush, threshold); }
 size_t nvnQueueBuilderGetCommandFlushThreshold(const NVNqueueBuilder* b) { return rd<uint64_t>(b, kQFlush); }
 
-// NVN2 only (not in the NVN1 table): nvnQueueBuilderSetPrimaryQueue(builder, queue). Pokopia calls it once at start-up. It names an
+// NVN2 only (not in the NVN1 table): nvnQueueBuilderSetPrimaryQueue(builder, queue). title A calls it once at start-up. It names an
 // existing queue as the primary one, which the new queue is created next to (NVN2 lets a title have a second queue on the same
 // engine). This back end has one Vulkan queue and replays every submission in order, so there is nothing to select: accepted, not stored
 // (the builder has no spare room for the pointer) and logged the first time.

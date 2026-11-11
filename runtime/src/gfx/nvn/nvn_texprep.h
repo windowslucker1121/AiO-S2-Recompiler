@@ -7,7 +7,7 @@
 // When a job starts (only block-compressed textures, the game's assets; render targets and video planes are not candidates):
 //   * a handle of the texture is bound in a command list being recorded (nvnCommandBufferBindTexture*), which is shortly before the list is submitted;
 //   * the texture look-ahead ([nvn] tex_lookahead, nvn_replay.cpp) finds it among the textures a submitted draw or dispatch reads (handles in uniform
-//     blocks and handle expressions included, which is how OoT names nearly all of its textures);
+//     blocks and handle expressions included, which is how the game names nearly all of its textures);
 //   * the texture is registered in a texture pool and has at least [nvn] tex_prep_early_kb of storage (the big ones are registered long before use);
 //   * a sparse texture that was named by one of the above is written again (tile maps and tile writes arrive in many small steps): the job starts
 //     when the writes have stopped for 40 ms.

@@ -21,12 +21,12 @@ namespace {
 constexpr uint32_t kInvalidCombination = 0xE801;   // kernel result 116 (InvalidCombination); not in kernel.h yet
 
 // Values Switchbrew does not document (it gives names only) are nxrt choices; the comment on each says where a value comes from.
-constexpr uint64_t kCoreMaskAppSwitch2 = 0x3f;                  // Switch 2: cores 0..5 (Pokopia NPDM ThreadInfo cores 0-5)
+constexpr uint64_t kCoreMaskAppSwitch2 = 0x3f;                  // platform 2: cores 0..5 (title A NPDM ThreadInfo cores 0-5)
 constexpr uint64_t kCoreMaskApp = 0x7;                          // nxrt: cores 0..2, the three application cores
 constexpr uint64_t kPriorityMaskApp = 0x0FFFFFFFF0000000ull;    // nxrt: bits 28..59 = HOS priorities 0x1C..0x3B (kernel.h: applications 28..59)
 constexpr uint64_t kAslrRegionAddress = 0x0008000000ull;       // chosen value (Switchbrew: no value given)
 constexpr uint64_t kAslrRegionSize = 0x7FF8000000ull;           // chosen value (Switchbrew: no value given)
-constexpr uint64_t kTotalMemorySwitch2 = 0x2A0000000ull;        // Switch 2 application: 10.5 GiB (nxrt choice; Pokopia alone pools ~8 GiB)
+constexpr uint64_t kTotalMemorySwitch2 = 0x2A0000000ull;        // platform 2 application: 10.5 GiB (nxrt choice; title A alone pools ~8 GiB)
 constexpr uint64_t kTotalMemoryAvailable = 0xCD500000ull;       // chosen value: ~3.2 GiB, like an application ([memory] app_memory_mb overrides)
 constexpr uint64_t kEntropyDefaultSeed = 0x1234567890ABCDEFull; // chosen value
 constexpr uint64_t kGoldenRatio64 = 0x9E3779B97F4A7C15ull;      // used to separate the four RandomEntropy subtypes
@@ -40,15 +40,15 @@ constexpr uint64_t kSubAllCores = 0xFFFFFFFFFFFFFFFFull;        // ThreadTickCou
 uint64_t svc_total_memory() {
     const int64_t mb = config_get_int("memory", "app_memory_mb", 0);
     if (mb > 0) return static_cast<uint64_t>(mb) << 20;
-    // Switch 2 applications get far more memory (12 GiB console): 10.5 GiB, inside nxrt's 12 GiB heap region.
+    // platform 2 applications get far more memory (12 GiB console): 10.5 GiB, inside nxrt's 12 GiB heap region.
     return game::info().platform == game::Platform::Switch2 ? kTotalMemorySwitch2 : kTotalMemoryAvailable;
 }
 namespace {
 uint64_t used_memory() {
     uint64_t images = 0;
     for (Module* m : modules()) images += m->size();          // the kernel counts the mapped code/data of the process as used
-    // plus the main thread's stack, which the kernel takes from the process's memory (main.npdm). This was an invented 64 MiB: Ocarina of
-    // Time checks its HeapDef "Program" budget (137 MiB) against nn::os::QueryMemoryInfo's used size before the heap and aborted.
+    // plus the main thread's stack, which the kernel takes from the process's memory (main.npdm). This was an invented 64 MiB: the game
+    // checks its HeapDef "Program" budget (137 MiB) against nn::os::QueryMemoryInfo's used size before the heap and aborted.
     return svc_current_heap_size() + services::profile().main_thread_stack + images;
 }
 
@@ -87,7 +87,7 @@ uint32_t get_info(uint32_t type, uint32_t handle, uint64_t sub, uint64_t& out) {
         case 9: out = 0; return kernel::kOk;                                  // ResourceLimit: no handle
         case 10: out = 0; return kernel::kOk;                                 // IdleTickCount (nxrt: no idle accounting)
         case 11: {                                                            // RandomEntropy, subtype 0..3
-            if (sub > (game::info().platform == game::Platform::Switch2 ? 7u : 3u)) return kInvalidCombination;   // Switch 1: subtypes 0..3 (Switchbrew)
+            if (sub > (game::info().platform == game::Platform::Switch2 ? 7u : 3u)) return kInvalidCombination;   // platform 1: subtypes 0..3 (Switchbrew)
             uint64_t seed = static_cast<uint64_t>(config_get_int("process", "entropy_seed", static_cast<int64_t>(kEntropyDefaultSeed)));
             out = seed ^ (sub * kGoldenRatio64);
             return kernel::kOk;
@@ -131,7 +131,7 @@ uint32_t get_info(uint32_t type, uint32_t handle, uint64_t sub, uint64_t& out) {
             if (sub != 0) return kInvalidCombination;
             out = 0;
             return kernel::kOk;
-        // Switch 2 kernels (switchbrew SVC, InfoType 29-33, 36-38). The remote region is an address range the SDK builds a
+        // platform 2 kernels (switchbrew SVC, InfoType 29-33, 36-38). The remote region is an address range the SDK builds a
         // 64 KiB-aligned allocator over; nxrt keeps it in the free span below the HLE thunks.
         case 29: if (sub != 0) return kInvalidCombination; out = mem::kRemoteBase; return kernel::kOk;   // RemoteRegionAddress
         case 30: if (sub != 0) return kInvalidCombination; out = mem::kRemoteSize; return kernel::kOk;   // RemoteRegionSize

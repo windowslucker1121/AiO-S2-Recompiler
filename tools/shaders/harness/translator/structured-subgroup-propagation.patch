@@ -1,7 +1,7 @@
 Ryujinx shader translator: AstOptimizer folded a single-assignment value into its uses even when the value is a cross-lane
 operation (ballot, vote, shuffle): a unary operation of an operand counts as "worth propagating" for any number of uses, so a
 ballot the SASS runs with the whole warp was moved into each use, also into an if that only some lanes enter. There it ran
-with those lanes only. Seen in OoT's GPU culling (AGENTS.md A18): f2422a7a appends with "VOTE.ALL R13, PT, P0; @lane!=0 skip;
+with those lanes only. Seen in the game's GPU culling (AGENTS.md A18): f2422a7a appends with "VOTE.ALL R13, PT, P0; @lane!=0 skip;
 POPC R13 -> ATOMG.ADD count; SHFL base from lane 0; slot = base + POPC(R13 & ltmask)"; the translated code took the ballot
 inside the lane-0 branch, so lane 0 reserved one slot per warp while every lane with P0 wrote its record at base + rank: the
 records overwrote each other differently every frame (46 records per frame, which ones varied), and the mesh draw counts

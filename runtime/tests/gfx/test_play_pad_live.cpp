@@ -37,7 +37,7 @@ namespace play = nxrt::play;
 constexpr uint64_t kBase = 0x5B00000000ull;
 
 // The registered game's frame boundary (GamePlay::frame_update, main-relative): play mode samples the pads in its entry hook there.
-// oot 0x3b4ea90; the upstream mpr's was 0x3c81c8. 0 when the game has no play table (the cases then skip).
+// oot 0x3b4ea90; title E's was 0x3c81c8. 0 when the game has no play table (the cases then skip).
 uint64_t frame_update() {
     const nxrt::play::GamePlay* gp = nxrt::game::info().play;
     return gp ? gp->frame_update : 0;

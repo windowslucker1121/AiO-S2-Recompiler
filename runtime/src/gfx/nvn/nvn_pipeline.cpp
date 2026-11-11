@@ -320,7 +320,7 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words, const ch
     }
     // [nvn] ballot_fix (as pokopia-recomp 0.7.0): NVN's warp-aggregated atomic counters made per lane (spirv_ballot_per_lane). After
     // some lanes have returned, their ballot(true) can stop NVIDIA GPUs for good (device lost). auto (default): NVIDIA (vendor 0x10de)
-    // only; the rewrite assumes 32-lane subgroups. on: any GPU. off: never. 57 OoT shaders have the pattern (the culling 4c1e8564 too).
+    // only; the rewrite assumes 32-lane subgroups. on: any GPU. off: never. 57 the game shaders have the pattern (the culling 4c1e8564 too).
     static const bool ballot_fix = [] {
         const std::string v = config_get_str("nvn", "ballot_fix", "auto");
         const uint32_t vendor = device().properties().vendorID;
@@ -427,7 +427,7 @@ static VkShaderModule no_output_module(const ShaderInfo* fs) {
 
 // The tone-map fragment shader runs as its HDR variant while the HDR scene is active (extras/hdr_nvn.h); every other fragment shader is the translated one.
 static VkShaderModule hdr_fragment_module(const ShaderInfo* fs) {
-    if (!extras::hdr_scene_active() || fs->spirv.size() > 65536) return shader_module(fs);   // Pokopia's composite tone map is about 24.5k words
+    if (!extras::hdr_scene_active() || fs->spirv.size() > 65536) return shader_module(fs);   // title A's composite tone map is about 24.5k words
     std::lock_guard<std::recursive_mutex> lk(g_module_mu);
     static std::unordered_map<const ShaderInfo*, VkShaderModule> cache;
     auto it = cache.find(fs);
@@ -1074,7 +1074,7 @@ VkPipeline create_compute(const ShaderInfo* cs, VkShaderModule m, VkPipelineLayo
 }
 
 // Compute programs with this much SPIR-V are built on a thread of their own, and their dispatches are left out until the pipeline is there.
-// OoT's tensor-core upscaler programs (fea98fe7, f90d726d: 4-5 MB of SPIR-V each) took 116 s in the NVIDIA driver the first time, all of it
+// the game's tensor-core upscaler programs (fea98fe7, f90d726d: 4-5 MB of SPIR-V each) took 116 s in the NVIDIA driver the first time, all of it
 // on the render thread (no frame for two minutes). The pipeline cache keeps them afterwards. [nvn] compute_background_spirv_kb (0 = never).
 struct ComputeBuild {
     std::thread thread;

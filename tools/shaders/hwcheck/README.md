@@ -24,7 +24,7 @@ Options:
 - `--game-corpus <dir>`: also take encodings from a game's shader corpus itself (`unique.tsv`, `code/`, `ctrl/`, as
   `scripts/extract_generic.py` writes it), decoded with our decoder: per shape the words found in the most blocks (data past a block's
   code decodes to illegal forms and is mostly unique; words in only one block are skipped). Read at run time only. Use it where no
-  nvdisasm oracle exists (OoT): `--no-corpus --game-corpus work\shaders\oot\corpus --only "H(ADD2|MUL2|FMA2)"`.
+  nvdisasm oracle exists (the game): `--no-corpus --game-corpus work\shaders\oot\corpus --only "H(ADD2|MUL2|FMA2)"`.
 - The CUDA tools (`ptxas`, `cuobjdump`, `nvdisasm`) can be the CUDA 13.3 redistributables (`cuda_nvcc`, `cuda_cuobjdump`,
   `cuda_nvdisasm` archives from developer.download.nvidia.com/compute/cuda/redist, SHA-256 from `redistrib_13.3.1.json`) copied into
   one `bin` folder that `CUDA_PATH` names; no toolkit install is needed.
@@ -129,14 +129,14 @@ and B). The translator's order then agrees with the CPU reference within the HMM
 sums, the tensor core's own rounding; F32: bit-identical to the scalar emulation).
 
 - **Packed-half arithmetic.** The variant also computes HADD2 / HMUL2 / HFMA2 with a half result in float16 (one rounding)
-  instead of fp32 arithmetic rounded twice and, for HFMA2, an fp64 round-to-odd step. `--coopmat` checks nine forms from OoT's
+  instead of fp32 arithmetic rounded twice and, for HFMA2, an fp64 round-to-odd step. `--coopmat` checks nine forms from the game's
   network passes against the scalar emulation on hwcheck's input generator (edge values, denormals): bit-identical (HADD2 may differ
   by 1 ulp, the emulation's double rounding; none seen on the RTX 4080).
 - `hwcheck --pipeline-stats <a.spv> ...` prints the driver's statistics of compute modules with the network passes' descriptor layout
   (VK_KHR_pipeline_executable_properties: registers, binary size, shared memory) and the pipeline build time.
 ## Findings (2026-11-08, RTX 4080, driver 610.88)
 
-- **Float16 variant** (`NXRT_HARNESS_F16=1`, `--game-corpus` on OoT's corpus, `--only "H(ADD2|MUL2|FMA2)"`, seeds 1-5): every
+- **Float16 variant** (`NXRT_HARNESS_F16=1`, `--game-corpus` on the game's corpus, `--only "H(ADD2|MUL2|FMA2)"`, seeds 1-5): every
   packed-half form that could be run passes bit for bit against the hardware, as the plain translation does: HADD2, HADD2.FTZ.SAT,
   HADD2.F32 (fp32 result: no float16 arithmetic), HMUL2, HFMA2, HFMA2.RELU (immediate and register forms, .H0_H0/.H1_H1 swizzles,
   negation), HFMA2.BF16_V2. The other corpus words of these opcodes are data decoded as instructions (nvdisasm refuses them or reads
@@ -156,4 +156,4 @@ sums, the tensor core's own rounding; F32: bit-identical to the scalar emulation
 
 - A full run shows the current state in `report.txt`. Forms the front end still refuses: DFMA with a directed rounding mode, F2FP.SATFINITE, F2FP.MERGE_C with RELU/BF16/directed modes, VABSDIFF with a predicate destination, ATOMS/ATOMG CAS and 64-bit atomics.
 - HMMA .BF16 is refused by the front end: a denormal bf16 input becomes an fp32 denormal, which the host flushes (no DenormPreserve) and the tensor core keeps. No corpus uses it. 1684/TF32 and LDSM.M816/M832, MOVM.M832/M864 are decoded but not translated.
-- SURED (Mario Kart World) is decoded and translated as an image atomic, but this oracle has no image test, so it is not checked here.
+- SURED (title C) is decoded and translated as an image atomic, but this oracle has no image test, so it is not checked here.

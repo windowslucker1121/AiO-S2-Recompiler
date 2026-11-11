@@ -112,7 +112,7 @@ Act Engine::frame(bool menu_up, const mm::Geometry& g, const Adapter& a) {
         return Act::None;
     }
     // The mouse is not the device in use and nothing is being carried out for it: the elements only feed the menu gate and the log, so the
-    // scan (a walk of every layout in the game's UI pools) runs four times a second, not every frame. While Pokopia loads its screens the
+    // scan (a walk of every layout in the game's UI pools) runs four times a second, not every frame. While title A loads its screens the
     // per-frame scan was up to half of the main thread's time. The last scan's elements and result stand in between.
     if (!snap.shown && !snap.click && !snap.held && !target_ && !pending_confirm_) {
         const uint64_t now = static_cast<uint64_t>(

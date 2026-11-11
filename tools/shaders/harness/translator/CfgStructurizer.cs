@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-// Structurizer for reducible control flow graphs (OoT register pressure, 2026-11-09).
+// Structurizer for reducible control flow graphs (the game register pressure, 2026-11-09).
 //
 // Ryujinx's structurizer (StructuredProgramContext + GotoElimination) turns every branch that does not land inside the current
-// if into a goto and then removes the gotos with the "Taming Control Flow" moves. For the SASS of OoT's material shaders (a light
+// if into a goto and then removes the gotos with the "Taming Control Flow" moves. For the SASS of the game's material shaders (a light
 // loop with a BRX switch whose cases leave to a common merge from different nesting depths) that produced five do-while loops nested
 // in the light loop, each with a flag condition, and many "if (!flag)" guards; NVIDIA's compiler then needed 235-255 registers for
 // shaders whose original code uses 94.

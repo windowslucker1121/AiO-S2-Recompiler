@@ -145,7 +145,7 @@ bool thread_join(uint32_t handle, uint32_t timeout_ms);    // host-side wait for
 void kernel_reset();                                       // tests: join/forget threads, clear handles, sync state (no thread may run guest code)
 uint64_t thread_count_running();                           // started and not yet exited
 bool thread_set_priority(KThread& t, int hos_prio);       // updates the object and the host thread
-int app_core_count();                 // application cores: 3 (Switch 1) or 6 (Switch 2)
+int app_core_count();                 // application cores: 3 (platform 1) or 6 (platform 2)
 bool thread_set_core_mask(KThread& t, int ideal_core, uint64_t mask);   // console cores; false when mask has no usable core
 
 // ---- scheduling model (console cores) ----------------------------------------------------------------------------------------
@@ -155,7 +155,7 @@ bool thread_set_core_mask(KThread& t, int ideal_core, uint64_t mask);   // conso
 struct SchedInfo {
     bool active = false;                 // false: fewer usable host processors than console cores, or [sched] console_cores = 0
     bool soft = false;                   // [sched] affinity = soft: affinity `pool`, ideal processor = the core's processor
-    int cores = 3;                       // application cores of the console: 3 (Switch 1), 6 (Switch 2)
+    int cores = 3;                       // application cores of the console: 3 (platform 1), 6 (platform 2)
     uint64_t host_masks[6] = {};         // host processor per console core (the first `cores` are used): the affinity (strict) or ideal processor (soft)
     uint64_t pool = 0;                   // host processors a guest thread may use under soft (and during a starvation boost under strict)
     int slot = -1;                       // processor slot taken (-1: shared / explicit mask)
@@ -181,8 +181,8 @@ void sched_reset_for_tests();            // forget the slot and re-read the conf
 
 // ---- time --------------------------------------------------------------------------------------------------------------------
 uint64_t system_tick();                  // the console tick (tick_hz()), from QueryPerformanceCounter
-constexpr uint64_t kTickHzSwitch1 = 19200000;   // Switch 1 system tick (CNTFRQ_EL0)
-constexpr uint64_t kTickHzSwitch2 = 31250000;   // Switch 2 system tick (SDK 20.5 for Switch 2 uses 31.25 MHz)
+constexpr uint64_t kTickHzSwitch1 = 19200000;   // platform 1 system tick (CNTFRQ_EL0)
+constexpr uint64_t kTickHzSwitch2 = 31250000;   // platform 2 system tick (SDK 20.5 for platform 2 uses 31.25 MHz)
 uint64_t tick_hz();                      // the registered game's platform tick frequency
 void sleep_ns(int64_t ns);               // high-resolution sleep; <= 0 yields
 

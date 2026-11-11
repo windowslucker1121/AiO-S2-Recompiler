@@ -452,7 +452,7 @@ void show_dialog(std::unique_ptr<Dlg> d) {
 class GamepadDlg final : public Dlg {
     enum { kPads = 100, kTest, kLabel, kPosition, kDzL, kDzR, kTrig, kRumbleK, kGyroK, kRumble, kGyro, kList, kRebind, kReset, kStatus,
            kDzLV, kDzRV, kTrigV, kRumbleV, kGyroV };
-    int rebind = -1;          // the Switch button row waiting for a pad button
+    int rebind = -1;          // the console button row waiting for a pad button
     std::string last_pads;
 
 public:
@@ -460,7 +460,7 @@ public:
     SIZE size() const override { return {620, 736}; }
     void build() override {
         const Settings s = host().settings();
-        label(L"Connected controllers (every one drives the same Switch pad):", 12, 10, 590);
+        label(L"Connected controllers (every one drives the same console pad):", 12, 10, 590);
         add(L"STATIC", L"", SS_LEFT | SS_SUNKEN, 12, 32, 594, 58, kPads);
         button(L"Test rumble", kTest, 12, 96, 120);
         label(L"Face buttons:", 12, 132, 100);
@@ -485,14 +485,14 @@ public:
         check(L"Rumble", kRumble, 12, y, 120, s.pad.rumble);
         check(L"Gyro (motion sensor)", kGyro, 150, y, 220, s.pad.gyro);
         y += 34;
-        label(L"Button mapping: select a Switch button, choose Rebind and press a controller button (the two swap jobs).", 12, y, 594, 36);
+        label(L"Button mapping: select a console button, choose Rebind and press a controller button (the two swap jobs).", 12, y, 594, 36);
         y += 38;
         HWND lv = add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, y, 594, 280, kList);
         ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
         LVCOLUMNW c = {};
         c.mask = LVCF_TEXT | LVCF_WIDTH;
         c.cx = sc(140);
-        c.pszText = const_cast<wchar_t*>(L"Switch button");
+        c.pszText = const_cast<wchar_t*>(L"Console button");
         lv_insert_column(lv, 0, &c);
         c.cx = sc(430);
         c.pszText = const_cast<wchar_t*>(L"Pressed by");
@@ -548,7 +548,7 @@ public:
             case kGyro: { const bool on = checked(kGyro); change([on](Settings& s) { s.pad.gyro = on; }); break; }
             case kRebind: {
                 const int row = ListView_GetNextItem(item(kList), -1, LVNI_SELECTED);
-                if (row < 0) { text(kStatus, "Select a Switch button first."); break; }
+                if (row < 0) { text(kStatus, "Select a console button first."); break; }
                 rebind = row;
                 host().begin_pad_capture();
                 text(kStatus, std::string("Press a controller button (or pull a trigger) for Switch ") + kSwitchBtns[row].name + " ...");
@@ -580,7 +580,7 @@ public:
         std::string t;
         for (size_t i = 0; i < live.pad_list.size(); ++i) {
             const PadLive& p = live.pad_list[i];
-            static const char* const kKinds[] = {"gamepad", "Xbox", "PlayStation", "Nintendo"};
+            static const char* const kKinds[] = {"gamepad", "Xbox", "PlayStation", "console layout"};
             const std::string pressed = sources_text(p.sources);
             char b[512];
             std::snprintf(b, sizeof b, "%zu. %s (%s, gyro %s, rumble %s): %s\r\n", i + 1, p.name.c_str(), kKinds[std::clamp(p.kind, 0, 3)], p.gyro ? "yes" : "no",

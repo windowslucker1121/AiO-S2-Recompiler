@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Ocarina of Time, the core part of the game module (oot_game.h): the data part plus the title facts. Needs the runtime library, not
+// the game, the core part of the game module (oot_game.h): the data part plus the title facts. Needs the runtime library, not
 // the graphics one. No test probes or poll sleeps yet.
 #include "oot_game.h"
 
@@ -46,7 +46,7 @@ void title_defaults(services::TitleProfile& p) {
 // The framework's per-frame virtual (main+0x3b4ea90, oot_game.cpp kFrameUpdate) runs the calc, then turns a target frame rate into the step
 // everything else multiplies its per-frame motion by: scale = 60.0f / (float)fps, with fps the u32 at this+0x2c8, stored as a float global
 // (main+0x4d41fc8; 1.0 at 60 fps, 2.0 at 30). The calc runs before that store, so it reads the scale the previous frame left. Retail keeps fps
-// at 60, so the game advances 1/60 s per presented frame. Real-time step ([time] mode = real, the OoT default): at the entry of that function
+// at 60, so the game advances 1/60 s per presented frame. Real-time step ([time] mode = real, the `oot` default): at the entry of that function
 // (before the calc) the scale is set to measured step * 60, so the calc moves by real time, and the fps field to the nearest whole rate, so the
 // function's own store after the calc lands close to it. Physics, animation, the camera and the event timeline all follow it (walking and the
 // camera checked at 10 and 27 fps); the movie player does not (one picture per frame), hence fixed_step_during_movies.
@@ -80,7 +80,7 @@ const timestep::Sites& step_sites() {
         s.apply_step = &apply_step;
         // fps_limit = auto follows the display's refresh rate. The movie player shows one picture per frame, so while a movie shows the
         // limiter holds the console's 60 anyway (play.cpp movie_cap, timestep::movie_showing). Measured 2026-11-09 at 1920x1080:
-        // Link's house 64 fps uncapped with a 1% low of 48-53 (vs 60 / 41-44 capped).
+        // the house scene 64 fps uncapped with a 1% low of 48-53 (vs 60 / 41-44 capped).
         s.cap_at_display_rate = true;
         s.fixed_step_during_movies = true;
         return s;

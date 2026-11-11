@@ -12,7 +12,7 @@ Code: `src/gfx/nvn/nvn_capture.cpp` (recorder, file format, loader, replay loop)
 
 While the game runs, one of:
 
-- `tools/ai` (MCP `game` server): `capture_frame(name="deku", instance="...")`. It returns the capture folder.
+- `tools/ai` (MCP `game` server): `capture_frame(name="tree", instance="...")`. It returns the capture folder.
 - A request file named `capture_frame` (any process) or `capture_frame.<pid>` in the run's request folder: the exe's folder, or the
   instance folder of a named run. Its first line names the capture.
 - `[capture] at_present = N`: the frame after present N, once.
@@ -67,7 +67,7 @@ What works on a replay, unchanged:
 - Memory is read once the frame's last submission has completed, except the ranges the frame's GPU work writes (saved at their first
   write, see `memory.bin`). CPU data the game already rewrote for the next frame (a uniform ring with fewer slots than frames in flight)
   can differ from what the frame used.
-- Why frame-start contents (2026-11-07): OoT's volumetric fog accumulates into its 3D volumes in place and clears accumulators on the CPU.
+- Why frame-start contents (2026-11-07): the game's volumetric fog accumulates into its 3D volumes in place and clears accumulators on the CPU.
   Saved as the frame left them, every replay loop added a second frame of fog on top: a thick haze (SSIM 0.53-0.58 against
   `reference.png`), and without `[capture] reset` a white-out after a few loops. With the frame-start contents: SSIM 0.86-0.88.
   The capture log says `frame start: N rendered images read` and `memory the frame writes: N ranges ... saved as they were when the

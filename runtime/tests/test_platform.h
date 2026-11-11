@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Running test code under one platform profile. The test executables register the test game (CMakeLists.txt NXRT_TEST_GAME), so
-// game::info().platform is that game's: Switch 1 for the upstream mpr, Switch 2 for oot. A test whose expectations belong to one console
+// game::info().platform is that game's: platform 1 for title E, platform 2 for oot. A test whose expectations belong to one console
 // says so with ScopedPlatform (Switch1 or Switch2) instead of relying on the registered game.
 //   ScopedPlatform p(Platform::Switch2);   in-process, restored at scope end. Covers what reads game::info().platform on every call
 //                                          (core count, GetInfo CoreMask, RandomEntropy subtypes ...).

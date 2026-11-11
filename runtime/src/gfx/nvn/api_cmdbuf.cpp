@@ -4,10 +4,10 @@
 //
 // Command memory model. The game hands over memory (AddCommandMemory / AddControlMemory), reads how much is used and free, and
 // registers a memory callback that the console's driver calls when a recording runs out: the game then adds the next chunk
-// itself (Pokopia moves its own command ring there). The back end records into host lists, so the console's usage is modelled:
+// itself (title A moves its own command ring there). The back end records into host lists, so the console's usage is modelled:
 //   command memory: every record costs an estimate of the command words it would write (8 bytes plus its inline data, rounded
 //     to the 4-byte command alignment), charged before it is written. The estimate stays below the console's, so the callback
-//     never fires where the console's would not (several of Pokopia's buffers have a callback whose handler is null).
+//     never fires where the console's would not (several of title A's buffers have a callback whose handler is null).
 //   control memory: the entries the sdk writes (sdk 0x5C4D20 BeginRecording, 0x5C4DE0 EndRecording, 0x5C49C0 AddCommandMemory,
 //     0x5C63F8 FenceSync, 0x5C6640 WaitSync, 0x5C5740 CallCommands): BeginRecording 16 bytes, EndRecording 8, a command segment
 //     32 bytes when it opens a group, 24 more in an open group, nothing when it continues the last segment; FenceSync and WaitSync

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Game-independent NVN2 (Switch 2) shader extractor: finds every NVN2 shader block in a romfs and the ExeFS modules by the
+"""Game-independent NVN2 (platform 2) shader extractor: finds every NVN2 shader block in a romfs and the ExeFS modules by the
 control section's signature, recovers its code area from the program record that points at it, and writes the Ampere
 corpus layout the translator reads (the layout of the old KTGL extractor): code/<h>.bin, ctrl/<h>.bin,
 glslc/<h>.bin (whole GLSLC output, when the block sits in one), manifest.tsv (one row per occurrence), unique.tsv (one row
@@ -17,8 +17,8 @@ control length u32 at +0x30 (0xd8 + optional tail) repeated at +0x98, program le
 +0x3c/+0x40, code area length +0x44, stage u16 +0x56.
 
 Code area: every NVN2 producer seen keeps a program record {control offset, code offset, code length, control length} with
-both offsets from one base: the GLSLC output's GPU code section header (u32 fields, base = section data; KTGL/Pokopia) and
-BNSH program records (u64 offsets, base = the 'BNSH' magic; Nintendo EPD/Bananza). The (code length, control length) pair
+both offsets from one base: the GLSLC output's GPU code section header (u32 fields, base = section data; KTGL/title A) and
+BNSH program records (u64 offsets, base = the 'BNSH' magic; the platform EPD/title B). The (code length, control length) pair
 is searched next to each control section's own values (within 16 MiB). Each record votes for every base it could have
 (control sections with its lengths, minus its control offset): the true base of a container gets a vote from each of its
 records. The best-voted, then nearest, record whose code area passes the content check wins, with

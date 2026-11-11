@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // NVN scene oracles, render state: depth test and depth write order, blending (funcs, equations, blend constants), channel masks,
 // stencil, scissored / multi-target / integer clears, polygon offset and logic op. Every scene is drawn with REAL translated
-// shaders of Metroid Prime Remastered (work/shader_cache): the position-only vertex shader a656883b0cdb8ebc (gl_Position =
+// shaders of title E (work/shader_cache): the position-only vertex shader a656883b0cdb8ebc (gl_Position =
 // attribute 0), and constant-colour fragment shaders 062cfa5657f5388d (magenta 1,0,1,1), f73f4dbe319ac111 (red 1,0,0,1),
 // d46b10898ec7c247 (black 0,0,0,1), 42ec6ac7b60dc032 (magenta with alpha 0.5). The frame is read back and compared pixel by pixel
 // with values computed from the geometry. Skipped when the shader data is not on this machine.

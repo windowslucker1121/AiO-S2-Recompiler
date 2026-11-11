@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The menu pointer on KTGL screen layouts (menu_ktgl.h): the KTGL adapter of the menu pointer engine (menu_pointer.h). Written against
-// Pokopia 2.0.1 (the addresses in the comments are in its main; the offsets themselves come from the game's Config).
+// title A 2.0.1 (the addresses in the comments are in its main; the offsets themselves come from the game's Config).
 //
 // A KTGL layout object holds its panes in a list, each pane has a name, a size and a world matrix in a 1920x1080 canvas (origin at the
 // centre, y up). The game itself never hit-tests them for its menus (the engine's script call kids::placeable::screenlayout::DoPaneHitTest

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Checks make_manifest on synthetic dumps (made-up NSO headers and NPDM; no game data): modules, bases, indices, units, npdm facts,
-the platform rule (SDK 20+ or ZBIC = Switch 2), hashes, and that the result reads as TOML with what game_build.py needs.
+the platform rule (SDK 20+ or ZBIC = platform 2), hashes, and that the result reads as TOML with what game_build.py needs.
   python tools/extract/tests/test_make_manifest.py
 """
 import hashlib
@@ -50,7 +50,7 @@ def dump(root, sdk_text, zbic=False, subsdks=(0,), version=131072):
     e = os.path.join(root, 'updates', str(version), 'exefs')
     os.makedirs(e)
     files = {'main': nso(45000 * 4 * 3 + 4, zbic=zbic, build_id=bytes(range(20))), 'rtld': nso(0x4000),
-             'sdk': nso(45000 * 4 + 8, extra=b'\0SDK MW+Nintendo+NintendoSdk_nnSdk-' + sdk_text + b'-Release\0'),
+             'sdk': nso(45000 * 4 + 8, extra=b'\0SDK MW+Vendor+NintendoSdk_nnSdk-' + sdk_text + b'-Release\0'),
              'main.npdm': npdm(0x0123456789ABC000)}
     for i in subsdks:
         files['subsdk%d' % i] = nso(0x1000)
@@ -62,7 +62,7 @@ def dump(root, sdk_text, zbic=False, subsdks=(0,), version=131072):
 
 def main():
     with tempfile.TemporaryDirectory() as t:
-        # Switch 2 by its SDK version; a subsdk past subsdk0 goes after rtld
+        # platform 2 by its SDK version; a subsdk past subsdk0 goes after rtld
         dump(os.path.join(t, 'a'), b'Generic_22_2_8', subsdks=(0, 1))
         text, facts = make_manifest.make(os.path.join(t, 'a'), name='Test Game')
         m = tomllib.loads(text)
@@ -87,14 +87,14 @@ def main():
         assert set(files) == {'main', 'rtld', 'sdk', 'subsdk0', 'subsdk1', 'main.npdm'}
         assert files['sdk'] == hashlib.sha256(open(os.path.join(e, 'sdk'), 'rb').read()).hexdigest()
 
-        # Switch 1 by its SDK version, the ExeFS folder itself as input
+        # platform 1 by its SDK version, the ExeFS folder itself as input
         e = dump(os.path.join(t, 'b'), b'16_2_12', subsdks=())
         text, facts = make_manifest.make(e)
         m = tomllib.loads(text)
         assert facts['platform'] == 'switch1' and m['game']['platform'] == 'switch1' and m['title']['firmware'] == '16.0.0', facts
         assert [x['name'] for x in m['module']] == ['main', 'sdk', 'rtld']
 
-        # ZBIC main = Switch 2 even without a readable SDK string
+        # ZBIC main = platform 2 even without a readable SDK string
         dump(os.path.join(t, 'c'), b'x', zbic=True, subsdks=())
         assert make_manifest.make(os.path.join(t, 'c'))[1]['platform'] == 'switch2'
 

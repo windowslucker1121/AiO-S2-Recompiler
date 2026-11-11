@@ -38,7 +38,7 @@ void sleep_ns(int64_t ns) {
         yield_host();
         return;
     }
-    // Short sleeps (polls such as Pokopia's GPU-fence wait, 100 us a round) overshoot to about half a millisecond on the timer: yield until the
+    // Short sleeps (polls such as title A's GPU-fence wait, 100 us a round) overshoot to about half a millisecond on the timer: yield until the
     // deadline instead. Longer ones keep the timer (no busy waiting while a thread idles).
     if (ns <= 200000) {
         LARGE_INTEGER f, s, n;

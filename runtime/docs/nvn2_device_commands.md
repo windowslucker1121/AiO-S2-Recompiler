@@ -1,10 +1,10 @@
 # NVN2 device commands
 
-Goal 19 of the Switch 2 plan. NVN2 has a device command buffer: memory the GPU fills with command words, which a command buffer then runs
-(`nvnCommandBufferSubmitDeviceCommands`). This page is what the sdk code (Pokopia, NintendoSDK_NVN-20_5_25, `work/ida/sdk`) says about it, how the
+Goal 19 of the platform 2 plan. NVN2 has a device command buffer: memory the GPU fills with command words, which a command buffer then runs
+(`nvnCommandBufferSubmitDeviceCommands`). This page is what the sdk code (title A, SDK_NVN-20_5_25, `work/ida/sdk`) says about it, how the
 back end replays it, and what is still open. Addresses are sdk-module offsets (IDA image base 0x7500000000).
 
-No game we have uses these functions: Pokopia and Yoshi only fetch them in `nvnLoadCProcs` (no call site), so nothing here has been compared with a
+No game we have uses these functions: title A and title I only fetch them in `nvnLoadCProcs` (no call site), so nothing here has been compared with a
 real stream. The facts marked *sdk* are read off the sdk's functions; *inferred* means a reading that fits the code but is not proven.
 
 ## Entry points

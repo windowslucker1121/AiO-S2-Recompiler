@@ -3,11 +3,11 @@
 
 Adapted from smo-recomp tools/lifter/recomp.py (GPL-3.0-or-later: Env, lift_function, cmd_full2, cmd_cover), with:
   * an `Image` (image.py) in place of module globals, so several modules lift in one process and tests lift ELFs;
-  * a per-game `GameConfig` (config.py) in place of SMO-specific rules;
+  * a per-game `GameConfig` (config.py) in place of rules written for one game;
   * C++ landing-pad resume entries (`u_<entry>(c, rp)`), after ssbu-recomp tools/lifter/recomp_eh.py (GPL-3.0-or-later);
   * jump tables resolved to bounded switches (jumptables.py, after SuperMarioWonderRecomp's resolver, MIT);
   * output sharded into a fixed number of translation units (for CMake) or by guest address (for stable files);
-  * a module descriptor `nxmod_<name>` (ctx.h: NxModule) instead of smo's loose tables.
+  * a module descriptor `nxmod_<name>` (ctx.h: NxModule) instead of smo-recomp's loose tables.
 
 Generated files, in <outdir>:
     c_<NNN>.cpp   the lifted functions (shards)        funcs.h     declarations of every f_<addr> / u_<addr>

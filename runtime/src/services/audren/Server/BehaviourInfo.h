@@ -37,7 +37,7 @@ class BehaviourInfo {
     // Get the revision number from the revision magic.
     static constexpr int32_t GetRevisionNumber(int32_t revision) { return (revision - BaseRevisionMagic) >> 24; }
 
-    // Switch 2 SDKs tag their native renderer with 'REv' (lower-case v) + the revision digit instead of 'REV', and the native revision goes
+    // platform 2 SDKs tag their native renderer with 'REv' (lower-case v) + the revision digit instead of 'REV', and the native revision goes
     // one past ours (NativeLastRevision, 16; Eglantine NX2_NOTES rows 38-39). GetRevisionNumber already reads such a tag (the case bit sits
     // below the shifted-out bytes); only the validity check and the update-header comparison need to know about it.
     static constexpr int32_t NativeCaseBit = 0x20 << 16;   // 'v' - 'V'

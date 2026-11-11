@@ -814,7 +814,7 @@ void gpl_program(const ShaderInfo* const stages[6], bool covered) {
     std::lock_guard<std::mutex> lk(g_mu);
     if (g_stop) return;
     ++g_stats.prog_set;
-    // A program of one stage (Pokopia sets its vertex and fragment programs apart) says nothing about the pair a draw will use; the parts of
+    // A program of one stage (title A sets its vertex and fragment programs apart) says nothing about the pair a draw will use; the parts of
     // the pairs the key file knows are built from boot (gpl_prebuild), new pairs when a draw first needs them.
     if (!stages[0] || !stages[1]) {
         ++g_stats.prog_single;

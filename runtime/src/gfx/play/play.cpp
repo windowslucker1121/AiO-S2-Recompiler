@@ -170,7 +170,7 @@ public:
     bool pad_look(bool gyro_enabled) const {
         return std::abs(right_y_.load(std::memory_order_relaxed)) > 650 || (gyro_enabled && gyro_pitch_.load(std::memory_order_relaxed) > 0.02f);
     }
-    // The right stick as the game gets it (dead zone, invert and sensitivity applied), -1..1, + = right and up: the alternate body's camera (mpr: the morph ball camera) orbits with it.
+    // The right stick as the game gets it (dead zone, invert and sensitivity applied), -1..1, + = right and up: the alternate body's camera (title E: the morph ball camera) orbits with it.
     void right_stick(float* x, float* y) const {
         *x = right_x_f_.load(std::memory_order_relaxed);
         *y = right_y_f_.load(std::memory_order_relaxed);
@@ -250,7 +250,7 @@ struct G {
     bool was_in_game = false;
     float mouse_x = 0, mouse_y = 0;
     bool mouse1 = false;
-    uint32_t jc2_buttons = 0;            // host mouse buttons as nn::hid::MouseButton bits, for the Joy-Con 2 mouse (hid jc2_mouse.h)
+    uint32_t jc2_buttons = 0;            // host mouse buttons as nn::hid::MouseButton bits, for the platform 2 controller mouse (hid jc2_mouse.h)
     float jc2_wheel_x = 0, jc2_wheel_y = 0;   // wheel notches since the last feed
     uint64_t last_status_ns = 0;
     bool warned_thread = false;
@@ -348,7 +348,7 @@ void apply_frame_cap(const Settings& s) {
     if (cap < 0) {
         // fps_limit = auto: the display's refresh rate (no limit while it is unknown, e.g. headless runs) for a game whose frame step
         // follows real time (timestep sites). A game without them advances one fixed 1/60 s step per frame, as on the console, where the
-        // 60 Hz display paces it: there auto means 60, whatever the monitor runs at. OoT on a Remote Desktop display (32 Hz) ran at 32 fps,
+        // 60 Hz display paces it: there auto means 60, whatever the monitor runs at. the game on a Remote Desktop display (32 Hz) ran at 32 fps,
         // its 60 fps movies at half speed against their voice lines (A11); a 144 Hz monitor would have run it 2.4 times too fast.
         // A game with sites that still advances something per frame (Sites::cap_at_display_rate false) stays at the console's rate.
         const timestep::Sites* ts = game::info().timestep;
@@ -555,9 +555,9 @@ bool game_menu_over_value() {
     return gp && gp->menu_active && gp->menu_over_value && gp->menu_active() && gp->menu_over_value();
 }
 
-// The Joy-Con 2 mouse is on its surface while the game is in play (menus and the map keep their bindings and the menu pointer).
-// [input] jc2_clicks: "both" (default) also hands clicks to the bindings (a real Joy-Con 2 sends its buttons as npad R/ZR),
-// "device" sends them to the Joy-Con mouse only.
+// The platform 2 controller mouse is on its surface while the game is in play (menus and the map keep their bindings and the menu pointer).
+// [input] jc2_clicks: "both" (default) also hands clicks to the bindings (a real platform 2 controller sends its buttons as npad R/ZR),
+// "device" sends them to the controller mouse only.
 bool jc2_owns_clicks() {
     G& st = g();
     static const bool device_only = config_get_str("input", "jc2_clicks", "both") == "device";
@@ -659,7 +659,7 @@ void handle_event(const input::Event& e, uint64_t now) {
             if (e.u.button.button == 1) st.mouse1 = true;
             st.jc2_buttons |= jc2_button_bit(e.u.button.button);
             if (!menu_blocked) mm::pointer().on_button(e.u.button.button, true);
-            // While the Joy-Con 2 mouse owns the mouse in play, the left and right buttons belong to the device alone (the middle button stays
+            // While the platform 2 controller mouse owns the mouse in play, the left and right buttons belong to the device alone (the middle button stays
             // the mouse-mode key). A release is always passed on: it only matters when the press was seen before the device took over.
             if (!menu_blocked && !(jc2_owns_clicks() && (e.u.button.button == 1 || e.u.button.button == 3))) st.engine->mouse_button(e.u.button.button, true, now);
             break;
@@ -673,7 +673,7 @@ void handle_event(const input::Event& e, uint64_t now) {
             if (menu_blocked) break;
             st.jc2_wheel_x += e.u.wheel.dx;
             st.jc2_wheel_y += e.u.wheel.dy;
-            if (jc2_owns_clicks()) break;           // the wheel goes to the Joy-Con 2 mouse only
+            if (jc2_owns_clicks()) break;           // the wheel goes to the platform 2 controller mouse only
             const float dy = e.u.wheel.dy;
             // the map: the wheel zooms (the L and R buttons), a longer pulse than a button tap so one notch is a visible step
             if (dy != 0 && st.settings.mouse.menu_cursor && st.engine->context() == Ctx::Map && !(st.overlay && st.overlay->visible())) {
@@ -901,7 +901,7 @@ int update_hook(::Ctx*, uint64_t, void*) {
     ft::mark("main.update");
     // frame pacing (S18): the limiter waits here, before the input is sampled, so the picture shown is the one simulated one render time
     // earlier. The wait for frames still in flight comes first, then the limiter's schedule.
-    // All of it runs once per presented frame: the game's main loop runs more iterations than it presents frames (Pokopia ~79 against ~50 a
+    // All of it runs once per presented frame: the game's main loop runs more iterations than it presents frames (title A ~79 against ~50 a
     // second), and per iteration the limiter took several slots per frame while the in-flight list (one id per sim_begin, one popped per
     // present) filled up until wait_in_flight held the main thread for presents that only come after more main-loop work.
     const bool frame_start = extras::pace_boundary_due();
@@ -1140,11 +1140,11 @@ int update_hook(::Ctx*, uint64_t, void*) {
         geo.keep_aspect = st.settings.display.keep_aspect;
         if (const Act a = gp && gp->menu_frame ? gp->menu_frame(menu_up, geo) : Act::None; a != Act::None) st.engine->pulse(a, now);
         if (st.overlay && st.pointer_draw) st.overlay->set_pointer(menu_up && ptr.enabled() && ptr.cursor_visible(menu_up), ptr.x(), ptr.y(), true);
-        // In play with the Joy-Con 2 mouse on its surface the game draws its own cursor: the OS cursor is hidden (unless the overlay is up).
+        // In play with the platform 2 controller mouse on its surface the game draws its own cursor: the OS cursor is hidden (unless the overlay is up).
         const bool game_cursor = playing && !overlay_visible && hid::jc2_mouse_active();
         if (st.window && !platform::relative_mouse())
             platform::set_cursor_visible(!game_cursor && (overlay_visible || !(ptr.enabled() && menu_up) || ptr.cursor_visible(menu_up)));
-        if (st.window) {   // the Joy-Con 2 mouse (hid): the pointer on the picture, the buttons and the wheel
+        if (st.window) {   // the platform 2 controller mouse (hid): the pointer on the picture, the buttons and the wheel
             hid::HostMouse hm;
             bool inside = false;
             mm::window_to_picture(geo, st.mouse_x, st.mouse_y, &hm.u, &hm.v, &inside);

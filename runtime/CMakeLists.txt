@@ -53,7 +53,7 @@ if(EXISTS "${NXRT_RECOMP_INCLUDE}")
     target_include_directories(nxrt PUBLIC "${NXRT_RECOMP_INCLUDE}")
 endif()
 target_link_libraries(nxrt PUBLIC psapi)
-include(cmake/media_deps.cmake)   # libvpx for the Switch 2 video decoders (optional)
+include(cmake/media_deps.cmake)   # libvpx for the platform 2 video decoders (optional)
 
 if(NXRT_BUILD_TESTS)
     enable_testing()

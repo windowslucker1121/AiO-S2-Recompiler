@@ -20,7 +20,7 @@ namespace nxrt::extras {
 
 // ---- settings --------------------------------------------------------------------------------------------------------------------
 // Auto: HDR when the display offers it. On: the HDR scene pipeline even without an HDR display. Native: as On, and the levels follow what the game
-// declares for an HDR TV on Switch 2 (nn::vi layer content luminance ranges, NVN2 window colour space and HDR metadata); see docs/S14.md.
+// declares for an HDR TV on platform 2 (nn::vi layer content luminance ranges, NVN2 window colour space and HDR metadata); see docs/S14.md.
 enum class HdrMode : uint8_t { Off = 0, Auto, On, Native };
 enum class HdrFormat : uint8_t { Auto = 0, Hdr10, ScRgb };     // swapchain flavour (Auto: HDR10 when offered, else scRGB)
 

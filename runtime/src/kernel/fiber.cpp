@@ -2,7 +2,7 @@
 // nn::os fibers on host fibers (kernel.h fibers_install). The SDK switches fibers in nn::os::detail::DispatchFiberContext(save, load):
 // it pushes the callee-saved registers on the current guest stack, stores that sp in *save, loads sp from *load, pops and returns
 // into the other fiber. Lifted code keeps its call frames on the host stack, so switching only the guest stack returns into the
-// wrong host frames (Ocarina of Time's nn::async tasks crashed in nn::async::Await with every register zero). An entry hook on
+// wrong host frames (the game's nn::async tasks crashed in nn::async::Await with every register zero). An entry hook on
 // DispatchFiberContext (the game's sdk.sites names the function) replaces it: every guest fiber runs on a host fiber with its own
 // host stack and its own Ctx, so a fiber resumed on another thread keeps its frames and registers; only the per-thread registers
 // (TPIDR_EL0, TPIDRRO_EL0) come from the thread that resumes it.

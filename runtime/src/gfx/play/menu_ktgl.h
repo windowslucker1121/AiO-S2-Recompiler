@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The menu pointer on KTGL screen layouts (Koei Tecmo's engine): the KTGL adapter of the menu pointer engine (menu_pointer.h,
-// docs/menu_pointer.md). The game passes the offsets of its build in Config (as the removed Pokopia port did) and wires the functions
+// docs/menu_pointer.md). The game passes the offsets of its build in Config (as the removed title A port did) and wires the functions
 // below into play mode's GamePlay table (menu_frame, menu_over_value, menu_active, menu_in_game).
 #pragma once
 #include <cstddef>

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Play mode: from a gamepad as SDL reports it to the Switch pad the game expects. Pure functions, no SDL calls, no state.
+// Play mode: from a gamepad as SDL reports it to the console pad the game expects. Pure functions, no SDL calls, no state.
 #pragma once
 #include "nxrt/input_source.h"
 #include "nxrt/platform.h"
@@ -8,7 +8,7 @@
 namespace nxrt::play {
 
 // Fills out->buttons, out->left and out->right from the raw pad. Other fields of *out (connected, style, six_axis, colours) are untouched.
-//  buttons   Switch button bits (hid::btn(hid::kBtnA) ...).
+//  buttons   console button bits (hid::btn(hid::kBtnA) ...).
 //            Each pressed physical source adds cfg.remap[source] when that is not kPadDefault (the bits of the value; 0 adds nothing, and the
 //            built-in mapping of that source is then not added). A source with kPadDefault adds the built-in mapping below.
 //            Face buttons: cfg.label_abxy = true maps by the printed label (raw.face_label: label A -> Switch A, B -> B, X -> X, Y -> Y), so an
@@ -24,7 +24,7 @@ void map_pad(const platform::GamepadRaw& raw, const PadSettings& cfg, hid::NpadI
 // onto the unit circle. Menus and the map do not call this (their stick is not a look).
 hid::StickValue adjust_look_stick(hid::StickValue right, const PadSettings& cfg);
 
-// The Switch button bits the built-in mapping gives a physical source (the kPadDefault case of map_pad), for a pad with the printed labels
+// The console button bits the built-in mapping gives a physical source (the kPadDefault case of map_pad), for a pad with the printed labels
 // A B X Y on SOUTH EAST WEST NORTH (label_abxy true: South A, East B, West X, North Y; false: South B, East A, West Y, North X).
 // LEFT_TRIGGER -> ZL, RIGHT_TRIGGER -> ZR, the other sources as in map_pad. Returns 0 for kCount.
 uint64_t pad_default_buttons(PadSrc src, bool label_abxy);
@@ -39,8 +39,8 @@ bool pad_src_of_sdl_button(int sdl_button, PadSrc* out);
 // The sources pressed in a raw state, as bits (1 << PadSrc): the buttons and the two triggers at the threshold.
 uint32_t pad_sources_pressed(const platform::GamepadRaw& raw, double trigger_threshold);
 
-// Press-to-rebind: makes `src` press the Switch buttons `target` (hid::btn bits). Every other source that pressed exactly `target` before
-// takes over what `src` pressed before (a swap), so no Switch button is left without a pad button. A source whose result equals its built-in
+// Press-to-rebind: makes `src` press the console buttons `target` (hid::btn bits). Every other source that pressed exactly `target` before
+// takes over what `src` pressed before (a swap), so no console button is left without a pad button. A source whose result equals its built-in
 // mapping is stored as kPadDefault. Returns true when anything changed.
 bool pad_assign(PadSettings* cfg, PadSrc src, uint64_t target);
 

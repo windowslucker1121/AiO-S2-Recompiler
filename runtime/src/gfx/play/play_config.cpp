@@ -410,7 +410,7 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
                 return false;
             }
             if (o.lx != 0 || o.ly != 0 || o.rx != 0 || o.ry != 0) {
-                *msg = k + " can press Switch buttons only (no stick directions), got '" + v + "'";
+                *msg = k + " can press console buttons only (no stick directions), got '" + v + "'";
                 return false;
             }
             dst = o.buttons;

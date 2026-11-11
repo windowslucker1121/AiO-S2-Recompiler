@@ -320,7 +320,7 @@ std::shared_ptr<ipc::Service> make_general() {
             {55, "GetDefaultNetworkEmulationProfileId", K::U32, 0},
             {56, "GetNetworkEmulationProfile", K::Fail, kNifmNoConnection},
             {57, "SetWowlTcpKeepAliveTimeout", K::Ok},
-            // SDK 22 (Switch 2) versions with larger structures, read from the sdk proxy's vtable (thunk sizes in brackets):
+            // SDK 22 (platform 2) versions with larger structures, read from the sdk proxy's vtable (thunk sizes in brackets):
             // 100 = 7 [entries 0xac], 101/102/103/104 = 5/8/9/14 [profile 0x1b4], 127/128 = 27/28 [0xf8], 132 = 32 [0x68c].
             {100, "EnumerateNetworkProfiles", K::S32, 0},
             {101, "GetCurrentNetworkProfile", K::Fail, kNifmNoConnection},
@@ -420,7 +420,7 @@ std::shared_ptr<ipc::Service> make_bsd() {
             {200, "SetThreadCoreMask", K::Ok},
             {201, "GetThreadCoreMask", K::U32, 0},
         });
-        // Descriptors (Ocarina of Time: gRPC probes IPv6 with a UDP socket, then makes its poll engine's wakeup an EventFd, and aborts when
+        // Descriptors (the game: gRPC probes IPv6 with a UDP socket, then makes its poll engine's wakeup an EventFd, and aborts when
         // it cannot). Sockets exist and do nothing (no network: their other commands keep failing with ENETDOWN, Poll never reports them
         // ready). An eventfd is Linux's: Write adds the 8-byte value, Read returns the counter and clears it (EFD_SEMAPHORE: 1, minus 1),
         // and an empty one answers EAGAIN (gRPC reads only after Poll said POLLIN). Poll waits up to its timeout for a Write.
@@ -1381,7 +1381,7 @@ void register_network() {
     for (const char* n : {"nifm:u", "nifm:a", "nifm:s"}) add(n, [] { return make_nifm_static(); });
     for (const char* n : {"bsd:u", "bsd:a", "bsd:s"}) add(n, [] { return make_bsd(); });
     add("bsdcfg", [] { return make_iface("nn::bsdsocket::cfg::ServerInterface", [](ipc::Service&) {}); });
-    // ssl:s (Switch 2; the game opens it, not ssl) is the same ISslService: CreateContext must hand out a real context object.
+    // ssl:s (platform 2; the game opens it, not ssl) is the same ISslService: CreateContext must hand out a real context object.
     for (const char* n : {"ssl", "ssl:s"}) add(n, [] { return make_ssl_service(); });
     add("nim:eca", [] { return make_nim_eca(); });
     for (const char* n : {"friend:u", "friend:v", "friend:m", "friend:s", "friend:a"}) add(n, [] { return make_friend_creator(); });

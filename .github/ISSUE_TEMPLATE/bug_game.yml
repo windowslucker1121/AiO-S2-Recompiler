@@ -43,7 +43,7 @@ body:
     id: where
     attributes:
       label: Where in the game
-      placeholder: e.g. the intro movie, Link's house, Kokiri Forest at night
+      placeholder: e.g. the intro movie, the house scene, the village at night
     validations:
       required: true
   - type: input

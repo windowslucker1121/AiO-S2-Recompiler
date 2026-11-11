@@ -56,7 +56,7 @@ class MultiTapBiquadFilterCommand : public ICommand {
             }
         }
 
-        // NOTE: Nintendo only implement single and double biquad filters but no generic path when the command definition suggests it could be done.
+        // NOTE: the platform only implement single and double biquad filters but no generic path when the command definition suggests it could be done.
         // As such the generic path is only used for the double case here, as in the C#.
         if (Parameters.size() == 1) {
             BiquadFilterHelper::ProcessBiquadFilter(Parameters[0], states[0], outputBuffer, inputBuffer, context.SampleCount);

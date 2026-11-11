@@ -62,13 +62,13 @@ struct ShaderControl {
     uint32_t program_start = 0;   // +0x708: 0x30 graphics (SPH there), 0x100 compute
     uint32_t local_size[3] = {};  // +0x748: compute work-group size
     uint32_t shared_size = 0;     // +0x754: compute shared memory bytes (0 = none)
-    bool nvn2 = false;            // Switch 2 control section (version word 201 at +4, 0xd8 bytes, Ampere SASS)
+    bool nvn2 = false;            // platform 2 control section (version word 201 at +4, 0xd8 bytes, Ampere SASS)
     int stage = -1;               // NVN2 only: u16 +0x56 (0 vs, 1 ps, 2 gs, 3 tcs, 4 tes, 5 cs)
     // NVN2 compute only: the slot counts of the program's c[0] resource table (bytes +0xb1 uniform blocks, +0xb2 storage
     // buffers, +0xb3 textures, +0xb6 images). See apply_nvn2_compute_table.
     uint8_t c0_ubos = 0, c0_ssbos = 0, c0_textures = 0, c0_images = 0;
     // The table's size in bytes (u16 +0xba) and the push constant area it holds after the 0x10-byte header: table size minus
-    // header and slots, 0 for programs without push constants (all of the bfsha/vsetb corpus; OoT's post-process chain built into
+    // header and slots, 0 for programs without push constants (all of the bfsha/vsetb corpus; the game's post-process chain built into
     // main has 0x80, the NDVE network 0x40). Byte +0xa9 is the number of push words the program reads.
     uint16_t c0_table = 0, c0_push = 0;
     uint8_t c0_push_words = 0;
@@ -282,7 +282,7 @@ struct ShaderInfo {
 // block's results.tsv resources column, or null (storage buffer c[0] offsets then stay -1).
 // `pre_refl`: the reflection of these words with the resources record already applied (the boot preload made it); then neither
 // is done again and `resources` is not read.
-// 1 when the graphics stages' c[0] storage buffer descriptors hold the slots in pairs swapped ([nvn] graphics_ssbo_slot_xor, OoT), else 0.
+// 1 when the graphics stages' c[0] storage buffer descriptors hold the slots in pairs swapped ([nvn] graphics_ssbo_slot_xor, the game), else 0.
 int graphics_ssbo_slot_xor();
 
 bool make_shader_info(const uint8_t* code, const uint8_t* control, std::vector<uint32_t> spirv,
@@ -421,7 +421,7 @@ uint64_t usable_programs(const std::vector<ProgramHashes>& progs);
 
 // ---- the shader preparation's state file (prepare.state next to programs.bin; written by gpl_prepare) --------------------------------------
 // Version of what a preparation builds. 2: pre-raster parts for every raster flag set of [nvn] prepare_rasters (1 built only the console's
-// default, depth clamp on, while OoT draws 98% of its pipelines with depth clamp off), and the state names the pipeline cache file it wrote.
+// default, depth clamp on, while the game draws 98% of its pipelines with depth clamp off), and the state names the pipeline cache file it wrote.
 constexpr int kPrepareScheme = 2;
 // [nvn] prepare_rasters: the raster flags (polygon mode . depth clamp . negative-one-to-one depth) every program's pre-raster part is prepared
 // with, as "p.c.n" groups. Normalised text, the same in the state file.

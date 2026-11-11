@@ -20,16 +20,16 @@ struct FloatingPointHelper {
     static float MultiplyRoundUp(float a, float b) { return RoundUp(a * b); }
 
     static float Pow10(float x) {
-        // NOTE: Nintendo implementation uses Q15 and a LUT for this, we don't.
-        // As such, we support the same ranges as Nintendo to avoid unexpected behaviours.
+        // NOTE: the platform implementation uses Q15 and a LUT for this, we don't.
+        // As such, we support the same ranges as the platform to avoid unexpected behaviours.
         if (x >= 0.0f) return 1.0f;
         if (x <= -5.3f) return 0.0f;
         return std::pow(10.0f, x);
     }
 
     static float Log10(float x) {
-        // NOTE: Nintendo uses an approximation of log10, we don't.
-        // As such, we support the same ranges as Nintendo to avoid unexpected behaviours.
+        // NOTE: the platform uses an approximation of log10, we don't.
+        // As such, we support the same ranges as the platform to avoid unexpected behaviours.
         return std::log10(std::max(x, 1.0e-10f));
     }
 

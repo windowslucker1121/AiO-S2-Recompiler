@@ -92,7 +92,7 @@ a route name or a dict with one of `route`, `wait_for` (the tool's arguments), `
 `press_until` (`input`, `every_s`, `until` = wait_for arguments, `timeout_s`; a log condition counts from the first press); `optional`
 lets a step fail. The routes use log lines and the window, so they survive load times that vary by minutes.
 
-Limits: a state is only as close to the moment as the game's last save (OoT has an auto-save manager and a save in the menu; a state
+Limits: a state is only as close to the moment as the game's last save (the game has an auto-save manager and a save in the menu; a state
 made right after an autosave or a save is exact, later ones restart from that save); everything after the save (position, enemies, what
 the game does not store) comes back as the game restores it. Before the first save a state is its route: `first_scene` and a state saved
 there replay New Game every time. A state made with another build still loads; the result says so. On 2026-11-06 the game wrote no slot
@@ -192,5 +192,4 @@ kinds. The runtime side (bundle contents, committed-only save copy, request file
   the game), `kill`, `load_state("after_intro")` in a new process 29 s, `bugs`, `load_state(bug=...)` 24 s.
 - A Git Bash `tail -f` on the run's log keeps it from being renamed (`launch` keeps the previous log as `<log>.prev`): `launch` waits
   20 s and then says the log is still open. A `tail` started by a stopped Claude Code monitor can survive it; end that `tail.exe`.
-- Still open: raw mouse look with `rel`, scripted runs on the real exe (`frame_source=tick`, `result.json`, `@peek`/`@poke`), and Ocarina
-  of Time probes (`runtime/games/oot` has no `tt::GameProbes`, so the trace has only frame, hash and time).
+- Still open: raw mouse look with `rel`, scripted runs on the real exe (`frame_source=tick`, `result.json`, `@peek`/`@poke`), and the game probes (`runtime/games/oot` has no `tt::GameProbes`, so the trace has only frame, hash and time).

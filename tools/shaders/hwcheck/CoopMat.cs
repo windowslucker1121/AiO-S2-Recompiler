@@ -41,7 +41,7 @@ namespace Hwcheck
         static string Opt(string[] a, string n, string d) { int i = Array.IndexOf(a, n); return i >= 0 && i + 1 < a.Length ? a[i + 1] : d; }
 
         /// hwcheck --pipeline-stats <a.spv> [b.spv ...]: the driver's statistics (registers, instructions, ...) of compute modules with
-        /// the layout of OoT's network passes (set 0: two uniform buffers, set 1: a storage buffer, set 2: a sampled texture, set 3: a
+        /// the layout of the game's network passes (set 0: two uniform buffers, set 1: a storage buffer, set 2: a sampled texture, set 3: a
         /// storage image). Builds each pipeline once, so it also times the driver's compile.
         public static int Stats(string[] args)
         {
@@ -164,7 +164,7 @@ namespace Hwcheck
 
         // ---- packed-half arithmetic of the variant ------------------------------------------------------------------------
 
-        // HADD2 / HMUL2 / HFMA2 forms as OoT's network passes use them (operand swizzles, negation, abs, immediates), as ptxas
+        // HADD2 / HMUL2 / HFMA2 forms as the game's network passes use them (operand swizzles, negation, abs, immediates), as ptxas
         // encodes them; the hwcheck rewrite moves their registers into the window.
         static readonly (ulong lo, ulong hi)[] HalfWords =
         {

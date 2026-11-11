@@ -12,7 +12,7 @@
 #include "test_framework.h"
 #include "play_fixture/mpr_play_fixture.h"
 NXTEST_GROUP(play_engine)
-// The checks are written against Metroid Prime Remastered's play vocabulary and factory controls.ini (play_fixture/mpr_play_fixture.h).
+// The checks are written against title E's play vocabulary and factory controls.ini (play_fixture/mpr_play_fixture.h).
 NXTEST_GROUP_FIXTURE(nxtest::mpr_play::install, nxtest::mpr_play::remove)
 
 namespace {

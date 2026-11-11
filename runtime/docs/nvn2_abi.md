@@ -1,6 +1,6 @@
-# NVN2 ABI as used by Pokémon Pokopia
+# NVN2 ABI as used by title A
 
-Source: the game's own `sdk` NSO (tag `NintendoSDK_NVN-20_5_25-Release`, build id `cc7da00d…`) and `main` (build id `76a489f3…`), converted with nx2elf and read with IDA 9.4 (Hex-Rays) plus capstone scripts. Release SDK: no debug layer, no enum validation, so evidence comes from what the code reads and writes. Analysis scratch lives in `work/nvn2/` (not in git).
+Source: the game's own `sdk` NSO (tag `SDK_NVN-20_5_25-Release`, build id `cc7da00d…`) and `main` (build id `76a489f3…`), converted with nx2elf and read with IDA 9.4 (Hex-Rays) plus capstone scripts. Release SDK: no debug layer, no enum validation, so evidence comes from what the code reads and writes. Analysis scratch lives in `work/nvn2/` (not in git).
 
 Generated files: `src/gfx/nvn/nvn2_procs.tsv` (one row per proc, the source of truth), `src/gfx/nvn/nvn2_table.inc` and `src/gfx/nvn/nvn2_sizes.inc` (written by `scripts/gen_nvn2_table.py`, which also checks the TSV against the NVN1 table and, with `--sdk`, against the sdk's own tables).
 
@@ -129,7 +129,7 @@ All in `work/nvn2/py/` (not committed): `mainload.py` (loader → slot per name)
 ## Open questions
 
 1. Exact sizes where min ≠ max (queue builder, window, buffer, sampler, pools, program, command buffer) and for the new types the game does not use.
-2. Which control-section minor Pokopia's shaders use (read the romfs shader archives) and what `+0` and the 1564-byte per-stage state hold.
+2. Which control-section minor title A's shaders use (read the romfs shader archives) and what `+0` and the 1564-byte per-stage state hold.
 3. Meaning of the recording modes 0–4 and the meaning of the patched shader-tail constants.
 4. The GPU class the console reports (0xC7C0 versus 0xC9C0), and the 3D class.
 5. Signatures of the 9 `hexrays-unreliable` and 12 `noop-stub` procs (none is used by the game).

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Play mode pad mapping: SDL gamepad state to the Switch pad state. Pure functions, see pad_map.h for the rules.
+// Play mode pad mapping: SDL gamepad state to the console pad state. Pure functions, see pad_map.h for the rules.
 #include "play/pad_map.h"
 
 #include <algorithm>
@@ -17,7 +17,7 @@ enum SdlButton : int {
 enum SdlAxis : int { kAxisLeftX = 0, kAxisLeftY, kAxisRightX, kAxisRightY, kAxisLeftTrigger, kAxisRightTrigger };
 
 // Face buttons, indexed by the physical position (SOUTH, EAST, WEST, NORTH).
-// By printed label: label 0 (A), 1 (B), 2 (X), 3 (Y) is the Switch button of the same name.
+// By printed label: label 0 (A), 1 (B), 2 (X), 3 (Y) is the console button of the same name.
 constexpr hid::NpadButtonBit kLabelBtn[4] = {hid::kBtnA, hid::kBtnB, hid::kBtnX, hid::kBtnY};
 // By position: the bottom button is Switch B, right is A, left is Y, top is X.
 constexpr hid::NpadButtonBit kPosBtn[4] = {hid::kBtnB, hid::kBtnA, hid::kBtnY, hid::kBtnX};

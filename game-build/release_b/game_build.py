@@ -8,7 +8,7 @@ Game independent: everything about the game (id, exe and runtime DLL names, supp
 load addresses) comes from the game manifest, game.toml in the package root (two folders above this script) unless --manifest says
 otherwise. The package ships no game code. This script
   1. verifies the dump's ExeFS against the manifest (the supported build: sha256 of every file + main's build ID),
-     and writes plain copies of ZBIC-compressed NSOs (Switch 2 main modules) with the bundled nx_plain_nso.exe,
+     and writes plain copies of ZBIC-compressed NSOs (platform 2 main modules) with the bundled nx_plain_nso.exe,
   2. lifts the NSOs with the bundled lifter (recomp/nxrecomp) into <game>/build/lift,
   3. compiles the generated C++ with the bundled Zig (zig c++, mingw target) into <game>/build/obj, in parallel,
   4. links the exe = sdk/stub.cpp + the lifted objects + sdk/<runtime stem>.lib (the runtime, the DLL of the package),

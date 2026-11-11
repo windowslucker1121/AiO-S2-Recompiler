@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Console core model. The application cores of the console (3 on Switch 1, 6 on Switch 2) are as many host processors; every guest
+// Console core model. The application cores of the console (3 on platform 1, 6 on platform 2) are as many host processors; every guest
 // thread's affinity is its core mask mapped onto them and its HOS priority is mapped onto six Windows priority bands with the dynamic
 // boost off. One host processor per console core matters: threads of one core never run at the same time, and GetCurrentProcessorNumber
-// names the thread's real core (Mario Kart World keeps per-core allocator state; with Switch 2's cores 3..5 folded onto 0..2 two cores
+// names the thread's real core (title C keeps per-core allocator state; with platform 2's cores 3..5 folded onto 0..2 two cores
 // shared that state and its loads crashed at a different place every run).
 // Measured in smo-recomp (runtime/os/os_threads.c): free scheduling failed 4 of 6 boots in sead heap code, the console model 0 of 6.
 // Config: [sched] console_cores (default 1; env NXRT_SCHED_CONSOLE_CORES), [sched] host_cpus = hexadecimal mask of host processors to use,
@@ -84,7 +84,7 @@ int lowest_bit(uint64_t m) {
 }
 
 // Slot k = the n fastest cores not taken by a lower slot (a named mutex per slot, held while the process lives). Slots of 3 and of 6
-// cores have separate names, so a Switch 1 and a Switch 2 process side by side may overlap; two of one kind never do.
+// cores have separate names, so a platform 1 and a platform 2 process side by side may overlap; two of one kind never do.
 uint64_t take_core_slot(const std::vector<uint64_t>& cores, size_t n, int* slot_out) {
     for (size_t k = 0; k + n <= cores.size(); k += n) {
         char name[64];

@@ -1,7 +1,7 @@
 # Third-party notices
 
 Paths in this file are relative to `runtime/` unless they start with a top-level folder of the repository. Nothing listed here is
-from Nintendo: no game, SDK or firmware code or data is part of the repository (see `LEGAL.md` at the repository root).
+from the platform: no game, SDK or firmware code or data is part of the repository (see `LEGAL.md` at the repository root).
 
 ## This project's upstream (GPL-3.0)
 
@@ -117,15 +117,15 @@ freely, subject to the following restrictions:
 
 ### volk (MIT)
 
-Copyright (c) 2018-2026 Arseny Kapoulkine. MIT licence, same text as the Wonder notice above.
+Copyright (c) 2018-2026 Arseny Kapoulkine. MIT licence, same text as the SuperMarioWonderRecomp notice above.
 
 ### VulkanMemoryAllocator (MIT)
 
-Copyright (c) 2017-2026 Advanced Micro Devices, Inc. All rights reserved. MIT licence, same text as the Wonder notice above.
+Copyright (c) 2017-2026 Advanced Micro Devices, Inc. All rights reserved. MIT licence, same text as the SuperMarioWonderRecomp notice above.
 
 ### Dear ImGui (MIT)
 
-Copyright (c) 2014-2026 Omar Cornut. MIT licence, same text as the Wonder notice above.
+Copyright (c) 2014-2026 Omar Cornut. MIT licence, same text as the SuperMarioWonderRecomp notice above.
 
 ### Vulkan-Headers (Apache-2.0 OR MIT)
 
@@ -137,14 +137,14 @@ Copyright 2015-2026 The Khronos Group Inc. Files fall under Apache-2.0 or MIT (S
 
 ### NVN header (MIT) and shader cache module
 
-`src/gfx/nvn/third_party/nvn/nvn.h` is the NVN header of the mp1r-practice-mod repository (`src_framework/nvn/nvn.h`), copied with its MIT notice ("Copyright (c) 2020 h1k421") and a few corrected typedefs (marked "NXRT NOTE" in the file). Provenance, as the file states: its author reconstructed the declarations from the DWARF debug information of a retail game (Darksiders II); it is not Nintendo SDK source or documentation, and it holds only interface declarations (types, enums, structs, function pointer typedefs), no implementation. The mp1r-practice-mod repository as a whole is GPL-2.0; this file is under its own MIT notice. The provenance is repeated at the top of the file. `src/gfx/nvn/nvn_shaders.h` and `nvn_shaders.cpp` are adapted from SuperMarioWonderRecomp `runtime/src/nvn/nvn_shaders.{h,cpp}` (MIT, Copyright (c) 2026 BelmanteGu; MIT text as above), which in turn follows Ryujinx's `SupportBuffer.cs` (MIT, Copyright Ryujinx Team and Contributors). The translator patches in `tools/shaders` are Ryujinx source in context lines (MIT).
+`src/gfx/nvn/third_party/nvn/nvn.h` is the NVN header of the mp1r-practice-mod repository (`src_framework/nvn/nvn.h`), copied with its MIT notice ("Copyright (c) 2020 h1k421") and a few corrected typedefs (marked "NXRT NOTE" in the file). Provenance, as the file states: its author reconstructed the declarations from the DWARF debug information of a retail game (Darksiders II); it is not platform SDK source or documentation, and it holds only interface declarations (types, enums, structs, function pointer typedefs), no implementation. The mp1r-practice-mod repository as a whole is GPL-2.0; this file is under its own MIT notice. The provenance is repeated at the top of the file. `src/gfx/nvn/nvn_shaders.h` and `nvn_shaders.cpp` are adapted from SuperMarioWonderRecomp `runtime/src/nvn/nvn_shaders.{h,cpp}` (MIT, Copyright (c) 2026 BelmanteGu; MIT text as above), which in turn follows Ryujinx's `SupportBuffer.cs` (MIT, Copyright Ryujinx Team and Contributors). The translator patches in `tools/shaders` are Ryujinx source in context lines (MIT).
 
 ### Tools linked at build time
 
 `nxrt_gfx` links `tools/textures` (astc2bc7, GPL-3.0-or-later; it bundles ARM astcenc 5.7.0, Apache-2.0, loaded as decoder DLLs next to the executable, and bc7e from bc7enc_rdo, Apache-2.0) and `tools/tiling` (GPL-3.0-or-later). Their notices are in those folders.
 ## libvpx 1.16.0 (BSD-3-Clause; x86inc assembly macros ISC)
 
-Linked statically into Switch 2 builds for the host nn::codec VP9/VP8 decoders (src/media/video_codec.cpp, cmake/media_deps.cmake), built
+Linked statically into platform 2 builds for the host nn::codec VP9/VP8 decoders (src/media/video_codec.cpp, cmake/media_deps.cmake), built
 by vcpkg (`vcpkg install libvpx:x64-windows-static`, port libvpx 1.16.0#3). Upstream: https://chromium.googlesource.com/webm/libvpx.
 Licence text as installed by vcpkg (`share/libvpx/copyright`), reproduced verbatim:
 

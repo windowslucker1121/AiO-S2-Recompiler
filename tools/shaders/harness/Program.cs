@@ -53,7 +53,7 @@ namespace SpirvHarness
 
         static readonly Dictionary<string, string> GlslcByHash = new();   // --reflect <corpus>: code hash -> GLSLC output
 
-        /// NVN2 (Switch 2) control section: magic 0x98761234, version 201 (docs/AMPERE.md section 3).
+        /// NVN2 (platform 2) control section: magic 0x98761234, version 201 (docs/AMPERE.md section 3).
         public static bool IsNvn2(byte[] ctrl) => ctrl != null && ctrl.Length >= 0xd8 && BitConverter.ToUInt32(ctrl, 0) == 0x98761234 && BitConverter.ToUInt32(ctrl, 4) == 201;
 
         static int Main(string[] args)
@@ -269,7 +269,7 @@ namespace SpirvHarness
             return r;
         }
 
-        // One NVN2 (Switch 2, Ampere SM86) block: control section +0x38 program end, +0x3c/+0x40 constant data size/offset,
+        // One NVN2 (platform 2, Ampere SM86) block: control section +0x38 program end, +0x3c/+0x40 constant data size/offset,
         // +0x56 stage (0 vs, 1 ps, 2 gs, 3 tcs, 4 tes, 5 cs). Graphics code starts with a 0x80-byte SPH v4, compute has
         // none. The SASS is decoded by tools/shaders/ampere/decoder and emitted into Ryujinx's IR by the Ampere front end
         // (tools/shaders/ampere/frontend); from there on it is Ryujinx's translator as for Maxwell. A block with any

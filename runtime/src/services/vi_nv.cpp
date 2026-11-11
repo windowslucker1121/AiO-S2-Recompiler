@@ -168,7 +168,7 @@ ViState& vi() {
 
 // The display's vsync: a host thread signals the event at 60 Hz. Started by the first GetDisplayVsyncEvent, stopped by vi_nv_reset().
 // The vsync runs on an absolute 60 Hz schedule (start + n / 60 s). A relative wait_for(16667 us) became a 16 ms (or 15.6 ms) wait on
-// Windows, so the event came at 62-64 Hz: OoT, which waits two vsyncs per frame, ran at 32 fps, and its movies and their voice lines
+// Windows, so the event came at 62-64 Hz: the game, which waits two vsyncs per frame, ran at 32 fps, and its movies and their voice lines
 // 6 % fast (A11). After a stall it skips to the next slot instead of firing the missed ones in a burst.
 void vsync_main() {
     ViState& s = vi();

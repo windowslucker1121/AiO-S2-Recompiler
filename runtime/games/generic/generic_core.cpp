@@ -25,7 +25,7 @@ void title_defaults(services::TitleProfile& p) {
     p.main_thread_stack = m.num("title.main_thread_stack", 0x100000);
     p.main_thread_priority = static_cast<int>(m.num("title.main_thread_priority", 44));
     p.main_thread_core = static_cast<int>(m.num("title.main_thread_core", 0));
-    // main.npdm SystemResourceSize: non-zero turns on the SDK's virtual address memory manager (OoT needs it, oot_core.cpp)
+    // main.npdm SystemResourceSize: non-zero turns on the SDK's virtual address memory manager (the game needs it, oot_core.cpp)
     p.system_resource_size = m.num("title.system_resource_size", 0);
     p.firmware = m.get("title.firmware", g.platform == game::Platform::Switch2 ? "22.0.0" : "16.0.0");
     p.user_nickname = "Player";

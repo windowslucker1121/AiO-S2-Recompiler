@@ -8,7 +8,7 @@
 // without a region in the game's command memory goes with its buffer: one in its buffer's overflow ring (api_cmdbuf.cpp: the
 // memory the out-of-memory callback would have handed over), which nothing could overlap once the buffer is gone, or one
 // without a region at all. There is no count limit: the game calls some lists (character draw lists, the map) long after
-// recording them. nvnDeviceFinalizeCommandHandle drops a handle at once (Pokopia finalizes the previous one at each
+// recording them. nvnDeviceFinalizeCommandHandle drops a handle at once (title A finalizes the previous one at each
 // BeginRecording).
 // The rule is taken from SuperMarioWonderRecomp docs/nvn/DEBUG.md #26, DEBUG-2 #90, #91 (MIT); the code is new.
 #include <atomic>

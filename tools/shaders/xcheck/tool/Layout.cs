@@ -79,12 +79,12 @@ namespace Nx.Shaders.XCheck
                     Check("+0x38 <= code file length", cn, stage, prog <= code.Length, h);
                     Check("+0x44 == code file length", cn, stage, area == code.Length, h);
                     Check("+0x40 + +0x3c <= +0x44", cn, stage, (ulong)coff + clen <= area, h);
-                    Check("+0x44 - +0x40 == +0x3c (constants run to the end of the code area; dkb: c1 = [+0x40, +0x44))", cn, stage, clen == 0 ? null : area - coff == clen, h);
+                    Check("+0x44 - +0x40 == +0x3c (constants run to the end of the code area; b: c1 = [+0x40, +0x44))", cn, stage, clen == 0 ? null : area - coff == clen, h);
                     Check("+0x40 multiple of 0x100 (when +0x3c != 0)", cn, stage, clen == 0 ? null : coff % 0x100 == 0, h);
-                    Check("+0x4c in 0x24..0x48 (dkb: register count)", cn, stage, U(0x4c) >= 0x24 && U(0x4c) <= 0x48, h);
+                    Check("+0x4c in 0x24..0x48 (b: register count)", cn, stage, U(0x4c) >= 0x24 && U(0x4c) <= 0x48, h);
                     Check("+0x4c in 6..0xff (ours: register count)", cn, stage, U(0x4c) >= 6 && U(0x4c) <= 0xff, h);
-                    Check("+0x54 multiple of 0x1000 (dkb)", cn, stage, U(0x54) % 0x1000 == 0, h);
-                    Check("+0x60 multiple of 0x1000 (dkb)", cn, stage, U(0x60) % 0x1000 == 0, h);
+                    Check("+0x54 multiple of 0x1000 (b)", cn, stage, U(0x54) % 0x1000 == 0, h);
+                    Check("+0x60 multiple of 0x1000 (b)", cn, stage, U(0x60) % 0x1000 == 0, h);
                     Check("+0x68 == +0x50 / 32", cn, stage, U(0x68) == U(0x50) / 32, h);
                     Check("+0xa4 == 0x01000000", cn, stage, U(0xa4) == 0x01000000, h);
                     Cross("+0x08 by stage", cn, stage, "0x" + U(0x08).ToString("x"));
@@ -92,8 +92,8 @@ namespace Nx.Shaders.XCheck
                     {
                         ulong wg = (ulong)U(0x58) * U(0x5c) * U(0x60);
                         Check("compute: x*y*z of +0x58/+0x5c/+0x60 in 1..1024", cn, stage, wg >= 1 && wg <= 1024, h);
-                        Check("compute: +0x50 == +0x64 (dkb: shared memory at +0x64)", cn, stage, U(0x50) == U(0x64), h);
-                        Check("compute: +0x64 multiple of 0x1000 (cross-check of dkb's claim)", cn, stage, U(0x64) % 0x1000 == 0, h);
+                        Check("compute: +0x50 == +0x64 (b: shared memory at +0x64)", cn, stage, U(0x50) == U(0x64), h);
+                        Check("compute: +0x64 multiple of 0x1000 (cross-check of b's claim)", cn, stage, U(0x64) % 0x1000 == 0, h);
                         uint tab = U16(0xba), want = 0x10 + 0x10 * (uint)(ctrl.Length > 0xb2 ? ctrl[0xb1] + ctrl[0xb2] : 0) + 8 * (uint)(ctrl.Length > 0xb6 ? ctrl[0xb3] + ctrl[0xb6] : 0);
                         Check("compute: u16 +0xba == 0x10 + 0x10*(+0xb1 + +0xb2) + 8*(+0xb3 + +0xb6)", cn, stage, tab == want, h);
                         Cross("compute (+0x50, +0x64, +0x68)", cn, stage, $"{U(0x50):x},{U(0x64):x},{U(0x68):x}");
@@ -124,8 +124,8 @@ namespace Nx.Shaders.XCheck
                         Sph(cn, stage, "words 1,2,3 shader_local_memory_low/high/crs_size != 0", $"{(BitConverter.ToUInt32(code, 4) & 0xffffff) != 0},{(BitConverter.ToUInt32(code, 8) & 0xffffff) != 0},{(BitConverter.ToUInt32(code, 12) & 0xffffff) != 0}");
                     }
 
-                    // attribute usage and memory spaces vs the SPH maps and the control section: every 20th pixel block of Pokopia, all others
-                    bool sample = cn != "pkp" || stage != 1 || (System.Threading.Interlocked.Increment(ref ps) % 20 == 0);
+                    // attribute usage and memory spaces vs the SPH maps and the control section: every 20th pixel block of title A, all others
+                    bool sample = cn != "a" || stage != 1 || (System.Threading.Interlocked.Increment(ref ps) % 20 == 0);
                     if (!sample) return;
                     int start = cs ? 0 : 0x80, end = (int)Math.Min(prog, (uint)code.Length);
                     while (end - 16 >= start && code.AsSpan(end - 16, 16).IndexOfAnyExcept((byte)0) < 0) end -= 16;
