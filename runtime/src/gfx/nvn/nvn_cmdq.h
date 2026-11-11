@@ -13,6 +13,11 @@ bool enabled();                       // [nvn] cmd_thread (read once)
 // At the start of a submission (render thread, nothing recorded yet): installs the hooks the first time, waits for the recorder, and
 // switches queuing on or off for what follows (paired windows).
 void begin_submission(bool on);
+void set_pds(bool on);                // [nvn] cmd_thread_pds under cpuperf_ab (pds_q): push descriptor sets queued or drained
+// [nvn] chunk_async (pds_q's sibling, cpuperf_ab_what chunk_async): ends `old`, submits it (no fence, no signal) and begins `next` on the
+// recorder thread, in order. False: not queuing now; the caller does it itself.
+bool queue_chunk(VkCommandBuffer old, VkCommandBuffer next, VkQueue q, std::mutex* mu);
+void set_chunk_async(bool on);
 void set_copies(bool on);             // [nvn] cmd_thread_copies under cpuperf_ab (cmd_copies): image copies and clears queued or drained
 void apply_render_priority(bool on);   // [nvn] render_priority: the calling (render) thread and the recorder; on false: NORMAL
 void set_publish_batch(bool on);       // [nvn] cmd_publish_batch under cpuperf_ab (cmd_batch)
@@ -41,10 +46,6 @@ void scan_stats(uint64_t* scans, uint64_t* stopped, uint64_t* waits);
 void post(void (*fn)(VkCommandBuffer), VkCommandBuffer cb);
 // fn(words, n) on the recorder in order with the queued calls; false (nothing queued) when this thread does not queue now.
 bool post_words(void (*fn)(const uint64_t*, uint32_t), const uint64_t* w, uint32_t n);
-// [nvn] chunk_on_recorder (default on): frame_chunk's vkEndCommandBuffer(cb), vkQueueSubmit2 (under *mu) and vkBeginCommandBuffer(next), then
-// after(cb, next), made by the recorder in order with the queued calls, so the render thread does not wait for it. False: not queuing.
-bool chunk_submit(VkCommandBuffer cb, VkCommandBuffer next, VkQueue q, std::mutex* mu, void (*after)(VkCommandBuffer, VkCommandBuffer));
-void set_chunk(bool on);   // cpuperf_ab (chunk_rec)
 // The driver's vkCmdPipelineBarrier2 behind the queue (for the placeholder and the hazard tracker's own barriers when not queuing).
 void raw_barrier(VkCommandBuffer cb, const VkDependencyInfo* di);
 

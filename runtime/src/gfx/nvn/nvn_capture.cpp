@@ -1021,6 +1021,7 @@ bool load_capture(const stdfs::path& dir, Loaded& L, std::string* err) {
         m.phys = Ref<MemoryPool>::share(phys);
         m.poff = v.poff;
         L.pools[v.pool]->vmaps.push_back(std::move(m));
+        gpu::virtual_maps_changed();
     }
     // textures
     const uint64_t ntex = in.get<uint64_t>();

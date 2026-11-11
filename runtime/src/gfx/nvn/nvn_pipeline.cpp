@@ -525,10 +525,10 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[kProgStages]) {
     // a per-thread memo in front of the map and its lock (the render thread asks at nearly every draw; layouts live until g_layouts is
     // cleared, which moves g_layout_gen)
     struct Memo { LayoutKey k{}; const ProgLayout* p = nullptr; uint64_t gen = 0; };
-    thread_local Memo memo[32];
+    thread_local Memo* memo = new Memo[1024];   // 32 entries thrashed: a frame of the village scene binds a few hundred programs
     uint64_t hk = 0;
     for (int i = 0; i < kProgStages; ++i) hk = (hk ^ reinterpret_cast<uintptr_t>(stages[i])) * 0x9E3779B97F4A7C15ull;
-    Memo& mm = memo[(hk >> 40) & 31];
+    Memo& mm = memo[(hk >> 40) & 1023];
     const uint64_t gen = g_layout_gen.load(std::memory_order_acquire);
     if (mm.p && mm.gen == gen && std::memcmp(mm.k.s, key.s, sizeof key.s) == 0) return mm.p;
     const ProgLayout* found = prog_layout_locked(key);

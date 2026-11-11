@@ -24,7 +24,6 @@ bool takes(VkCommandBuffer cb);
 void request(uint32_t line);
 // frame_chunk / frame_split (nvn_gpu.cpp): the submission goes on in another command buffer.
 void switch_cb(VkCommandBuffer from, VkCommandBuffer to);
-void note_rt_switch(VkCommandBuffer from, VkCommandBuffer to);   // the switch went into the command queue (cmdq::chunk_submit)
 // Commands recorded without the hooks follow (an upscaler SDK): a barrier now if anything is unordered, everything unknown after.
 void external(VkCommandBuffer cb);
 // Buffers made through VMA (vk_device.cpp create_buffer), whose vkCreateBuffer the hooks do not see.

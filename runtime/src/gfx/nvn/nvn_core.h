@@ -255,6 +255,7 @@ void textures_note_bound(TexturePool* tp, const uint64_t* handles, int count);
 extern std::atomic<uint64_t> g_tex_scan_epoch;
 extern std::atomic<bool> g_tex_prep_on;       // background texture preparation is running ([nvn] tex_prep); set by nvn_texprep.cpp when it starts
 void virtual_textures_remapped(const MemoryPool* vpool, uint64_t voff, uint64_t size);
+namespace gpu { void virtual_maps_changed(); }   // a virtual pool's mappings changed (physical_buffer_address's memo)
 bool texture_gather_virtual(const Texture& t, std::vector<uint8_t>& out);
 // Copies [at, at + len) of a sparse texture's storage out of the mapped tiles into dst (unmapped bytes are zeros). Returns true when the
 // whole range is mapped.

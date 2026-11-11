@@ -1395,12 +1395,16 @@ void begin_submission(VkCommandBuffer cb, bool on, bool piggyback) {
     begin_cb(cb);
 }
 
+void switch_rec(const uint64_t* w, uint32_t) {   // the recorder, after the queued chunk submit (cmdq::queue_chunk)
+    const VkCommandBuffer from = reinterpret_cast<VkCommandBuffer>(w[0]), to = reinterpret_cast<VkCommandBuffer>(w[1]);
+    if (g_on && from && from == g_cb.load(std::memory_order_relaxed)) begin_cb(to);
+}
 void switch_cb(VkCommandBuffer from, VkCommandBuffer to) {
     if (on_rt() && from && from == g_rt_cb) g_rt_cb = to;
-    if (g_on && (on_rt() || cmdq::on_recorder()) && from && from == g_cb.load(std::memory_order_relaxed)) begin_cb(to);
-}
-void note_rt_switch(VkCommandBuffer from, VkCommandBuffer to) {   // render thread: the switch is queued (the recorder makes switch_cb)
-    if (from && from == g_rt_cb) g_rt_cb = to;
+    if (!g_on || !from) return;
+    const uint64_t w[2] = {reinterpret_cast<uint64_t>(from), reinterpret_cast<uint64_t>(to)};
+    if (on_rt() && cmdq::post_words(&switch_rec, w, 2)) return;   // the tracking runs on the recorder: in order with the queued commands
+    switch_rec(w, 2);
 }
 
 void external(VkCommandBuffer cb) {

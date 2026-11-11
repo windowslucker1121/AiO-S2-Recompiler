@@ -259,6 +259,8 @@ Ref<CmdList> handle_lookup(uint64_t handle);
 // [nvn] handle_cache (default on): handle_lookup answers from a per-thread cache while the cached list is still in the table (handles are
 // never reused, a list leaves the table only through drop_locked, which marks it dropped). The replay switches it per ab window.
 void handle_cache_enable(bool on);
+// [nvn] cpuperf_ab_what handle_big: 16k cache slots (default) or the 1024 of before in the off windows
+void handle_cache_big(bool on);
 void handle_release(uint64_t handle);            // the game finalized the handle (nvnDeviceFinalizeCommandHandle)
 void handle_release_unbacked(uint64_t handle);   // drops the handle only when its list has no region in the game's command memory
 void handles_release_pool(const MemoryPool* pool);

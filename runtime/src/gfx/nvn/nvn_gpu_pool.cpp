@@ -711,9 +711,25 @@ BufRef resolve_buffer(uint64_t gpu_address, uint64_t size) { return resolve_in_p
 
 namespace {
 bool virtual_to_physical(MemoryPool& vp, uint64_t off, uint64_t size, uint64_t* phys_address);
+uint64_t physical_buffer_address_uncached(uint64_t gpu_address, uint64_t size);
 }
 
+std::atomic<uint64_t> g_vmap_gen{0};
+void virtual_maps_changed() { g_vmap_gen.fetch_add(1, std::memory_order_release); }
 uint64_t physical_buffer_address(uint64_t gpu_address, uint64_t size) {
+    // Per-thread memo (the render thread asks for every uniform and storage binding: ~10k per frame in the village scene, a few hundred
+    // distinct ranges). The answer depends only on the pool registry and the virtual pools' mappings: both counters are in the entry.
+    struct Memo { uint64_t addr = 0, size = 0, gen = ~0ull, phys = 0; };
+    thread_local Memo memo[256];
+    const uint64_t gen = pool_registry_generation() * 0x9e3779b97f4a7c15ull ^ g_vmap_gen.load(std::memory_order_acquire);
+    Memo& mm = memo[(gpu_address >> 8 ^ gpu_address >> 17 ^ size) & 255];
+    if (mm.gen == gen && mm.addr == gpu_address && mm.size == size) return mm.phys;
+    const uint64_t r = physical_buffer_address_uncached(gpu_address, size);
+    mm = {gpu_address, size, gen, r};
+    return r;
+}
+namespace {
+uint64_t physical_buffer_address_uncached(uint64_t gpu_address, uint64_t size) {
     const PoolHit hit = pool_lookup(gpu_address);
     uint64_t phys = 0;
     if (!hit.pool || !hit.pool->is_virtual || !virtual_to_physical(*hit.pool, hit.offset, size, &phys)) return gpu_address;
@@ -723,6 +739,7 @@ uint64_t physical_buffer_address(uint64_t gpu_address, uint64_t size) {
                 static_cast<unsigned long long>(size), static_cast<unsigned long long>(phys));
     return phys;
 }
+}  // namespace
 
 namespace {
 // A range of a virtual (sparse) pool as the GPU address of its physical backing: the pool's nvnMemoryPoolMapVirtual mappings must cover all of
