@@ -108,7 +108,13 @@ bool write_atomic(const std::wstring& path, const std::string& text) {
         f << text;
         if (!f) return false;
     }
-    return MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    // another program may hold the file for a moment (the running game reads controls.ini): try a few times
+    for (int i = 0; i < 20; ++i) {
+        if (MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) return true;
+        Sleep(25);
+    }
+    DeleteFileW(tmp.c_str());
+    return false;
 }
 
 std::wstring search_path(const wchar_t* name) {
@@ -350,6 +356,7 @@ State load_state(const std::wstring& path) {
     s.translated_with = kv["translated_with"];
     s.programs_game = kv["programs_game"];
     s.built_for = kv["built_for"];
+    for (int i = 0; i < 6; ++i) s.secs[i] = std::atoi(kv["secs_" + std::to_string(i)].c_str());
     return s;
 }
 
@@ -361,6 +368,8 @@ bool save_state(const std::wstring& path, const State& s) {
     t += "translated_with = " + s.translated_with + "\n";
     t += "programs_game = " + s.programs_game + "\n";
     t += "built_for = " + s.built_for + "\n";
+    for (int i = 0; i < 6; ++i)
+        if (s.secs[i] > 0) t += "secs_" + std::to_string(i) + " = " + std::to_string(s.secs[i]) + "\n";
     return write_atomic(path, t);
 }
 

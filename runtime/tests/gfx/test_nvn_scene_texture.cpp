@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// NVN scene oracles: textures (S4d). Every scene draws a 64x48 frame with REAL translated shaders of title E
+// NVN scene oracles: textures (S4d). Every scene draws a 64x48 frame with REAL translated shaders of a game
 // Remastered: vertex 2bf6629719b97303 (gl_Position = attribute 0, varying 0 = attribute 1, the texture coordinate) and fragment
 // 2192ff78120fa063 (out.rgb = texture(sampler, uv).rgb, alpha 1, no uniform reads). Textures are tiled with tegra::tile into the
 // pool memory the way a game writes pre-tiled assets; the real samples of work/survey/textures/samples are copied as they sit

@@ -22,6 +22,10 @@ struct WinMenuHooks {
     std::function<void(bool)> set_debug_overlay; // Debug > In-game debug overlay
     std::function<bool()> debug_overlay;
     std::function<std::string()> debug_report;   // Debug info window, the clipboard report
+    std::function<void()> menu_opened;           // a drop-down or the system menu opened (the mouse is let go)
+    // The library's Settings page on a tab (0 graphics, 1 display, 2 controller, 3 keyboard and mouse, 4 audio). Set: Game > Settings... exists
+    // and Input > Gamepad... / Keyboard and mouse bindings... open the library instead of the native dialogs. Returns false when it could not start.
+    std::function<bool(int tab)> open_library;
     std::string bug_key = "F9", fps_key = "F2";
     unsigned display_options = 0;                // play_game.h kDisplayOpt*
     bool upscaler_configured = false;

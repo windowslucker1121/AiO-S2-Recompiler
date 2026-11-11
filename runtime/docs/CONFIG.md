@@ -316,7 +316,7 @@ Rules:
 | `system` | `region` | empty (USA, 1) | `NXRT_SYSTEM_REGION` | `src/services/common.cpp` | Region by name (`Japan`, `USA`, `Europe`, `Australia`, `HongKongTaiwanKorea`, `China`) or number (Japan 0 to China 5). Empty: USA. |
 | `system` | `firmware` | `12.1.0` | `NXRT_SYSTEM_FIRMWARE` | `src/services/common.cpp` | Firmware version that `set:sys` GetFirmwareVersion reports. |
 | `system` | `nickname` | `nxrt` | `NXRT_SYSTEM_NICKNAME` | `src/services/common.cpp` | Console nickname. |
-| `account` | `nickname` | `Samus` | `NXRT_ACCOUNT_NICKNAME` | `src/services/common.cpp` | Nickname of the local user. |
+| `account` | `nickname` | `Player` | `NXRT_ACCOUNT_NICKNAME` | `src/services/common.cpp` | Nickname of the local user. |
 | `account` | `uid` | empty (`00000000000000014d50525265636f6d`) | `NXRT_ACCOUNT_UID` | `src/services/common.cpp` | Local user id as 32 hex digits. Anything that is not 32 hex digits keeps the default. |
 | `fs` | `romfs` | `game/romfs` | `NXRT_FS_ROMFS` | `src/services/common.cpp` | Host folder served as the game's RomFS, relative to the working directory. |
 | `fs` | `save_dir` | empty (`%APPDATA%\<save folder>\save`, e.g. `oot-recomp`) | `NXRT_FS_SAVE_DIR` | `src/services/common.cpp` | Folder for save data. Empty: the APPDATA default. A named instance: `<instance folder>\save` (see "Named instances"). |
@@ -326,7 +326,8 @@ Rules:
 | `net` | `offline` | `true` | `NXRT_NET_OFFLINE` | `src/services/network.cpp` | `true`: no connection, no friends and no BCAT data (the start-up log line says so). |
 | `pl` | `font_dir` | empty | `NXRT_PL_FONT_DIR` | `src/services/pl.cpp` | Folder searched first for `DejaVuSans.ttf` and the shared font dumps. Empty: the search goes on to `fonts\` next to the exe, then `assets\fonts\` under the working directory, then the exe's folder. |
 | `play` | `controls` | `controls.ini` | `NXRT_PLAY_CONTROLS` | `src/gfx/play/play.cpp` | Settings file of play mode (controls, sensitivity, display); written with the factory settings when missing. |
-| `play` | `capture_mouse` | `true` | `NXRT_PLAY_CAPTURE_MOUSE` | `src/gfx/play/play.cpp` | Capture the pointer (relative mode) while the game is in play. |
+| `play` | `capture_mouse` | `true` | `NXRT_PLAY_CAPTURE_MOUSE` | `src/gfx/play/play.cpp` | `false`: the pointer is never captured, whatever `[mouse] capture` in controls.ini says. `true` (default): `[mouse] capture` decides. |
+| `play` | `watch_settings` | `true` | `NXRT_PLAY_WATCH_SETTINGS` | `src/gfx/play/play.cpp`, `src/gfx/play/play_sync.cpp` | Once a second the game looks at controls.ini's size and write time; when another program (the library's Settings page, an editor) changed it, the keys that program changed are taken over into the settings in force and applied as a menu change would be (log: `controls.ini was changed by another program: N changes taken over (...)`). The game's own saves write only the keys it changed, in place (comments and unknown keys stay), and keep a change another program made in the meantime. `false`: no watching (the saves still merge). Read once. |
 | `play` | `pitch_limit_deg` | `0` | `NXRT_PLAY_PITCH_LIMIT_DEG` | `src/gfx/play/play.cpp` | Pitch limit of the mouse aim in degrees; 0 uses the game's tweak value. |
 | `play` | `quit_on_close` | `true` | `NXRT_PLAY_QUIT_ON_CLOSE` | `src/gfx/play/play.cpp` | Closing the window ends the process. |
 | `play` | `game_base` | `0x7100000000` | `NXRT_PLAY_GAME_BASE` | `src/gfx/play/play.cpp` | Base of the game's main module (hook addresses). |
@@ -334,7 +335,7 @@ Rules:
 | `play` | `pointer_draw` | `false` | `NXRT_PLAY_POINTER_DRAW` | `src/gfx/play/play.cpp` | Test aid: draws an arrow at the menu pointer into the game's own frame, so a game screenshot shows where the pointer is (the OS cursor is not part of the frame). |
 | `play` | `selftest` | empty | `NXRT_PLAY_SELFTEST` | `src/gfx/play/play_selftest.h` | Window self-test script for the oracles (steps are listed in that header). |
 | `play` | `late_sample` | `true` | `NXRT_PLAY_LATE_SAMPLE` | `src/gfx/play/play.cpp` | Pump the window's events again right before the first `ProcessInput` of a frame takes the mouse counts, so the aim includes what the mouse did since the frame boundary. |
-| `prompts` | `style` | `auto` | none (controls.ini only) | `src/gfx/play/play_config.cpp` (read from `controls.ini`) | Button icons the game's prompts show. `auto` (the default) shows keyboard and mouse icons until a controller is used, then that controller's icons, and goes back to the keyboard when a key or mouse button is pressed. The other values are `switch` (the game's own icons), `xbox`, `playstation` and `keyboard` (keyboard and mouse). Also accepts `ps`, `ps4`, `ps5`, `dualsense`, `kbm`, `mouse` and `keyboard_mouse`. Stored in `controls.ini` under `[prompts]`, not in `nxrt.ini`. Set it in the library (Controls tab) or on the F1 page (Controller tab, Button prompts). Changes apply on the next frame, with no restart. Keyboard icons show the keys the action is bound to: a rebound jump key shows the new key, and a key with no icon of its own gets a plain key icon. Xbox and PlayStation icons follow `[padmap]`. |
+| `prompts` | `style` | `auto` | none (controls.ini only) | `src/gfx/play/play_config.cpp` (read from `controls.ini`) | Button icons the game's prompts show. `auto` (the default) shows keyboard and mouse icons until a controller is used, then that controller's icons, and goes back to the keyboard when a key or mouse button is pressed. The other values are `console` (the game's own icons; `game`, `own` and the older `switch` mean the same), `xbox`, `playstation` and `keyboard` (keyboard and mouse). Also accepts `ps`, `ps4`, `ps5`, `dualsense`, `kbm`, `mouse` and `keyboard_mouse`. Stored in `controls.ini` under `[prompts]`, not in `nxrt.ini`. Set it in the library (Controls tab) or on the F1 page (Controller tab, Button prompts). Changes apply on the next frame, with no restart. Keyboard icons show the keys the action is bound to: a rebound jump key shows the new key, and a key with no icon of its own gets a plain key icon. Xbox and PlayStation icons follow `[padmap]`. |
 | `fps` | `show` | `0` | none (controls.ini only) | `src/gfx/play/play.cpp`, `src/gfx/overlay.cpp` | Frame rate counter in a corner of the game window. Off by default. While it is off, the overlay does one atomic read per frame and nothing else. The hotkey (`key`), the Display tab of the F1 page and the library's Extras tab can turn it on or off, and the choice is saved. |
 | `fps` | `key` | `F2` | none (controls.ini only) | `src/gfx/play/play.cpp` | Keyboard key that shows and hides the counter. The game never receives it, so do not bind the same key to an action. Any SDL scancode name. |
 | `fps` | `corner` | `top_left` | none (controls.ini only) | `src/gfx/overlay.cpp` | `top_left`, `top_right`, `bottom_left` or `bottom_right`. |
@@ -342,6 +343,8 @@ Rules:
 | `fps` | `in_screenshots` | `0` | none (controls.ini only) | `src/gfx/overlay.cpp` | `0`: a frame being captured (the test tooling's `@shot`, `[nvn] shot_frames`, or the boot screenshots) is drawn without the counter. `1`: the counter appears in the picture. The self-test step `set:fps_in_shots=1` switches it. |
 | `audio` | `mute_unfocused` | `0` | none (controls.ini only) | `src/gfx/play/play.cpp`, `src/services/audio_sink.cpp` | `1` silences the game while its window has no focus (the master volume is kept). Live. |
 | `display` | `upscaler_replace` | `1` | none (controls.ini only) | `src/gfx/play/play.cpp`, `src/gfx/nvn/nvn_replay.cpp` | Live. `1`: the game's own upscaler is replaced as `[nvn] upscaler_replace` and `upscaler_fallback` say (a game module's default; the game: the game's compute chain runs, a scaled copy of the 3D scene stands in while a pass of it cannot run). `0`: the game's own passes always run (the game: a black 3D scene until the network pipeline is built). Nothing happens for a game that names no replacement. F1 menu: Graphics, Picture. |
+| `mouse` | `capture` | `click` | none (controls.ini only) | `src/gfx/play/play_capture.cpp`, `play.cpp` | Who holds the mouse in play. `click` (default): the mouse is captured (relative mode, cursor hidden) only after a click into the game picture while the game is playing; that click and its release do not reach the game. It is let go on focus loss (Alt+Tab, the Win key), minimizing, the in-game menu, the menu bar opening (Alt + its letter, Alt+Space), the library's Settings page opening, and the release key; after that nothing captures again until the next click (focus coming back alone does not). A short note says how: "Alt releases the mouse" when captured, "Click to control the camera with the mouse" when let go. `auto`: the older behaviour, captured whenever the window has the focus and the game is playing. `off`: never. Live. `[play] capture_mouse = false` forces `off`. |
+| `mouse` | `release_key` | `Left Alt` | none (controls.ini only) | `src/gfx/play/play_capture.cpp` | The key that lets the captured mouse go when pressed and released alone (Alt+Tab, Alt+Enter or Alt + a menu letter are not "alone"). Any SDL key name, or `none` (then focus loss and the menus are the way out). The key still reaches the game's bindings. Live. |
 | `menu` | `auto_apply` | `1` | none (controls.ini only) | `src/gfx/play/play_ui.cpp` | `1`: a change in the F1 menu takes effect and is saved as soon as the control is let go. `0`: changes wait for the menu's Apply and save. |
 | `config` | `<section>.<key>` | none | none (controls.ini only) | `src/gfx/play/play.cpp` | Restart-only runtime keys the F1 menu sets: at the start each line becomes the key `[section] key` of this table, unless the game ini or an `NXRT_*` variable sets that key (a game module's own default, `game::Info::config_defaults`, is replaced). The menu writes `am.operation_mode`, `am.resolution`, `am.graphics_scale`, `gfx.device_diagnostics`, `gfx.device_fault`, `gfx.exit_on_device_lost`, `gfx.robust_access`, `nvn.skip_unmapped_dispatch`, `nvn.debug_skip_compute`, `gfx.log_fps` and `diag.hitch_ms`, and removes a line again when its value is the default; other keys written by hand work the same way. |
 | `display` | `monitor` | `auto` | none (controls.ini only) | `src/gfx/play/play.cpp`, `src/gfx/platform.cpp` | The display the window lives on: `auto` (where the window opens) or the display's number, 1 for the first in the system's order. Moves the window at once; a fullscreen window goes along. |
@@ -416,73 +419,46 @@ When the sink has a clock of its own (XAudio2, or `paced`), the audio renderer k
 
 While a sink is active, a line `sink <name>: queue avg A ms (min..max ms), underruns +N (total), dropped +D, written F frames/s (rate R)` is logged every `stats_interval` seconds. The queue is the audio waiting in the device, which is the output latency; `written` should match the rate (lower: the game is starved or the stream is stretched). When a sink closes, it writes one line to the log with its counters: frames written, accepted, dropped, underruns (times the device ran out of audio after playback had started) and the largest number of buffers queued at once.
 
-## Keyboard beam and visor keys (`controls.ini`)
+## Keyboard and mouse bindings (`controls.ini`)
 
-These live in the play-mode file `controls.ini` (key `[play] controls`), not in `nxrt.ini`. The F1 settings page writes the same file.
+These live in the play-mode file `controls.ini` (key `[play] controls`), not in `nxrt.ini`. The F1 settings page, the game window's menu
+bar and the library write the same file.
 
-| Input | Action | What the game does |
-|---|---|---|
-| `1` | `beam_1` | Power beam |
-| `2` | `beam_2` | Wave beam |
-| `3` | `beam_3` | Ice beam |
-| `4` | `beam_4` | Plasma beam |
-| `5` | `visor_1` | Combat visor |
-| `6` | `visor_2` | Scan visor |
-| `7` | `visor_3` | Thermal visor |
-| `8` | `visor_4` | X-ray visor |
-| Mouse wheel up / down | `beam_prev` / `beam_next` | Cycle the beams you own, in the order power, wave, ice, plasma. Off when `[mouse] wheel_beams = 0`. |
+Actions: `move_*`, `look_*`, the console buttons `btn_a` ... `btn_rstick`, the d-pad `dpad_*`, `confirm`, `back`, and slots a game module
+names itself (`play_types.h` `GameVocabulary`): a primary and a secondary action, targeting, jump, an alternate control scheme, a look
+button, map, pause, two sets of four selects (set A, which the mouse wheel cycles with the set's next / previous actions, and set B).
+Without a game's own names the slots are called `primary`, `target`, `secondary`, `jump`, `alt_form`, `look_hold`, `map`, `pause`,
+`set_a_1` ... `set_a_4`, `set_a_next`, `set_a_prev`, `set_b_1` ... `set_b_4`. Contexts: `all` (a layer under every context) and, by
+their generic names, `play`, `alt`, `map`, `menu`, `inspect`; a game may name them too.
 
-How it works: the game only knows the console pad, so an action is turned into pad buttons by the `[switch]` table. By default `beam_1` to `beam_4` hold X and press the d-pad (up, right, down, left), and `visor_1` to `visor_4` press the d-pad alone (up, right, down, left). The wheel skips beams the player does not have yet. In the menu and map contexts they are switched off (`1` to `8 = none` in `[bindings.menu]` and `[bindings.map]`) and the wheel moves the cursor or the map instead.
+How it works: the game only knows the console pad, so an action is turned into pad buttons by the `[console]` table (`[switch]` in older
+files, still read). A set select is a short pulse of its output; the wheel skips members the game says the player does not have yet
+(`GamePlay::frame` cycle hint). `[mouse] wheel_cycles = 0` (or the game's own name for it) turns the wheel cycling off.
 
-To change a key, add a line `Key = action` to `[bindings.all]` (every context) or to one context (`[bindings.gameplay]`, `[bindings.morph]`, `[bindings.scan]`, `[bindings.menu]`, `[bindings.map]`). `Key = none` switches an input off in that context. Key names are SDL scancode names (`Left Ctrl`, `Page Up`, `Mouse1`, `WheelUp`).
+To change a key, add a line `Key = action` to `[bindings.all]` (every context) or to one context (`[bindings.play]`, `[bindings.menu]`,
+`[bindings.map]` ...). `Key = none` switches an input off in that context. Key names are SDL scancode names (`Left Ctrl`, `Page Up`,
+`Mouse1`, `WheelUp`). A trigger may follow the action: `Space = jump toggle`, `Left Ctrl = alt_form hold 250`.
 
-`[meta] defaults_rev` records the revision of the factory bindings that the file was written with. The game writes it. A file without the section counts as `0`. When a release adds a new factory binding, the game adds it to an existing `controls.ini` at the next start, but only where that key is still unbound in that context. A key you bound yourself is left alone. A file written before `[meta]` existed has no record of what you removed, so a key you had unbound there gets its new default once. After that, a key you remove stays removed. The first time this happens, the old file is kept next to it as `controls.ini.bak` (an existing `.bak` is never overwritten), and the upgraded file is written at once. The log has one line saying what was added. A file with no `[bindings.*]` section gets the whole factory set and is not rewritten. A revision can also change a factory value (revision 3: `[aim] lock_mode` to `free`). A file that still has the old factory value takes the new one at the same upgrade; any other value stays.
+`[meta] defaults_rev` records the revision of the factory bindings that the file was written with. The game writes it. A file without the section counts as `0`. When a release adds a new factory binding, the game adds it to an existing `controls.ini` at the next start, but only where that key is still unbound in that context. A key you bound yourself is left alone. A file written before `[meta]` existed has no record of what you removed, so a key you had unbound there gets its new default once. After that, a key you remove stays removed. The first time this happens, the old file is kept next to it as `controls.ini.bak` (an existing `.bak` is never overwritten), and the upgraded file is written at once. The log has one line saying what was added. A file with no `[bindings.*]` section gets the whole factory set and is not rewritten. A revision can also change a factory value (`GameDefaultChange`). A file that still has the old factory value takes the new one at the same upgrade; any other value stays.
 
 `[mouse] menu_cursor`, default `1`: in menus the mouse works like a pointer: a visible cursor, hovering highlights an item, left click activates, right click goes back, the wheel scrolls. While it is on, the left click drives no binding in the menu and map contexts. The old key `menu_touch` is ignored; a file that still has it loads without a warning and nothing changes.
 
-### Lock-on and camera feel (`controls.ini`, `[aim]` and `[camera]`)
-
-`[aim] lock_mode`, default `free` (it was `classic` before defaults revision 3; a `controls.ini` still on `classic` from an older revision moves to `free` once, and a later choice of `classic` stays). `classic` is the game's own lock-on: the view turns to face the target. `free` starts the lock the same way, then centres the view on the target once. After that the mouse and right stick still turn the view, and the view is held so the locked target stays on screen inside the margin. The gun and reticle stay on the target, and shots home and strafing circle it, as in the normal lock. Releasing the lock returns to normal aim. The scan visor always uses the classic lock. See `docs/S32.md` for details.
-
-`[aim] free_lock_margin`, default `0.15`, range `0` to `0.4`: the share of the screen kept clear along every edge while `lock_mode = free` holds the view. `0` lets the target reach the edge; `0.15` keeps it in the middle 70 percent.
-
-`[camera] gun_drives_view`, default `1`. `1` is the game's own behaviour: the arm cannon is fixed to the view, so its idle drift, walking bob and landing dip move the whole view. `0` makes the view follow only the mouse and the stick. Those movements move the gun on screen instead, and the view stays still. Takes effect at once, no restart needed. Set it from the F1 page or the library, where it shows as "Steady view" (ticked means `0`).
+Sections of older files that no game uses any more (`[aim]`, `[camera]`) and `[tweaks]` keys the play code does not own are skipped
+without a warning; the game's in-place saves leave them in the file.
 
 ### Start-up and menus (`controls.ini`, `[tweaks]`)
 
-All off by default; with them off the game starts and plays as it always did. They are on the F1 page (Extras tab, "Start-up and menus") and on the library's Extras tab. See `docs/S46.md`.
+All off by default; with them off the game starts and plays as it always did. They take effect only for a game module that implements them
+(`play_fastboot.h`; none in this repository does yet).
 
-`[tweaks] skip_intro`, default `0`. `1` skips the opening cutscene of a new game (the gunship landing on the Frigate Orpheon) without a key press. It uses the game's own cutscene skip: in the Exterior Docking Hangar the cutscene counts as skippable, and the skip button is pressed for the game the moment the game accepts it (about two seconds in), then the game fades out and jumps to the state the end of the cutscene leaves. Other cutscenes play as usual. Takes effect at the next new game.
+`[tweaks] skip_intro`, default `0`. `1` skips the opening cutscene of a new game without a key press, through the game's own cutscene skip.
+Other cutscenes play as usual. Takes effect at the next new game.
 
-`[tweaks] skip_boot_logos`, default `0`. `1` ends the title's 14 second intro movie (the logo forming) as soon as it starts, so the title screen with "press start" comes up at once.
+`[tweaks] skip_boot_logos`, default `0`. `1` ends the title's intro movie as soon as it starts, so the title screen comes up at once.
 
 `[tweaks] language`, default `auto`. The game's language: `auto` uses the Windows display language when the game has it, else English; a name such as `French` or `LatinAmericanSpanish` picks one (names as in `[system] language`). The library's Extras tab sets it. `[system] language` in the game ini wins over it. Applies at the next start.
 
-`[tweaks] fast_menus`, default `0`, and `[tweaks] menu_speed`, default `2`, range `1` to `4`. With `fast_menus = 1` the front end (title, main menu, save slots, difficulty, options, extras) runs its clock `menu_speed` times faster: its animations, fades, waits and the attract-mode timer. The transition movies between the title, the main menu and Extras are cut after 1/`menu_speed` of their length. The looping movies behind the menus, their sound and the game itself keep their speed. `menu_speed` is read only while `fast_menus` is on. Applies at once.
-
-### Glow colour (`controls.ini`, `[tweaks]`)
-
-`[tweaks] glow_color`, default `off`: `off` keeps the game's colours. `R,G,B` (0 to 255 each, as a colour picker shows them) recolours the glows of Samus's equipment: the morph ball's glowing stripes, inner glow, boost glow, trail and light, the arm cannon's charge glow and lit panels, and the suit's lights (the visor glow and the small lights on the chest, belt, knees and shins, on all four suits, from their glow maps). The colour multiplies the game's glow, so the ball's white glow takes it exactly, the charge's yellow mixes with it (magenta gives a pink-red charge), and a darker colour gives a dimmer glow. The morph ball's shell keeps its colours. The cannon's panels and the suit's lights keep the game's brightness and take the setting's hue, for every beam. Their glow textures are recoloured as the game uploads them, which takes about a second in the background. A change applies at once, with no restart. Details in `docs/S44.md`.
-
-`[tweaks] suit_glow`, `ball_glow` and `gun_glow`, default `auto`: `auto` follows `glow_color`, `off` keeps the game's colour for that part even when `glow_color` is set, and `R,G,B` gives the part its own colour.
-
-The library's Tweaks tab and the F1 page's Tweaks tab have the switch, three sliders with a colour swatch, a Reset button that goes back to the game's colours, and the per-part choice. The F1 page shows the colour in the game while the sliders move; Apply and save keeps it.
-
-`NXRT_GLOW_TEST_FILE` (environment, test aid): a file of `[tweaks]` lines. When it changes, its values replace the saved ones in the running game (checked twice a second).
-
-`NXRT_GLOW_LOG_TEXTURES` (environment, discovery aid): `1` logs the identity (tail hash) of every sRGB ASTC texture the glow's texture hook sees, once each, while a glow colour is on. `WxH,WxH,...` also claims every texture of those sizes under a numbered discovery id without changing it, so the runtime's `edited by the host (id ...)` lines match each texture id to its tail. See `docs/S44.md`.
-
-`NXRT_GLOW_TEST_FILL` (environment, test aid): `1` paints every glow texture texel in the glow colour at full strength, to show whether a texture reaches the screen.
-
-### Suit and arm cannon colour (`controls.ini`, `[tweaks]`)
-
-`[tweaks] suit_color`, default `off`: `off` keeps the game's paint. `R,G,B` (0 to 255 each) repaints the player character's suit in that colour, anything from black to white, keeping the shading and detail of the game's textures. The morph ball and the spider ball follow it. The visor, the lights painted on the suit and the glow keep their colours (the glow has `glow_color`).
-
-`[tweaks] gun_color`, default `off`: the same for the arm cannon's shell (first person, every suit and beam).
-
-Both are on the library's Tweaks tab and the F1 page's Tweaks tab (a switch, three sliders and a swatch each, and "Reset the paint"). A change shows in the game about a quarter of a second after the slider stops; the textures are repainted in the background (about 0.1 to 0.15 s per texture). Details in `docs/S45.md`.
-
-`NXRT_TINT_TEST_FILE` (environment, test aid): a file of `[tweaks]` lines (`suit_color = ...`, `gun_color = ...`). When it changes, its values replace the saved ones in the running game (checked twice a second).
+`[tweaks] fast_menus`, default `0`, and `[tweaks] menu_speed`, default `2`, range `1` to `4`. With `fast_menus = 1` the front end runs its clock `menu_speed` times faster: its animations, fades and waits. `menu_speed` is read only while `fast_menus` is on. Applies at once.
 
 ### Controller sticks (`controls.ini`, `[pad]`)
 
@@ -494,11 +470,9 @@ Both are on the library's Tweaks tab and the F1 page's Tweaks tab (a switch, thr
 
 `[pad] look_sens`, default `1`, range `0.25` to `3`: multiplies the right stick's deflection in play. Below 1, the top turn speed is lower. Above 1, it is reached sooner. Like `invert_y`, it applies in play only.
 
-`[pad] ball_orbit`, default `2`, range `0` to `6`: how fast, in radians per second, the right stick turns the morph ball camera around the ball at full deflection. `0` turns the stick off and leaves the mouse on. `[mouse] ball_camera = 0` turns both off.
+`[pad] alt_orbit`, default `2`, range `0` to `6`: for a game with an alternate control scheme seen from outside (a vehicle, a second form): how fast, in radians per second, the right stick turns its camera at full deflection. `0` turns the stick off and leaves the mouse on.
 
-`[mouse] ball_camera`, default `1`: in the morph ball, the mouse and the right stick turn the camera around the ball. Moving the mouse left or right puts the camera on another side of the ball, and it stays there; the ball then rolls in the direction you see. Moving the mouse up or down raises or lowers the camera, between just above the floor and almost overhead. The vertical part goes back to normal when you leave the ball. Rooms with a fixed or scripted camera keep it. `0` gives you the game's own camera, which the mouse does not move. Details in `docs/S48.md`.
-
-`[mouse] ball_sensitivity`, default `2`, range `0.1` to `20`: how fast the mouse turns the morph ball camera, on the same Source engine scale as the settings page (2 is the same speed as the default aim). It sets both directions. Older files with `morph_yaw` and `morph_pitch` (radians per count) still load. A vertical speed of its own can be kept by putting `morph_pitch = <radians per count>` after `ball_sensitivity`; the game writes it that way when the two differ.
+`[mouse] alt_camera`, default `1`, and `[mouse] alt_sensitivity`, default `2`, range `0.1` to `20`: the mouse turns that camera, at this speed on the Source engine scale of the settings page (2 is the same speed as the default aim, both directions; `alt_yaw` / `alt_pitch` in radians per count set one direction each). A game may give these keys its own names (`GameVocabulary`).
 
 ## Window modes and the picture (`controls.ini`, `[display]`)
 
@@ -508,7 +482,7 @@ The game's picture size (internal resolution) is fixed when the game starts. It 
 
 `aspect`, default `auto`: the shape of the 3D view and the HUD. `auto` takes the window's shape at start (or the shape of `render_width` x `render_height` when both are set); `16:9`, `21:9`, `32:9`, `16:10` (any `W:H`) or a number from 1.0 to 5.0 forces one. Title A: on any shape but 16:9 the game's targets get that shape (1080 high when wider, 1920 wide when narrower, then `render_scale` on top), the 3D view is Hor+ (the game's vertical FOV, a wider horizontal one; narrower shapes keep the 16:9 width and show more above and below) and the menus and HUD stay 16:9, centred. `aspect = 16:9` keeps the 16:9 picture with bars. The log line `title A: aspect ...` gives the size used, and the first widened camera logs its vertical and horizontal FOV.
 
-`quality_preset` (`switch2`, `high`, `ultra`, `custom`) and `view_distance` (1.0 to 4.0), live, shown on the F1 Graphics page for games with quality hooks (none ship now). Picking a preset sets `view_distance`, `lod_bias` and `anisotropy` together (platform 2: x1, 0, game; High: x1.5, -0.5, 8; Ultra: x2, -1.0, 16); changing one of them afterwards makes it `custom`.
+`quality_preset` (`console`, `high`, `ultra`, `custom`; the older `switch2` is read as `console`) and `view_distance` (1.0 to 4.0), live, shown on the F1 Graphics page for games with quality hooks (none ship now). Picking a preset sets `view_distance`, `lod_bias` and `anisotropy` together (Console: x1, 0, game; High: x1.5, -0.5, 8; Ultra: x2, -1.0, 16); changing one of them afterwards makes it `custom`.
 
 On a picture narrower than 16:9 (16:10, 3:2, 4:3), the HUD and the menus keep their full 16:9 width and show more above and below. Wider pictures keep the HUD at 16:9 in the middle, as before.
 
@@ -633,7 +607,7 @@ firmware = 12.1.0
 nickname = nxrt
 
 [account]
-nickname = Samus
+nickname = Player
 ; uid =  (empty: the built-in local user id)
 
 [fs]

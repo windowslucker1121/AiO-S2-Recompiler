@@ -871,7 +871,7 @@ void install(uint64_t base, const Config& cfg) {
         }
     }
     s.key_guides.clear();
-    {   // "id=act ..." (act names as in the [switch] section: btn_minus, btn_plus, btn_x ...); "" turns them off
+    {   // "id=act ..." (act names as in the [console] section: btn_minus, btn_plus, btn_x ...); "" turns them off
         const std::string list = config_get_str(sec, "menu_key_guides", cfg.default_key_guides ? cfg.default_key_guides : "");
         char name[32];
         unsigned id = 0;

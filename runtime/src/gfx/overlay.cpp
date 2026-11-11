@@ -151,6 +151,10 @@ struct Overlay::Impl {
     std::atomic<bool> debug_win{false};     // the display-only Debug window
     std::atomic<bool> focus_next{false};   // the menu was just shown: give it the keyboard and gamepad focus
     bool restore_relative = false;
+    std::atomic<bool> restore_mouse{true};   // set_restore_mouse
+    std::mutex toast_mu;                     // guards toast_text and toast_until_s (any thread sets them, the presenting thread draws)
+    std::string toast_text;
+    double toast_until_s = 0;
     std::chrono::steady_clock::time_point last_frame = std::chrono::steady_clock::now();
     uint64_t drawn = 0;
 
@@ -381,7 +385,8 @@ void Overlay::set_visible(bool v) {
     s.visible = v;
     if (v) {
         s.focus_next = true;
-        s.restore_relative = platform::has_window() && platform::relative_mouse();
+        s.restore_relative = s.restore_mouse.load() && platform::has_window() && platform::relative_mouse();
+        if (!s.restore_mouse.load() && platform::has_window() && platform::relative_mouse()) platform::set_relative_mouse(false);
         if (s.restore_relative) platform::set_relative_mouse(false);
     } else {
         s.hides.fetch_add(1);
@@ -418,6 +423,16 @@ void Overlay::set_pointer(bool show, float x, float y, bool in_screenshots) {
     s.ptr_y.store(y, std::memory_order_relaxed);
     s.ptr_in_shots.store(in_screenshots, std::memory_order_relaxed);
     s.ptr_show.store(show, std::memory_order_relaxed);
+}
+
+void Overlay::set_restore_mouse(bool on) { impl_->restore_mouse.store(on); }
+
+void Overlay::show_toast(const std::string& text, double seconds) {
+    Impl& s = *impl_;
+    const double now_s = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::lock_guard<std::mutex> lk(s.toast_mu);
+    s.toast_text = text;
+    s.toast_until_s = text.empty() ? 0 : now_s + seconds;
 }
 
 void Overlay::set_counter(const CounterConfig& c) {
@@ -675,7 +690,17 @@ void Overlay::draw(const FrameInfo& f) {
     const bool note_on = s.note_visible(now_s) && (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
     const bool ptr_on = s.ptr_show.load(std::memory_order_relaxed) && (s.ptr_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
     const bool debug_on = s.debug_win.load(std::memory_order_relaxed) && !s.ctx.renderer->capture_pending();
-    if (!s.visible && !counter_on && !note_on && !ptr_on && !debug_on) {
+    std::string toast;
+    double toast_left = 0;
+    {
+        std::lock_guard<std::mutex> lk(s.toast_mu);
+        if (now_s < s.toast_until_s && !s.ctx.renderer->capture_pending()) {
+            toast = s.toast_text;
+            toast_left = s.toast_until_s - now_s;
+        }
+    }
+    const bool toast_on = !toast.empty();
+    if (!s.visible && !counter_on && !note_on && !ptr_on && !debug_on && !toast_on) {
         s.last_frame = now;
         s.counter_was_on = false;
         return;
@@ -698,7 +723,7 @@ void Overlay::draw(const FrameInfo& f) {
     }
     // a screenshot leaves the counter out unless asked for; with the menu hidden there is then nothing to draw
     const bool show_counter = counter_on && (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
-    if (!s.visible && !show_counter && !note_on && !ptr_on && !debug_on) {
+    if (!s.visible && !show_counter && !note_on && !ptr_on && !debug_on && !toast_on) {
         s.last_frame = now;
         return;
     }
@@ -727,6 +752,18 @@ void Overlay::draw(const FrameInfo& f) {
     }
     if (show_counter) s.draw_counter(f, now_s);
     if (note_on) s.draw_note(f);
+    if (toast_on) {   // centred near the top, fading out over its last half second
+        const float a = static_cast<float>(std::clamp(toast_left / 0.5, 0.0, 1.0));
+        ImFont* font = ImGui::GetFont();
+        const float size = std::clamp(std::round(static_cast<float>(f.extent.height) / 40.f), 14.f, 40.f);
+        const float pad = size * 0.5f;
+        const ImVec2 sz = font->CalcTextSizeA(size, FLT_MAX, 0.0f, toast.c_str());
+        const float W = static_cast<float>(f.extent.width);
+        const float x0 = (W - sz.x) * 0.5f - pad, y0 = size * 1.5f;
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + sz.x + 2.f * pad, y0 + sz.y + 2.f * pad), IM_COL32(0, 0, 0, static_cast<int>(160 * a)), size * 0.3f);
+        dl->AddText(font, size, ImVec2(x0 + pad, y0 + pad), IM_COL32(255, 255, 255, static_cast<int>(240 * a)), toast.c_str());
+    }
     if (ptr_on) {   // a plain arrow, white with a dark outline, sized with the frame height
         const float k = std::max(1.f, static_cast<float>(f.extent.height) / 720.f);
         const float x = s.ptr_x.load(std::memory_order_relaxed), y = s.ptr_y.load(std::memory_order_relaxed);

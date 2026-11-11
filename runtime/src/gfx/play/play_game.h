@@ -3,8 +3,8 @@
 //
 // Play mode itself is the game-independent PC front end: the window, the SDL event pump, the frame limiter, the binding engine that turns
 // keys, mouse buttons and pads into console pad input, the menu pointer state, the F1 overlay and its settings file. What only makes sense for
-// one game goes through GamePlay: the hooks on that game's functions (raw mouse aim, camera look, lock-on, display options, menu widgets, the
-// tone curve), what the game's state says about the context (play, alternate body, inspect; title E: gameplay, morph ball, scan) and its parts of the F1 page. A game without a
+// one game goes through GamePlay: the hooks on that game's functions (raw mouse aim, camera look, targeting, display options, menu widgets, the
+// tone curve), what the game's state says about the context (play, alternate scheme, inspect) and its parts of the F1 page. A game without a
 // GamePlay table still gets a window, pad input, the frame limiter and the overlay; the context is then always the menu.
 //
 // Order at start (play.cpp start()): install_render (before the frame-boundary hook), the frame-boundary hook at frame_update, install.
@@ -45,8 +45,8 @@ public:
 struct GameFrame {
     float look_scale = 1.f;          // the gyro's pitch rate is multiplied by this before the game reads it
     bool hints_valid = false;        // the cycle fields are meaningful
-    int cycle_index = -1;            // the selected set-A member in the bindings' numbering (SetA1..SetA4 = 0..3), -1 = unknown (title E: the beam)
-    unsigned cycle_mask = 0;         // bit i = SetA<i+1> selectable (title E: the beams owned)
+    int cycle_index = -1;            // the selected set-A member in the bindings' numbering (SetA1..SetA4 = 0..3), -1 = unknown (for example the weapon in use)
+    unsigned cycle_mask = 0;         // bit i = SetA<i+1> selectable (for example the weapons owned)
     Ctx play_ctx = Ctx::Play;    // the context while the game is in play (Play, Alt, Inspect)
 };
 
@@ -73,12 +73,12 @@ struct GamePlay {
     unsigned display_options = 0;    // kDisplayOpt* bits: which of the options above the game's display hooks apply (0: none)
     uint64_t frame_update = 0;       // entry hook site (offset in main): once per rendered frame, on the main thread; 0 = play mode is never pumped
     // A game without an input hook (no GameHost::input_tick calls): > 0 makes the mouse turn the camera through the right stick. Every frame
-    // then counts as play (the mouse is captured while the window has the focus) and the mouse's turn rate ([mouse] yaw_rad / pitch_rad per
+    // then counts as play (the mouse is captured after a click into the picture, [mouse] capture) and the mouse's turn rate ([mouse] yaw_rad / pitch_rad per
     // count) is this many radians per second at full stick.
     double mouse_stick_rad_s = 0;
     // Before the frame-boundary hook is added: hooks that do not need the host (display options, the tone curve). window_w/h: the client size.
     void (*install_render)(uint64_t base, const DisplaySettings& d, int window_w, int window_h) = nullptr;
-    // After it: input, camera, lock-on, menu widgets.
+    // After it: input, camera, targeting, menu widgets.
     void (*install)(uint64_t base, GameHost* host, const Settings& s) = nullptr;
     void (*remove)() = nullptr;
     void (*settings_changed)(const Settings& s) = nullptr;       // new settings are in force
@@ -100,7 +100,7 @@ struct GamePlay {
     bool (*mouse_tab)(int where, Settings& edit) = nullptr;
     // F1 page, Tweaks tab: the game's optional looks ([tweaks], play_tweaks.h). Returns true when edit changed; nullptr = no Tweaks tab.
     bool (*tweaks_tab)(Settings& edit) = nullptr;
-    // F1 page, Graphics tab (kDisplayOptQuality): writes a quality preset's values ("switch2", "high", "ultra") into d. False: unknown name.
+    // F1 page, Graphics tab (kDisplayOptQuality): writes a quality preset's values ("console", "high", "ultra") into d. False: unknown name.
     bool (*quality_preset)(const char* name, DisplaySettings& d) = nullptr;
 };
 

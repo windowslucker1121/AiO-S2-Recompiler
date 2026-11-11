@@ -11,7 +11,7 @@
 //   timestep         the sites of the real-time frame step (nxrt/timestep.h, Sites)                           games/oot/oot_core.cpp
 //   probes           test-tooling game-state probes and script steps (nxrt/tt.h, GameProbes)                  (none for oot)
 //   play_defaults    factory controls.ini text and the bindings added by later revisions (play_types.h)       games/oot/oot_game.cpp
-//   play             play-mode hooks: aim, camera, lock-on, display, menu pointer, F1 entries (play_game.h)     games/oot/oot_game.cpp
+//   play             play-mode hooks: aim, camera, targeting, display, menu pointer, F1 entries (play_game.h)     games/oot/oot_game.cpp
 //   prompts          the game's button icon textures (play/prompt_resolve.h, PromptGame)                      (none for oot)
 //   poll_sleeps      SleepThread calls inside the game's own polling loops, shortened (PollSleep below)        (none for oot)
 // The registry is header-only, so programs that do not link the runtime library (the library) use it too.

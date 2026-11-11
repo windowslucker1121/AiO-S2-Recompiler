@@ -171,7 +171,7 @@ PromptStyle auto_style(LastDevice last, int last_pad_kind, int connected_pad_kin
     auto from_kind = [](int k) {
         switch (k) {
             case 2: return PromptStyle::PlayStation;
-            case 3: return PromptStyle::Switch;
+            case 3: return PromptStyle::Console;
             default: return PromptStyle::Xbox;     // Xbox pads and every pad that is neither a PlayStation nor a console pad
         }
     };

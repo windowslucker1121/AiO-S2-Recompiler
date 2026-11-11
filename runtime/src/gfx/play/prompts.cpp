@@ -118,11 +118,11 @@ struct State {
     // answers
     std::string names[kIconCount];
     bool any_name = false;
-    PromptStyle effective = PromptStyle::Switch;
+    PromptStyle effective = PromptStyle::Console;
     // the inputs of the last update
     bool have_inputs = false;
     PromptInputs last_in;
-    PromptStyle last_eff = PromptStyle::Switch;
+    PromptStyle last_eff = PromptStyle::Console;
     uint32_t hits = 0;
 };
 
@@ -266,7 +266,7 @@ void prompts_reset() {
     s.id_sizes.clear();
     for (auto& n : s.names) n.clear();
     s.any_name = false;
-    s.effective = PromptStyle::Switch;
+    s.effective = PromptStyle::Console;
     s.have_inputs = false;
     s.hits = 0;
 }

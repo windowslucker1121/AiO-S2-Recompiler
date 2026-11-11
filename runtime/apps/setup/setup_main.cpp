@@ -35,6 +35,7 @@
 #include <cstdio>
 #include <deque>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -66,9 +67,11 @@ constexpr UINT kMsgLine = WM_APP + 1;     // wParam: StepRun*, lParam: std::stri
 constexpr UINT kMsgExit = WM_APP + 2;     // wParam: StepRun*, lParam: exit code
 constexpr UINT kMsgCheck = WM_APP + 3;    // wParam: GameItem*, lParam: std::string* (the prepare check's answer)
 constexpr UINT kMsgDlss = WM_APP + 5;     // lParam: std::wstring* (empty: DLSS downloaded, else the error)
-constexpr UINT kMsgReqs = WM_APP + 4;     // lParam: std::vector<Check>* (the PC's checks, made on a thread)
+constexpr UINT kMsgReqs = WM_APP + 4;
+constexpr UINT kMsgGameExit = WM_APP + 6; // wParam: GameItem*, lParam: the game's exit code     // lParam: std::vector<Check>* (the PC's checks, made on a thread)
 constexpr UINT_PTR kTimer = 1;
-constexpr int kHovPc = 90, kHovBrand = 98, kHovAdd = 99, kHovReport = 100, kHovTab = 101;
+constexpr ULONG_PTR kCopyArgs = 0x52454C42;   // WM_COPYDATA from a second start: its command line
+constexpr int kHovPc = 90, kHovBrand = 98, kHovAdd = 99, kHovReport = 100, kHovTab = 101, kHovDetails = 103;
 
 // Two colours per game for its card's banner, from its id (stable, distinct, never too dark or too bright).
 void banner_colors(const std::string& id, COLORREF* a, COLORREF* b) {
@@ -91,6 +94,12 @@ enum Page { P_LIB, P_GAME, P_SET, P_PC, P_COUNT };
 enum StepId { S_EXTRACT, S_BUILD, S_CORPUS, S_TRANSLATE, S_PROGRAMS, S_PREPARE, S_COUNT };
 const wchar_t* kStepName[S_COUNT] = {L"Extract the game files", L"Build the game program", L"Find the game's shaders", L"Translate the shaders",
                                      L"List the shader programs", L"Compile the shaders for your graphics card"};
+// What a step takes on a 16-thread PC for a full-size game (about 25 GB), before anything is measured here. CPU-bound steps scale with the
+// PC's threads, the shader steps with the game's size; the time a step took last time on this PC (setup_state.ini secs_N) wins over both.
+// ponytail: from the development machines (AGENTS.md); rough on purpose: the running steps' measured rates correct the rest
+constexpr double kStepBaseSecs[S_COUNT] = {300, 1500, 840, 420, 100, 1800};
+constexpr bool kStepCpu[S_COUNT] = {false, true, true, true, false, true};
+constexpr bool kStepBySize[S_COUNT] = {true, false, true, true, true, true};
 const wchar_t* kStepShort[S_COUNT] = {L"extract", L"build", L"corpus", L"translate", L"programs", L"prepare"};
 // What a step needs finished first (a dependency that is not part of the job counts as finished): everything needs the extracted dump,
 // TRANSLATE the shader corpus and the built exe, PREPARE the translations, the program list and the exe.
@@ -112,7 +121,18 @@ struct StepRun {
     uint64_t done0 = 0;
     std::chrono::steady_clock::time_point t1;
     bool running() const { return started && !finished; }
-    void reset() { started = finished = ok = result_ok = seen = false; done = total = done0 = 0; phase.clear(); error.clear(); }
+    std::chrono::steady_clock::time_point t_end;   // when it ended (finished)
+    double elapsed() const {
+        if (t0 == std::chrono::steady_clock::time_point{}) return 0;
+        return std::chrono::duration<double>((finished && t_end > t0 ? t_end : std::chrono::steady_clock::now()) - t0).count();
+    }
+    void reset() {
+        started = finished = ok = result_ok = seen = false;
+        done = total = done0 = 0;
+        phase.clear();
+        error.clear();
+        t0 = t_end = {};
+    }
     // Seconds left, -1 while there is no fair guess yet (under 20 s or under 2% of the work measured).
     int secs_left() const {
         const auto now = std::chrono::steady_clock::now();
@@ -145,19 +165,19 @@ std::wstring thousands(uint64_t v) {
     for (int i = static_cast<int>(d.size()) - 3; i > 0; i -= 3) d.insert(static_cast<size_t>(i), L",");
     return d;
 }
-std::wstring left_text(int left) {
-    if (left < 0) return L"";
-    if (left < 60) return L"under a minute left";
-    if (left < 5400) return L"about " + std::to_wstring((left + 59) / 60) + L" min left";
-    return L"about " + std::to_wstring(left / 3600) + L" h " + std::to_wstring(left / 60 % 60) + L" min left";
+// "under a minute", "about 5 min", "about 1 h 20 min"
+std::wstring span_text(double secs) {
+    const int left = static_cast<int>(secs + 0.5);
+    if (left < 60) return L"under a minute";
+    if (left < 5400) return L"about " + std::to_wstring((left + 59) / 60) + L" min";
+    const int m = (left + 299) / 300 * 5;   // whole 5 minutes: the hour figures are rough anyway
+    return L"about " + std::to_wstring(m / 60) + L" h" + (m % 60 ? L" " + std::to_wstring(m % 60) + L" min" : L"");
 }
-// "42% · 1,234 of 39,363 · about 5 min left" (the counts only for the shader steps, which count blocks / programs)
-std::wstring step_detail(const StepRun& r) {
-    if (!r.total) return L"Running...";
+// "42% · 1,234 of 39,363" (the counts only for the shader steps, which count blocks / programs)
+std::wstring step_counts(const StepRun& r) {
+    if (!r.total) return L"Working";
     std::wstring t = std::to_wstring(static_cast<int>(r.fraction() * 100)) + L"%";
     if (r.id == S_CORPUS || r.id == S_TRANSLATE || r.id == S_PREPARE) t += L" · " + thousands(std::min(r.done, r.total)) + L" of " + thousands(r.total);
-    const std::wstring l = left_text(r.secs_left());
-    if (!l.empty()) t += L" · " + l;
     return t;
 }
 
@@ -185,6 +205,7 @@ struct GameItem {
     std::chrono::steady_clock::time_point stop_at;
     bool play_after = false;             // Play pressed before the setup was done: start the game when it is
     bool play_now = false;               // "Play now": the setup was stopped, start the game once its steps have ended
+    bool game_running = false;           // the library started the game and it has not ended yet
     // The game program exists and no step that rewrites it runs: the game can start now, shaders translate and compile while it plays.
     bool can_play_now() const {
         if (!def || !gid.ok || !exe_ok() || queued) return false;
@@ -193,11 +214,64 @@ struct GameItem {
         return true;
     }
     StepRun run[S_COUNT];
-    // How far the whole job is, 0..1: finished and not needed steps count as done.
-    double overall() const {
+    double size_scale = 1;               // the game's size against a full-size game (the shader steps' estimates)
+    std::chrono::steady_clock::time_point job_t0;
+    // ---- time estimates: one honest figure for everything that is left ----
+    bool planned(int s) const { return running ? run[s].planned : need[s]; }
+    // what step s takes from its start, before it runs: measured here last time, else the base figure for this PC and game size
+    double expected(int s) const {
+        if (st.secs[s] > 0) return st.secs[s];
+        const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+        double t = kStepBaseSecs[s];
+        if (kStepCpu[s]) t *= 16.0 / static_cast<double>(hw);
+        if (kStepBySize[s]) t *= size_scale;
+        return std::max(10.0, t);
+    }
+    // How this PC compares to the base figures, from the running steps that report a rate (1 while none does). Steps measured here
+    // before keep their own figure.
+    double speed() const {
         double sum = 0;
-        for (const StepRun& r : run) sum += (!r.planned || r.finished) ? 1 : r.started ? std::min(r.fraction(), 0.999) : 0;
-        return sum / static_cast<double>(S_COUNT);
+        int n = 0;
+        for (const StepRun& r : run) {
+            if (!r.running() || st.secs[r.id] > 0) continue;
+            const int left = r.secs_left();
+            if (left < 0) continue;
+            sum += (r.elapsed() + left) / expected(r.id);
+            ++n;
+        }
+        return n ? std::clamp(sum / n, 0.33, 3.0) : 1.0;
+    }
+    double remaining(int s, double sp) const {
+        if (!planned(s)) return 0;
+        const StepRun& r = run[s];
+        const double e = st.secs[s] > 0 ? expected(s) : expected(s) * sp;
+        if (running && r.finished) return 0;
+        if (running && r.running()) {
+            const int left = r.secs_left();
+            if (left >= 0) return left;
+            return std::max(e - r.elapsed(), 0.1 * e);   // no rate yet: the estimate minus what ran, never "done" before it is
+        }
+        return e;
+    }
+    // Seconds until every planned step is done. Steps run side by side once their inputs are done, so it is the longest chain of
+    // remaining times through the dependencies (every dependency has a lower index than its step).
+    double eta() const {
+        const double sp = speed();
+        double fin[S_COUNT] = {};
+        double end = 0;
+        for (int s = 0; s < S_COUNT; ++s) {
+            double start = 0;
+            for (int d : kStepDeps[s]) start = std::max(start, fin[d]);
+            fin[s] = start + remaining(s, sp);
+            end = std::max(end, fin[s]);
+        }
+        return end;
+    }
+    // How far the whole job is, 0..1: the time it has run against that time plus what is left.
+    double overall() const {
+        if (!running) return 0;
+        const double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - job_t0).count(), left = eta();
+        return el + left > 0 ? std::clamp(el / (el + left), 0.0, 0.999) : 0;
     }
     int nrunning() const { int n = 0; for (const StepRun& r : run) n += r.running(); return n; }
     std::string error;
@@ -209,6 +283,22 @@ struct GameItem {
     bool playable() const { return def && gid.ok && !need[S_EXTRACT] && exe_ok() && !running; }
     int todo() const { int n = 0; for (bool x : need) n += x; return n; }
 };
+
+// The game's size against a full-size game (25 GB): the .nup's size, or the extracted romfs's (walked once per game and kept).
+double size_scale_of(const GameItem& g) {
+    static std::map<std::wstring, double> memo;
+    std::error_code ec;
+    uint64_t bytes = 0;
+    if (source_kind(g.cfg.source) == SourceKind::nup) bytes = fs::file_size(g.cfg.source, ec);
+    else if (!g.lay.game.empty()) {
+        const std::wstring romfs = join(g.lay.game, L"romfs");
+        if (auto it = memo.find(romfs); it != memo.end()) return it->second;
+        for (fs::recursive_directory_iterator it(romfs, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end; it.increment(ec))
+            if (it->is_regular_file(ec)) bytes += it->file_size(ec);
+        return memo[romfs] = std::clamp(static_cast<double>(bytes) / 25e9, 0.002, 4.0);
+    }
+    return bytes ? std::clamp(static_cast<double>(bytes) / 25e9, 0.002, 4.0) : 1.0;
+}
 
 struct Status {
     std::wstring text;
@@ -223,7 +313,7 @@ enum Id : int {
     ID_CARDS = 100, ID_STEPS, ID_LOG, ID_REQ_LIST, ID_REQ_FIX,
     ID_PLAY, ID_PREP, ID_CANCEL, ID_REBUILD, ID_SRC_NUP, ID_SRC_FOLDER, ID_DATA, ID_OPEN_DATA, ID_SHORTCUT, ID_REMOVE,
     ID_RECHECK, ID_COPY, ID_OPEN_INI, ID_ADD, ID_SETTINGS, ID_MORE, ID_DETAILS, ID_PLAY_AS_IS,
-    IDM_ADD = 1000, IDM_EXIT, IDM_RECHECK, IDM_ABOUT, IDM_REPORT, IDM_PAGE0,
+    IDM_ADD = 1000, IDM_EXIT, IDM_RECHECK, IDM_ABOUT, IDM_REPORT, IDM_PAGE0, IDM_BACK = IDM_PAGE0 + 8, IDM_PREV_GAME, IDM_NEXT_GAME,
 };
 
 class App {
@@ -300,6 +390,7 @@ private:
     void refresh();                       // texts and enabled states of the controls of the current page
     void update_settings();               // the settings panel shows the selected game
     void download_dlss();                 // licence dialog, then fetch_dlss.py as a child
+    void handle_args(const std::wstring& line, bool live);   // a second start's command line (--game, --page, --tab, --add)
     Child dlss_child_;
 
     HINSTANCE inst_ = nullptr;
@@ -311,14 +402,19 @@ private:
     int page_ = P_LIB;
     std::vector<std::pair<HWND, int>> ctls_;   // control, page (-1: never shown by show_page)
     std::vector<std::pair<HWND, Btn>> btns_;
-    HWND steps_ = nullptr, log_ = nullptr, req_list_ = nullptr, req_fix_ = nullptr;
+    HWND log_ = nullptr;
+    RECT pc_rect_area_{};                 // This PC: where the checks are painted
+    int pc_scroll_ = 0, pc_content_h_ = 0;
+    std::vector<const Check*> pc_checks() const;   // every check, problems first
+    void paint_pc(gp::Graphics& g);
     HWND b_more_ = nullptr;
     HWND b_play_ = nullptr, b_cancel_ = nullptr, b_recheck_ = nullptr, b_copy_ = nullptr, b_open_ini_ = nullptr;
     RECT brand_rect_{}, pc_rect_{}, add_rect_{}, report_rect_{}, tab_rect_[2] = {};
     std::vector<std::pair<RECT, GameItem*>> nav_games_;   // the side menu: one entry per game in the library, then This PC
-    RECT prog_rect_{};
+    RECT prog_rect_{}, steps_rect_{}, details_rect_{};
+    void paint_steps(gp::Graphics& g, const GameItem& s);
     int hover_nav_ = -1;                 // 0.. a game, kHovPc, kHovBrand, kHovAdd, kHovReport, kHovTab + 0/1
-    bool details_ = true;                // the game page shows the steps and the output (always while a setup runs)
+    bool details_ = false;               // the game page shows the setup's output under the steps
 
     // cards
     struct Hit { RECT r; GameItem* g; int action; };   // action: 0 select, 1 play, 2 prepare, 3 cancel, 4 add
@@ -326,6 +422,7 @@ private:
     int hover_hit_ = -1;
     GameItem* hover_game_ = nullptr;
     int scroll_ = 0, content_h_ = 0;
+    int kb_card_ = 0, cards_cols_ = 1, cards_n_ = 1;   // the card the keyboard is on (arrows move it, Enter opens it)
 
     Tools tools_;
     std::vector<GameDef> defs_;
@@ -339,6 +436,7 @@ private:
     std::wstring game_args_;
     std::vector<std::wstring> add_paths_;   // --add
     bool auto_start_ = false;
+    int start_tab_ = -1;                  // --tab: the settings tab to open
 };
 
 App* g_app = nullptr;
@@ -483,6 +581,7 @@ void App::evaluate(GameItem& g) {
     g.lay = layout_of(g.cfg);
     g.st = load_state(g.lay.state_file);
     g.gid = game_id_of(g.lay.game);
+    if (!g.running && g.in_library()) g.size_scale = size_scale_of(g);
     if (g.def) { g.build = game_build_of(tools_, *g.def); g.exe = game_exe_for(tools_, *g.def, g.cfg); }
     for (int i = 0; i < S_COUNT; ++i) { g.need[i] = false; g.why[i].clear(); }
     const SourceKind sk = source_kind(g.cfg.source);
@@ -538,17 +637,17 @@ Status App::status_of(const GameItem& g) const {
     if (g.running) {
         s.color = kAccentHi;
         s.text = g.cancel_requested ? L"Stopping" : L"Setting up";
-        s.progress = 0;
-        // the steps as one bar: each step an equal share
+        // one bar and one time for the whole job (every step that is left, side by side where they can run so)
         s.progress = g.overall();
-        if (s.progress > 0) {
+        if (!g.cancel_requested) {
             wchar_t b[32];
             std::swprintf(b, 32, L" \u00B7 %d%%", static_cast<int>(s.progress * 100));
-            s.text += b;
+            s.text += b + std::wstring(L" \u00B7 ") + span_text(g.eta()) + L" left";
         }
         return s;
     }
     if (g.queued) { s.text = L"Waiting"; s.color = kAccentHi; s.progress = 0; return s; }
+    if (g.game_running) { s.text = L"Playing"; s.color = kOk; return s; }
     if (!g.error.empty()) { s.text = L"Problem"; s.color = kBad; return s; }
     if (!g.exe_ok() && !g.build.ok) { s.text = L"Not built yet"; s.color = kWarn; return s; }
     if (g.ready()) { s.text = exp ? L"Ready (experimental)" : L"Ready"; s.color = kOk; return s; }
@@ -565,7 +664,9 @@ std::wstring App::primary_label(const GameItem& g, bool* enabled) const {
     }
     if (!g.in_library()) return L"Add dump";
     if (g.running || g.queued) { *enabled = false; return L"Setting up"; }
+    if (g.game_running) { *enabled = false; return L"Playing"; }
     if (!g.exe_ok() && !g.build.ok) { *enabled = false; return L"Not built yet"; }
+    if (!g.error.empty() && !g.ready()) return L"Try again";
     return L"Play";
 }
 
@@ -950,6 +1051,8 @@ void App::run_queue() {
     g.stopping = g.killed = false;
     active_ = &g;
     evaluate(g);   // the plan of this job: the steps to run; it is not recomputed while they run (each step looks again just before it starts)
+    g.job_t0 = std::chrono::steady_clock::now();
+    g.size_scale = size_scale_of(g);
     for (int i = 0; i < S_COUNT; ++i) {
         g.run[i].reset();
         g.run[i].g = &g;
@@ -988,7 +1091,12 @@ void App::request_stop(GameItem& g) {
 }
 
 void App::fail_job(GameItem& g, const std::string& error) {
-    if (g.error.empty()) g.error = error;
+    if (g.error.empty()) {
+        // the tools say "error <what>": the player reads "<what>", with a capital
+        std::string e = error.rfind("error ", 0) == 0 ? error.substr(6) : error;
+        if (!e.empty()) e[0] = static_cast<char>(toupper(static_cast<unsigned char>(e[0])));
+        g.error = e;
+    }
     g.play_after = false;
     request_stop(g);   // the others stop too: what they did is kept, Prepare continues later
 }
@@ -1027,6 +1135,7 @@ void App::start_step(GameItem& g, int s) {
         return;
     }
     if (s == S_BUILD && (!g.build.ok || tools_.python.empty())) { fail("this package cannot build the game program"); return; }
+    if (s == S_TRANSLATE && tools_.translator.empty()) { fail("The shader translator is missing: see This PC."); return; }
     if ((s == S_TRANSLATE || s == S_PREPARE) && !g.exe_ok()) {
         log(g, L"--- the game program is not built: " + g.exe + L" ---");
         fail("the game program is not built yet");
@@ -1130,6 +1239,8 @@ void App::step_exit(StepRun& r, DWORD code) {
         else if (s == S_TRANSLATE) { g.st.translated_game = game_id_of(g.lay.game).text(); g.st.translated_with = translator_stamp(tools_.translator); }
         else if (s == S_PROGRAMS) { ok = file_exists(g.lay.programs); if (ok) g.st.programs_game = game_id_of(g.lay.game).text(); }
         else if (s == S_PREPARE) { g.prep_check = L"ready"; g.force_prepare = false; }
+        r.t_end = std::chrono::steady_clock::now();
+        if (ok && !cancelled) g.st.secs[s] = std::max(1, static_cast<int>(r.elapsed()));   // the next estimate of this step on this PC
         save_state(g.lay.state_file, g.st);
     }
     r.finished = true;
@@ -1192,6 +1303,11 @@ void App::play(GameItem& g) {
     if (dlss_state(tools_) == 2) SetEnvironmentVariableW(L"NXRT_UPSCALE_DLSS_DLL", dlss_dir(tools_).c_str());
     // setup not done: no "Preparing shaders" window at start; missing shaders are translated and compiled while the game runs
     SetEnvironmentVariableW(L"NXRT_NVN_SETUP_ON_START", g.ready() ? nullptr : L"0");
+    // the game's Settings entries open this library on its settings page (one place for the settings: runtime/docs/MENU.md)
+    wchar_t self[MAX_PATH * 2] = {};
+    GetModuleFileNameW(nullptr, self, static_cast<DWORD>(std::size(self)));
+    SetEnvironmentVariableW(L"NXRT_LIBRARY_EXE", self);
+    SetEnvironmentVariableW(L"NXRT_LIBRARY_GAME", widen(g.id).c_str());
     std::vector<wchar_t> buf(cmd.begin(), cmd.end());
     buf.push_back(0);
     STARTUPINFOW si{sizeof si};
@@ -1206,13 +1322,29 @@ void App::play(GameItem& g) {
     const bool ended = WaitForSingleObject(pi.hProcess, 4000) == WAIT_OBJECT_0;
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess);
-    if (ended && code != 0) {
-        const std::wstring why = code == 7 ? L"The game is already running, or another run of it leaves too little free memory. Close it first."
-                                           : L"The game stopped while starting (exit code " + std::to_wstring(code) + L").";
-        MessageBoxW(wnd_, (why + L"\r\n\r\nIts log: " + log_path).c_str(), kAppName, MB_OK | MB_ICONWARNING);
+    if (ended) {
+        CloseHandle(pi.hProcess);
+        if (code != 0) {
+            const std::wstring why = code == 7 ? L"The game is already running, or another run of it leaves too little free memory. Close it first."
+                                               : L"The game stopped while starting (exit code " + std::to_wstring(code) + L").";
+            MessageBoxW(wnd_, (why + L"\r\n\r\nIts log: " + log_path).c_str(), kAppName, MB_OK | MB_ICONWARNING);
+        }
         return;
     }
+    // it runs: the library shows "Playing" until it ends (a thread waits for the process)
+    g.game_running = true;
+    HWND w = wnd_;
+    GameItem* gp_ = &g;
+    std::thread([w, gp_, h = pi.hProcess] {
+        WaitForSingleObject(h, INFINITE);
+        DWORD c = 0;
+        GetExitCodeProcess(h, &c);
+        CloseHandle(h);
+        PostMessageW(w, kMsgGameExit, reinterpret_cast<WPARAM>(gp_), static_cast<LPARAM>(c));
+    }).detach();
+    refresh();
+    InvalidateRect(wnd_, nullptr, FALSE);
+    InvalidateRect(cards_, nullptr, FALSE);
     if (!g.ready()) return;
     ShowWindow(wnd_, SW_MINIMIZE);
 }
@@ -1228,6 +1360,24 @@ void App::play_now(GameItem& g) {
     schedule(g);
     refresh();
     InvalidateRect(cards_, nullptr, FALSE);
+}
+
+void App::handle_args(const std::wstring& line, bool live) {
+    (void)live;
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(line.c_str(), &argc);
+    int page = -1, tab = -1;
+    for (int i = 1; argv && i < argc; ++i) {
+        const std::wstring a = argv[i];
+        const bool more = i + 1 < argc;
+        if (a == L"--game" && more) { const std::string id = narrow(argv[++i]); if (GameItem* g = item(id); g && g->in_library()) select(id); }
+        else if (a == L"--page" && more) page = _wtoi(argv[++i]);
+        else if (a == L"--tab" && more) tab = _wtoi(argv[++i]);
+        else if (a == L"--add" && more) add_dump(argv[++i], true);
+    }
+    if (argv) LocalFree(argv);
+    if (page >= 0) show_page(page);
+    if (tab >= 0) settings::set_tab(settings_, tab);
 }
 
 void App::make_shortcut(GameItem& g) {
@@ -1342,7 +1492,7 @@ void App::apply_theme(HWND h) {
 }
 
 void App::create_controls() {
-    cards_ = CreateWindowExW(0, kCardsClass, L"", WS_CHILD | WS_VSCROLL, 0, 0, 10, 10, wnd_, reinterpret_cast<HMENU>(ID_CARDS), inst_, nullptr);
+    cards_ = CreateWindowExW(0, kCardsClass, L"", WS_CHILD | WS_VSCROLL | WS_TABSTOP, 0, 0, 10, 10, wnd_, reinterpret_cast<HMENU>(ID_CARDS), inst_, nullptr);
     SetWindowTheme(cards_, L"DarkMode_Explorer", nullptr);
     ctls_.push_back({cards_, P_LIB});
     // game page: the one button, a cancel while it sets up, and the rest in a menu
@@ -1350,55 +1500,21 @@ void App::create_controls() {
     b_cancel_ = button(L"Cancel", ID_CANCEL, Btn::danger);
     b_more_ = button(L"\u2022\u2022\u2022", ID_MORE, Btn::normal);
     for (HWND h : {b_play_, b_cancel_, b_more_}) ctls_.push_back({h, P_GAME});
-    steps_ = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER | LVS_NOCOLUMNHEADER, 0, 0, 10, 10, wnd_,
-                             reinterpret_cast<HMENU>(ID_STEPS), inst_, nullptr);
-    ListView_SetExtendedListViewStyle(steps_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    // the steps are painted (paint_steps); the output below them shows with details_
     log_ = CreateWindowExW(0, WC_EDITW, L"", WS_CHILD | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 0, 0, 10, 10, wnd_,
                            reinterpret_cast<HMENU>(ID_LOG), inst_, nullptr);
-    ctls_.push_back({steps_, -1});   // shown with details_
     ctls_.push_back({log_, -1});
     // settings page
     settings_ = settings::create(wnd_, inst_, ID_SETTINGS);
     ctls_.push_back({settings_, P_SET});
     b_open_ini_ = button(L"Open file", ID_OPEN_INI, Btn::normal);
     ctls_.push_back({b_open_ini_, P_SET});
-    // this PC
-    req_list_ = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_TABSTOP, 0, 0, 10, 10, wnd_,
-                                reinterpret_cast<HMENU>(ID_REQ_LIST), inst_, nullptr);
-    ListView_SetExtendedListViewStyle(req_list_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-    req_fix_ = CreateWindowExW(0, WC_EDITW, L"", WS_CHILD | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 0, 0, 10, 10, wnd_,
-                               reinterpret_cast<HMENU>(ID_REQ_FIX), inst_, nullptr);
+    // this PC: the checks are painted (paint_pc); the two buttons below them
     b_recheck_ = button(L"Check again", ID_RECHECK, Btn::normal);
-    b_copy_ = button(L"Copy", ID_COPY, Btn::normal);
-    for (HWND h : {req_list_, req_fix_, b_recheck_, b_copy_}) ctls_.push_back({h, P_PC});
-
-    for (HWND lv : {steps_, req_list_}) {
-        apply_theme(lv);
-        ListView_SetBkColor(lv, kCard);
-        ListView_SetTextBkColor(lv, kCard);
-        ListView_SetTextColor(lv, kText);
-        if (HWND hd = ListView_GetHeader(lv)) SetWindowTheme(hd, L"DarkMode_ItemsView", nullptr);
-    }
-    for (HWND e : {log_, req_fix_}) apply_theme(e);
+    b_copy_ = button(L"Copy report", ID_COPY, Btn::normal);
+    for (HWND h : {b_recheck_, b_copy_}) ctls_.push_back({h, P_PC});
+    apply_theme(log_);
     for (auto& [h, k] : btns_) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(bold_), TRUE);
-    auto col = [](HWND lv, int i, const wchar_t* t, int w) {
-        LVCOLUMNW c{LVCF_TEXT | LVCF_WIDTH};
-        c.pszText = const_cast<wchar_t*>(t);
-        c.cx = w;
-        ListView_InsertColumn(lv, i, &c);
-    };
-    col(steps_, 0, L"Step", S(300));
-    col(steps_, 1, L"State", S(380));
-    for (int i = 0; i < S_COUNT; ++i) {
-        LVITEMW it{LVIF_TEXT};
-        it.iItem = i;
-        it.pszText = const_cast<wchar_t*>(kStepName[i]);
-        ListView_InsertItem(steps_, &it);
-    }
-    col(req_list_, 0, L"Check", S(190));
-    col(req_list_, 1, L"Needs", S(220));
-    col(req_list_, 2, L"This PC", S(260));
-    col(req_list_, 3, L"Result", S(110));
 }
 
 constexpr int kSideW = 236;
@@ -1418,30 +1534,20 @@ void App::layout() {
     put(b_cancel_, x + S(212), y + S(6), S(110), S(36));
     put(b_more_, x + w - S(48), y + S(6), S(48), S(36));
     y += S(64);
-    prog_rect_ = {x, y, x + w, y + S(40)};
-    y += S(56);
-    const int steps_h = S_COUNT * S(26) + S(6);
-    put(steps_, x, y, w, steps_h);
-    ListView_SetColumnWidth(steps_, 0, S(300));
-    ListView_SetColumnWidth(steps_, 1, std::max(S(120), w - S(304)));
-    y += steps_h + S(12);
-    put(log_, x, y, w, bottom - y - S(24));
+    prog_rect_ = {x, y, x + w, y + S(48)};
+    y += S(60);
+    // the steps card: a header row, then one row per step
+    steps_rect_ = {x, y, x + w, y + S(52) + S_COUNT * S(46) + S(8)};
+    y = steps_rect_.bottom + S(16);
+    put(log_, x, y, w, std::max(S(80), bottom - y - S(24)));
     // settings: the panel below the page title, the file button in the title row
     put(settings_, S(kSideW), S(92), rc.right - S(kSideW), bottom - S(92));
     put(b_open_ini_, rc.right - S(32) - S(130), S(58), S(130), S(30));
-    // this PC: the problems only
+    // this PC: the checks (painted) between the title and the buttons
     const int bh = S(36);
-    const int list_h = std::max(S(200), (bottom - S(100)) * 58 / 100);
-    put(req_list_, x, S(100), w, list_h);
-    const int c0 = S(190), c3 = S(110), rest = std::max(S(200), w - c0 - c3 - S(4));
-    ListView_SetColumnWidth(req_list_, 0, c0);
-    ListView_SetColumnWidth(req_list_, 1, rest * 42 / 100);
-    ListView_SetColumnWidth(req_list_, 2, rest * 58 / 100);
-    ListView_SetColumnWidth(req_list_, 3, c3);
-    const int fy = S(100) + list_h + S(14);
-    put(req_fix_, x, fy, w, bottom - fy - S(64));
-    put(b_recheck_, x, bottom - S(52), S(140), bh);
-    put(b_copy_, x + S(150), bottom - S(52), S(100), bh);
+    pc_rect_area_ = {x, S(104), x + w, bottom - S(72)};
+    put(b_recheck_, x, bottom - S(56), S(150), bh);
+    put(b_copy_, x + S(162), bottom - S(56), S(150), bh);
     InvalidateRect(wnd_, nullptr, TRUE);
 }
 
@@ -1452,6 +1558,9 @@ void App::show_page(int p) {
     if (page_ == P_SET && before != P_SET) update_settings();
     for (auto& [h, pg] : ctls_) ShowWindow(h, pg == page_ ? SW_SHOW : SW_HIDE);
     refresh();
+    // the keyboard starts where the page's main thing is
+    HWND f = page_ == P_LIB ? cards_ : page_ == P_GAME ? (IsWindowEnabled(b_play_) ? b_play_ : b_more_) : page_ == P_SET ? settings_ : b_recheck_;
+    if (f && IsWindowVisible(wnd_)) SetFocus(f);
     InvalidateRect(wnd_, nullptr, TRUE);
 }
 
@@ -1459,42 +1568,15 @@ void App::refresh() {
     GameItem* g = sel();
     const bool game_page = page_ == P_GAME;
     if (g) {
-        for (int i = 0; i < S_COUNT; ++i) {
-            const StepRun& r = g->run[i];
-            std::wstring t = g->running && r.running() ? L"Running..." : g->running && r.started && r.finished && r.ok ? L"Done"
-                                                                                                               : step_state_text(g->need[i], g->why[i]);
-            ListView_SetItemText(steps_, i, 1, const_cast<wchar_t*>(t.c_str()));
-        }
         bool en = false;
         SetWindowTextW(b_play_, primary_label(*g, &en).c_str());
         EnableWindow(b_play_, en);
         ShowWindow(b_cancel_, game_page && (g->running || g->queued) ? SW_SHOW : SW_HIDE);
         EnableWindow(b_cancel_, g->running || g->queued);
         EnableWindow(b_open_ini_, g->in_library() && !g->lay.game.empty());
-        InvalidateRect(steps_, nullptr, FALSE);
     }
-    const bool busy = g && (g->running || g->queued);
-    for (HWND h : {steps_, log_}) ShowWindow(h, game_page && (details_ || busy) ? SW_SHOW : SW_HIDE);
-    // this PC: every check, what it needs, what this PC has, and a mark for each (the fixes of the ones that are not met below)
-    ListView_DeleteAllItems(req_list_);
-    std::vector<const Check*> all;
-    for (const Check& c : sys_checks_) all.push_back(&c);
-    if (g) for (const Check& c : g->checks) all.push_back(&c);
-    std::wstring fixes;
-    for (size_t i = 0; i < all.size(); ++i) {
-        const Check& c = *all[i];
-        LVITEMW it{LVIF_TEXT | LVIF_PARAM};
-        it.iItem = static_cast<int>(i);
-        it.pszText = const_cast<wchar_t*>(c.item.c_str());
-        it.lParam = static_cast<LPARAM>(c.level);
-        ListView_InsertItem(req_list_, &it);
-        const std::wstring mark = std::wstring(c.level == Level::ok ? L"✓  " : c.level == Level::warn ? L"!  " : c.level == Level::bad ? L"✗  " : L"○  ") + c.state;
-        ListView_SetItemText(req_list_, static_cast<int>(i), 1, const_cast<wchar_t*>(c.need.c_str()));
-        ListView_SetItemText(req_list_, static_cast<int>(i), 2, const_cast<wchar_t*>(c.detail.c_str()));
-        ListView_SetItemText(req_list_, static_cast<int>(i), 3, const_cast<wchar_t*>(mark.c_str()));
-        if (!c.fix.empty()) fixes += c.item + L":\r\n" + c.fix + L"\r\n\r\n";
-    }
-    SetWindowTextW(req_fix_, fixes.empty() ? L"Nothing to fix." : fixes.c_str());
+    ShowWindow(log_, game_page && g && details_ ? SW_SHOW : SW_HIDE);
+    if (page_ == P_PC) InvalidateRect(wnd_, &pc_rect_area_, FALSE);
     for (auto& [h, k] : btns_) InvalidateRect(h, nullptr, FALSE);
 }
 
@@ -1534,6 +1616,12 @@ void App::paint_side(gp::Graphics& g, const RECT& rc) {
     HDC dc = g.GetHDC();
     gp::Font big(dc, title_), bold(dc, bold_), smallf(dc, small_), normal(dc, font_);
     g.ReleaseHDC(dc);
+    if (page_ == P_LIB) {   // the library home: the brand is its entry
+        gp::SolidBrush on(C(kCardHi));
+        fill_round(g, gp::RectF(Sf(12), Sf(16), Sf(kSideW - 24), Sf(54)), Sf(10), on);
+        gp::SolidBrush a(C(kAccent));
+        fill_round(g, gp::RectF(Sf(12), Sf(28), Sf(4), Sf(30)), Sf(2), a);
+    }
     // brand
     gp::LinearGradientBrush lg(gp::PointF(Sf(20), Sf(28)), gp::PointF(Sf(52), Sf(60)), C(kAccent), C(RGB(0xB0, 0x6B, 0xFF)));
     fill_round(g, gp::RectF(Sf(20), Sf(26), Sf(34), Sf(34)), Sf(9), lg);
@@ -1561,7 +1649,6 @@ void App::paint_side(gp::Graphics& g, const RECT& rc) {
             text(g, sub, smallf, gp::RectF(rf.X + rf.Width - Sf(44), rf.Y, Sf(32), rf.Height), kMuted, gp::StringAlignmentFar, gp::StringAlignmentCenter);
         }
     };
-    if (nav_games_.empty()) text(g, L"No games yet. Add one below.", smallf, gp::RectF(Sf(20), Sf(100), Sf(kSideW - 40), Sf(40)), kMuted, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
     for (size_t i = 0; i < nav_games_.size(); ++i) {
         const GameItem* gi = nav_games_[i].second;
         row(nav_games_[i].first, gi->short_title, gi == s && (page_ == P_GAME || page_ == P_SET), hover_nav_ == static_cast<int>(i), status_of(*gi).color, L"");
@@ -1600,7 +1687,6 @@ void App::nav_layout() {
     int ny = S(88);
     for (auto& gi : games_)
         if (gi->in_library()) { nav_games_.push_back({RECT{S(12), ny, S(kSideW) - S(12), ny + S(42)}, gi.get()}); ny += S(46); }
-    if (nav_games_.empty()) ny += S(44);   // room for the "no games yet" note
     pc_rect_ = {S(12), ny + S(8), S(kSideW) - S(12), ny + S(50)};
     add_rect_ = {S(12), rc.bottom - S(60), S(kSideW) - S(12), rc.bottom - S(16)};
     report_rect_ = {rc.right - S(24) - S(132), S(14), rc.right - S(24), S(46)};
@@ -1634,6 +1720,7 @@ void App::paint_report(gp::Graphics& g) {
 
 void App::paint_game_header(gp::Graphics& g, const RECT& rc) {
     GameItem* s = sel();
+    details_rect_ = {};
     if (!s) return;
     HDC dc = g.GetHDC();
     gp::Font big(dc, big_), bold(dc, bold_), normal(dc, font_), smallf(dc, small_);
@@ -1648,8 +1735,7 @@ void App::paint_game_header(gp::Graphics& g, const RECT& rc) {
     g.FillRectangle(&fade, x0, Sf(110), w, Sf(87));
     const float x = x0 + Sf(32);
     text(g, s->title, big, gp::RectF(x, Sf(80), w - Sf(64), Sf(48)), RGB(255, 255, 255));
-    std::wstring sub = s->def ? widen(s->def->platform == "switch2" ? "Platform 2" : "Platform 1") + L"  ·  version " + widen(s->def->display_version) +
-                                    (s->def->generic ? L"  ·  experimental" : L"")
+    std::wstring sub = s->def ? L"Version " + widen(s->def->display_version) + (s->def->generic ? L"  ·  experimental build" : L"")
                               : std::wstring(L"No port yet");
     text(g, sub, normal, gp::RectF(x, Sf(130), w - Sf(64), Sf(20)), RGB(0xD8, 0xDC, 0xE4));
     const Status st = status_of(*s);
@@ -1666,48 +1752,214 @@ void App::paint_game_header(gp::Graphics& g, const RECT& rc) {
     gp::SolidBrush dotb(C(st.color));
     g.FillEllipse(&dotb, x + Sf(11), Sf(169), Sf(8), Sf(8));
     text(g, st.text, bold, gp::RectF(x + Sf(24), Sf(160), cw, Sf(26)), st.color, gp::StringAlignmentNear, gp::StringAlignmentCenter);
-    // the status line under the button: what runs, what went wrong, or what to do
+    // the line under the button: the whole setup's progress and time, what went wrong, or what to do
     const float px = static_cast<float>(prog_rect_.left), py = static_cast<float>(prog_rect_.top), pw = static_cast<float>(prog_rect_.right - prog_rect_.left);
-    std::wstring pt;
+    std::wstring pt, right;
     COLORREF pc = kMuted;
     bool bar = false;
     if (s->running) {
         bar = true;
-        // one running step: its name and detail; several: each with its percent
-        std::wstring names;
-        const StepRun* one = nullptr;
-        for (const StepRun& r : s->run) {
-            if (!r.running()) continue;
-            one = &r;
-            names += (names.empty() ? L"" : L", ") + std::wstring(kStepName[r.id]) + L" " + std::to_wstring(static_cast<int>(r.fraction() * 100)) + L"%";
+        if (s->cancel_requested) pt = s->play_now ? L"Stopping the setup, then the game starts" : L"Stopping…";
+        else {
+            pt = L"All steps · " + std::to_wstring(static_cast<int>(st.progress * 100)) + L"%";
+            if (s->play_after) pt += L" · the game starts when it is done";
+            right = span_text(s->eta()) + L" left in total";
         }
-        if (s->nrunning() == 1) pt = std::wstring(kStepName[one->id]) + L"  \u00B7  " + step_detail(*one);
-        else pt = names;
-        if (s->play_after) pt += L"  \u00B7  the game starts when it is done";
-        if (s->cancel_requested) pt = L"Stopping...";
+        pc = kText;
     } else if (s->queued) {
         bar = true;
-        pt = L"Waits for the game before it";
+        pt = L"Waiting for the game before it";
     } else if (!s->error.empty()) {
-        pt = widen(s->error);
+        pt = L"⚠  " + widen(s->error);
         pc = kBad;
-    } else if (s->def && s->in_library() && !s->exe_ok()) {
+        right = L"";
+    } else if (s->game_running) {
+        pt = L"The game is running. Settings changes reach it at once.";
+    } else if (s->def && s->in_library() && !s->exe_ok() && !s->build.ok) {
         pt = L"This release has no game program for it yet.";
     } else if (s->def && s->in_library() && !s->ready()) {
-        pt = L"Play sets it up once first (takes a while).";
+        pt = L"The first Play sets it up: " + span_text(s->eta()) + L".";
     } else {
         bool bad = false;
         for (const Check& c : sys_checks_) bad |= c.level == Level::bad;
         if (bad) { pt = L"Something is missing on this PC: see This PC."; pc = kWarn; }
     }
-    text(g, pt, normal, gp::RectF(px, py, pw, Sf(18)), pc);
+    text(g, pt, normal, gp::RectF(px, py, pw - (right.empty() ? 0 : Sf(260)), Sf(22)), pc);
+    if (!right.empty()) text(g, right, normal, gp::RectF(px + pw - Sf(260), py, Sf(260), Sf(22)), kMuted, gp::StringAlignmentFar);
     if (bar) {
         gp::SolidBrush track(C(kLine)), fillb(C(kAccent));
-        fill_round(g, gp::RectF(px, py + Sf(26), pw, Sf(6)), Sf(3), track);
-        if (st.progress > 0) fill_round(g, gp::RectF(px, py + Sf(26), std::max(Sf(6), pw * static_cast<float>(st.progress)), Sf(6)), Sf(3), fillb);
+        fill_round(g, gp::RectF(px, py + Sf(30), pw, Sf(8)), Sf(4), track);
+        if (st.progress > 0) fill_round(g, gp::RectF(px, py + Sf(30), std::max(Sf(8), pw * static_cast<float>(st.progress)), Sf(8)), Sf(4), fillb);
     }
+    if (s->def && s->in_library()) paint_steps(g, *s);
     (void)smallf;
     (void)rc;
+}
+
+// The steps card: one row per step with its own state, bar and time. The times of steps still to come are estimates; the header
+// gives the setup's time as a whole (steps that can run side by side do, so it is less than the sum of the rows).
+void App::paint_steps(gp::Graphics& g, const GameItem& s) {
+    HDC dc = g.GetHDC();
+    gp::Font bold(dc, bold_), normal(dc, font_), smallf(dc, small_);
+    g.ReleaseHDC(dc);
+    const RECT& R = steps_rect_;
+    const float x = static_cast<float>(R.left), y0 = static_cast<float>(R.top), w = static_cast<float>(R.right - R.left);
+    gp::SolidBrush card(C(kCard));
+    fill_round(g, gp::RectF(x, y0, w, static_cast<float>(R.bottom - R.top)), Sf(12), card);
+    // header: "Setup" and the output toggle
+    int todo = 0, total = 0;
+    for (int i = 0; i < S_COUNT; ++i) { total += s.planned(i) ? 1 : 0; todo += s.planned(i) && !(s.running && s.run[i].finished) ? 1 : 0; }
+    std::wstring head = L"Setup";
+    if (s.running) head += L" · step " + std::to_wstring(std::min(total, total - todo + 1)) + L" of " + std::to_wstring(total);
+    else if (!todo) head += L" · done";
+    text(g, head, bold, gp::RectF(x + Sf(20), y0 + Sf(14), w - Sf(200), Sf(24)), kText, gp::StringAlignmentNear, gp::StringAlignmentCenter);
+    const std::wstring link = details_ ? L"Hide output" : L"Show output";
+    details_rect_ = {static_cast<LONG>(x + w - Sf(150)), static_cast<LONG>(y0 + Sf(10)), static_cast<LONG>(x + w - Sf(16)), static_cast<LONG>(y0 + Sf(42))};
+    text(g, link, normal, gp::RectF(x + w - Sf(150), y0 + Sf(14), Sf(134), Sf(24)), hover_nav_ == kHovDetails ? kAccentHi : kAccent, gp::StringAlignmentFar,
+         gp::StringAlignmentCenter);
+    gp::SolidBrush line(C(kLine));
+    g.FillRectangle(&line, x + Sf(16), y0 + Sf(50), w - Sf(32), Sf(1));
+    const double sp = s.speed();
+    for (int i = 0; i < S_COUNT; ++i) {
+        const StepRun& r = s.run[i];
+        const float ry = y0 + Sf(56) + static_cast<float>(i) * Sf(46), cx = x + Sf(34), cy = ry + Sf(16);
+        // state of this step
+        enum { kPending, kRunning, kDone, kSkip, kFail } state = kPending;
+        if (s.running && r.planned) state = r.running() ? kRunning : r.finished ? (r.ok ? kDone : kFail) : kPending;
+        else if (!s.error.empty() && r.planned && r.started && r.finished && !r.ok) state = kFail;   // the last run
+        else if (!s.need[i]) state = kSkip;
+        if (state == kSkip && s.run[i].finished && s.run[i].ok && s.run[i].planned) state = kDone;
+        // not needed because it ran before (a step this dump or package has no use for says so in its "why")
+        const bool done_before = state == kSkip && s.in_library() && s.why[i].rfind(L"Not needed", 0) != 0 && s.why[i].rfind(L"This package", 0) != 0;
+        // icon
+        if (state == kRunning) {
+            gp::Pen ring(C(kLine), Sf(3));
+            g.DrawEllipse(&ring, cx - Sf(9), cy - Sf(9), Sf(18), Sf(18));
+            gp::Pen arc(C(kAccentHi), Sf(3));
+            const float sweep = static_cast<float>(std::max(0.08, std::min(r.fraction(), 1.0)) * 360.0);
+            g.DrawArc(&arc, cx - Sf(9), cy - Sf(9), Sf(18), Sf(18), -90.f, sweep);
+        } else if (state == kDone || done_before) {
+            gp::SolidBrush ok(C(kOk));
+            g.FillEllipse(&ok, cx - Sf(10), cy - Sf(10), Sf(20), Sf(20));
+            gp::Pen tick(C(kBg), Sf(2.4f));
+            tick.SetStartCap(gp::LineCapRound);
+            tick.SetEndCap(gp::LineCapRound);
+            const gp::PointF pts[3] = {{cx - Sf(4.5f), cy}, {cx - Sf(1), cy + Sf(3.5f)}, {cx + Sf(5), cy - Sf(3.5f)}};
+            g.DrawLines(&tick, pts, 3);
+        } else if (state == kFail) {
+            gp::SolidBrush bad(C(kBad));
+            g.FillEllipse(&bad, cx - Sf(10), cy - Sf(10), Sf(20), Sf(20));
+            gp::Pen xp(C(kBg), Sf(2.4f));
+            g.DrawLine(&xp, cx - Sf(4), cy - Sf(4), cx + Sf(4), cy + Sf(4));
+            g.DrawLine(&xp, cx + Sf(4), cy - Sf(4), cx - Sf(4), cy + Sf(4));
+        } else if (state == kSkip) {
+            gp::Pen dash(C(kMuted), Sf(2));
+            g.DrawLine(&dash, cx - Sf(5), cy, cx + Sf(5), cy);
+        } else {
+            gp::Pen ring(C(kMuted), Sf(2));
+            g.DrawEllipse(&ring, cx - Sf(8), cy - Sf(8), Sf(16), Sf(16));
+        }
+        // name and what it is doing / why
+        const COLORREF nc = state == kSkip && !done_before ? kMuted : kText;
+        text(g, kStepName[i], state == kRunning ? bold : normal, gp::RectF(x + Sf(58), ry + Sf(4), w - Sf(330), Sf(22)), nc);
+        std::wstring sub, right;
+        if (state == kRunning) {
+            sub = step_counts(r);
+            const int left = r.secs_left();
+            // no rate yet: the estimate the total uses, so the two always agree
+            right = (left >= 0 ? span_text(left) : span_text(s.remaining(i, sp))) + L" left";
+        } else if (state == kPending) {
+            sub = s.why[i].rfind(L"after", 0) == 0 ? L"" : s.why[i];
+            right = span_text(s.remaining(i, sp));
+        } else if (state == kDone) {
+            right = L"Done";
+            if (s.running && r.finished && r.elapsed() > 0) sub = L"Took " + span_text(r.elapsed());
+        } else if (state == kFail) {
+            sub = widen(r.error);
+            right = L"Failed";
+        } else {
+            sub = s.why[i];
+            if (sub.rfind(L"Not needed: ", 0) == 0) { sub = sub.substr(12); if (!sub.empty()) sub[0] = static_cast<wchar_t>(towupper(sub[0])); }
+            right = done_before ? L"Done" : L"Not needed";
+        }
+        if (state == kRunning) {
+            // the step's own bar, labelled by its row
+            const float bx = x + Sf(58), bw = w - Sf(58) - Sf(190);
+            text(g, sub, smallf, gp::RectF(bx, ry + Sf(22), bw, Sf(16)), kMuted);
+            gp::SolidBrush track(C(kLine)), fillb(C(kAccent));
+            fill_round(g, gp::RectF(bx, ry + Sf(40), bw, Sf(4)), Sf(2), track);
+            const float f = static_cast<float>(std::min(r.fraction(), 1.0));
+            if (f > 0) fill_round(g, gp::RectF(bx, ry + Sf(40), std::max(Sf(4), bw * f), Sf(4)), Sf(2), fillb);
+        } else if (!sub.empty()) {
+            text(g, sub, smallf, gp::RectF(x + Sf(58), ry + Sf(24), w - Sf(330), Sf(16)), state == kFail ? kBad : kMuted);
+        }
+        const COLORREF rc = state == kRunning ? kAccentHi : state == kDone || done_before ? kOk : state == kFail ? kBad : kMuted;
+        text(g, right, state == kRunning ? bold : normal, gp::RectF(x + w - Sf(196), ry + Sf(4), Sf(176), Sf(22)), rc, gp::StringAlignmentFar);
+    }
+}
+
+std::vector<const Check*> App::pc_checks() const {
+    std::vector<const Check*> all;
+    for (const Check& c : sys_checks_) all.push_back(&c);
+    if (const GameItem* g = const_cast<App*>(this)->sel()) for (const Check& c : g->checks) all.push_back(&c);
+    auto rank = [](Level l) { return l == Level::bad ? 0 : l == Level::warn ? 1 : 2; };
+    std::stable_sort(all.begin(), all.end(), [&](const Check* a, const Check* b) { return rank(a->level) < rank(b->level); });
+    return all;
+}
+
+// This PC: what needs attention first, each with what to do; the checks that pass as one compact list below.
+void App::paint_pc(gp::Graphics& g) {
+    HDC dc = g.GetHDC();
+    gp::Font bold(dc, bold_), normal(dc, font_), smallf(dc, small_);
+    g.ReleaseHDC(dc);
+    const RECT& A = pc_rect_area_;
+    const float x = static_cast<float>(A.left), w = static_cast<float>(A.right - A.left);
+    gp::Region clip(gp::RectF(x - Sf(4), static_cast<float>(A.top), w + Sf(8), static_cast<float>(A.bottom - A.top)));
+    g.SetClip(&clip);
+    float y = static_cast<float>(A.top) - static_cast<float>(pc_scroll_);
+    const auto all = pc_checks();
+    auto measure = [&](const std::wstring& t, const gp::Font& f, float width) {
+        gp::RectF out;
+        gp::StringFormat sf;
+        g.MeasureString(t.c_str(), static_cast<INT>(t.size()), &f, gp::RectF(0, 0, width, 10000), &sf, &out);
+        return out.Height;
+    };
+    bool ok_head = false;
+    for (const Check* c : all) {
+        const bool problem = c->level == Level::bad || c->level == Level::warn;
+        const COLORREF col = c->level == Level::ok ? kOk : c->level == Level::warn ? kWarn : c->level == Level::bad ? kBad : kMuted;
+        if (problem) {
+            // a card: the problem, what this PC has against what it needs, and the steps to fix it
+            const float tw = w - Sf(72);
+            const std::wstring fix = c->fix.empty() ? std::wstring() : c->fix;
+            const float fh = fix.empty() ? 0 : measure(fix, normal, tw) + Sf(10);
+            const float h = Sf(64) + fh;
+            gp::SolidBrush card(C(kCard));
+            fill_round(g, gp::RectF(x, y, w, h), Sf(12), card);
+            gp::SolidBrush bar(C(col));
+            fill_round(g, gp::RectF(x, y + Sf(12), Sf(4), h - Sf(24)), Sf(2), bar);
+            text(g, c->level == Level::bad ? L"\u2715" : L"!", bold, gp::RectF(x + Sf(18), y + Sf(12), Sf(24), Sf(22)), col, gp::StringAlignmentCenter);
+            text(g, c->item + L"  \u00B7  " + c->state, bold, gp::RectF(x + Sf(48), y + Sf(12), tw, Sf(22)), kText);
+            text(g, (c->detail.empty() ? L"" : c->detail) + (c->need.empty() ? L"" : L"   \u2014   needs " + c->need), smallf,
+                 gp::RectF(x + Sf(48), y + Sf(36), tw, Sf(18)), kMuted);
+            if (!fix.empty()) text(g, fix, normal, gp::RectF(x + Sf(48), y + Sf(60), tw, fh), RGB(0xD8, 0xDC, 0xE4), gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+            y += h + Sf(12);
+            continue;
+        }
+        if (!ok_head) {
+            ok_head = true;
+            y += Sf(6);
+            text(g, L"Ready", bold, gp::RectF(x, y, w, Sf(22)), kMuted);
+            y += Sf(30);
+        }
+        // a passed check: one line
+        text(g, c->level == Level::ok ? L"\u2713" : L"\u2022", bold, gp::RectF(x + Sf(4), y, Sf(20), Sf(26)), col, gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+        text(g, c->item, normal, gp::RectF(x + Sf(32), y, w * 0.34f, Sf(26)), kText, gp::StringAlignmentNear, gp::StringAlignmentCenter);
+        text(g, c->detail, normal, gp::RectF(x + Sf(32) + w * 0.34f, y, w * 0.66f - Sf(40), Sf(26)), kMuted, gp::StringAlignmentNear, gp::StringAlignmentCenter);
+        y += Sf(32);
+    }
+    pc_content_h_ = static_cast<int>(y + static_cast<float>(pc_scroll_)) - A.top;
+    g.ResetClip();
 }
 
 void App::paint(HDC hdc) {
@@ -1743,8 +1995,14 @@ void App::paint(HDC hdc) {
             if (const GameItem* sg = sel()) for (const Check& c : sg->checks) { ++total; met += c.level == Level::ok || c.level == Level::info; }
             wchar_t b[96];
             std::swprintf(b, 96, L"%d of %d checks met", met, total);
-            if (sys_checks_.empty()) text(g, L"Checking...", normal, gp::RectF(x, Sf(64), w, Sf(24)), kMuted);
-            else text(g, (met == total ? L"✓  " : L"") + std::wstring(b), normal, gp::RectF(x, Sf(64), w, Sf(24)), met == total ? kOk : kWarn);
+            if (sys_checks_.empty()) text(g, L"Checking\u2026", normal, gp::RectF(x, Sf(64), w, Sf(24)), kMuted);
+            else {
+                const int todo = total - met;
+                text(g, todo == 0 ? std::wstring(L"\u2713  Everything this PC needs is there") : std::to_wstring(todo) + (todo == 1 ? L" thing needs" : L" things need") + L" attention",
+                     normal, gp::RectF(x, Sf(64), w, Sf(24)), todo == 0 ? kOk : kWarn);
+                paint_pc(g);
+            }
+            (void)b;
         }
         paint_report(g);
     }
@@ -1776,9 +2034,31 @@ void App::paint_cards(HWND h, HDC hdc) {
         std::vector<GameItem*> order;
         for (auto& gi : games_) if (gi->in_library()) order.push_back(gi.get());
         const int n = static_cast<int>(order.size()) + 1;
+        cards_cols_ = cols;
+        cards_n_ = n;
+        if (kb_card_ >= n) kb_card_ = n - 1;
+        const bool kb = GetFocus() == h && kb_card_ >= 0;
         content_h_ = static_cast<int>(pad + ((n + cols - 1) / cols) * (ch + gap));
         const float oy = -static_cast<float>(scroll_);
-        for (int i = 0; i < n; ++i) {
+        if (order.empty()) {
+            // empty library: one clear way in
+            const float W = static_cast<float>(rc.right), cx = W / 2, top = std::max(Sf(40), static_cast<float>(rc.bottom) / 2 - Sf(200));
+            text(g, L"Add your first game", title, gp::RectF(0, top, W, Sf(40)), kText, gp::StringAlignmentCenter);
+            text(g, L"Choose your own dump: a .nup package or an extracted folder with exefs and romfs.", normal, gp::RectF(Sf(40), top + Sf(48), W - Sf(80), Sf(24)),
+                 kMuted, gp::StringAlignmentCenter);
+            const RECT b{static_cast<LONG>(cx - Sf(120)), static_cast<LONG>(top + Sf(100)), static_cast<LONG>(cx + Sf(120)), static_cast<LONG>(top + Sf(152))};
+            const int hi = static_cast<int>(hits_.size());
+            hits_.push_back({b, nullptr, 4});
+            const bool hv = hover_hit_ == hi || kb;
+            gp::SolidBrush bb(C(hv ? kAccentHi : kAccent));
+            const gp::RectF bf(static_cast<float>(b.left), static_cast<float>(b.top), static_cast<float>(b.right - b.left), static_cast<float>(b.bottom - b.top));
+            fill_round(g, bf, Sf(10), bb);
+            text(g, L"+  Add a game", bold, bf, RGB(255, 255, 255), gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+            if (kb) { gp::Pen fp(C(kText), Sf(2)); gp::GraphicsPath pth; round_path(pth, gp::RectF(bf.X - Sf(4), bf.Y - Sf(4), bf.Width + Sf(8), bf.Height + Sf(8)), Sf(13)); g.DrawPath(&fp, &pth); }
+            text(g, L"or drop it on this window", smallf, gp::RectF(0, top + Sf(166), W, Sf(20)), kMuted, gp::StringAlignmentCenter);
+            content_h_ = 0;
+        }
+        for (int i = 0; i < n && !order.empty(); ++i) {
             const float x = pad + static_cast<float>(i % cols) * (cw + gap), y = Sf(8) + oy + static_cast<float>(i / cols) * (ch + gap);
             const RECT card{static_cast<LONG>(x), static_cast<LONG>(y), static_cast<LONG>(x + cw), static_cast<LONG>(y + ch)};
             if (i == n - 1) {
@@ -1792,6 +2072,7 @@ void App::paint_cards(HWND h, HDC hdc) {
                 round_path(p, gp::RectF(x + Sf(1), y + Sf(1), cw - Sf(2), ch - Sf(2)), Sf(14));
                 if (hv) { gp::SolidBrush hb(C(kCard)); g.FillPath(&hb, &p); }
                 g.DrawPath(&pen, &p);
+                if (kb && kb_card_ == i) { gp::Pen fp(C(kAccentHi), Sf(2)); g.DrawPath(&fp, &p); }
                 text(g, L"+", title, gp::RectF(x, y + ch / 2 - Sf(48), cw, Sf(40)), hv ? kAccentHi : kMuted, gp::StringAlignmentCenter, gp::StringAlignmentCenter);
                 text(g, L"Add a game", bold, gp::RectF(x, y + ch / 2, cw, Sf(20)), hv ? kText : kMuted, gp::StringAlignmentCenter);
                 text(g, L"or drop it here", smallf, gp::RectF(x, y + ch / 2 + Sf(22), cw, Sf(18)), kMuted, gp::StringAlignmentCenter);
@@ -1818,7 +2099,7 @@ void App::paint_cards(HWND h, HDC hdc) {
                 return gi.def ? t.substr(0, 3) : std::wstring(L"?");
             }();
             text(g, initials, title, gp::RectF(x + Sf(18), y + Sf(14), cw - Sf(36), Sf(40)), RGB(255, 255, 255));
-            text(g, gi.def ? (gi.def->platform == "switch2" ? L"SWITCH 2" : L"SWITCH") : L"UNKNOWN", smallf, gp::RectF(x + Sf(18), y + Sf(112), cw - Sf(36), Sf(16)),
+            text(g, gi.def ? (gi.def->generic ? L"EXPERIMENTAL" : L"VERSION " + widen(gi.def->display_version)) : std::wstring(L"NO PORT YET"), smallf, gp::RectF(x + Sf(18), y + Sf(112), cw - Sf(36), Sf(16)),
                  RGB(0xE8, 0xEA, 0xF0));
             // texts
             text(g, gi.title, bold, gp::RectF(x + Sf(18), y + Sf(152), cw - Sf(36), Sf(20)), kText);
@@ -1852,6 +2133,12 @@ void App::paint_cards(HWND h, HDC hdc) {
                 const std::wstring l = primary_label(gi, &en);
                 if (en) btn(x + Sf(18), full, l == L"Play" ? L"\u25B6  Play" : l, 1, true, true);   // nothing to press: the status says why
             }
+            if (kb && kb_card_ == i) {   // keyboard focus
+                gp::Pen fp(C(kAccentHi), Sf(2));
+                gp::GraphicsPath fpath;
+                round_path(fpath, gp::RectF(x - Sf(3), y - Sf(3), cw + Sf(6), ch + Sf(6)), Sf(16));
+                g.DrawPath(&fp, &fpath);
+            }
         }
     }
     BitBlt(hdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
@@ -1865,7 +2152,7 @@ void App::paint_cards(HWND h, HDC hdc) {
 void App::draw_button(const DRAWITEMSTRUCT* d) {
     Btn kind = Btn::normal;
     for (auto& [h, k] : btns_) if (h == d->hwndItem) kind = k;
-    const bool enabled = IsWindowEnabled(d->hwndItem), pressed = d->itemState & ODS_SELECTED;
+    const bool enabled = IsWindowEnabled(d->hwndItem), pressed = d->itemState & ODS_SELECTED, focus = (d->itemState & ODS_FOCUS) && !(d->itemState & ODS_NOFOCUSRECT);
     POINT pt;
     GetCursorPos(&pt);
     RECT wr;
@@ -1892,12 +2179,18 @@ void App::draw_button(const DRAWITEMSTRUCT* d) {
         wchar_t t[128] = {};
         GetWindowTextW(d->hwndItem, t, 128);
         std::wstring label = t;
-        if (d->hwndItem == b_play_) label = L"▶  " + label;
+        if (d->hwndItem == b_play_ && label == L"Play") label = L"\u25B6  " + label;
         HDC fdc = g.GetHDC();
         gp::Font f(fdc, bold_);
         g.ReleaseHDC(fdc);
         COLORREF tc = !enabled ? RGB(0x5E, 0x64, 0x70) : kind == Btn::danger ? RGB(0xFF, 0xA0, 0xA0) : RGB(255, 255, 255);
         text(g, label, f, gp::RectF(0, 0, static_cast<gp::REAL>(r.right), static_cast<gp::REAL>(r.bottom)), tc, gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+        if (focus) {   // keyboard focus
+            gp::Pen fp(C(kind == Btn::primary ? RGB(255, 255, 255) : kAccentHi), Sf(1.5f));
+            gp::GraphicsPath p;
+            round_path(p, gp::RectF(Sf(2), Sf(2), static_cast<gp::REAL>(r.right) - Sf(4), static_cast<gp::REAL>(r.bottom) - Sf(4)), Sf(6));
+            g.DrawPath(&fp, &p);
+        }
     }
     BitBlt(d->hDC, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
     SelectObject(dc, old);
@@ -1907,63 +2200,9 @@ void App::draw_button(const DRAWITEMSTRUCT* d) {
 
 // ---- messages ----------------------------------------------------------------------------------------------------------------------
 LRESULT App::notify(NMHDR* n) {
-    if ((n->idFrom == ID_REQ_LIST || n->idFrom == ID_STEPS) && n->code == NM_CUSTOMDRAW) {
-        auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(n);
-        if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
-        if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) return CDRF_NOTIFYSUBITEMDRAW;
-        if (cd->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
-            const int i = static_cast<int>(cd->nmcd.dwItemSpec);
-            cd->clrText = kText;
-            cd->clrTextBk = kCard;
-            if (cd->iSubItem == (n->idFrom == ID_REQ_LIST ? 3 : 1)) {
-                if (n->idFrom == ID_REQ_LIST) {
-                    LVITEMW it{LVIF_PARAM};
-                    it.iItem = i;
-                    ListView_GetItem(req_list_, &it);
-                    const Level lv = static_cast<Level>(it.lParam);
-                    cd->clrText = lv == Level::ok ? kOk : lv == Level::warn ? kWarn : lv == Level::bad ? kBad : kMuted;
-                } else if (const GameItem* g = sel(); g && i < S_COUNT) {
-                    const StepRun& r = g->run[i];
-                    if (g->running && r.running()) {
-                        // a progress bar with the numbers on it
-                        RECT rc{};
-                        ListView_GetSubItemRect(steps_, i, 1, LVIR_BOUNDS, &rc);
-                        gp::Graphics gr(cd->nmcd.hdc);
-                        gr.SetSmoothingMode(gp::SmoothingModeAntiAlias);
-                        gr.SetTextRenderingHint(gp::TextRenderingHintClearTypeGridFit);
-                        gp::SolidBrush bg(C(kCard));
-                        gr.FillRectangle(&bg, gp::Rect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top));
-                        const gp::RectF tr(static_cast<float>(rc.left) + Sf(4), static_cast<float>(rc.top) + Sf(3),
-                                           static_cast<float>(rc.right - rc.left) - Sf(10), static_cast<float>(rc.bottom - rc.top) - Sf(6));
-                        gp::SolidBrush track(C(kLine)), fillb(C(kAccent));
-                        fill_round(gr, tr, Sf(5), track);
-                        const float f = static_cast<float>(std::min(r.fraction(), 1.0));
-                        if (f > 0) fill_round(gr, gp::RectF(tr.X, tr.Y, std::max(Sf(10), tr.Width * f), tr.Height), Sf(5), fillb);
-                        gp::Font font(cd->nmcd.hdc);
-                        text(gr, step_detail(r), font, tr, kText, gp::StringAlignmentCenter, gp::StringAlignmentCenter);
-                        return CDRF_SKIPDEFAULT;
-                    }
-                    cd->clrText = (g->running && r.started && r.finished && r.ok) ? kOk : g->need[i] ? kWarn : kOk;
-                }
-            }
-            return CDRF_NEWFONT;
-        }
-    }
-    if (n->idFrom == ID_REQ_LIST && n->code == LVN_ITEMCHANGED) {
-        auto* lv = reinterpret_cast<NMLISTVIEW*>(n);
-        if ((lv->uNewState & LVIS_SELECTED) && lv->iItem >= 0) {
-            std::vector<const Check*> all;
-            for (const Check& c : sys_checks_) all.push_back(&c);
-            if (GameItem* g = sel()) for (const Check& c : g->checks) all.push_back(&c);
-            if (static_cast<size_t>(lv->iItem) < all.size()) {
-                const Check& c = *all[static_cast<size_t>(lv->iItem)];
-                SetWindowTextW(req_fix_, (c.item + L": " + c.state + L"\r\n" + c.detail + L"\r\n\r\n" + (c.fix.empty() ? L"Nothing to do." : c.fix)).c_str());
-            }
-        }
-    }
+    (void)n;
     return 0;
 }
-
 void App::command(int id, int code) {
     if (code != BN_CLICKED && code != 1 && code != 0) return;
     GameItem* g = sel();
@@ -2002,13 +2241,17 @@ void App::command(int id, int code) {
             if (g) start_prepare_check(*g);
             break;
         case ID_COPY: {
-            const int len = GetWindowTextLengthW(req_fix_);
-            std::wstring t(static_cast<size_t>(len) + 1, L'\0');
-            GetWindowTextW(req_fix_, t.data(), len + 1);
+            // every check as text: what it needs, what this PC has, and what to do (for a bug report or a forum post)
+            std::wstring t = std::wstring(kAppName) + L" " + widen(RECOMP_LIBRARY_VERSION) + L"\r\n";
+            for (const Check* c : pc_checks()) {
+                const wchar_t* mark = c->level == Level::ok ? L"[ok]  " : c->level == Level::warn ? L"[!]   " : c->level == Level::bad ? L"[x]   " : L"[i]   ";
+                t += mark + c->item + L": " + c->state + (c->detail.empty() ? L"" : L" (" + c->detail + L")") + L"\r\n";
+                if (!c->fix.empty()) t += L"      " + c->fix + L"\r\n";
+            }
             if (OpenClipboard(wnd_)) {
                 EmptyClipboard();
-                if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, t.size() * sizeof(wchar_t))) {
-                    std::memcpy(GlobalLock(h), t.c_str(), t.size() * sizeof(wchar_t));
+                if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, (t.size() + 1) * sizeof(wchar_t))) {
+                    std::memcpy(GlobalLock(h), t.c_str(), (t.size() + 1) * sizeof(wchar_t));
                     GlobalUnlock(h);
                     SetClipboardData(CF_UNICODETEXT, h);
                 }
@@ -2020,6 +2263,19 @@ void App::command(int id, int code) {
         case IDM_ABOUT: about(); break;
         case IDM_REPORT: report(g); break;
         case IDM_EXIT: PostMessageW(wnd_, WM_CLOSE, 0, 0); break;
+        case IDCANCEL: case IDM_BACK: if (page_ != P_LIB) show_page(P_LIB); break;
+        case IDM_PREV_GAME: case IDM_NEXT_GAME: {
+            // Ctrl+Up / Ctrl+Down: the game above or below in the side list
+            std::vector<GameItem*> order;
+            for (auto& gi : games_) if (gi->in_library()) order.push_back(gi.get());
+            if (order.empty()) break;
+            int at = 0;
+            for (size_t i = 0; i < order.size(); ++i) if (order[i] == g) at = static_cast<int>(i);
+            at = std::clamp(at + (id == IDM_NEXT_GAME ? 1 : -1), 0, static_cast<int>(order.size()) - 1);
+            select(order[static_cast<size_t>(at)]->id);
+            show_page(page_ == P_SET ? P_SET : P_GAME);
+            break;
+        }
         default:
             if (id >= IDM_PAGE0 && id < static_cast<int>(IDM_PAGE0) + P_COUNT) show_page(id - static_cast<int>(IDM_PAGE0));
     }
@@ -2067,6 +2323,36 @@ LRESULT App::on_cards(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         case WM_MOUSELEAVE: hover_hit_ = -1; hover_game_ = nullptr; InvalidateRect(h, nullptr, FALSE); return 0;
+        case WM_GETDLGCODE: {
+            const MSG* msg = reinterpret_cast<const MSG*>(l);
+            if (msg && msg->message == WM_KEYDOWN && (msg->wParam == VK_RETURN || msg->wParam == VK_SPACE)) return DLGC_WANTMESSAGE;
+            return DLGC_WANTARROWS | DLGC_WANTCHARS;
+        }
+        case WM_SETFOCUS: case WM_KILLFOCUS: InvalidateRect(h, nullptr, FALSE); return 0;
+        case WM_LBUTTONDOWN: SetFocus(h); return 0;
+        case WM_KEYDOWN: {
+            // arrows move between the cards, Enter or Space opens a game (or adds one), P plays it
+            int k = kb_card_;
+            if (w == VK_LEFT) k -= 1;
+            else if (w == VK_RIGHT) k += 1;
+            else if (w == VK_UP) k -= cards_cols_;
+            else if (w == VK_DOWN) k += cards_cols_;
+            else if (w == VK_HOME) k = 0;
+            else if (w == VK_END) k = cards_n_ - 1;
+            else if (w == VK_RETURN || w == VK_SPACE || w == 'P') {
+                std::vector<GameItem*> order;
+                for (auto& gi : games_) if (gi->in_library()) order.push_back(gi.get());
+                if (kb_card_ >= static_cast<int>(order.size())) { add_game(); return 0; }
+                GameItem& g = *order[static_cast<size_t>(kb_card_)];
+                select(g.id);
+                if (w == 'P') primary(g);
+                else show_page(P_GAME);
+                return 0;
+            } else break;
+            kb_card_ = std::clamp(k, 0, std::max(0, cards_n_ - 1));
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        }
         case WM_SETCURSOR: return TRUE;
         case WM_LBUTTONUP: {
             const POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
@@ -2130,19 +2416,20 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
             for (const std::wstring& p : add_paths_) add_dump(p, true);
             if (!add_paths_.empty()) show_page(page_);
             if (auto_start_) if (GameItem* g = sel()) enqueue(*g, false);
+            if (start_tab_ >= 0) settings::set_tab(settings_, start_tab_);
             return 0;
         }
         case WM_SIZE: layout(); return 0;
         case WM_GETMINMAXINFO: {
             auto* mm = reinterpret_cast<MINMAXINFO*>(l);
-            mm->ptMinTrackSize = {S(960), S(680)};
+            mm->ptMinTrackSize = {S(980), S(800)};
             return 0;
         }
         case WM_DPICHANGED: {
             dpi_ = HIWORD(w);
             make_fonts();
             settings::set_fonts(settings_, {font_, bold_, small_, title_, dpi_});
-            for (HWND h : {steps_, log_, req_list_, req_fix_}) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font_), FALSE);
+            for (HWND h : {log_}) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font_), FALSE);
             for (auto& [h, k] : btns_) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(bold_), FALSE);
             const RECT* r = reinterpret_cast<const RECT*>(l);
             SetWindowPos(wnd_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -2178,6 +2465,7 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
             if (PtInRect(&brand_rect_, p)) hov = kHovBrand;
             if (PtInRect(&add_rect_, p)) hov = kHovAdd;
             if (PtInRect(&report_rect_, p)) hov = kHovReport;
+            if (page_ == P_GAME && sel() && PtInRect(&details_rect_, p)) hov = kHovDetails;
             if (sel() && (page_ == P_GAME || page_ == P_SET))
                 for (int i = 0; i < 2; ++i) if (PtInRect(&tab_rect_[i], p)) hov = kHovTab + i;
             if (hov != hover_nav_) {
@@ -2208,11 +2496,20 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
             else if (PtInRect(&brand_rect_, p)) show_page(P_LIB);
             else if (PtInRect(&add_rect_, p)) add_game();
             else if (PtInRect(&report_rect_, p)) report(sel());
+            else if (page_ == P_GAME && sel() && PtInRect(&details_rect_, p)) { details_ = !details_; refresh(); InvalidateRect(wnd_, nullptr, FALSE); }
             else if (sel() && (page_ == P_GAME || page_ == P_SET))
                 for (int i = 0; i < 2; ++i) if (PtInRect(&tab_rect_[i], p)) show_page(i == 0 ? P_GAME : P_SET);
             return 0;
         }
         case WM_COMMAND: command(LOWORD(w), HIWORD(w)); return 0;
+        case WM_MOUSEWHEEL:
+            if (page_ == P_PC) {
+                const int view = pc_rect_area_.bottom - pc_rect_area_.top;
+                pc_scroll_ = std::clamp(pc_scroll_ - GET_WHEEL_DELTA_WPARAM(w) * S(60) / WHEEL_DELTA, 0, std::max(0, pc_content_h_ - view));
+                InvalidateRect(wnd_, &pc_rect_area_, FALSE);
+                return 0;
+            }
+            break;
         case WM_DROPFILES: {
             // a .nup file or a game folder dropped on the window: add it
             HDROP d = reinterpret_cast<HDROP>(w);
@@ -2234,7 +2531,6 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
                     active_->killed = true;
                     for (StepRun& r : active_->run) if (r.running()) r.child.kill();
                 }
-                InvalidateRect(steps_, nullptr, FALSE);
                 InvalidateRect(cards_, nullptr, FALSE);
                 RECT side{0, 0, S(kSideW), 10000};
                 InvalidateRect(wnd_, &side, FALSE);
@@ -2242,6 +2538,7 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
                     RECT top{S(kSideW), 0, 10000, S(200)};
                     InvalidateRect(wnd_, &top, FALSE);
                     InvalidateRect(wnd_, &prog_rect_, FALSE);
+                    InvalidateRect(wnd_, &steps_rect_, FALSE);
                 }
             }
             return 0;
@@ -2251,6 +2548,25 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         case kMsgExit: step_exit(*reinterpret_cast<StepRun*>(w), static_cast<DWORD>(l)); return 0;
+        case kMsgGameExit: {
+            GameItem& g = *reinterpret_cast<GameItem*>(w);
+            g.game_running = false;
+            if (sel() == &g) update_settings();   // the game may have changed its settings on the way out
+            refresh();
+            InvalidateRect(wnd_, nullptr, FALSE);
+            InvalidateRect(cards_, nullptr, FALSE);
+            return 0;
+        }
+        case WM_COPYDATA: {
+            // another start of the library (the game's Settings entry: --game ID --page N --tab N) hands its command line over
+            const auto* cd = reinterpret_cast<const COPYDATASTRUCT*>(l);
+            if (cd->dwData != kCopyArgs || !cd->lpData) return FALSE;
+            const std::wstring line(static_cast<const wchar_t*>(cd->lpData), cd->cbData / sizeof(wchar_t));
+            handle_args(line, true);
+            if (IsIconic(wnd_)) ShowWindow(wnd_, SW_RESTORE);
+            SetForegroundWindow(wnd_);
+            return TRUE;
+        }
         case kMsgCheck: {
             std::unique_ptr<std::string> s(reinterpret_cast<std::string*>(l));
             GameItem& g = *reinterpret_cast<GameItem*>(w);
@@ -2283,7 +2599,7 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
         case WM_CLOSE:
             if (active_) {
                 if (closing_) return 0;   // already stopping: the window goes when the last step has ended
-                if (MessageBoxW(wnd_, L"A game is being prepared. Stop it and close? What is done is kept; Prepare continues later.", kAppName,
+                if (MessageBoxW(wnd_, L"A game is being set up. Stop and close?\r\n\r\nWhat is done is kept: Play continues the setup where it stopped.", kAppName,
                                 MB_YESNO | MB_ICONQUESTION) != IDYES)
                     return 0;
                 queue_.clear();
@@ -2341,8 +2657,22 @@ int App::run(HINSTANCE inst, int show) {
         else if (a == L"--start") auto_start_ = true;
         else if (a == L"--game-args" && more) game_args_ = argv[++i];
         else if (a == L"--add" && more) add_paths_.push_back(fs::absolute(argv[++i]).wstring());
+        else if (a == L"--tab" && more) start_tab_ = _wtoi(argv[++i]);
     }
     if (argv) LocalFree(argv);
+    // one library at a time: a second start (the game's Settings entry, a shortcut) hands its command line to the running one
+    if (HWND other = FindWindowW(kClass, nullptr)) {
+        const std::wstring line = GetCommandLineW();
+        COPYDATASTRUCT cd{kCopyArgs, static_cast<DWORD>((line.size() + 1) * sizeof(wchar_t)), const_cast<wchar_t*>(line.c_str())};
+        DWORD pid = 0;
+        GetWindowThreadProcessId(other, &pid);
+        AllowSetForegroundWindow(pid);
+        DWORD_PTR res = 0;
+        if (SendMessageTimeoutW(other, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cd), SMTO_ABORTIFHUNG, 5000, &res) && res) {
+            gp::GdiplusShutdown(gdiplus_);
+            return 0;
+        }
+    }
     if (GameItem* g = item(lib_.selected); g && (!data.empty() || !source.empty())) {
         if (!data.empty()) g->cfg.data_dir = data;
         if (!source.empty()) {
@@ -2368,9 +2698,11 @@ int App::run(HINSTANCE inst, int show) {
     cc.lpszClassName = kCardsClass;
     RegisterClassExW(&cc);
     const int sys = static_cast<int>(GetDpiForSystem());
-    const int w = MulDiv(1180, sys, 96), h = MulDiv(780, sys, 96);
+    const int w = MulDiv(1200, sys, 96), h = MulDiv(880, sys, 96);
     ACCEL a[] = {{FVIRTKEY, VK_F5, IDM_RECHECK}, {FVIRTKEY | FCONTROL, 'O', IDM_ADD}, {FVIRTKEY | FCONTROL, '1', IDM_PAGE0},
-                 {FVIRTKEY | FCONTROL, '2', IDM_PAGE0 + 1}, {FVIRTKEY | FCONTROL, '3', IDM_PAGE0 + 2}, {FVIRTKEY | FCONTROL, '4', IDM_PAGE0 + 3}};
+                 {FVIRTKEY | FCONTROL, '2', IDM_PAGE0 + 1}, {FVIRTKEY | FCONTROL, '3', IDM_PAGE0 + 2}, {FVIRTKEY | FCONTROL, '4', IDM_PAGE0 + 3},
+                 {FVIRTKEY | FCONTROL, VK_UP, IDM_PREV_GAME}, {FVIRTKEY | FCONTROL, VK_DOWN, IDM_NEXT_GAME}, {FVIRTKEY | FALT, VK_LEFT, IDM_BACK},
+                 {FVIRTKEY, VK_BROWSER_BACK, IDM_BACK}};
     HACCEL acc = CreateAcceleratorTableW(a, static_cast<int>(sizeof a / sizeof a[0]));
     CreateWindowExW(0, kClass, kAppName, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, w, h, nullptr, nullptr, inst, nullptr);
     if (!wnd_) return 1;

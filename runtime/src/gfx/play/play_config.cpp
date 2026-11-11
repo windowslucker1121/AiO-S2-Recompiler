@@ -150,7 +150,8 @@ Settings builtin_settings() {
     return s;
 }
 
-enum class Sec { None, Unknown, Meta, Mouse, Pad, PadMap, Timing, Display, Audio, Hdr, Upscale, Latency, Picture, Prompts, Fps, Switch, Aim, Camera, Tweaks, Menu, Config, Bindings };
+// Retired: a section of older files no game uses any more ([aim], [camera]); its keys are skipped without a warning.
+enum class Sec { None, Unknown, Retired, Meta, Mouse, Pad, PadMap, Timing, Display, Audio, Hdr, Upscale, Latency, Picture, Prompts, Fps, Console, Tweaks, Menu, Config, Bindings };
 
 // The factory-defaults revision this build writes ([meta] defaults_rev) and the factory bindings an older controls.ini does not have: the
 // game's (play_types.h GameDefaults).
@@ -174,9 +175,7 @@ const char* sec_label(Sec s) {
         case Sec::Picture: return "[picture]";
         case Sec::Prompts: return "[prompts]";
         case Sec::Fps: return "[fps]";
-        case Sec::Switch: return "[switch]";
-        case Sec::Aim: return "[aim]";
-        case Sec::Camera: return "[camera]";
+        case Sec::Console: return "[console]";
         case Sec::Tweaks: return "[tweaks]";
         case Sec::Menu: return "[menu]";
         case Sec::Config: return "[config]";
@@ -286,7 +285,7 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
         case Sec::Mouse:
             if (k == "yaw") return set_num(&s->mouse.yaw_rad);
             if (k == "pitch") return set_num(&s->mouse.pitch_rad);
-            // the ball camera's speed: 0.1 to 20 on the Source scale (the F1 slider's range), in radians per count for the older keys
+            // the alternate scheme's camera speed: 0.1 to 20 on the Source scale (the F1 slider's range), in radians per count for the older keys
             if (k == key_alt_yaw()) return set_real(rad_per_count(0.1), rad_per_count(20.0), &s->mouse.alt_yaw_rad);
             if (k == key_alt_pitch()) return set_real(rad_per_count(0.1), rad_per_count(20.0), &s->mouse.alt_pitch_rad);
             if (k == key_alt_camera()) return set_bool(&s->mouse.alt_camera);
@@ -307,27 +306,31 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             if (k == "menu_cursor") return set_bool(&s->mouse.menu_cursor);
             if (k == "menu_touch") return true;   // legacy key, dead since it never did anything: accepted and ignored
             if (k == key_wheel_cycles()) return set_bool(&s->mouse.wheel_cycles);
-            break;
-        case Sec::Aim:
-            if (k == "lock_mode") {
-                LockMode m = LockMode::Classic;
-                if (!parse_lock_mode(v, &m)) {
-                    *msg = "lock_mode must be classic or free, got '" + v + "'";
+            if (k == "capture") {
+                if (!parse_capture_mode(v.c_str(), &s->mouse.capture)) {
+                    *msg = "capture must be click, auto or off, got '" + v + "'";
                     return false;
                 }
-                s->aim.lock_mode = m;
                 return true;
             }
-            if (k == "free_lock_margin") return set_real(0.0, 0.4, &s->aim.free_lock_margin);
-            break;
-        case Sec::Camera:
-            if (k == "gun_drives_view") return set_bool(&s->camera.gun_drives_view);
+            if (k == "release_key") {
+                if (lower(v) == "none" || v.empty()) { s->mouse.release_key = 0; return true; }
+                InputId id;
+                if (!parse_input(v, &id) || id.kind != InKind::Key) {
+                    *msg = "release_key must be a keyboard key name (Left Alt, Right Ctrl, F8 ...) or none, got '" + v + "'";
+                    return false;
+                }
+                s->mouse.release_key = id.code;
+                return true;
+            }
             break;
         case Sec::Tweaks: {
             bool mine = false;
             if (!fastboot_apply(k, v, &s->fastboot, &mine, msg)) return false;
             if (mine) return true;
-            return apply_tweaks_key(k, v, &s->tweaks, known, msg);
+            // Any other key is kept quiet: the section is shared with the library and the services (language, read by services/common.cpp),
+            // and older files carry keys no game uses any more.
+            return true;
         }
         case Sec::Pad:
             if (k == "label_abxy") return set_bool(&s->pad.label_abxy);
@@ -351,7 +354,7 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
         case Sec::Prompts:
             if (k == "style") {
                 if (!parse_prompt_style(v, &s->prompts.style)) {
-                    *msg = "style must be switch, xbox, playstation, keyboard or auto, got '" + v + "'";
+                    *msg = "style must be console, xbox, playstation, keyboard or auto, got '" + v + "'";
                     return false;
                 }
                 return true;
@@ -445,8 +448,12 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             if (k == "view_distance") return set_real(1.0, 4.0, &s->display.view_distance);
             if (k == "quality_preset") {
                 const std::string q = lower(v);
-                if (q != "switch2" && q != "high" && q != "ultra" && q != "custom") {
-                    *msg = "quality_preset must be switch2, high, ultra or custom, got '" + v + "'";
+                if (q == "switch2") {   // the older word
+                    s->display.quality_preset = "console";
+                    return true;
+                }
+                if (q != "console" && q != "high" && q != "ultra" && q != "custom") {
+                    *msg = "quality_preset must be console, high, ultra or custom, got '" + v + "'";
                     return false;
                 }
                 s->display.quality_preset = q;
@@ -565,7 +572,7 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             if (k == "gamma") return set_real(0.5, 2.0, &c.gamma);
             break;
         }
-        case Sec::Switch: {
+        case Sec::Console: {
             Act a = Act::None;
             if (!parse_act(k, &a) || a == Act::None) break;   // unknown action name: a warning
             Output o;
@@ -601,12 +608,11 @@ Sec fixed_sec(const std::string& key) {
     if (key == "picture") return Sec::Picture;
     if (key == "prompts") return Sec::Prompts;
     if (key == "fps") return Sec::Fps;
-    if (key == "aim") return Sec::Aim;
-    if (key == "camera") return Sec::Camera;
+    if (key == "aim" || key == "camera") return Sec::Retired;
     if (key == "tweaks") return Sec::Tweaks;
     if (key == "menu") return Sec::Menu;
     if (key == "config") return Sec::Config;
-    if (key == "switch") return Sec::Switch;
+    if (key == "console" || key == "switch") return Sec::Console;   // [switch]: the older name
     return Sec::Unknown;
 }
 
@@ -617,7 +623,7 @@ void apply_default_changes(Settings* s, int file_rev, std::string* added) {
     for (unsigned i = 0; gd && i < gd->change_count; ++i) {
         const GameDefaultChange& c = gd->changes[i];
         const Sec sec = fixed_sec(lower(c.section));
-        if (c.rev <= file_rev || sec == Sec::Unknown) continue;
+        if (c.rev <= file_rev || sec == Sec::Unknown || sec == Sec::Retired) continue;
         Settings old = *s, now = *s;
         bool known = false;
         std::string msg;
@@ -722,7 +728,7 @@ bool parse_onto(const std::string& text, Settings* s, std::string* err, std::vec
             continue;
         }
 
-        if (sec == Sec::Unknown) continue;   // the keys of an unknown section are skipped
+        if (sec == Sec::Unknown || sec == Sec::Retired) continue;   // the keys of an unknown or retired section are skipped
 
         // Bindings keep the key before the LAST '=' (the key may itself be "="); their value never contains '='.
         const size_t eq = sec == Sec::Bindings ? line.rfind('=') : line.find('=');
@@ -817,22 +823,6 @@ bool config_entry_name_ok(const std::string& name) {
     return true;
 }
 
-// [aim] lock_mode names. Case-insensitive, no trimming (the file parser has already trimmed the value).
-const char* lock_mode_name(LockMode m) { return m == LockMode::Free ? "free" : "classic"; }
-
-bool parse_lock_mode(const std::string& s, LockMode* out) {
-    const std::string key = lower(s);
-    if (key == "classic") {
-        if (out) *out = LockMode::Classic;
-        return true;
-    }
-    if (key == "free") {
-        if (out) *out = LockMode::Free;
-        return true;
-    }
-    return false;
-}
-
 const GameDefaults* game_defaults() { return game::info().play_defaults; }
 
 const char* default_settings_text() {
@@ -881,15 +871,11 @@ std::string format_settings(const Settings& s) {
     kv("invert_x", flag(s.mouse.invert_x));
     kv("menu_cursor", flag(s.mouse.menu_cursor));
     kv(key_wheel_cycles(), flag(s.mouse.wheel_cycles));
+    kv("capture", capture_mode_name(s.mouse.capture));
+    kv("release_key", s.mouse.release_key ? input_name(InputId{InKind::Key, s.mouse.release_key}) : std::string("none"));
 
-    o += "\n[aim]\n";
-    kv("lock_mode", lock_mode_name(s.aim.lock_mode));
-    kv("free_lock_margin", num(s.aim.free_lock_margin));
-    o += "\n[camera]\n";
-    kv("gun_drives_view", flag(s.camera.gun_drives_view));
     o += "\n[tweaks]\n";
     fastboot_format(s.fastboot, &o);
-    o += format_tweaks(s.tweaks);
 
     o += "\n[pad]\n";
     kv("label_abxy", flag(s.pad.label_abxy));
@@ -992,7 +978,7 @@ std::string format_settings(const Settings& s) {
     kv("detail", std::to_string(s.fps.detail));
     kv("in_screenshots", flag(s.fps.in_screenshots));
 
-    o += "\n[switch]\n";
+    o += "\n[console]\n";
     for (int a = 1; a < kActCount; ++a) {   // every action except none
         kv(act_info(static_cast<Act>(a)).name, output_text(s.out[a]));
     }

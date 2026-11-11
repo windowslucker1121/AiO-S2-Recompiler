@@ -84,15 +84,15 @@ The recompiler (`nxrecomp/`) has no game knowledge. `0x7100000000` there is the 
 These are still shaped by the first game the base was written for (title E, removed). None of them blocks a new
 game from building; they limit what it can reuse.
 
-- Play-mode vocabulary. The base's action and context slots are generic: `Ctx` is All, Play, Alt (the alternate body), Map, Menu,
+- Play-mode vocabulary. The base's action and context slots are generic: `Ctx` is All, Play, Alt (an alternate control scheme), Map, Menu,
   Inspect; the game actions are Primary, Target, Secondary, Jump, AltForm, LookHold, Map, Pause, Confirm, Back, the selects SetA1..4 /
   SetB1..4 and the cycle SetANext / SetAPrev; `GameFrame` carries `cycle_index` / `cycle_mask`. A game names them through
   `play::GameVocabulary` (in `GameDefaults`). Without a game the slots keep generic names and the game actions have no factory output.
-  The test fixture `runtime/tests/play_fixture` rebuilds the old title E vocabulary for the play_config and play_engine groups. Fixed in
-  the base: the number and kinds of slots (four-member sets A and B, one alternate body, one inspect context) and the `[aim]` (lock-on)
-  and `[camera]` sections.
-- `[tweaks]` names title E's features. `skip_intro`, `skip_boot_logos`, `fast_menus`, `glow_color` and the per-part glow keys are base
-  settings code (`play_fastboot.h`, `play_tweaks.h`); no game module uses the glow keys now.
+  The test fixture `runtime/tests/play_fixture/sample_play_fixture.*` is a made-up sample game's vocabulary (weapons, modes, a vehicle)
+  for the play_config, play_engine and play_sync groups. Fixed in the base: the number and kinds of slots (four-member sets A and B, one
+  alternate scheme, one inspect context). The old `[aim]` and `[camera]` sections are read and skipped without a warning.
+- `[tweaks]` holds `skip_intro`, `skip_boot_logos`, `fast_menus`, `menu_speed` (`play_fastboot.h`; no game module implements them now) and
+  `language` (read by the services); other keys are skipped quietly.
 - Code that moved out of a game module keeps namespace `nxrt::play`.
 - Test tooling vocabulary: `tt::GameState` fields (morph, beam, visor, missiles), the hash over them (`tt_core.cpp`) and the item names
   in `tt_script.cpp`.

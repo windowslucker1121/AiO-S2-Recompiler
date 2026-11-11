@@ -40,7 +40,7 @@ private:
 uint64_t prompt_hash(const void* data, size_t size);
 
 struct PromptInputs {
-    PromptStyle requested = PromptStyle::Switch;       // [prompts] style
+    PromptStyle requested = PromptStyle::Console;       // [prompts] style
     bool label_abxy = true;
     Ctx ctx = Ctx::Menu;
     uint64_t settings_epoch = 0;                       // changes whenever the bindings or the [switch] table may have changed

@@ -99,6 +99,9 @@ struct State {
     std::string translated_with;  // translator_stamp of that translation
     std::string programs_game;    // the GameId programs.bin was listed from
     std::string built_for;        // "<GameId>|<GameBuild stamp>" the game exe in <data>\program was built for
+    // How long each step took the last time it ran from its start to its end on this PC (seconds, 0: not measured): the time estimate
+    // of the next run (the library's step order: extract, build, corpus, translate, programs, prepare).
+    int secs[6] = {};
 };
 State load_state(const std::wstring& path);
 bool save_state(const std::wstring& path, const State& s);

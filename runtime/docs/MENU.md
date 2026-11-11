@@ -8,7 +8,7 @@ dialogs it opens. Game independent (`runtime/src/gfx/play`); a game module only 
 
 | Menu | Entries |
 |---|---|
-| Game | Save settings now, Reload settings from the file, Open the settings file, Show the settings folder, Capture a bug report (F9), Exit |
+| Game | Settings... (only when started from the library), Save settings now, Reload settings from the file, Open the settings file, Show the settings folder, Capture a bug report (F9), Exit |
 | Input | Gamepad..., Keyboard and mouse bindings..., Rumble, Test rumble, Gyro, Face buttons (by label / by position), Button prompts |
 | Graphics | Window mode, Window size, Keep the 16:9 picture, Vsync, Frame limit, Console mode (docked / handheld, next start; "tell the game now", experimental), Texture anisotropy, Replace the game's upscaler (the game stopgap, live), Upscaler (off / FSR 1 / NIS), Colour (neutral / vivid), More graphics settings... |
 | Audio | Volume, Mute when the window is not in focus |
@@ -25,6 +25,37 @@ The bar is on the window in windowed mode and taken off in fullscreen (Alt+Enter
 its size when the bar comes and goes (SDL counts the bar when it sizes the window), so the swapchain and the mouse coordinates are those of
 the picture. Alt alone and F10 do not open the bar (SDL swallows `SC_KEYMENU`, and so does the menu's window subclass): they stay game keys.
 Alt + the underlined letter of a top-level menu (Alt+G, Alt+I, Alt+R, Alt+A, Alt+D, Alt+H) opens it, as in any Windows program.
+
+## The mouse
+
+`[mouse] capture` in controls.ini (`src/gfx/play/play_capture.cpp`, a pure state machine with its tests in the `play_capture` group). With the
+default `click` the window never takes the mouse by itself: the first click into the picture while the game is playing captures it (that click
+does not reach the game), and Left Alt pressed and released alone (`[mouse] release_key`), focus loss, minimizing, the in-game menu, the menu
+bar or the system menu opening (Alt + letter, Alt+Space) and the library's Settings page let it go. After a release only the next click captures
+again. While captured, a note near the top of the picture says "Alt releases the mouse" for 3 s; when the mouse is free while the game is
+playing (also each time the window comes back to the front) it says "Click to control the camera with the mouse" for 4 s (`Overlay::show_toast`).
+The game's own menus and a waiting rebind hold the capture back (cursor shown) without ending it. `auto` is the older behaviour (captured
+whenever the window has the focus and the game is playing), `off` never captures. The log says each change (`mouse captured ...`,
+`mouse released (why)`).
+
+## One settings file: the library and the game
+
+**There is one set of settings and one place to edit them: the library's Settings page.** The game's menu bar keeps quick toggles and,
+without the library, its own dialogs; both write the same file, so neither copy goes stale.
+
+The library's Settings page (recomp_library.exe) edits the same controls.ini, changing only the keys it touches: it reads the file again just
+before each change and polls it once a second, so a change made in the game shows on the page ("Updated from the game"). The running game looks at the
+file once a second (size and write time, then the text against what it last read or wrote, `src/gfx/play/play_sync.cpp`): a change made by
+someone else is taken over key by key into the settings in force and applied as a menu change would be (live keys at once, "next start" keys
+at the next start). The game's own saves write only the keys it changed, in place, and a change another program made since the game last read
+the file is merged first, never overwritten. Its own writes are not taken for outside changes. `[play] watch_settings = false` turns the
+watching off.
+
+When the library starts the game it sets `NXRT_LIBRARY_EXE` (the library's full path) and `NXRT_LIBRARY_GAME` (the game id). Then Game >
+Settings... opens the library's Settings page (`"<NXRT_LIBRARY_EXE>" --game <id> --page 2 --tab 0`), and Input > Gamepad... and Keyboard and
+mouse bindings... open its controller (tab 2) and keyboard and mouse (tab 3) tabs instead of the native dialogs; the mouse is let go first.
+Without the variable (or when the file is missing) the native dialogs below are used. The quick toggles of the bar stay; they write the same
+file, so the library sees them.
 
 ## The dialogs
 
@@ -70,14 +101,17 @@ the game (display only), also in fullscreen.
 | Play mode's hooks (save, reload, exit, bug capture, debug report), the bar per frame, the in-game menu's switch | `src/gfx/play/play.cpp` (`install_menu_bar`) |
 | The in-game menu and the `UiHost` contract | `src/gfx/play/play_ui.cpp`, `play_ui.h` |
 | The overlay: toggle key and chord, navigation, the debug window | `src/gfx/overlay.cpp`, `overlay_debug.cpp`, `include/nxrt/overlay.h` |
-| Settings file (`[menu]`, `[config]`, `[display] upscaler_replace`) | `src/gfx/play/play_config.cpp`, `play_types.h` |
+| Settings file (`[menu]`, `[config]`, `[display] upscaler_replace`, `[mouse] capture`, `release_key`) | `src/gfx/play/play_config.cpp`, `play_types.h` |
+| The mouse capture state machine | `src/gfx/play/play_capture.cpp`, `play_capture.h` |
+| The settings file shared with the library: outside changes, in-place saves | `src/gfx/play/play_sync.cpp`, `play_sync.h` |
 | Pad helpers (press-to-rebind swap, pressed sources) | `src/gfx/play/pad_map.cpp` |
 | Data sources | `log_tail` (`diag/log.cpp`), `frame_time_stats` and `hitch_recent` (`diag/gauge.cpp`), `nvn::shader_stats` (`nvn_gpl.cpp`), `nvn::set_upscaler_replace_enabled` (`nvn_replay.cpp`), `config_set_default` / `config_user_set` (`diag/config.cpp`) |
 
 Keys: `[play] menu_bar` (default `1`; `0`: no bar), `[gfx] overlay_menu`, `[gfx] overlay_key`, `[gfx] overlay_pad_chord`, `[menu] auto_apply`
 (the in-game menu's Apply mode), `[config]`, `[boot] screenshot_dir` (docs/CONFIG.md).
 
-Tests: `play_ui` (the menu model: unique ids, every check and radio entry changes the settings and shows its state, `[config]` entries stored
+Tests: `play_capture` (click to capture, the release key, focus, the menus), `play_sync` (key-level diff and in-place edit, outside changes
+merged, no clobbering, own writes), `play_ui` (the menu model: unique ids, every check and radio entry changes the settings and shows its state, `[config]` entries stored
 and removed; the in-game menu's pages, press-to-rebind, auto-apply), `gfx_overlay` (pad chord, navigation), `play_config`, `play_pad`,
 `log_config`, `soak`.
 

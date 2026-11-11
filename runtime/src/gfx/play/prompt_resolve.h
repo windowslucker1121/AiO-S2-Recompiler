@@ -32,7 +32,7 @@ struct PromptIcon {
     const char* asset;          // the texture's name in the game's files (logs): "TXTR_ButtonA"
     const char* uuid;           // its asset id there, canonical lower-case text
     const char* pak;            // the archive under the RomFS folder: "Preload/MPR1/GuiSysMP1.pak"
-    const char* front_uuid;     // a second copy of the icon (title E: the front end's own, in front_pak), or nullptr
+    const char* front_uuid;     // a second copy of the icon (for example the front end's own), or nullptr
 };
 struct PromptGame {
     const PromptIcon* icons = nullptr;   // kIconCount entries in Icon order
@@ -53,7 +53,7 @@ const char* icon_pak_file(Icon i);
 const char* icon_front_uuid(Icon i);    // nullptr when the icon has no second copy
 
 struct ResolveIn {
-    PromptStyle style = PromptStyle::Switch;   // never Auto: the caller resolves Auto first
+    PromptStyle style = PromptStyle::Console;   // never Auto: the caller resolves Auto first
     bool label_abxy = true;                    // [pad] label_abxy: Xbox A is Switch A (true) or by position (false)
     Ctx ctx = Ctx::Menu;                       // where the player is
     const Settings* settings = nullptr;        // bindings (keyboard style) and the pad remap (pad styles); null: the built-in mapping

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// title E's play-mode vocabulary and factory controls.ini as a test fixture (see mpr_play_fixture.h for why and how).
-#include "mpr_play_fixture.h"
+// A sample game's play-mode vocabulary and factory controls.ini as a test fixture (see sample_play_fixture.h for why and how).
+#include "sample_play_fixture.h"
 
 #include "nxrt/game.h"
 #include "play/play_types.h"
 
-namespace nxtest::mpr_play {
+namespace nxtest::sample_play {
 namespace {
 
 using nxrt::play::Act;
@@ -17,8 +17,7 @@ using nxrt::play::GameDefaultChange;
 using nxrt::play::GameDefaults;
 using nxrt::play::GameVocabulary;
 
-// One row per Act, in enum order: the settings-file name and the factory [switch] output. The beams are power, wave, ice and plasma (set A),
-// the visors combat, scan, thermal and x-ray (set B).
+// One row per Act, in enum order: the settings-file name and the factory [console] output. Set A is four weapons, set B four modes.
 const ActInfo kActs[] = {
     {Act::None, "none", ""},
     {Act::MoveForward, "move_forward", "LS_UP"},
@@ -29,11 +28,11 @@ const ActInfo kActs[] = {
     {Act::LookDown, "look_down", "RS_DOWN"},
     {Act::LookLeft, "look_left", "RS_LEFT"},
     {Act::LookRight, "look_right", "RS_RIGHT"},
-    {Act::Primary, "fire", "ZR"},
-    {Act::Target, "lock_on", "ZL"},
-    {Act::Secondary, "missile", "R"},
+    {Act::Primary, "attack", "ZR"},
+    {Act::Target, "target", "ZL"},
+    {Act::Secondary, "item", "R"},
     {Act::Jump, "jump", "B"},
-    {Act::AltForm, "morph", "Y"},
+    {Act::AltForm, "vehicle", "Y"},
     {Act::LookHold, "free_look", "RSTICK"},
     {Act::Map, "map", "PLUS"},
     {Act::Pause, "pause", "MINUS"},
@@ -43,16 +42,16 @@ const ActInfo kActs[] = {
     {Act::DpadDown, "dpad_down", "DOWN"},
     {Act::DpadLeft, "dpad_left", "LEFT"},
     {Act::DpadRight, "dpad_right", "RIGHT"},
-    {Act::SetA1, "beam_1", "X+UP"},
-    {Act::SetA2, "beam_2", "X+RIGHT"},
-    {Act::SetA3, "beam_3", "X+DOWN"},
-    {Act::SetA4, "beam_4", "X+LEFT"},
-    {Act::SetB1, "visor_1", "L+UP"},
-    {Act::SetB2, "visor_2", "L+RIGHT"},
-    {Act::SetB3, "visor_3", "L+DOWN"},
-    {Act::SetB4, "visor_4", "L+LEFT"},
-    {Act::SetANext, "beam_next", ""},
-    {Act::SetAPrev, "beam_prev", ""},
+    {Act::SetA1, "weapon_1", "X+UP"},
+    {Act::SetA2, "weapon_2", "X+RIGHT"},
+    {Act::SetA3, "weapon_3", "X+DOWN"},
+    {Act::SetA4, "weapon_4", "X+LEFT"},
+    {Act::SetB1, "mode_1", "L+UP"},
+    {Act::SetB2, "mode_2", "L+RIGHT"},
+    {Act::SetB3, "mode_3", "L+DOWN"},
+    {Act::SetB4, "mode_4", "L+LEFT"},
+    {Act::SetANext, "weapon_next", ""},
+    {Act::SetAPrev, "weapon_prev", ""},
     {Act::BtnA, "btn_a", "A"},
     {Act::BtnB, "btn_b", "B"},
     {Act::BtnX, "btn_x", "X"},
@@ -69,23 +68,23 @@ const ActInfo kActs[] = {
 };
 static_assert(sizeof(kActs) / sizeof(kActs[0]) == nxrt::play::kActCount, "one row per Act");
 
-const char* const kCtxNames[] = {"all", "gameplay", "morph", "map", "menu", "scan"};
+const char* const kCtxNames[] = {"all", "field", "vehicle", "map", "menu", "focus"};
 static_assert(sizeof(kCtxNames) / sizeof(kCtxNames[0]) == nxrt::play::kCtxCount, "one name per Ctx");
 
-// The launcher's keyboard rows (26), in display order.
+// The library's keyboard rows (26), in display order.
 const GameActLabel kLabels[] = {
     {Act::MoveForward, "Move forward", "Movement"}, {Act::MoveBack, "Move back", "Movement"},
     {Act::MoveLeft, "Move left", "Movement"},       {Act::MoveRight, "Move right", "Movement"},
     {Act::LookUp, "Look up", "Looking"},            {Act::LookDown, "Look down", "Looking"},
     {Act::LookLeft, "Look left", "Looking"},        {Act::LookRight, "Look right", "Looking"},
-    {Act::Primary, "Fire", "Combat"},               {Act::Secondary, "Missile", "Combat"},
-    {Act::Target, "Lock on", "Combat"},             {Act::Jump, "Jump", "Combat"},
-    {Act::AltForm, "Morph ball", "Combat"},         {Act::LookHold, "Free look", "Combat"},
-    {Act::SetA1, "Power beam", "Beams"},            {Act::SetA2, "Wave beam", "Beams"},
-    {Act::SetA3, "Ice beam", "Beams"},              {Act::SetA4, "Plasma beam", "Beams"},
-    {Act::SetANext, "Next beam", "Beams"},          {Act::SetAPrev, "Previous beam", "Beams"},
-    {Act::SetB1, "Combat visor", "Visors"},         {Act::SetB2, "Scan visor", "Visors"},
-    {Act::SetB3, "Thermal visor", "Visors"},        {Act::SetB4, "X-ray visor", "Visors"},
+    {Act::Primary, "Attack", "Action"},             {Act::Secondary, "Item", "Action"},
+    {Act::Target, "Target", "Action"},              {Act::Jump, "Jump", "Action"},
+    {Act::AltForm, "Vehicle", "Action"},            {Act::LookHold, "Free look", "Action"},
+    {Act::SetA1, "Weapon 1", "Weapons"},            {Act::SetA2, "Weapon 2", "Weapons"},
+    {Act::SetA3, "Weapon 3", "Weapons"},            {Act::SetA4, "Weapon 4", "Weapons"},
+    {Act::SetANext, "Next weapon", "Weapons"},      {Act::SetAPrev, "Previous weapon", "Weapons"},
+    {Act::SetB1, "Mode 1", "Modes"},                {Act::SetB2, "Mode 2", "Modes"},
+    {Act::SetB3, "Mode 3", "Modes"},                {Act::SetB4, "Mode 4", "Modes"},
     {Act::Map, "Map", "Menus"},                     {Act::Pause, "Pause", "Menus"},
 };
 
@@ -95,21 +94,21 @@ const GameVocabulary kVocabulary = [] {
     v.ctx_names = kCtxNames;
     v.labels = kLabels;
     v.label_count = sizeof(kLabels) / sizeof(kLabels[0]);
-    v.key_alt_yaw = "morph_yaw";
-    v.key_alt_pitch = "morph_pitch";
-    v.key_wheel_cycles = "wheel_beams";
-    v.key_alt_orbit = "ball_orbit";
-    v.key_alt_camera = "ball_camera";
-    v.key_alt_sens = "ball_sensitivity";
-    v.label_alt_camera = "Morph ball camera";
-    v.label_wheel_cycles = "Mouse wheel changes the beam";
-    v.label_alt_camera_on = "Mouse and right stick turn the morph ball camera";
+    v.key_alt_yaw = "vehicle_yaw";
+    v.key_alt_pitch = "vehicle_pitch";
+    v.key_wheel_cycles = "wheel_weapons";
+    v.key_alt_orbit = "vehicle_orbit";
+    v.key_alt_camera = "vehicle_camera";
+    v.key_alt_sens = "vehicle_sensitivity";
+    v.label_alt_camera = "Vehicle camera";
+    v.label_wheel_cycles = "Mouse wheel changes the weapon";
+    v.label_alt_camera_on = "Mouse and right stick turn the vehicle camera";
     return v;
 }();
 
 // The factory controls.ini at revision 3. Every key is one the reader knows (the tests parse it without warnings); the display keys sit on
 // lines of their own, and the four that only apply at the next start say so on the comment line above them.
-constexpr const char* kSettingsText = R"INI(# title E: keyboard, mouse and controller settings (test fixture)
+constexpr const char* kSettingsText = R"INI(# sample game: keyboard, mouse and controller settings (test fixture)
 [meta]
 defaults_rev = 3
 
@@ -119,15 +118,9 @@ pitch = 0.000767945
 invert_y = 0
 invert_x = 0
 menu_cursor = 1
-wheel_beams = 1
-ball_camera = 1
-
-[aim]
-lock_mode = free
-free_lock_margin = 0.15
-
-[camera]
-gun_drives_view = 1
+wheel_weapons = 1
+vehicle_camera = 1
+capture = click
 
 [pad]
 label_abxy = 1
@@ -140,7 +133,7 @@ gyro = 1
 gyro_scale = 1
 rumble = 1
 rumble_scale = 1
-ball_orbit = 2
+vehicle_orbit = 2
 
 [timing]
 tap_ms = 200
@@ -175,12 +168,6 @@ fewer_gpu_waits = 1
 [prompts]
 style = auto
 
-[tweaks]
-glow_color = off
-suit_glow = auto
-ball_glow = auto
-gun_glow = auto
-
 [bindings.all]
 W = move_forward
 S = move_back
@@ -190,23 +177,23 @@ Up = look_up
 Down = look_down
 Left = look_left
 Right = look_right
-Mouse1 = fire
-Mouse2 = missile
-F = missile
-Mouse3 = lock_on
+Mouse1 = attack
+Mouse2 = item
+F = item
+Mouse3 = target
 Space = jump
-Left Ctrl = morph
+Left Ctrl = vehicle
 Left Shift = free_look
-WheelUp = beam_prev
-WheelDown = beam_next
-1 = beam_1
-2 = beam_2
-3 = beam_3
-4 = beam_4
-5 = visor_1
-6 = visor_2
-7 = visor_3
-8 = visor_4
+WheelUp = weapon_prev
+WheelDown = weapon_next
+1 = weapon_1
+2 = weapon_2
+3 = weapon_3
+4 = weapon_4
+5 = mode_1
+6 = mode_2
+7 = mode_3
+8 = mode_4
 Tab = map
 Escape = pause
 
@@ -229,12 +216,12 @@ Q = btn_l
 E = btn_r
 )INI";
 
-// Revision 2 added X on the map (the map's own X action); revision 3 moved the lock-on from the game's classic one to the free one.
+// Revision 2 added X on the map (the map's own X action); revision 3 moved the mouse capture from auto to click.
 const GameDefaultAddition kAdditions[] = {
     {2, Ctx::Map, "X", Act::BtnX},
 };
 const GameDefaultChange kChanges[] = {
-    {3, "aim", "lock_mode", "classic", "free"},
+    {3, "mouse", "capture", "auto", "click"},
 };
 
 const GameDefaults kDefaults = [] {
@@ -272,4 +259,4 @@ void remove() {
     g_installed = false;
 }
 
-}  // namespace nxtest::mpr_play
+}  // namespace nxtest::sample_play
