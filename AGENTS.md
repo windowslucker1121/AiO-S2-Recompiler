@@ -215,6 +215,33 @@ took 25 min for 117,981 parts (both raster sets); a forced second one loads the 
   folder's `spirv` at a cache you need (a junction survived: `remove_all` takes the junction only).
   Not checked yet: Play running the setup and then the game; two games queued. Next: build a game from the library (lift + compile as a
   queue step), release layout `games\<id>\game.toml` next to the exe.
+  **UI/UX overhaul (2026-11-11, branch `ui/library-overhaul`; supersedes the list/diagram notes above where they differ):**
+  - **One time estimate.** `GameItem::expected/remaining/eta/overall` (setup_main.cpp): each step's expected seconds = what it took on this
+    PC last time (`setup_state.ini` `secs_0..5`, written when a step ends ok and was not cancelled), else `kStepBaseSecs` scaled by
+    16/threads (CPU steps) and by the game's size against 25 GB (`.nup` size or the romfs walked once). Running steps with a rate give their
+    own time left and correct the unmeasured ones (`speed()`, clamped 0.33..3). The total is the longest chain through `kStepDeps` (steps
+    run side by side), the header bar is elapsed / (elapsed + left); each step row has its own bar and "x min left" (painted steps card,
+    `paint_steps`; the ListView is gone). Not seen yet with a full-size game (the test dump is exefs-only: every figure is "under a minute").
+  - **Settings: one file, two editors.** The library is the main place; the game's menu bar writes the same `controls.ini`. The library
+    re-reads the file before every change and writes only that key (`Panel::fresh`), polls it every second and shows the game's changes
+    ("Updated from the game"); the game polls it too and takes over changed keys (`play_sync.cpp`). Only keys the runtime reads are offered
+    (no render scale / dynamic resolution / aspect / bloom / chromatic aberration / upscaler quality: no effect in this runtime); "Next start"
+    tags on the start-time keys; hints are tooltips. Values from the file that a list lacks show as "Custom (...)".
+  - **Library <-> game.** Play sets `NXRT_LIBRARY_EXE` / `NXRT_LIBRARY_GAME`; the game's Game > Settings..., Input > Gamepad... and Keyboard
+    and mouse... start `recomp_library.exe --game <id> --page 2 --tab <0..4>`, and a running library takes the command line over
+    (single instance by window class `NxrtGameLibrary`, `WM_COPYDATA` `kCopyArgs`, `App::handle_args`). The library shows "Playing" while the
+    game it started runs (a thread waits for the process).
+  - **Controller tab.** Pictures in the connected pad's look (XInput = Xbox letters in colour; the joystick API, winmm, for the rest:
+    vendor 054C = PlayStation shapes, others a position dot), `[library] pad_icons = auto|xbox|playstation|generic` overrides. Mapping rows
+    in the order face buttons, shoulders/triggers, View/Menu, sticks, d-pad; each target is named by the pad button that gives it by default
+    under the face-button layout ("Acts as B"; PlayStation always by position, as `pad_map.cpp`). Remapped controls get a badge.
+  - **This PC** is painted: problems first as cards with their fix, passed checks as one list; Copy report copies all of it.
+  - Keyboard: focus rings on every owner-drawn control; arrows/Enter/P on the game cards; Esc / Alt+Left back to the library; Ctrl+Up/Down
+    between games; Left/Right switch settings tabs when the panel has the focus. Empty library: one "Add a game" call to action.
+  - Test helpers (git-ignored, recreate as needed): build `cmake -S tools/release/library -B work/build/lib -G Ninja -DCMAKE_CXX_COMPILER=clang-cl
+    -DLIBRARY_DEV_ROOT=ON` through `nx_env.cmd`; shots with `winshot.py cmd "Recomp Library" <1005+page>` then `shot`; a settings tab by a
+    second start `recomp_library.exe --page 2 --tab N`; the panel scrolls by `WM_VSCROLL` to its child `NxrtSettingsPanel`; message boxes
+    are answered by posting `WM_COMMAND IDYES` to the `#32770` window.
   **Release package / CI (2026-11-08):** `.github/workflows/release.yml` builds `tools/release/package.ps1` on `windows-latest` (tag
   `v*` or "Run workflow" with a version -> GitHub release with the zip + `.sha256`; PRs touching the library -> build only, zip as a
   workflow artifact). The package: `recomp_library.exe` (standalone CMake `tools/release/library`, no game or runtime needed, no

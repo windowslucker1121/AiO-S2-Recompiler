@@ -40,7 +40,11 @@ whenever the window has the focus and the game is playing), `off` never captures
 
 ## One settings file: the library and the game
 
-The library's Settings page (recomp_library.exe) edits the same controls.ini, changing only the keys it touches. The running game looks at the
+**There is one set of settings and one place to edit them: the library's Settings page.** The game's menu bar keeps quick toggles and,
+without the library, its own dialogs; both write the same file, so neither copy goes stale.
+
+The library's Settings page (recomp_library.exe) edits the same controls.ini, changing only the keys it touches: it reads the file again just
+before each change and polls it once a second, so a change made in the game shows on the page ("Updated from the game"). The running game looks at the
 file once a second (size and write time, then the text against what it last read or wrote, `src/gfx/play/play_sync.cpp`): a change made by
 someone else is taken over key by key into the settings in force and applied as a menu change would be (live keys at once, "next start" keys
 at the next start). The game's own saves write only the keys it changed, in place, and a change another program made since the game last read

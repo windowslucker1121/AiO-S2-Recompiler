@@ -1091,7 +1091,12 @@ void App::request_stop(GameItem& g) {
 }
 
 void App::fail_job(GameItem& g, const std::string& error) {
-    if (g.error.empty()) g.error = error;
+    if (g.error.empty()) {
+        // the tools say "error <what>": the player reads "<what>", with a capital
+        std::string e = error.rfind("error ", 0) == 0 ? error.substr(6) : error;
+        if (!e.empty()) e[0] = static_cast<char>(toupper(static_cast<unsigned char>(e[0])));
+        g.error = e;
+    }
     g.play_after = false;
     request_stop(g);   // the others stop too: what they did is kept, Prepare continues later
 }
@@ -1130,6 +1135,7 @@ void App::start_step(GameItem& g, int s) {
         return;
     }
     if (s == S_BUILD && (!g.build.ok || tools_.python.empty())) { fail("this package cannot build the game program"); return; }
+    if (s == S_TRANSLATE && tools_.translator.empty()) { fail("The shader translator is missing: see This PC."); return; }
     if ((s == S_TRANSLATE || s == S_PREPARE) && !g.exe_ok()) {
         log(g, L"--- the game program is not built: " + g.exe + L" ---");
         fail("the game program is not built yet");
@@ -1610,6 +1616,12 @@ void App::paint_side(gp::Graphics& g, const RECT& rc) {
     HDC dc = g.GetHDC();
     gp::Font big(dc, title_), bold(dc, bold_), smallf(dc, small_), normal(dc, font_);
     g.ReleaseHDC(dc);
+    if (page_ == P_LIB) {   // the library home: the brand is its entry
+        gp::SolidBrush on(C(kCardHi));
+        fill_round(g, gp::RectF(Sf(12), Sf(16), Sf(kSideW - 24), Sf(54)), Sf(10), on);
+        gp::SolidBrush a(C(kAccent));
+        fill_round(g, gp::RectF(Sf(12), Sf(28), Sf(4), Sf(30)), Sf(2), a);
+    }
     // brand
     gp::LinearGradientBrush lg(gp::PointF(Sf(20), Sf(28)), gp::PointF(Sf(52), Sf(60)), C(kAccent), C(RGB(0xB0, 0x6B, 0xFF)));
     fill_round(g, gp::RectF(Sf(20), Sf(26), Sf(34), Sf(34)), Sf(9), lg);
@@ -1637,7 +1649,6 @@ void App::paint_side(gp::Graphics& g, const RECT& rc) {
             text(g, sub, smallf, gp::RectF(rf.X + rf.Width - Sf(44), rf.Y, Sf(32), rf.Height), kMuted, gp::StringAlignmentFar, gp::StringAlignmentCenter);
         }
     };
-    if (nav_games_.empty()) text(g, L"No games yet. Add one below.", smallf, gp::RectF(Sf(20), Sf(100), Sf(kSideW - 40), Sf(40)), kMuted, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
     for (size_t i = 0; i < nav_games_.size(); ++i) {
         const GameItem* gi = nav_games_[i].second;
         row(nav_games_[i].first, gi->short_title, gi == s && (page_ == P_GAME || page_ == P_SET), hover_nav_ == static_cast<int>(i), status_of(*gi).color, L"");
@@ -1676,7 +1687,6 @@ void App::nav_layout() {
     int ny = S(88);
     for (auto& gi : games_)
         if (gi->in_library()) { nav_games_.push_back({RECT{S(12), ny, S(kSideW) - S(12), ny + S(42)}, gi.get()}); ny += S(46); }
-    if (nav_games_.empty()) ny += S(44);   // room for the "no games yet" note
     pc_rect_ = {S(12), ny + S(8), S(kSideW) - S(12), ny + S(50)};
     add_rect_ = {S(12), rc.bottom - S(60), S(kSideW) - S(12), rc.bottom - S(16)};
     report_rect_ = {rc.right - S(24) - S(132), S(14), rc.right - S(24), S(46)};
@@ -1762,7 +1772,7 @@ void App::paint_game_header(gp::Graphics& g, const RECT& rc) {
     } else if (!s->error.empty()) {
         pt = L"⚠  " + widen(s->error);
         pc = kBad;
-        right = details_ ? L"" : L"See the output below";
+        right = L"";
     } else if (s->game_running) {
         pt = L"The game is running. Settings changes reach it at once.";
     } else if (s->def && s->in_library() && !s->exe_ok() && !s->build.ok) {
@@ -1816,9 +1826,11 @@ void App::paint_steps(gp::Graphics& g, const GameItem& s) {
         // state of this step
         enum { kPending, kRunning, kDone, kSkip, kFail } state = kPending;
         if (s.running && r.planned) state = r.running() ? kRunning : r.finished ? (r.ok ? kDone : kFail) : kPending;
+        else if (!s.error.empty() && r.planned && r.started && r.finished && !r.ok) state = kFail;   // the last run
         else if (!s.need[i]) state = kSkip;
         if (state == kSkip && s.run[i].finished && s.run[i].ok && s.run[i].planned) state = kDone;
-        const bool done_before = state == kSkip && !s.why[i].empty() && s.why[i].rfind(L"Not needed", 0) != 0 && s.why[i].rfind(L"This package", 0) != 0;
+        // not needed because it ran before (a step this dump or package has no use for says so in its "why")
+        const bool done_before = state == kSkip && s.in_library() && s.why[i].rfind(L"Not needed", 0) != 0 && s.why[i].rfind(L"This package", 0) != 0;
         // icon
         if (state == kRunning) {
             gp::Pen ring(C(kLine), Sf(3));
@@ -1862,11 +1874,12 @@ void App::paint_steps(gp::Graphics& g, const GameItem& s) {
             right = L"Done";
             if (s.running && r.finished && r.elapsed() > 0) sub = L"Took " + span_text(r.elapsed());
         } else if (state == kFail) {
-            sub = r.error.empty() ? L"failed" : widen(r.error);
+            sub = widen(r.error);
             right = L"Failed";
         } else {
             sub = s.why[i];
-            right = done_before ? L"Done" : L"Skipped";
+            if (sub.rfind(L"Not needed: ", 0) == 0) { sub = sub.substr(12); if (!sub.empty()) sub[0] = static_cast<wchar_t>(towupper(sub[0])); }
+            right = done_before ? L"Done" : L"Not needed";
         }
         if (state == kRunning) {
             // the step's own bar, labelled by its row
@@ -2585,7 +2598,7 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
         case WM_CLOSE:
             if (active_) {
                 if (closing_) return 0;   // already stopping: the window goes when the last step has ended
-                if (MessageBoxW(wnd_, L"A game is being prepared. Stop it and close? What is done is kept; Prepare continues later.", kAppName,
+                if (MessageBoxW(wnd_, L"A game is being set up. Stop and close?\r\n\r\nWhat is done is kept: Play continues the setup where it stopped.", kAppName,
                                 MB_YESNO | MB_ICONQUESTION) != IDYES)
                     return 0;
                 queue_.clear();
