@@ -49,4 +49,7 @@ void set_game(HWND panel, const std::wstring& title, const std::wstring& control
 // download; 0 hides them. Call before set_game.
 void set_dlss(HWND panel, int state, std::function<void()> download);
 
+// Opens a tab: 0 graphics, 1 display, 2 controller, 3 keyboard and mouse, 4 audio (the game's Settings entries pass it as --tab).
+void set_tab(HWND panel, int tab);
+
 }  // namespace setup::settings
