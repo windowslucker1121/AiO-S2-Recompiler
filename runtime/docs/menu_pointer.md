@@ -6,10 +6,10 @@ The mouse as a pointer in a game's own menus: hover selects, left click confirms
 |---|---|
 | `menu_mouse.h`, `menu_mouse_math.cpp` | The pointer itself (events, the window to UI plane mapping). Unchanged. |
 | `menu_pointer.h`, `menu_pointer.cpp` | The engine. It knows no game and no UI library. |
-| `menu_ktgl.h`, `menu_ktgl.cpp` | Adapter for KTGL screen layouts (Koei Tecmo). Used by Pokopia. |
-| `menu_ui2d.h`, `menu_ui2d.cpp` | Adapter for Nintendo's nn::ui2d layouts (BFLYT) and the button controls built on them. Written for Donkey Kong Bananza. Not wired into any game yet. |
+| `menu_ktgl.h`, `menu_ktgl.cpp` | Adapter for KTGL screen layouts (Koei Tecmo). Used by title A. |
+| `menu_ui2d.h`, `menu_ui2d.cpp` | Adapter for the platform's nn::ui2d layouts (BFLYT) and the button controls built on them. Written for title B. Not wired into any game yet. |
 
-The game module supplies the addresses and wires the adapter into play mode's `GamePlay` table (`menu_frame`, `menu_over_value`, `menu_active`, `menu_in_game`). The Pokopia port (removed) used it with a `ktgl::Config` holding the offsets of its 2.0.1 main, plus `play_follow_live` as the gate policy.
+The game module supplies the addresses and wires the adapter into play mode's `GamePlay` table (`menu_frame`, `menu_over_value`, `menu_active`, `menu_in_game`). The title A port (removed) used it with a `ktgl::Config` holding the offsets of its 2.0.1 main, plus `play_follow_live` as the gate policy.
 
 ## Engine
 
@@ -34,9 +34,9 @@ Once a frame, `Engine::frame(menu_up, geometry, adapter)` does the following:
 - While up, it reuses the menu frame's own scan of that frame.
 - It opens after 2 positive polls in a row and closes after 10 negative frames.
 
-## KTGL adapter (Pokopia)
+## KTGL adapter (title A)
 
-This is the logic of the removed Pokopia port's menu code, moved over as it was:
+This is the logic of the removed title A port's menu code, moved over as it was:
 
 - the pool walk, the draw hooks and the per-pane draw records;
 - the pane classification and the cursor rules (`pick`, `pick_extend`).
@@ -54,15 +54,15 @@ Hover candidates are passed as element flags:
 | Mode 2 (sibling button layouts) | the group's entries | none |
 | Other modes | entries of the selected entry's layout, or of any layout when nothing is selected | the same layout rule |
 
-Panes of a `menu_key_guides` layout carry their button as `click`. Config keys, log lines and the status text are the same as before; the keys stay in `[pkp]`.
+Panes of a `menu_key_guides` layout carry their button as `click`. Config keys, log lines and the status text are the same as before; the keys stay in the section the game module names (`ktgl::Config::section`).
 
-## ui2d adapter (Donkey Kong Bananza)
+## ui2d adapter (title B)
 
-Source: `game/dkb/dk-bananza-040074A01BF12000/updates/458752/exefs/main` as an ELF, `work/ida/dkb/main.elf` (IDA database `work/ida/dkb/main.elf.i64`, image base 0, 120800 functions after auto-analysis). The game keeps the C++ RTTI names of the `nn::ui2d` classes (`N2nn4ui2d4PaneE`, `...6LayoutE`, `...5PartsE`, `...8BoundingE`, `...TransitionConditionIsHitE` ...). Its own classes have no names.
+Source: `game/<dump>/updates/458752/exefs/main` as an ELF, `work/ida/<dump>/main.elf` (IDA database `work/ida/<dump>/main.elf.i64`, image base 0, 120800 functions after auto-analysis). The game keeps the C++ RTTI names of the `nn::ui2d` classes (`N2nn4ui2d4PaneE`, `...6LayoutE`, `...5PartsE`, `...8BoundingE`, `...TransitionConditionIsHitE` ...). Its own classes have no names.
 
 ### How the game handles the pointer
 
-Bananza's menus are built from layout *controls*. A factory, `0x5b0d9c`, creates the control named in the layout by comparing strings. The names it knows: `UniteButton`, `NormalButton`, `DecisionButton`, `SelectButton`, `CheckButton`, `DragButton`, `CheckKeepButton`, `TwoTouchCheckKeepButton`, `BoxCursor`, `TraceGauge`, `ScrollIndicator`, `DragScrollButton`. Each button class's vtable slot 0 returns its name; `0x170c7ec` returns "NormalButton", for example.
+Title B's menus are built from layout *controls*. A factory, `0x5b0d9c`, creates the control named in the layout by comparing strings. The names it knows: `UniteButton`, `NormalButton`, `DecisionButton`, `SelectButton`, `CheckButton`, `DragButton`, `CheckKeepButton`, `TwoTouchCheckKeepButton`, `BoxCursor`, `TraceGauge`, `ScrollIndicator`, `DragScrollButton`. Each button class's vtable slot 0 returns its name; `0x170c7ec` returns "NormalButton", for example.
 
 The game already drives these buttons with a pointer (the touch screen). A *scene* runs `0x1709ce0` each frame:
 
@@ -111,11 +111,11 @@ Names given in the IDA database: `ui2dctl_ButtonGroup_UpdatePointer`, `ui2dctl_S
 
 ### Not known yet
 
-- Whether Bananza's pad selection uses `grp+40` too, or a separate cursor (`BoxCursor`). If it is separate, hover and the pad focus could both show a highlight.
+- Whether title B's pad selection uses `grp+40` too, or a separate cursor (`BoxCursor`). If it is separate, hover and the pad focus could both show a highlight.
 - Whether groups with bit `0x4` (decide on release) react to hover without a press. The decompiled path suggests they do not, so in those groups a click still works but hover may not.
 - Whether `0x16ffabc` runs every frame for every open menu. The scene skips it when the group has no buttons (`0x46948`) or the scene is inactive.
-- The game module (`games/dkb`) and `recomp/games/dkb` do not exist yet. Wiring them up means:
-  - load a `games/dkb/menu.ini` with the values above into the config;
+- The game module (`runtime/games/<id>`) and `recomp/games/<id>` do not exist yet. Wiring them up means:
+  - load a `games/<id>/menu.ini` with the values above into the config;
   - call `ui2d::config_from_ini("menu", &cfg)` and then `ui2d::install(base, cfg)`;
   - set the `GamePlay` menu functions;
   - add `entryhook 0x71016ffabc` to its `main.sites`.

@@ -1,9 +1,9 @@
 # nxrecomp: AArch64 to C++ static recompiler
 
-Turns the code of a Nintendo Switch program (NSO modules, or any static AArch64 ELF) into C++ that builds natively on Windows
+Turns the code of a platform 1 program (NSO modules, or any static AArch64 ELF) into C++ that builds natively on Windows
 x64 with clang-cl. The translation is done by deterministic code. There is no inline assembly and no
 interpreter. It is the CPU half of the PC ports in this repository; nothing here
-is specific to a game except the per-game folders `games/<id>/` (`games/oot/config.py` for Ocarina of Time).
+is specific to a game except the per-game folders `games/<id>/` (`games/oot/config.py` for the game).
 
 Licence: GPL-3.0-or-later (`LICENSE`). Borrowed code and its licences: `THIRD_PARTY.md`.
 
@@ -37,7 +37,7 @@ lifts as a build step and builds the result as a static library (flags: C++20, `
 
 ## How it is built
 
-- `nxrecomp/image.py` loads a module (NSO, smo-style ELF, or static ELF) into one `Image`; `funcs.py` finds function
+- `nxrecomp/image.py` loads a module (NSO, smo-recomp-style ELF, or static ELF) into one `Image`; `funcs.py` finds function
   boundaries (`.eh_frame` and sized symbols first); `eh.py` reads CFI and C++ LSDAs; `jumptables.py` resolves `br` tables;
   `program.py` lifts and writes the sources.
 - Instruction lifting has two tiers. Tier 1 (`lift/a64.py`) decodes bit fields and is the reference where it applies. Tier 2

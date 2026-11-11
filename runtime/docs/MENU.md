@@ -10,7 +10,7 @@ dialogs it opens. Game independent (`runtime/src/gfx/play`); a game module only 
 |---|---|
 | Game | Save settings now, Reload settings from the file, Open the settings file, Show the settings folder, Capture a bug report (F9), Exit |
 | Input | Gamepad..., Keyboard and mouse bindings..., Rumble, Test rumble, Gyro, Face buttons (by label / by position), Button prompts |
-| Graphics | Window mode, Window size, Keep the 16:9 picture, Vsync, Frame limit, Console mode (docked / handheld, next start; "tell the game now", experimental), Texture anisotropy, Replace the game's upscaler (OoT stopgap, live), Upscaler (off / FSR 1 / NIS), Colour (neutral / vivid), More graphics settings... |
+| Graphics | Window mode, Window size, Keep the 16:9 picture, Vsync, Frame limit, Console mode (docked / handheld, next start; "tell the game now", experimental), Texture anisotropy, Replace the game's upscaler (the game stopgap, live), Upscaler (off / FSR 1 / NIS), Colour (neutral / vivid), More graphics settings... |
 | Audio | Volume, Mute when the window is not in focus |
 | Debug | Debug info..., Log..., Open the log file, Show the log folder, Copy a debug report to the clipboard, Frame rate counter (F2) and its corner, In-game debug overlay, Diagnostics switches (next start), Hitch threshold (next start) |
 | Help | Keys and controls, About |
@@ -36,7 +36,7 @@ they come to the front.
   strength, gyro scale, rumble and gyro on/off, and the button mapping: select a Switch button, Rebind, press a button on the controller (or
   pull a trigger); the button that had the job takes over the old job of the pressed one (a swap). Built-in layout resets all of them.
   Sliders apply when they are let go.
-- **Keyboard and mouse bindings**: the bindings of a context (a game that does not report play or menu, like OoT for now, uses the `menu`
+- **Keyboard and mouse bindings**: the bindings of a context (a game that does not report play or menu, like the game for now, uses the `menu`
   bindings plus the `all` layer), Rebind, Remove, Add a key for an action, Factory bindings. Rebind and Add bring the game window to the front:
   press the key, mouse button or wheel there (Escape cancels); the key that opens the in-game menu and the frame-rate hotkey are refused.
 - **More graphics settings**: texture LOD bias, FSR 1 / NIS sharpness and the colour controls (live; the colour shows while a slider is

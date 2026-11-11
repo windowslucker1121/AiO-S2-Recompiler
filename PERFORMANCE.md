@@ -1,13 +1,13 @@
-# OoT performance: state, history, what we tried, what is running
+# The game performance: state, history, what we tried, what is running
 
-Living document for the OoT frame-rate work. Detailed per-session notes, with every key, measurement and pitfall, stay in
+Living document for the frame-rate work. Detailed per-session notes, with every key, measurement and pitfall, stay in
 `AGENTS.md` ("Performance work" and the "Session 2026-11-xx" paragraphs). Config keys are in `runtime/docs/CONFIG.md`.
 This file is the overview: where we are, how we measure, what paid, what did not, and what is next.
 Last update: 2026-11-10, branch `feat/perf-generic-runtime`.
 
 ## Goal and constraints (from the user)
 
-- **A real, steady 60 fps in the Kokiri village** (`load_state("kokiri_outside")`), the heaviest scene, at the **pinned render
+- **A real, steady 60 fps in the village** (`load_state("village_outside")`), the heaviest scene, at the **pinned render
   resolution 1920x1080** (`[oot] render_height = 1080`).
 - No DLSS, FSR, frame generation, lower resolution or skipped game rendering. The game's own post-process chain (including its
   upscaler network) stays. Resolution changes only via DLSS-like tech later, and only if the user asks.
@@ -19,14 +19,14 @@ Last update: 2026-11-10, branch `feat/perf-generic-runtime`.
 
 | Scene | Start of plan D (854x480) | First 1080 runs (W7) | 2026-11-09 evening | Now |
 |---|---|---|---|---|
-| Kokiri outside | 21-24 | ~16 | 36.6 | **~49.6** (G1 run; P5 merged after it, not yet measured together) |
+| Village outside | 21-24 | ~16 | 36.6 | **~49.6** (G1 run; P5 merged after it, not yet measured together) |
 | First scene (intro village) | 34-39 | 25-43 | 50-62 | **~62-66** |
-| Link's house | 47-52 | 31-33 | 64 | **~79-83** |
+| The house scene | 47-52 | 31-33 | 64 | **~79-83** |
 
-- Kokiri frame: ~20 ms. The **render thread replay is ~18.5 ms per frame** and the **GPU is busy ~19.7 ms per frame**. Both have to
+- Village frame: ~20 ms. The **render thread replay is ~18.5 ms per frame** and the **GPU is busy ~19.7 ms per frame**. Both have to
   drop under ~15 ms for a steady 60.
 - The game's main thread (G) is ~10 ms busy per frame. It caps near ~95 fps and is not the limit.
-- Frame cap: `fps_limit = auto` follows the display's refresh rate for OoT. Movies are always held at 60 (`movie_cap`).
+- Frame cap: `fps_limit = auto` follows the display's refresh rate for the game. Movies are always held at 60 (`movie_cap`).
 
 ## How to measure
 
@@ -63,7 +63,7 @@ Last update: 2026-11-10, branch `feat/perf-generic-runtime`.
   - `set_reuse = verify` / `odb_incremental = verify`: 0 differences.
   - `runtime\scripts\build.ps1 -Test`: 174 groups. `gfx_nvn_scene_state` is a known flake; rerun it alone.
 
-## Frame anatomy (Kokiri outside, 1080, before G1 / P5)
+## Frame anatomy (village outside, 1080, before G1 / P5)
 
 Measured by K1 at real clocks; detail in the git-ignored `work/notes/k1_roadmap.md`.
 
@@ -96,25 +96,25 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 |---|---|---|
 | D1/D3 (854x480) | page checks word-wise; occlusion queries inside the pass (passes 670 → 45 per frame); shared c[0] tables; interval index of held results (`out_index`); pass chunks; `pool_lookup_snapshot` | 11.6 → ~38 fps first scene at 480 |
 | G-1/G2/G3 (lifted code) | `/O2 -march=x86-64-v3`; function-local NZCV; scratch registers x9-x17 as locals; inline caches for indirect calls (`NX_ICALL`); exact closed-form FRSQRTE; opt-in PGO | main thread G 13.2 → 10.5 ms (−21%) |
-| R2 | `tex_park`: parks the GPU-written images of per-frame texture objects | Kokiri 21 → 29 fps |
+| R2 | `tex_park`: parks the GPU-written images of per-frame texture objects | Village 21 → 29 fps |
 | R3 | `gmem_ro_bindings`, `overlap_grow`, `out_index_inc`, `flat_set_maps`, `pool_sync_cache` | render −1.35 ms |
-| S1 / R4 | `set_keep` (persistent validated descriptor sets); `odb_incremental`; recorder thread `cmd_thread` | Kokiri replay −5 ms; house +1.75 fps |
+| S1 / R4 | `set_keep` (persistent validated descriptor sets); `odb_incremental`; recorder thread `cmd_thread` | Village replay −5 ms; house +1.75 fps |
 | P2 | `out_delta`: copy-backs of changed words only; `write_defer`; fp32 FMUL.RZ shaders | first scene 39 → 45 fps |
-| H1 | `ww_quiet_wait`, `tex_park_presents` 240, `bc7_format_index`, `present_pace`, prewarm key saver, movie cap | Kokiri 1% low 11.6 → 23.9 |
+| H1 | `ww_quiet_wait`, `tex_park_presents` 240, `bc7_format_index`, `present_pace`, prewarm key saver, movie cap | Village 1% low 11.6 → 23.9 |
 | T1 | `tex_lookahead`: textures named by handles prepared ahead | camera cut worst frame 703 → 95 ms |
-| R5 | background pool imports; `pool_sync_depth_ids`; `c0_persist` | load frame 2.7 s → 0.75 s; Kokiri replay 26.7 → 17.8 ms |
+| R5 | background pool imports; `pool_sync_depth_ids`; `c0_persist` | load frame 2.7 s → 0.75 s; village replay 26.7 → 17.8 ms |
 | U1 (A22) | TLD4 `.F16.RN` decoder fix: no upscaler stripes at 1080 | picture |
 | S2 / S3 | gpt helpers out of line with an inline page cache; new CFG structurizer | pipeline builds 16-82 s → 1-3 s; fragment registers mean 136 → 93 |
 | step 2 | `cap_at_display_rate = true` (uncapped house 64 fps vs 60 capped, smoother) | house 1% low 41 → 48 |
-| F1 | pointer fast path: one vector load per LDG.64/.128 (`NXRT_HARNESS_GMEM_VECTOR`) | Kokiri 36.6 → 40.4 fps (42.6 in the shared cache) |
+| F1 | pointer fast path: one vector load per LDG.64/.128 (`NXRT_HARNESS_GMEM_VECTOR`) | Village 36.6 → 40.4 fps (42.6 in the shared cache) |
 | P4 | `cs_gmem_held`, `refill_compute`, `pass_pre_layout`, `occ_defer` | about +1.5-2 fps |
-| C1 | compute pointer shaders take the page cache when no marked slot overlaps (`NXRT_HARNESS_GMEM_CS_SPAN`) | #3 5.63 → 4.90 ms; Kokiri 44.0 fps (shared cache) |
-| R6 | `cmd_thread_desc`, `odb_program`, `pool_sync_fast`, `overlap_pos`, `handle_cache`, word hashes, layout memo, pool page hints | Kokiri replay 21.9 → 20.2 ms; house +0.4 fps |
+| C1 | compute pointer shaders take the page cache when no marked slot overlaps (`NXRT_HARNESS_GMEM_CS_SPAN`) | #3 5.63 → 4.90 ms; village 44.0 fps (shared cache) |
+| R6 | `cmd_thread_desc`, `odb_program`, `pool_sync_fast`, `overlap_pos`, `handle_cache`, word hashes, layout memo, pool page hints | Village replay 21.9 → 20.2 ms; house +0.4 fps |
 | V1 | `mem::ww::changes()` in the set-memo epoch: closes a race (stale set-memo hits 1 per run → 0) | correctness, 0 fps cost |
 | R7 | `reflect_literals`: SPIR-V reflection had taken literal operands for written storage ids (37,479 of 47,409 modules wrongly "written") | replay −2 ms; first scene 58.5 → 61.3; house 76 → 78.9 |
 | R7 | `memo_storage_check` | correctness for the newly reusable storage sets |
 | P5 | `fill_ahead` (copy-ins of a run of dispatches under one barrier pair); `mesh_copy_ahead` (mesh-indirect record copies before the pass) | +0.75 fps (30/30), GPU −0.34 ms |
-| G1 | `occ_batch`: ~1,450 occlusion reports per frame written with a few multi-region copies instead of ~2,900 tiny transfer commands | **Kokiri 43.3 → 49.6 fps**, GPU −3.1 ms; first scene 62 → 65.8; house 78.4 → 82.8 |
+| G1 | `occ_batch`: ~1,450 occlusion reports per frame written with a few multi-region copies instead of ~2,900 tiny transfer commands | **Village 43.3 → 49.6 fps**, GPU −3.1 ms; first scene 62 → 65.8; house 78.4 → 82.8 |
 
 Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
 - F1's set: 3,419 gpt corpus blocks plus 12 runtime blocks; backup `gpt_backup_v9`.

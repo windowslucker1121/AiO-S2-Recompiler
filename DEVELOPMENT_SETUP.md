@@ -102,7 +102,7 @@ recomp\scripts\nx_env.cmd tools\vcpkg\vcpkg.exe install libvpx:x64-windows-stati
 ```
 The checkout pins the port versions below. vcpkg fetches its own build tools (msys2, nasm, meson, pkgconf) into
 `tools\vcpkg\downloads`; libvpx is the slow one (configure under msys2).
-Static libraries with the static MSVC runtime (VP9/VP8, AV1 for OoT's movies, Opus for `hwopus`); vcpkg checks each source archive's
+Static libraries with the static MSVC runtime (VP9/VP8, AV1 for the game's movies, Opus for `hwopus`); vcpkg checks each source archive's
 SHA-512. Versions here: dav1d 1.5.4, opus 1.6.1, libvpx 1.16.0 (vcpkg checkout `661e42cd`). `runtime\cmake\media_deps.cmake` finds
 them in `tools\vcpkg\installed\x64-windows-static`; after installing, reconfigure (`cmake game-build\build\release`). Without them
 the runtime builds without movies and with silent Opus.
@@ -138,12 +138,12 @@ From a Visual Studio x64 developer prompt:
 cmake -S tools\extract -B tools\extract\build\msvc -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build tools\extract\build\msvc
 ```
-Gives `nx_plain_nso.exe` (writes plain NSOs from OoT's ZBIC-compressed `main`). The project reads only already decrypted dumps (a
+Gives `nx_plain_nso.exe` (writes plain NSOs from the game's ZBIC-compressed `main`). The project reads only already decrypted dumps (a
 `.nup` or an extracted folder); there is no NSP/XCI reader and nothing reads keys.
 
 ## 5. Game data (supplied by the developer)
 
-A decrypted dump of The Legend of Zelda: Ocarina of Time for Switch 2 (program `0400486024DEC000`, update 2.0.0 / `131072`) as a
+A decrypted dump of the game for platform 2 (program `0400486024DEC000`, update 2.0.0 / `131072`) as a
 `.nup` package, called `oot.nup` here (25.6 GB, in the repository root, git-ignored; name your file that way or put its name in the commands).
 
 ```bat

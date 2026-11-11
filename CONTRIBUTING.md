@@ -52,9 +52,9 @@ under the repository's licence (GPL-3.0), and everyone follows the [code of cond
 ## Rules
 
 - **Never commit game files**: dumps, extracted files, lifted code, shader caches (`game/`, `work/` and `*.nup` are ignored for that).
-  Nor keys, firmware, Nintendo SDK code, logos or screenshots and captures of a game. The full list is in `AGENTS.md`, "Legal rules",
+  Nor keys, firmware, platform SDK code, logos or screenshots and captures of a game. The full list is in `AGENTS.md`, "Legal rules",
   and [LEGAL.md](LEGAL.md).
-- Game names only say which game a module is for; never use them, or Nintendo's marks, in product, exe or window names.
+- Game names only say which game a module is for; never use them, or the platform's marks, in product, exe or window names.
 - Tools go into git-ignored folders and come from official releases with checksum checks.
 - Do not change system or security settings in scripts; say what the user should run.
 - Code is GPL-3.0. Code you copy from elsewhere must have a compatible licence; name its source and add it to the notices.

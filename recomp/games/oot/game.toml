@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Game manifest of The Legend of Zelda: Ocarina of Time (Switch 2): the one file that tells the game-independent build, release
+# Game manifest of the game (platform 2): the one file that tells the game-independent build, release
 # and library code what this game is. Adding a game means a new recomp/games/<id>/ folder with its own game.toml (and config.py,
 # sites, runtime/games/<id>/); no shared script, CMake file or library source names a game.
 #
@@ -19,11 +19,11 @@ schema = 1
 
 [game]
 id = "oot"                                  # short id: folder names, CMake targets, environment variable prefix, logs
-title = "The Legend of Zelda: Ocarina of Time"   # the game's own name (log, error boxes)
-short_title = "Ocarina of Time"             # short name in messages
+title = "the game"   # the game's own name (log, error boxes)
+short_title = "the game"             # short name in messages
 product = "Recomp module: oot"                 # neutral build name (exe properties); never the game's name
-window_title = "Ocarina of Time (unofficial recompilation)"   # the game window and its dialogs (empty: title)
-title_id = "0400486024DEC000"               # Switch program id
+window_title = "the game (unofficial recompilation)"   # the game window and its dialogs (empty: title)
+title_id = "0400486024DEC000"               # program id
 version = "2.0.0"                           # the update the module list and hashes are of
 platform = "switch2"                         # "switch2" or "switch" (NVN2 / Maxwell shaders, SDK constants)
 languages = 0x1ffff                         # control.nacp SupportedLanguage bits; placeholder: every language (the NUP package carries no control.nacp)
@@ -107,4 +107,4 @@ window_title = "Recomp Launcher (oot)"
 product_name = "oot_launcher"
 identifier = "org.oot-recomp.launcher"
 package_name = "oot-recomp"
-disclaimer = "Nintendo"
+disclaimer = "the platform"
