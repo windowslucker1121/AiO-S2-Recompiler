@@ -27,7 +27,7 @@ constexpr uint32_t kPerSlot = 4096;
 constexpr const char* kTag = "nvn.stats";
 
 struct Acc {
-    uint64_t draws = 0, vs = 0, clip_in = 0, clip_out = 0, fs = 0, samples = 0, samples_draws = 0;
+    uint64_t draws = 0, vs = 0, clip_in = 0, clip_out = 0, fs = 0, samples = 0, samples_draws = 0, task = 0, mesh = 0;
 };
 
 struct SlotState {
@@ -37,6 +37,7 @@ struct SlotState {
 };
 
 bool g_tried = false, g_on = false;
+uint32_t g_nv = 5;   // values per statistics query (with availability)
 VkQueryPool g_stat = VK_NULL_HANDLE, g_occ = VK_NULL_HANDLE;
 SlotState g_slots[kSlotsMax];
 int32_t g_active = -1;                     // query index of the open draw (render thread)
@@ -59,7 +60,9 @@ bool init() {
     qi.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
     qi.queryCount = kSlotsMax * kPerSlot;
     qi.pipelineStatistics = VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT | VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT |
-                            VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT | VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT;
+                            VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT | VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT |
+                            (f.mesh_queries ? VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT | VK_QUERY_PIPELINE_STATISTIC_MESH_SHADER_INVOCATIONS_BIT_EXT : 0u);
+    g_nv = f.mesh_queries ? 7 : 5;
     if (vkCreateQueryPool(vkdev(), &qi, nullptr, &g_stat) != VK_SUCCESS) return false;
     VkQueryPoolCreateInfo oi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     oi.queryType = VK_QUERY_TYPE_OCCLUSION;
@@ -93,9 +96,9 @@ void log_window() {
     static const size_t top = static_cast<size_t>(config_get_int("prof", "gpu_stats_top", 40));
     for (size_t k = 0; k < order.size() && k < top; ++k) {
         const Acc& a = g_acc[order[k]];
-        NXLOG_I(kTag, "gpu stats  %-60s per frame: draws %6.1f vs %9.0f clip %8.0f/%8.0f fs %9.0f samples %9.0f (of %.1f draws) fs/sample %.2f",
+        NXLOG_I(kTag, "gpu stats  %-60s per frame: draws %6.1f vs %9.0f clip %8.0f/%8.0f fs %9.0f samples %9.0f (of %.1f draws) fs/sample %.2f task %.0f mesh %.0f",
                 g_names[order[k]].c_str(), a.draws / frames, a.vs / frames, a.clip_in / frames, a.clip_out / frames, a.fs / frames, a.samples / frames,
-                a.samples_draws / frames, a.samples ? static_cast<double>(a.fs) / static_cast<double>(a.samples) : 0.0);
+                a.samples_draws / frames, a.samples ? static_cast<double>(a.fs) / static_cast<double>(a.samples) : 0.0, a.task / frames, a.mesh / frames);
     }
     for (Acc& a : g_acc) a = Acc();
     g_presents0 = presents;
@@ -111,19 +114,20 @@ void slot_begin(VkCommandBuffer cb, uint32_t slot) {
     if (!on() || slot >= kSlotsMax) return;
     SlotState& s = g_slots[slot];
     if (s.n) {   // the slot's previous submission has completed (acquire_slot waited for it): add its results
-        std::vector<uint64_t> st(static_cast<size_t>(s.n) * 5), oc(static_cast<size_t>(s.n) * 2);
+        std::vector<uint64_t> st(static_cast<size_t>(s.n) * g_nv), oc(static_cast<size_t>(s.n) * 2);
         const uint32_t base = slot * kPerSlot;
-        vkGetQueryPoolResults(vkdev(), g_stat, base, s.n, st.size() * 8, st.data(), 5 * 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        vkGetQueryPoolResults(vkdev(), g_stat, base, s.n, st.size() * 8, st.data(), g_nv * 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
         if (g_occ) vkGetQueryPoolResults(vkdev(), g_occ, base, s.n, oc.size() * 8, oc.data(), 2 * 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
         for (uint32_t i = 0; i < s.n; ++i) {
-            const uint64_t* r = &st[static_cast<size_t>(i) * 5];
-            if (!r[4]) continue;
+            const uint64_t* r = &st[static_cast<size_t>(i) * g_nv];
+            if (!r[g_nv - 1]) continue;
             Acc& a = g_acc[s.label[i]];
             ++a.draws;
             a.vs += r[0];
             a.clip_in += r[1];
             a.clip_out += r[2];
             a.fs += r[3];
+            if (g_nv == 7) { a.task += r[4]; a.mesh += r[5]; }
             if (g_occ && s.occ[i] && oc[static_cast<size_t>(i) * 2 + 1]) {
                 a.samples += oc[static_cast<size_t>(i) * 2];
                 ++a.samples_draws;

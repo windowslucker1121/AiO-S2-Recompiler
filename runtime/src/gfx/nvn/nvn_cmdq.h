@@ -36,6 +36,16 @@ bool ph_insert(VkCommandBuffer cb);
 void ph_resolve(bool barrier);
 bool ph_pending();
 void ph_stats(uint64_t* inserted, uint64_t* forced);
+// [nvn] hazard on the recorder (nvn_hazard.cpp): on_recorder is true on the recorder thread; scan_pass (recorder, inside a vkCmdBeginRendering
+// packet) runs the pass's queued packets dry up to its vkCmdEndRendering (or until the render thread needs the recorder); replay_scanned then
+// runs them for real. post: fn(cb) on the recorder in order with the queued calls (now when not queuing).
+bool on_recorder();
+void scan_pass();
+void replay_scanned();
+void scan_stats(uint64_t* scans, uint64_t* stopped, uint64_t* waits);
+void post(void (*fn)(VkCommandBuffer), VkCommandBuffer cb);
+// fn(words, n) on the recorder in order with the queued calls; false (nothing queued) when this thread does not queue now.
+bool post_words(void (*fn)(const uint64_t*, uint32_t), const uint64_t* w, uint32_t n);
 // The driver's vkCmdPipelineBarrier2 behind the queue (for the placeholder and the hazard tracker's own barriers when not queuing).
 void raw_barrier(VkCommandBuffer cb, const VkDependencyInfo* di);
 

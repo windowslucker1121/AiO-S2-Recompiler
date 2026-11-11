@@ -919,7 +919,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     // mesh shaders: task and mesh stages only (the multiview / shading-rate / query variants need features of their own)
     amesh.multiviewMeshShader = VK_FALSE;
     amesh.primitiveFragmentShadingRateMeshShader = VK_FALSE;
-    amesh.meshShaderQueries = VK_FALSE;
+    // [prof] gpu_stats (measurement): task / mesh shader invocations in the pipeline statistics
+    if (!config_get_bool("prof", "gpu_stats", false)) amesh.meshShaderQueries = VK_FALSE;
+    features_.mesh_queries = amesh.meshShaderQueries == VK_TRUE;
     acm.cooperativeMatrixRobustBufferAccess = VK_FALSE;   // the translated shaders never load or store matrices
     auil.unifiedImageLayoutsVideo = VK_FALSE;
     features_.unified_layouts = x_uil && auil.unifiedImageLayouts;
