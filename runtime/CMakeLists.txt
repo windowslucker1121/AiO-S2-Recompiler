@@ -34,6 +34,15 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _WIN32_WINNT=0x0A00)
 
+# The render thread is CPU-bound (per-draw resolution spread over many translation units: nvn_replay, nvn_gpu_pool, nvn_gpu_texture, ...).
+# Release builds use the CPU baseline the lifted code already requires (x86-64-v3, AVX2; recomp/cmake/NxRecomp.cmake NX_ISA) and ThinLTO,
+# so small functions of other files (tex_gpu, pool_lookup, the held-result checks) inline into the replay's loops. No FMA contraction: the
+# runtime's float results stay as before. NXRT_FAST_CPU=OFF builds the baseline x86-64 runtime without LTO.
+option(NXRT_FAST_CPU "Release runtime: -march=x86-64-v3 and ThinLTO" ON)
+if(NXRT_FAST_CPU AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options("$<$<CONFIG:Release>:-march=x86-64-v3>" "$<$<CONFIG:Release>:/clang:-ffp-contract=off>" "$<$<CONFIG:Release>:-flto=thin>")
+endif()
+
 option(NXRT_BUILD_GFX "Build the graphics shell (SDL3 + Vulkan + NVN front end, src/gfx, cmake/gfx.cmake)" ON)
 # Game modules (games/<id>/, docs/GAME_BOUNDARY.md): the title-specific code a game exe links. The test executables register one of them, so
 # the tests of the base run against that game's tables (title facts, sites, probes, hooks) as the game exe does.
