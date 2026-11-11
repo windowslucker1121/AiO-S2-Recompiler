@@ -241,14 +241,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbVrs = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbViUpload = 1ull << 39 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbVrs = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbViUpload = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbSigTex = 1ull << 45 };
 uint64_t ab_mask() {
     static const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"vrs", kAbVrs}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"vi_upload", kAbViUpload}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"vrs", kAbVrs}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"vi_upload", kAbViUpload}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"sig_tex", kAbSigTex}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -1521,6 +1521,18 @@ TexResolved resolve_texture_uncached(const BindingDesc& d) {
     return r;
 }
 
+ViewRequest make_request(const DescriptorBinding& b, const TexResolved& r);
+uint64_t bytes_hash(const void* p, size_t n);
+uint64_t tex_key(const DescriptorBinding& b, const TexResolved& r) {
+    if (!r.tex) return 0x5e1f;
+    const uint64_t st = tex_view_stamp(r.tex);
+    if (!st) return 0;
+    const ViewRequest q = make_request(b, r);
+    uint64_t k = (st * 0x9e3779b97f4a7c15ull) ^ bytes_hash(&q, sizeof q);
+    k = (k ^ reinterpret_cast<uint64_t>(r.tex->fmt)) * 1099511628211ull;
+    k = (k ^ (r.has_sampler ? bytes_hash(&r.smp, sizeof r.smp) : 0x51)) * 1099511628211ull;
+    return k ? k : 1;
+}
 ViewRequest make_request(const DescriptorBinding& b, const TexResolved& r) {
     ViewRequest q;
     q.type = view_type_for(b);
@@ -3580,6 +3592,11 @@ bool compute_c0(const ShaderInfo& s, VkDescriptorBufferInfo& bi) {
 
 uint64_t g_sets_built = 0, g_sets_cached = 0;   // statistics: descriptor sets resolved, of them found in this submission's cache
 // ---- [nvn] set_keep: what a kept set's bindings depended on (recorded by build_set, checked by keep_valid below) ----------------------
+// [nvn] sig_tex (default off until measured; cpuperf_ab_what sig_tex): the kept-set table keys a sampled texture by what its descriptor is made of (the
+// image and its views' generation, tex_view_stamp, the view request, the format and the sampler) instead of the raw handle. The game
+// registers new texture objects (new handles) over the same images every frame (render targets, shadow maps, parked images), so ~45% of
+// the ~760 sets per frame that were built because their signature was new differed from an earlier one only in such handles.
+uint64_t tex_key(const DescriptorBinding& b, const TexResolved& r);   // below (after make_request); 0: no key (no image yet)
 struct KDep {
     uint8_t kind = 0;          // 0 nothing to check, 1 uniform block (the copy-or-pool decision), 2 storage range (no held result), 3 texture, 4 storage image
     bool texel = false;        // kind 3: a texel buffer: its range is checked like kind 2 too
@@ -3591,6 +3608,7 @@ struct KDep {
     Texture* tex = nullptr;
     uint32_t tex_id = 0;
     uint64_t stamp = 0, vh = 0, sh = 0;       // view stamp of the image, hashes of the view info and the sampler info
+    uint64_t rq = 0;                          // kind 3 image: tex_key (sig_tex), 0 when the image had no views yet
     uint8_t has_view = 0, has_sampler = 0;
 };
 struct BVal { uint64_t binding, a, b, c; };   // set_reuse = verify: what build_set wrote for each binding (keep verify names the one that differs)
@@ -3867,6 +3885,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
         } else if (d.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
             VkDescriptorImageInfo ii = {dummy_sampler(), dummy_view(view_type_for(b), b.image.depth), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
             TexResolved r = resolve_texture(d);
+            Texture* const r0tex = r.tex;   // before a feedback / 3D copy replaces it (those sets are not kept)
             if (kd) {
                 kd->kind = 3;
                 kd->d = &d;
@@ -3929,6 +3948,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
             }
             if (kd) {
                 kd->stamp = tex_view_stamp(r.tex);   // after the view: tex_gpu above may have made the image
+                kd->rq = r.tex == r0tex ? tex_key(b, r) : 0;
                 if (feedback) kbad("colour feedback");
                 if (!null_fmt.empty()) kbad("debug_null_format");
             }
@@ -4211,7 +4231,7 @@ uint64_t set_signature(const ProgLayout& pl, uint32_t set) {
             uint64_t k = 0x9e3779b97f4a7c15ull ^ (reinterpret_cast<uint64_t>(pl.layout) * 31 + set) ^ static_cast<uint64_t>(v + 1) * 0x51ed27ull;
             auto mx = [&](uint64_t x) { k = (k ^ x) * 1099511628211ull; };
             mx(reinterpret_cast<uint64_t>(&pl));
-            if (v != 3) {
+            if (false) {   // the kept-set key has no pools or targets either: variant 3 = without uniform and storage addresses
                 mx(reinterpret_cast<uint64_t>(S.tpool.get())); mx(reinterpret_cast<uint64_t>(S.spool.get()));
                 mx(S.ncolor);
                 for (uint32_t i = 0; i < S.ncolor && i < 8; ++i) mx(reinterpret_cast<uint64_t>(S.color_tex[i].get()));
@@ -4223,11 +4243,11 @@ uint64_t set_signature(const ProgLayout& pl, uint32_t set) {
                 mx(d.binding);
                 switch (b.nvn.source) {
                     case NvnSource::UniformBlock:
-                        if (b.nvn.index >= 0 && b.nvn.index < 16) { const GState::Bind& u = S.ubo[d.nvn_stage][b.nvn.index]; if (v != 0) mx(u.addr); mx(u.size); }
+                        if (b.nvn.index >= 0 && b.nvn.index < 16) { const GState::Bind& u = S.ubo[d.nvn_stage][b.nvn.index]; if (v != 0 && v != 3) mx(u.addr); mx(u.size); }
                         break;
                     case NvnSource::StorageBuffer: {
                         const int slot = b.nvn.index >= 0 ? b.nvn.index : storage_slot_for(d.nvn_stage, b.nvn.c0_offset);
-                        if (slot >= 0 && slot < 16) { if (v != 1) mx(S.ssbo[d.nvn_stage][slot].addr); mx(S.ssbo[d.nvn_stage][slot].size); }
+                        if (slot >= 0 && slot < 16) { if (v != 1 && v != 3) mx(S.ssbo[d.nvn_stage][slot].addr); mx(S.ssbo[d.nvn_stage][slot].size); }
                         break;
                     }
                     case NvnSource::SamplerBinding: if (v != 2 && b.nvn.index >= 0 && b.nvn.index < 64) mx(S.tex[d.nvn_stage][b.nvn.index]); break;
@@ -4437,6 +4457,50 @@ void keep_begin_submit() {
     }
 }
 
+bool sig_tex_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "sig_tex", false);
+    return on && ab_on(kAbSigTex);
+}
+// g_keep_sig with sampled textures keyed by tex_key (set_signature keys them by handle: the memo stays as it was).
+uint64_t g_sig_tex_keyed = 0, g_sig_tex_raw = 0;   // statistics: texture bindings keyed by image / by handle (no image yet)
+uint64_t keep_sig_tex(const ProgLayout& pl, uint32_t set) {
+    uint64_t bk = 0xcbf29ce484222325ull;
+    auto mixb = [&](uint64_t v) { bk = (bk ^ v) * 1099511628211ull; };
+    for (const BindingDesc& d : pl.bindings) {
+        if (d.set != set) continue;
+        const DescriptorBinding& b = d.shader->refl.bindings[d.index];
+        mixb(d.binding);
+        switch (b.nvn.source) {
+            case NvnSource::UniformBlock:
+                if (b.nvn.index >= 0 && b.nvn.index < 16) { const GState::Bind& u = S.ubo[d.nvn_stage][b.nvn.index]; mixb(u.addr); mixb(u.size); }
+                break;
+            case NvnSource::StorageBuffer: {
+                const int slot = b.nvn.index >= 0 ? b.nvn.index : storage_slot_for(d.nvn_stage, b.nvn.c0_offset);
+                if (slot >= 0 && slot < 16) { mixb(S.ssbo[d.nvn_stage][slot].addr); mixb(S.ssbo[d.nvn_stage][slot].size); }
+                break;
+            }
+            case NvnSource::SamplerBinding: case NvnSource::HandleInUniform: case NvnSource::HandleExpr: {
+                uint64_t k = 0;
+                if (d.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) k = tex_key(b, resolve_texture(d));
+                if (k) { mixb(k); ++g_sig_tex_keyed; break; }
+                ++g_sig_tex_raw;
+                if (b.nvn.source == NvnSource::SamplerBinding) { if (b.nvn.index >= 0 && b.nvn.index < 64) mixb(S.tex[d.nvn_stage][b.nvn.index]); }
+                else if (b.nvn.source == NvnSource::HandleInUniform) mixb(read_handle_word(d.nvn_stage, b.nvn.bank, b.nvn.word));
+                else mixb(eval_handle_expr(d, b.nvn.expr));
+                break;
+            }
+            case NvnSource::ImageBinding:
+                if (b.nvn.index >= 0 && b.nvn.index < 16) mixb(S.img[d.nvn_stage][b.nvn.index]);
+                break;
+            case NvnSource::DriverConstants:
+                if (d.nvn_stage != kCompute && d.shader->refl.global_fallback && c0_persist_on()) { mixb(graphics_c0_build(!d.shader->refl.global_pt)); mixb(g_c0_era); }
+                break;
+            default: break;
+        }
+    }
+    return ((((0x9e3779b97f4a7c15ull ^ (reinterpret_cast<uint64_t>(pl.layout) * 31 + set)) * 1099511628211ull ^ reinterpret_cast<uint64_t>(&pl)) * 1099511628211ull ^ bk) ^ 0x7465786bull);
+}
+
 // The check of a kept set (see above). 0: valid; else 1 + the kind of failure (g_keep_fail).
 __declspec(noinline) int keep_valid(KeepEntry& e) {   // noinline: its own line in the sampler's profile
     if (e.pool_gen != pool_unregister_generation()) return 1;
@@ -4463,6 +4527,11 @@ __declspec(noinline) int keep_valid(KeepEntry& e) {   // noinline: its own line 
                 break;
             case 3: {
                 const TexResolved r = resolve_texture(*k.d);
+                if (k.rq && !k.texel && sig_tex_on()) {   // keyed by the image, not the texture object (sig_tex)
+                    if (tex_key(k.d->shader->refl.bindings[k.d->index], r) != k.rq) return 4;
+                    if (is_color_feedback(r.tex)) return 4;
+                    break;
+                }
                 if (r.tex != k.tex || (r.tex && r.tex->id != k.tex_id) || r.has_view != (k.has_view != 0)) return 4;
                 if (r.has_view && bytes_hash(&r.view, sizeof r.view) != k.vh) return 4;
                 if (!k.texel && (r.has_sampler != (k.has_sampler != 0) || (r.has_sampler && bytes_hash(&r.smp, sizeof r.smp) != k.sh))) return 4;
@@ -4753,7 +4822,7 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
         if (!ds && (reusable & (1u << set)) && set_keep_on()) {
             // not put in the memo: a kept set is checked at every use (its checks see changes the memo's epoch does not: with kept sets in the
             // memo, set_reuse = verify found a burst of stale memo hits right after the area load in the village)
-            ds = keep_lookup_or_build(pl, set, g_keep_sig, mode);
+            ds = keep_lookup_or_build(pl, set, sig_tex_on() ? keep_sig_tex(pl, set) : g_keep_sig, mode);
         } else if (!ds && keep_only & (1u << set)) {   // writes storage: kept and checked, never in the memo (its writes are noted per draw)
             set_signature(pl, set);
             ds = keep_lookup_or_build(pl, set, g_keep_sig ^ 0x6b6565702d77ull, mode);
@@ -8281,6 +8350,8 @@ void replay_begin_submit(Frame& f) {
             g_cpu_ab_on = con;
             cmdq::set_copies(ab_on(kAbCmdCopies));
             cmdq::set_desc(ab_on(kAbCmdDesc));
+            cmdq::set_publish_batch(ab_on(kAbCmdBatch));
+            flush_copy_enable(ab_on(kAbFlushCopy));
             handle_cache_enable(ab_on(kAbHandleCache));
             alloc_batch_enable(ab_on(kAbAllocBatch));
             overlap_pos_enable(ab_on(kAbOverlapPos));
@@ -8410,7 +8481,7 @@ void replay_begin_submit(Frame& f) {
                         (unsigned long long)g_odb_hot_n, (unsigned long long)g_odb_verify_bad);
                 if (g_sig_var_on)
                     NXLOG_I(kTag, "set_keep_diag: %llu signatures not in the table; seen in an earlier present without uniform addresses %llu, without storage addresses %llu, "
-                            "without texture handles %llu, without pools and targets %llu; none of these %llu; pool registry generation %llu", (unsigned long long)g_var_new, (unsigned long long)g_var_hit[0],
+                            "without texture handles %llu, without uniform and storage addresses %llu; none of these %llu; pool registry generation %llu", (unsigned long long)g_var_new, (unsigned long long)g_var_hit[0],
                             (unsigned long long)g_var_hit[1], (unsigned long long)g_var_hit[2], (unsigned long long)g_var_hit[3], (unsigned long long)g_var_none,
                             (unsigned long long)pool_registry_generation());
             }

@@ -21,6 +21,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <shared_mutex>
 #include <memory>
 #include <string>
 #include <thread>
@@ -75,6 +76,8 @@ struct PoolGpu {
     std::deque<PoolChunk> spans;      // imports of ranges longer than the overlap that cross a stride boundary (deque: stable addresses)
     gpu::Mirror* mirror = nullptr;  // device-local copy of the pages draws read (S38, [nvn] pool_mirror); render thread
     bool mirror_tried = false;
+    void* fcopy = nullptr;            // device-local copy kept current by the game's flushes ([nvn] flush_copy); render thread
+    bool fcopy_tried = false;
     bool ptr_all = false;             // import_pools_for_pointers tried every chunk already (render thread)
     // Background chunk import ([nvn] pool_prefetch_chunks): while `bg` is set the importer may still import chunks, each under chunk_mu,
     // and ready[k] says (release) that chunk k was tried; once `bg` is clear every chunk field is the render thread's alone again.
@@ -803,6 +806,7 @@ void pool_shutdown() {
 
 uint64_t pool_imports() { return counters().pools_imported.load(); }
 
+void fc_destroy(PoolGpu* pg);   // flush_copy (below)
 void pool_gpu_destroy(PoolGpu* p) {
     if (!p) return;
     bool was_live = false;
@@ -813,6 +817,7 @@ void pool_gpu_destroy(PoolGpu* p) {
     }
     if (was_live) g_gauge_pools_live.sub(1);
     if (p->mirror) mirror_destroy(p);
+    if (p->fcopy) fc_destroy(p);
     for (PoolChunk& c : p->chunks) destroy_chunk(c);
     for (PoolChunk& c : p->spans) destroy_chunk(c);
     delete p;
@@ -1185,6 +1190,202 @@ VkBuffer mirror_src(Mirror& m, uint64_t page, uint64_t* base) {
     return c->buffer;
 }
 
+// ---- [nvn] flush_copy: device-local copies of CPU_CACHED pools outside the heap's primary view --------------------------------------
+// The pools the game maps with MapPhysicalMemory (outside the heap's primary view: ~300 pools of flags 0x24 = CPU_CACHED | GPU_CACHED in
+// the village outside) get no mirror, because their CPU writes cannot be tracked (mem::ww regions need the primary view). 72% of the
+// vertex and 88% of the index binds of that scene come from them and read host memory over PCIe (G1: ~1.1 ms of GPU per frame). The NVN
+// contract for CPU_CACHED pools is that the CPU flushes what it wrote before the GPU may see it (nvnMemoryPoolFlushMappedRange; the E2a
+// measurement found every changed page of such pools flushed), so a copy here is kept current by the flushes instead of write tracking:
+//   - a flush (any thread) clears the valid bits of its pages; GPU writes into the pool (note_gpu_write) clear them too;
+//   - vertex and index reads whose pages are all valid bind the copy; otherwise the pool, and the pages are wanted;
+//   - at the start of the next submission the wanted invalid pages are copied from the pool on the GPU and become valid (set before the
+//     copy is recorded, so a flush after that point clears them again).
+// Only pools imported whole (one chunk) and up to [nvn] flush_copy_max_mb (64) each, at most [nvn] flush_copy_mb (1024) in all.
+namespace {
+struct FCopy {
+    PoolGpu* pg = nullptr;
+    uint64_t npages = 0;
+    gfx::Buffer buf;
+    std::unique_ptr<std::atomic<uint64_t>[]> valid;
+    std::vector<uint64_t> want;
+    bool any_want = false;
+};
+std::shared_mutex g_fc_mu;                        // g_fc_by_base (flush threads read it)
+std::map<uint64_t, FCopy*> g_fc_by_base;          // pool base address -> copy
+std::vector<FCopy*> g_fc_list;                    // render thread
+uint64_t g_fc_bytes = 0;
+std::atomic<uint64_t> g_fc_flush_pages{0}, g_fc_gpu_pages{0}, g_fc_copied{0}, g_fc_dev{0}, g_fc_host{0};
+int g_fc_on = -1;                                 // cpuperf_ab can switch it per window (flush_copy_enable)
+
+bool fc_mode() {
+    static const bool on = config_get_bool("nvn", "flush_copy", true);
+    return on;
+}
+bool fc_active() { return fc_mode() && g_fc_on != 0; }
+
+uint64_t fc_mask(uint64_t lo, uint64_t hi) { return (hi - lo == 63) ? ~uint64_t{0} : (((uint64_t{1} << (hi - lo + 1)) - 1) << lo); }
+bool fc_clear(FCopy& f, uint64_t first, uint64_t last) {   // true: a valid page was cleared
+    if (first > last || first >= f.npages) return false;
+    last = std::min<uint64_t>(last, f.npages - 1);
+    bool any = false;
+    for (uint64_t p = first; p <= last;) {
+        const uint64_t lo = p & 63, hi = std::min<uint64_t>(63, lo + (last - p));
+        const uint64_t m = fc_mask(lo, hi);
+        any |= (f.valid[static_cast<size_t>(p >> 6)].fetch_and(~m, std::memory_order_acq_rel) & m) != 0;
+        p += hi - lo + 1;
+    }
+    return any;
+}
+bool fc_all_valid(const FCopy& f, uint64_t first, uint64_t last) {
+    for (uint64_t p = first; p <= last;) {
+        const uint64_t lo = p & 63, hi = std::min<uint64_t>(63, lo + (last - p));
+        const uint64_t mask = fc_mask(lo, hi);
+        if ((f.valid[static_cast<size_t>(p >> 6)].load(std::memory_order_acquire) & mask) != mask) return false;
+        p += hi - lo + 1;
+    }
+    return true;
+}
+FCopy* fc_find_locked(uint64_t addr) {   // g_fc_mu held (shared)
+    auto it = g_fc_by_base.upper_bound(addr);
+    if (it == g_fc_by_base.begin()) return nullptr;
+    --it;
+    FCopy* f = it->second;
+    return addr < it->first + f->npages * kPageBytes ? f : nullptr;
+}
+bool fc_gpu_wrote(uint64_t addr, uint64_t size) {   // true: pages a binding may use went stale (the next draw binds again)
+    std::shared_lock<std::shared_mutex> lk(g_fc_mu);   // fc_destroy cannot free it meanwhile
+    FCopy* f = fc_find_locked(addr);
+    if (!f) return false;
+    const uint64_t base = reinterpret_cast<uint64_t>(f->pg->base);
+    const uint64_t first = (addr - base) / kPageBytes, last = (addr + size - 1 - base) / kPageBytes;
+    g_fc_gpu_pages.fetch_add(last - first + 1, std::memory_order_relaxed);
+    return fc_clear(*f, first, last);
+}
+FCopy* fc_for(PoolGpu* pg, MemoryPool* mp) {
+    if (pg->fcopy || pg->fcopy_tried) return static_cast<FCopy*>(pg->fcopy);
+    pg->fcopy_tried = true;
+    if (!mp || mp->is_virtual || mp->is_shader_code || mp->dead.load() || pg->failed || pg->viewed) return nullptr;
+    if ((mp->flags & 0x7) != 0x4) return nullptr;   // CPU_CACHED only (the game flushes what it writes)
+    if (pg->chunks.size() != 1) return nullptr;
+    static const uint64_t max_one = static_cast<uint64_t>(std::max<int64_t>(1, config_get_int("nvn", "flush_copy_max_mb", 64))) << 20;
+    static const uint64_t max_all = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "flush_copy_mb", 1024))) << 20;
+    if (pg->size > max_one || g_fc_bytes + pg->size > max_all) return nullptr;
+    auto f = std::make_unique<FCopy>();
+    const VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (device().create_buffer(pg->size, usage, gfx::MemoryUse::GpuOnly, &f->buf, "nvn pool flush copy") != VK_SUCCESS) return nullptr;
+    f->pg = pg;
+    f->npages = pg->size / kPageBytes;
+    const size_t words = static_cast<size_t>((f->npages + 63) / 64);
+    f->valid.reset(new std::atomic<uint64_t>[words]);
+    for (size_t i = 0; i < words; ++i) f->valid[i].store(0, std::memory_order_relaxed);
+    f->want.assign(words, 0);
+    g_fc_bytes += pg->size;
+    FCopy* raw = f.release();
+    { std::unique_lock<std::shared_mutex> lk(g_fc_mu); g_fc_by_base[reinterpret_cast<uint64_t>(pg->base)] = raw; }
+    g_fc_list.push_back(raw);
+    pg->fcopy = raw;
+    static int logged = 0;
+    if (logged++ < 4) NXLOG_I(kTag, "pool %p (%llu KiB, flags 0x%x): device-local copy kept current by flushes (flush_copy)", static_cast<void*>(pg->base),
+                              static_cast<unsigned long long>(pg->size >> 10), static_cast<unsigned>(mp->flags));
+    return raw;
+}
+// Vertex / index reads of a pool without a mirror: the copy when every page is valid (true, out rewritten), else the pages are wanted.
+bool fc_serve(PoolGpu* pg, MemoryPool* mp, uint64_t poff, uint64_t size, BufRef& out) {
+    if (!fc_active()) return false;
+    FCopy* f = fc_for(pg, mp);
+    if (!f) return false;
+    const uint64_t first = poff / kPageBytes, last = (poff + size - 1) / kPageBytes;
+    if (last >= f->npages) return false;
+    if (fc_all_valid(*f, first, last)) {
+        out.buffer = f->buf.buffer;
+        out.offset = poff;
+        out.avail = f->npages * kPageBytes - poff;
+        g_fc_dev.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    bits_put(f->want, first, last, true);
+    f->any_want = true;
+    g_fc_host.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+// At the start of a submission: the wanted pages that are not valid are copied from the pool (render thread).
+void fc_begin_submit(Frame& fr) {
+    if (!fc_active()) return;
+    static std::vector<VkBufferCopy> runs;
+    bool barrier_done = false;
+    for (FCopy* fp : g_fc_list) {
+        FCopy& f = *fp;
+        if (!f.any_want) continue;
+        f.any_want = false;
+        runs.clear();
+        const PoolChunk& c = f.pg->chunks[0];
+        if (!c.buffer || c.failed) { std::fill(f.want.begin(), f.want.end(), 0); continue; }
+        for (uint64_t p = 0; p < f.npages;) {
+            if (!f.want[static_cast<size_t>(p >> 6)]) { p = (p | 63) + 1; continue; }
+            if (!bit_get(f.want, p) || fc_all_valid(f, p, p)) { bit_put(f.want, p, false); ++p; continue; }
+            uint64_t q = p + 1;
+            while (q < f.npages && bit_get(f.want, q) && !fc_all_valid(f, q, q)) ++q;
+            for (uint64_t i = p; i < q; ++i) {
+                bit_put(f.want, i, false);
+                f.valid[static_cast<size_t>(i >> 6)].fetch_or(uint64_t{1} << (i & 63), std::memory_order_acq_rel);   // before the copy: a later flush clears it
+            }
+            if (p * kPageBytes >= c.off && q * kPageBytes <= c.off + c.size) {
+                runs.push_back(VkBufferCopy{p * kPageBytes - c.off, p * kPageBytes, (q - p) * kPageBytes});
+                g_fc_copied.fetch_add((q - p) * kPageBytes, std::memory_order_relaxed);
+            } else {
+                fc_clear(f, p, q - 1);
+            }
+            p = q;
+        }
+        if (runs.empty()) continue;
+        if (!barrier_done) { memory_barrier(fr.cb); barrier_done = true; }   // earlier GPU writes into the pools and reads of the copies come first
+        vkCmdCopyBuffer(fr.cb, c.buffer, f.buf.buffer, static_cast<uint32_t>(runs.size()), runs.data());
+    }
+    if (barrier_done) {
+        VkMemoryBarrier2 b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        b.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
+        VkDependencyInfo di = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.memoryBarrierCount = 1;
+        di.pMemoryBarriers = &b;
+        vkCmdPipelineBarrier2(fr.cb, &di);
+    }
+    static uint32_t last_log = 0;
+    const uint32_t now = presents_now();
+    if (now - last_log >= 1200) {
+        last_log = now;
+        NXLOG_I(kTag, "flush copies: %zu pools, %llu MiB; vertex/index binds to the copy %llu, to the pool %llu; copied %llu MiB; pages cleared by flushes %llu, by GPU writes %llu",
+                g_fc_list.size(), static_cast<unsigned long long>(g_fc_bytes >> 20), static_cast<unsigned long long>(g_fc_dev.load()),
+                static_cast<unsigned long long>(g_fc_host.load()), static_cast<unsigned long long>(g_fc_copied.load() >> 20),
+                static_cast<unsigned long long>(g_fc_flush_pages.load()), static_cast<unsigned long long>(g_fc_gpu_pages.load()));
+    }
+}
+}  // namespace
+
+void fc_destroy(PoolGpu* pg) {   // pool_gpu_destroy (deferred until the GPU is done with the pool and its copy)
+    FCopy* f = static_cast<FCopy*>(pg->fcopy);
+    if (!f) return;
+    pg->fcopy = nullptr;
+    { std::unique_lock<std::shared_mutex> lk(g_fc_mu); g_fc_by_base.erase(reinterpret_cast<uint64_t>(pg->base)); }
+    g_fc_list.erase(std::remove(g_fc_list.begin(), g_fc_list.end(), f), g_fc_list.end());
+    g_fc_bytes -= std::min<uint64_t>(g_fc_bytes, pg->size);
+    if (f->buf.buffer) device().destroy_buffer(f->buf);
+    delete f;
+}
+void flush_copy_cpu_wrote(uint64_t addr, uint64_t n) {   // any thread: nvnMemoryPool/BufferFlushMappedRange
+    if (!n || !fc_mode()) return;
+    std::shared_lock<std::shared_mutex> lk(g_fc_mu);   // fc_destroy cannot free it meanwhile
+    FCopy* f = fc_find_locked(addr);
+    if (!f) return;
+    const uint64_t base = reinterpret_cast<uint64_t>(f->pg->base);
+    const uint64_t first = (addr - base) / kPageBytes, last = (addr + n - 1 - base) / kPageBytes;
+    fc_clear(*f, first, last);
+    g_fc_flush_pages.fetch_add(last - first + 1, std::memory_order_relaxed);
+}
+void flush_copy_enable(bool on) { g_fc_on = on ? 1 : 0; }
+
 BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) { return resolve_read_dep(gpu_address, size, use, nullptr); }
 
 bool read_dep_check(const ReadDep& d, int use) {
@@ -1221,7 +1422,11 @@ BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* d
     const uint64_t first = poff / kPageBytes, last = (poff + size - 1) / kPageBytes;
     if (last - first + 1 > kMaxBindPages) { g_use_skip[use % 3]++; g_skip_why[1]++; return out; }
     Mirror* m = mirror_for(pg, mp);
-    if (!m || last >= m->npages) { g_use_skip[use % 3]++; g_skip_why[2]++; return out; }
+    if (!m || last >= m->npages) {
+        g_use_skip[use % 3]++; g_skip_why[2]++;
+        if (use != kReadUniform && fc_serve(pg, mp, poff, size, out)) d.keep = false;   // flush_copy (vertex and index only)
+        return out;
+    }
     const uint64_t chunk_pages = kChunkBytes / kPageBytes;
     if (first / chunk_pages != last / chunk_pages) { g_use_skip[use % 3]++; g_skip_why[3]++; return out; }
     const VkBuffer cb = mirror_chunk(*m, first);
@@ -1418,13 +1623,14 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
 
 bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
     if (archexp::coherence_on()) archexp::note_gpu_write(gpu_address, size);   // E2a (measurement only)
-    if (g_mirrors.empty() || !size) return false;
+    const bool fc_stale = !g_fc_list.empty() && size && fc_gpu_wrote(gpu_address, size);   // flush_copy: what the GPU writes into the pool is not in the copy
+    if (g_mirrors.empty() || !size) return fc_stale;
     const PoolHit hit = pool_lookup(gpu_address);
-    if (!hit.pool || !hit.pool->gpu || !hit.pool->gpu->mirror) return false;
+    if (!hit.pool || !hit.pool->gpu || !hit.pool->gpu->mirror) return fc_stale;
     PoolGpu* pg = hit.pool->gpu;
     Mirror& m = *pg->mirror;
     const uint64_t off = gpu_address - reinterpret_cast<uint64_t>(pg->base);
-    if (off >= pg->size) return false;
+    if (off >= pg->size) return fc_stale;
     const uint64_t first = off / kPageBytes, last = std::min<uint64_t>((off + size - 1) / kPageBytes, m.npages - 1);
     g_wr_calls[use % 6]++;
     g_wr_pages[use % 6] += static_cast<int64_t>(last - first + 1);
@@ -1435,10 +1641,11 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
         for (uint64_t p = first; p <= last; ++p) stale |= ((m.fresh[static_cast<size_t>(p >> 6)].fetch_and(~(uint64_t{1} << (p & 63)), std::memory_order_acq_rel) >> (p & 63)) & 1) != 0;
     }
     bits_put(m.want, first, last, false);
-    return stale;
+    return stale || fc_stale;
 }
 
 void mirror_begin_submit(Frame& f, bool on) {
+    fc_begin_submit(f);
     for (Mirror* m : g_fresh_mirrors) {           // fresh pages are current for one submission
         for (size_t i = 0; i < static_cast<size_t>((m->npages + 63) / 64); ++i) m->fresh[i].store(0, std::memory_order_relaxed);
         m->any_fresh = false;

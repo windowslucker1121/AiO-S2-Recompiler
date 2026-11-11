@@ -199,6 +199,7 @@ void nvnMemoryPoolFlushMappedRange(const NVNmemoryPool* pool, ptrdiff_t offset, 
     uint64_t start = 0;
     const uint64_t n = clip_range(offset, size, p->size, start);
     if (n) textures_cpu_wrote(p->base + start, n);
+    if (n) gpu::flush_copy_cpu_wrote(reinterpret_cast<uint64_t>(p->base) + start, n);
     if (n && be::archexp::coherence_on()) be::archexp::note_flush(reinterpret_cast<uint64_t>(p->base) + start, n);   // E2a
 }
 
@@ -332,6 +333,7 @@ void nvnBufferFlushMappedRange(const NVNbuffer* buffer, ptrdiff_t offset, size_t
     uint64_t start = 0;
     const uint64_t n = clip_range(offset, size, d.size, start);
     if (n) textures_cpu_wrote(map + start, n);
+    if (n) gpu::flush_copy_cpu_wrote(reinterpret_cast<uint64_t>(map) + start, n);
     if (n && be::archexp::coherence_on()) be::archexp::note_flush(reinterpret_cast<uint64_t>(map) + start, n);   // E2a
 }
 
