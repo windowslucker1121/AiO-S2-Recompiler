@@ -6,7 +6,7 @@
 // library's WinMain and of the test mains. Every part is optional. A null table or an empty string turns off what needs it (no hooks, no
 // probes, neutral title facts), so a new title can start with the identity alone and add tables as its hooks are found.
 //
-// What each table is for, and where the Ocarina of Time one lives:
+// What each table is for, and where the game one lives:
 //   title_defaults   services::TitleProfile defaults (main.npdm, control.nacp); ini keys still override them    games/oot/oot_core.cpp
 //   timestep         the sites of the real-time frame step (nxrt/timestep.h, Sites)                           games/oot/oot_core.cpp
 //   probes           test-tooling game-state probes and script steps (nxrt/tt.h, GameProbes)                  (none for oot)
@@ -36,18 +36,18 @@ struct PollSleep {
     int64_t ns = 0;
 };
 
-// The console the game was built for. Switch 2 games run on the same Horizon model with a few platform facts that differ
+// The console the game was built for. platform 2 games run on the same Horizon model with a few platform facts that differ
 // (system tick 31.25 MHz instead of 19.2 MHz, the NVN2 graphics API).
 enum class Platform : uint8_t { Switch1, Switch2 };
 
 struct Info {
     // ---- identity ----
     const char* id = "";                    // short id, also the stem of the game's file names: "oot"
-    const char* title = "";                 // the game's own name: "The Legend of Zelda: Ocarina of Time"
+    const char* title = "";                 // the name in logs and error boxes: "oot" (neutral, never the game's own title)
     const char* product = "";               // the build's neutral name (exe properties, shortcut descriptions): "Recomp module: oot".
                                             // Never the game's name (AGENTS.md, legal rules)
     const char* window_title = "";          // window and dialog titles: "<short title> (unofficial recompilation)" (empty: title)
-    const char* short_title = "";           // a short name for file headers (the library's ini comment): "Ocarina of Time" (empty: product)
+    const char* short_title = "";           // a short name for file headers (the library's ini comment): "oot" (empty: product)
     uint64_t program_id = 0;                // the Switch title id
     const char* version = "";               // the game version the hooks were found in: "1.0.0"
     uint64_t main_base = 0x7100000000ull;   // where main is mapped (the lifter's base for it): hook offsets are relative to this

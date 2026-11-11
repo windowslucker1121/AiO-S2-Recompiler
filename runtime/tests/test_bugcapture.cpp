@@ -84,7 +84,7 @@ NXTEST(bundle_has_note_config_save_screenshot_and_build) {
     (void)nxrt::config_get_str("bug", "dir");   // read once, so the effective config lists it
     g_traces = 0;
     nxrt::bug::Request r;
-    r.note = "Link walks through the wall";
+    r.note = "The player walks through the wall";
     r.origin = "test";
     r.label = "wall clip!";
     r.trace_frame = true;
@@ -96,7 +96,7 @@ NXTEST(bundle_has_note_config_save_screenshot_and_build) {
     CHECK_EQ(g_traces, 1);
     CHECK_MSG(nxrt::bug::wait_complete(d, 15000), "bug.json not written");
     const stdfs::path b = stdfs::u8path(d);
-    CHECK_EQ(read(b / "note.txt"), std::string("Link walks through the wall\n"));
+    CHECK_EQ(read(b / "note.txt"), std::string("The player walks through the wall\n"));
     const std::string j = read(b / "bug.json");
     CHECK(has(j, "\"complete\": true"));
     CHECK(has(j, "\"origin\": \"test\""));

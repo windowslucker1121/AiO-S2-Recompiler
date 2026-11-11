@@ -2,8 +2,8 @@ Ryujinx SPIR-V back end: emit "else if" chains (AstBlockType.ElseIf) as nested s
 Without this, the false edge of the If before an ElseIf goes straight to the merge block and every
 ElseIf/Else after it becomes unreachable code. See docs/nvn/TRANSLATOR.md, "else if chains".
 Also a loop cap: every loop of a function leaves once its back edges, counted in one per-invocation
-variable, reach N. Default 4096 for graphics stages (a runaway per-pixel loop in OoT's material shaders
-took the GPU to TDR / device lost minutes into the first scene) and for task/mesh programs (translated as compute; OoT task fd8debac
+variable, reach N. Default 4096 for graphics stages (a runaway per-pixel loop in the game's material shaders
+took the GPU to TDR / device lost minutes into the first scene) and for task/mesh programs (translated as compute; the game task fd8debac
 runs 2^27 rounds while the data it counts is not built yet), off for compute; NXRT_HARNESS_LOOP_CAP=N overrides (0 = off).
 Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a copy in private/build; the
 checkout in private/third_party stays untouched. The Ryujinx code in the context lines is MIT.
@@ -97,7 +97,7 @@ the epilogue at the end of main, every global in the entry point).
              context.LoopTargets = loopTargets;
  
 +            SpvInstruction loopCounter = null;
-+            // task and mesh programs are translated as compute (AmpereMesh) but are graphics stages: they get the graphics default. OoT's task
++            // task and mesh programs are translated as compute (AmpereMesh) but are graphics stages: they get the graphics default. the game's task
 +            // fd8debac counts its rounds from data earlier dispatches build; before those run (a block still being translated on demand) the
 +            // count is 0 and the loop runs 2^27 rounds: device lost.
 +            int loopCap = LoopCap >= 0 ? LoopCap : (context.Definitions.Stage == ShaderStage.Compute && !AmpereMesh.Active ? 0 : DefaultGraphicsLoopCap);

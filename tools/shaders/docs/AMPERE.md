@@ -1,7 +1,7 @@
-# Pokopia shaders: container, NVN2 control section, Ampere SASS
+# Title A shaders: container, NVN2 control section, Ampere SASS
 
-First stage of the Ampere (Switch 2) translator: where the game's shaders live, how a shader is laid out, and the
-nvdisasm reference. Data: Pokopia v2.0.1a (update 655360). Everything below was read from the game's own files unless
+First stage of the Ampere (platform 2) translator: where the game's shaders live, how a shader is laid out, and the
+nvdisasm reference. Data: title A v2.0.1a (update 655360). Everything below was read from the game's own files unless
 marked *inferred*. Game data and the corpus stay in `work\shaders\` (gitignored).
 
 ## 1. Archives (KTGL RDB)
@@ -9,13 +9,13 @@ marked *inferred*. Game data and the corpus stay in `work\shaders\` (gitignored)
 `romfs\motor_asset_re\KIDS_PLATFORM_OUNCE\`: `root.rdb`/`system.rdb` (index, magic `_DRK0000`, entries `IDRK0000` that
 describe files), `root.rdx`/`system.rdx` (u16 index → fdata KTID), 12 `0x<KTID>.fdata` and 4 `data\0x<KTID>.file`.
 No new RE was needed: the layout matches the notes in seedds/nxnative `dm/gfx/tools/shader_split.py` (MIT) for
-Hyrule Warriors: Age of Calamity and Romance of the Three Kingdoms 8 Remake (eArmada8/yumia_fdata_tools, GPL-3.0, and
+Tools written for two other titles of the same engine (eArmada8/yumia_fdata_tools, GPL-3.0, and
 wattostudios GameExtractor `Plugin_RDB_DRK` cover the same family; code was not copied from them).
 
 - `.fdata`: `PDRK0000`, u64 0x10, then IDRK entries. `.file`: IDRK entries only.
 - IDRK entry: `IDRK0000`, u64 entry length, u64 stored length, u64 inflated length, u32 (1), u32 file KTID,
   u32 type KTID, u32 flags, parameter words; the stored data is the entry's last *stored length* bytes.
-- Every entry in Pokopia has flags 0x400000: chunks of {u16 stored length, 8 bytes, zlib stream}, a zero length ends,
+- Every entry in title A has flags 0x400000: chunks of {u16 stored length, 8 bytes, zlib stream}, a zero length ends,
   each chunk inflates to ≤ 0x4000 bytes. (0x500000 = LZ4 chunks, 0x100000 alone = u32-length zlib chunks; not seen here.)
 
 Survey (`.weaver\ktgl_rdb.py survey`, 5,574 type/magic rows): shaders are in type KTID **0x7bcd279f** = `_S2G7000`
@@ -26,7 +26,7 @@ of them hold shaders). Others: `GT1G` textures (0xafbec60c), `_M1G` models, `_A2
 ## 2. GLSLC output (NVN2)
 
 Each shader stage is a whole NVN2 GLSLC output (a G2S container holds a material's variations, several outputs each).
-Same idea as Switch 1, but the header grew by 0x18 bytes:
+Same idea as platform 1, but the header grew by 0x18 bytes:
 
 | Offset | Field |
 |---|---|
@@ -38,7 +38,7 @@ Same idea as Switch 1, but the header grew by 0x18 bytes:
 | +0xa8 + 0x98·i | section header: u32 size, u32 data offset (from output), u32 type |
 | GPU code header +0x30/+0x34/+0x38/+0x3c | control offset, code offset (from section data), code length, control length |
 
-Sections seen: type 0 (GPU code: control section, then code area) and type 3 (*inferred* reflection, as Switch 1's
+Sections seen: type 0 (GPU code: control section, then code area) and type 3 (*inferred* reflection, as platform 1's
 GLSLC section type 3; not parsed yet: it is where uniform block / sampler names and bindings should be).
 
 ## 3. NVN2 control section (0xd8 bytes + optional tail)
@@ -78,7 +78,7 @@ No constant-buffer or resource binding table in the control section: bindings ar
 `TEX.SCR R20, R4, R0, R1, 0x2, 0x10, 2D`). The binding contract has to come from the reflection section and the code.
 
 Runtime: for `read_control`, code size = **+0x44**, stage = **u16 +0x56**, program end = +0x38, constants at +0x40/+0x3c.
-Switch 1's +0x6f8/+0x704/+0x714 offsets do not apply (the control section is 0xd8 bytes, not 0x880+).
+Platform 1's +0x6f8/+0x704/+0x714 offsets do not apply (the control section is 0xd8 bytes, not 0x880+).
 
 ## 4. Code area and SM version
 
@@ -128,7 +128,7 @@ C# library `AmpereDecoder` (shared model `SassInst.cs`; `SassDecoder.Decode(lo, 
   source uses C) and is never printed on RZ or texture operands; fp32 immediates are C `%.20g` (|v| ≥ 2^63: `%.20e`), INF/NaN
   as `+INF `/`-QNAN ` (trailing space); fp16 pairs print the high half first; scalar selectors (`.H1`) sit inside `|..|`,
   packed ones (`.H0_H0`) outside; IMAD aliases MOV/SHL/IADD (SHL for 2^1..2^30 except 2^16).
-- `xcheck` (`tools/shaders/xcheck`) compares the decoder with nxnative's Ampere front end and with nvdisasm over the Pokopia, Bananza and Mario Kart World corpora (README there: results, fixes); `nvn2_layout_xcheck.md` does the same for the NVN2 control section and the SPH.
+- `xcheck` (`tools/shaders/xcheck`) compares the decoder with nxnative's Ampere front end and with nvdisasm over the title A, title B and title C corpora (README there: results, fixes); `nvn2_layout_xcheck.md` does the same for the NVN2 control section and the SPH.
 - `sassdecode --verify <oracle> <corpus>` decodes every reference block from the corpus and compares each line with the
   oracle (whitespace normalised). `--corpus <corpus>` decodes every unique block. `--dump <code.bin> <ctrl.bin>`.
 - `Sched` = hi >> 41 (stall 105..108, yield 109, write barrier 110..112, read barrier 113..115, wait mask 116..121, reuse

@@ -8,7 +8,7 @@
 //     (console_block_height: 1.5 times the rows, thresholds 16/32/64/128; the layout of the game's own TXTR data).
 //     3D textures use block height 1 GOB and block depth 16 GOBs (the rule that matches the game's 3D textures, see
 //     SURVEY section 3).
-//     Switch 2 (NVN2): the packaged layout is three 4-bit log2 fields in its first halfword: bits 0-3 block height, 4-7 block depth,
+//     platform 2 (NVN2): the packaged layout is three 4-bit log2 fields in its first halfword: bits 0-3 block height, 4-7 block depth,
 //     8-11 block width (in GOBs). The NVN2 driver's SetPackagedTextureLayout (sdk 0x5EEA00) keeps those 12 bits, and texture
 //     initialization (0x5EEF48) uses them in place of its own block shape (0x5C1408: width 0, height from the rows, depth from the
 //     slices, 0x633A80) for every target. Here: height and depth for 2D and non-sparse 3D textures (width is always 0 on Tegra; a
@@ -106,7 +106,7 @@ TexLayout compute_texture_layout(const TextureBuilderInfo& b) {
     out.fmt = format_info(b.format);
     if (!out.fmt) return out;
     if (b.target == NVN_TEXTURE_TARGET_BUFFER) {
-        // A buffer texture (Switch 2 games make small ones at start-up): one row of width texels, tightly packed, one level. The back end shows
+        // A buffer texture (platform 2 games make small ones at start-up): one row of width texels, tightly packed, one level. The back end shows
         // it as a 1D image, which covers reads through a texture view; a real texel buffer view is not made.
         if (b.width <= 0) return out;
         out.levels = 1;
@@ -152,7 +152,7 @@ TexLayout compute_texture_layout(const TextureBuilderInfo& b) {
             layers = 6;
             break;
         case NVN_TEXTURE_TARGET_CUBEMAP_ARRAY:
-            if (!depth_field || depth_field % 6) return out;   // depth = layer-faces (6 per cube), as GL: Pokopia sets 6 * cubes
+            if (!depth_field || depth_field % 6) return out;   // depth = layer-faces (6 per cube), as GL: title A sets 6 * cubes
             layers = depth_field;
             break;
         case NVN_TEXTURE_TARGET_3D:
@@ -177,7 +177,7 @@ TexLayout compute_texture_layout(const TextureBuilderInfo& b) {
     out.layers = layers;
 
     // ---- pitch-linear ----------------------------------------------------------------------------------------------------
-    // LINEAR_RENDER_TARGET is pitch-linear too (OoT renders its menu text into such R8 textures on the CPU: "New Game" came out in
+    // LINEAR_RENDER_TARGET is pitch-linear too (the game renders its menu text into such R8 textures on the CPU: "New Game" came out in
     // 64-texel bands when untiled as block-linear)
     out.block_linear = (b.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) == 0;
     if (!out.block_linear) {
@@ -201,7 +201,7 @@ TexLayout compute_texture_layout(const TextureBuilderInfo& b) {
     ds.block_h = bh;
     ds.bytes_per_block = bpb;
     ds.linear_stride_align = 1;   // tight rows in the scratch buffers of the texel access
-    ds.gob_switch2 = nxrt::game::info().platform == nxrt::game::Platform::Switch2;   // Switch 2 GOB byte order (tegra_tiling.h)
+    ds.gob_switch2 = nxrt::game::info().platform == nxrt::game::Platform::Switch2;   // platform 2 GOB byte order (tegra_tiling.h)
     int tile[3] = {0, 0, 0};
     if (is3d && (b.flags & NVN_TEXTURE_FLAGS_SPARSE) && sparse_tile_shape(b.target, out.fmt, tile) && tile[2] <= 16 && tile[1] / static_cast<int>(bh) >= 8) {
         // A sparse volume is cut into 64 KiB tiles; a tile is whole GOB blocks, so the block shape is the tile's: rows of GOBs of its height, as deep
@@ -235,11 +235,11 @@ TexLayout compute_texture_layout(const TextureBuilderInfo& b) {
     out.storage_size = out.layout.tiled_layer_stride * layers * samples;
     out.alignment = std::max<uint64_t>(0x200, 512ull * out.layout.levels[0].gob_blocks_y);
     if (b.flags & NVN_TEXTURE_FLAGS_SPARSE) {   // starts on a 64 KiB tile
-        // Volumes are whole tiles. A 2D sparse texture's size is its tiled mip chain as it is: Mario Kart World places sparse 512x512
+        // Volumes are whole tiles. A 2D sparse texture's size is its tiled mip chain as it is: title C places sparse 512x512
         // textures (10 levels) in pools of exactly that size rounded to 4 KiB (0x156000 for RGBA8), which a 64 KiB round-up overruns.
         if (is3d) out.storage_size = align_up(out.storage_size, 0x10000);
         // The layers of a 2D sparse array start on 64 KiB tiles (a tile is mapped as one 64 KiB page); the last layer is not padded, which
-        // keeps a single-layer texture at its mip chain's size. Mario Kart World's terrain virtual texture caches (8192x8192, 68 layers,
+        // keeps a single-layer texture at its mip chain's size. title C's terrain virtual texture caches (8192x8192, 68 layers,
         // 12 levels: 0x1556000 bytes per layer) map their tiles at 0x1560000 per layer.
         if (!is3d && layers > 1 && samples == 1) {
             const uint64_t layer = out.layout.tiled_layer_stride;

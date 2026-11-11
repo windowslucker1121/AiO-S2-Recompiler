@@ -57,7 +57,7 @@ class CaptureBufferEffect : public BaseEffect {
             if (!BufferUnmapped) {
                 DspAddress sendDspAddress = WorkBuffers[0].GetReference(false);
 
-                // NOTE: Nintendo directly interact with the CPU side structure in the processing of the DSP command.
+                // NOTE: the platform directly interact with the CPU side structure in the processing of the DSP command.
                 State.send_buffer_info = sendDspAddress;
                 State.send_buffer_info_base = sendDspAddress + sizeof(AuxiliaryBufferHeader);
                 State.return_buffer_info = 0;

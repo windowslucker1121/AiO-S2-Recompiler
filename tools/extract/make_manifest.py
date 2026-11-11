@@ -8,7 +8,7 @@ Everything comes from the dump's ExeFS (decrypted, as nup_extract.py writes it):
   - the modules (rtld, main, subsdk0..9, sdk) with load addresses, lifter indices and translation-unit counts (text size),
   - sha256 of every ExeFS file and main's build id (the game build checks the dump against them),
   - main.npdm: program id (ACI0), main thread priority / core / stack, SystemResourceSize,
-  - the platform: Switch 2 when the SDK version string in sdk is 20 or newer or main is ZBIC-compressed, else Switch 1,
+  - the platform: platform 2 when the SDK version string in sdk is 20 or newer or main is ZBIC-compressed, else platform 1,
   - control.nacp when one is given or found next to the ExeFS (title, display version); else placeholders.
 The manifest says `generic = true`: it runs on the generic runtime (generic_rt.dll, runtime/games/generic), which reads the [title] table
 at start. Nothing here hooks the game: an experimental build boots with what the runtime covers for every title.

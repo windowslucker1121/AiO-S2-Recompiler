@@ -161,7 +161,7 @@ NXTEST(read_control_fields) {
     CHECK(!read_control(ctrl).valid);
 }
 
-// NVN2 compute: the c[0] resource table. Control bytes of OoT's fea98fe719bc0348 (a compute program built into main, part of the
+// NVN2 compute: the c[0] resource table. Control bytes of the game's fea98fe719bc0348 (a compute program built into main, part of the
 // post-process chain): no uniform blocks, 3 storage buffers, 1 texture, 2 images, table 0xd8 bytes = 0x10 header + 0x80 push constants
 // + 3 * 0x10 + 3 * 8, 29 push words read. The harness printed sb[c0+0x2c], texTexture2D[c0:48] and imgTexture2D[c0:52].
 namespace {

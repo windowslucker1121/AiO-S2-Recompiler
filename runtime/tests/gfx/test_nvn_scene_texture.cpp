@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// NVN scene oracles: textures (S4d). Every scene draws a 64x48 frame with REAL translated shaders of Metroid Prime
+// NVN scene oracles: textures (S4d). Every scene draws a 64x48 frame with REAL translated shaders of title E
 // Remastered: vertex 2bf6629719b97303 (gl_Position = attribute 0, varying 0 = attribute 1, the texture coordinate) and fragment
 // 2192ff78120fa063 (out.rgb = texture(sampler, uv).rgb, alpha 1, no uniform reads). Textures are tiled with tegra::tile into the
 // pool memory the way a game writes pre-tiled assets; the real samples of work/survey/textures/samples are copied as they sit
@@ -281,7 +281,7 @@ Lay make_layout(uint32_t w, uint32_t h, uint32_t levels, uint32_t bw, uint32_t b
     r.d.gob_blocks_y = nxrt::nvn::be::console_block_height((h + bh - 1) / bh);
     r.d.gob_blocks_z = 1;
     r.d.linear_stride_align = 1;
-    // the console's GOB byte order, as the runtime picks it for the registered game's platform (nvn_texture_layout.cpp; oot is a Switch 2 title)
+    // the console's GOB byte order, as the runtime picks it for the registered game's platform (nvn_texture_layout.cpp; oot is a platform 2 title)
     r.d.gob_switch2 = nxrt::game::info().platform == nxrt::game::Platform::Switch2;
     r.L = tegra::compute_layout(r.d);
     return r;

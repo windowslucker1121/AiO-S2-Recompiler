@@ -1648,7 +1648,7 @@ void App::paint_game_header(gp::Graphics& g, const RECT& rc) {
     g.FillRectangle(&fade, x0, Sf(110), w, Sf(87));
     const float x = x0 + Sf(32);
     text(g, s->title, big, gp::RectF(x, Sf(80), w - Sf(64), Sf(48)), RGB(255, 255, 255));
-    std::wstring sub = s->def ? widen(s->def->platform == "switch2" ? "Switch 2" : "Switch") + L"  ·  version " + widen(s->def->display_version) +
+    std::wstring sub = s->def ? widen(s->def->platform == "switch2" ? "Platform 2" : "Platform 1") + L"  ·  version " + widen(s->def->display_version) +
                                     (s->def->generic ? L"  ·  experimental" : L"")
                               : std::wstring(L"No port yet");
     text(g, sub, normal, gp::RectF(x, Sf(130), w - Sf(64), Sf(20)), RGB(0xD8, 0xDC, 0xE4));

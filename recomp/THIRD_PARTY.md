@@ -10,8 +10,8 @@ naming its source; this page lists them with the exact upstream commit that was 
 | ssbu-recomp `fea28c18b785372b5024ece0a2ea52e860b1fa04` | GPL-3.0 | C++ exception lifting with landing-pad resume entries and `nro_catch_call` (here `nx_catch_call`), the site list (patch / inline / midhook / dynimm / noinline / jtable) of `relift_sites.py`, the hook-table / noinline rule of `hook_inline_check.py` | `nxrecomp/program.py` (`u_<entry>`, resume table, `load_sites`), `include/nxrecomp/ctx.h` (`NxResume`, `nx_catch_call`) |
 | ScarletNX `9ec73af7fe2712e8f823f399640ca3e71d3baff6` | GPL-3.0-or-later | TPIDR_EL0 / TPIDRRO_EL0 kept apart; Cortex-A57 as the Unicorn reference; the audit corpus's edge-value design; the known-answer cases (`tests/a64_ported_cases.h`, originally rEden / dynarmic tests) are read from `refs/` by `oracle/ka/run_ka.py`, not copied | `ctx.h` (`tpidrro`), `oracle/difftest/common.py`, `oracle/ka/` |
 
-Not taken: smo-recomp's `sdklift.py` / `sdklift_rules.txt`, `gen_tables.py` (SMO symbol matching between the base game and the
-update, nerve naming), `extract.py` (SMO version / NPDM checks), its clang-9 build scripts, and everything under its `runtime/`
+Not taken: smo-recomp's `sdklift.py` / `sdklift_rules.txt`, `gen_tables.py` (game symbol matching between the base game and the
+update, nerve naming), `extract.py` (game version / NPDM checks), its clang-9 build scripts, and everything under its `runtime/`
 except the three headers above. The game-specific seam is `games/<name>/config.py`.
 
 ## MIT notice (SuperMarioWonderRecomp)

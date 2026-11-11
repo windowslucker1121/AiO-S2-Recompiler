@@ -112,7 +112,7 @@ NXTEST(device_initialize_binds_and_finalize_unbinds) {
     CHECK(be::host_of<be::Device>(&dev) == nullptr);
 }
 
-// NVN1 (Switch 1): API 55.15 and the NVN1 table. The test game may be a Switch 2 title (oot), so the console is named; NVN2 is checked below.
+// NVN1 (platform 1): API 55.15 and the NVN1 table. The test game may be a platform 2 title (oot), so the console is named; NVN2 is checked below.
 NXTEST(device_get_integer_known_and_unknown_values) {
     nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);
     setup();
@@ -141,7 +141,7 @@ NXTEST(device_get_integer_known_and_unknown_values) {
     P<void(NVNdevice*)>("nvnDeviceFinalize")(&dev);
 }
 
-// NVN2 (Switch 2): API 231.40 (Ocarina of Time, SDK 22, needs minor >= 40; Pokopia >= 30), the NVN2-only values 0x62..0xA9 from the SDK 22
+// NVN2 (platform 2): API 231.40 (the game, SDK 22, needs minor >= 40; title A >= 30), the NVN2-only values 0x62..0xA9 from the SDK 22
 // constant table (0x67 = 256: the movie enhancer aborts with 0), 0 past the table; the values NVN2 shares with NVN1 keep their numbering.
 NXTEST(device_get_integer_nvn2_values) {
     nxtest::ScopedPlatform sw2(nxrt::game::Platform::Switch2);

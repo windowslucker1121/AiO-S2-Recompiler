@@ -103,7 +103,7 @@ uint64_t g_pre_bytes = 0;
 bool g_pre_on = false;                 // render thread: a submission of the frame being captured is being recorded
 constexpr uint64_t kPreMaxBytes = 1ull << 30;
 // Frame start contents of the images the GPU had rendered (read when the capture is armed, before the frame's first submission is queued):
-// images the frame updates in place (OoT's volumetric fog volumes accumulate into themselves) must start from what the frame started from,
+// images the frame updates in place (the game's volumetric fog volumes accumulate into themselves) must start from what the frame started from,
 // not from what it left behind. Images rendered for the first time in the frame are read at its end, as before.
 std::mutex g_pre_img_mu;
 std::unordered_map<const Texture*, std::pair<Ref<Texture>, gpu::TexImageDump>> g_pre_img;
@@ -534,7 +534,7 @@ bool write_capture(const std::string& name, std::vector<FrameEvent>& events, con
         o.put(static_cast<uint32_t>(p->sample_shading));
         // Blocks the on-demand translator had not finished when the frame was captured: SetShaders knows no stage for them yet, so
         // without these the replay ran such programs without the stage (a capture taken while a run translates, run cap_1: five
-        // dispatches of OoT's culling chain "cs -" on every replay). The replay resolves them like a running game does.
+        // dispatches of the game's culling chain "cs -" on every replay). The replay resolves them like a running game does.
         std::vector<std::pair<uint64_t, uint64_t>> pend;
         {
             std::unique_lock lk(const_cast<Program*>(p)->pending_mu, std::try_to_lock);

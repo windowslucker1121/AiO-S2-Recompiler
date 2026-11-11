@@ -17,7 +17,7 @@ namespace nxrt::extras {
 
 bool spirv_hdr_tonemap(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
 
-// HDR patch of a LUT tone-map (Pokémon Pokopia's composite pass, KTGL's cbComposite shaders). The shader takes the exposed scene colour x per
+// HDR patch of a LUT tone-map (title A's composite pass, KTGL's cbComposite shaders). The shader takes the exposed scene colour x per
 // channel through a log shaper, coordinate = 0.0735 * log2(5.5556 * x + 0.048) + 0.386, into a 32^3 grading volume (g_tHdrLut) whose output is
 // display-referred [0,1]; the area's LUT climbs about linearly and clips flat at 1 from x of about 0.85 to 1.1 (work/trace/ro_tex/t6112), so
 // everything brighter is paper white. The patch keeps the graded colour and scales it at the end by

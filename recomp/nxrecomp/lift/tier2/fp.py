@@ -115,7 +115,7 @@ class FpOps:
         return self.fw(d, subst(expr, a=f"({self.fr(n)})"))
 
     def f16_sign(self, i, ops, op):
-        """FNEG / FABS on half-precision lanes (FEAT_FP16, Switch 2): a sign-bit operation, exact under any FPCR. None when the
+        """FNEG / FABS on half-precision lanes (FEAT_FP16, platform 2): a sign-bit operation, exact under any FPCR. None when the
         operands are not FP16 vectors. Other FP16 vector arithmetic is refused in v_un / v_bin (V128 has no f16 view)."""
         if not self.is_vec(i, ops[0]) or self.vinfo(ops[0])[0] != 16:
             return None

@@ -1,6 +1,6 @@
 # tools/shaders: NVN2 shader to SPIR-V translation
 
-Offline and on-demand translator that turns the game's shader machine code (Ampere SASS for Switch 2, Maxwell for Switch 1) into
+Offline and on-demand translator that turns the game's shader machine code (Ampere SASS for platform 2, Maxwell for platform 1) into
 SPIR-V: Ryujinx's `Ryujinx.Graphics.Shader` (built from `refs
 yubing` plus the `.patch` files of `harness/translator/`) with an
 Ampere frontend (`ampere/`). The harness writes `results.tsv`, the binding contract the runtime reads.
@@ -29,7 +29,7 @@ Needs .NET SDK 10 and the project venv (`tools\.venv`) for the scripts; the Vulk
 
 Hardware oracle per ALU instruction (GPU vs our translation): `dotnet run --project tools\shaders\hwcheck -c Release`, see `hwcheck/README.md`.
 
-Input is a folder of extracted blocks in Wonder's layout: `manifest.tsv` (columns `id stage code_off code_size ctrl_off
+Input is a folder of extracted blocks in SuperMarioWonderRecomp's layout: `manifest.tsv` (columns `id stage code_off code_size ctrl_off
 ctrl_size program_start program_bytes const_off const_size code_sha1_16 code_file ctrl_file`), `code_<hash>.bin` (the code
 block, SPH at `program_start`) and `ctrl_<hash>.bin` (the NVN control section; the harness reads +0x6f8/+0x6fc/+0x700
 program length and constant data, +0x708 start, +0x714 stage, +0x748 work group, +0x754 shared memory).
@@ -50,9 +50,9 @@ terms, translator messages, draw-time queries) and `summary.txt`. The binding sc
 uniform buffers with binding 0 reserved for the support buffer, set 1 storage buffers, set 2 textures, set 3 images; see
 `refs\SuperMarioWonderRecomp\docs\nvn\TRANSLATOR.md`, which also explains the `ok-retry` status).
 
-### Differences from Wonder's harness
+### Differences from SuperMarioWonderRecomp's harness
 
-- Host profile `--host desktop` (default): full precision, geometry shaders, float64. `--host moltenvk` reproduces Wonder's answers.
+- Host profile `--host desktop` (default): full precision, geometry shaders, float64. `--host moltenvk` reproduces SuperMarioWonderRecomp's answers.
 - Stage comes from the SPH (vertex, tessellation, geometry, pixel); compute also from control +0x714 = 5, for blocks without an SPH.
 - `spirv-val` target defaults to `vulkan1.3`; the executable is found through `VULKAN_SDK` or `PATH`.
 - Extra post-pass: `OpCapability MultiViewport` when a module decorates `ViewportIndex` without a capability (`docs/debug/001.md`).
@@ -71,14 +71,14 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
 - `harness/translator/spirv-pixld-*.patch` (five files): PIXLD.MY_INDEX reads `gl_SampleID` (new `IoVariable.SampleId`), `gl_PerVertex` declares `ClipDistance[7]`. Before the patch 33,361 of 33,744 pixel blocks hit "Shader instruction Pixld is not implemented"; after it none do.
 - `StaticGpuAccessor.cs`: the host profile reports no fragment shader interlock, so no module needs `SPV_EXT_fragment_shader_interlock`.
 
-`spirv-nan.patch` (carried from Wonder) is applied since 2026-11-07: float Clamp/Min/Max become NClamp/NMin/NMax (FMNMX and .SAT drop NaN). It patches the same file as `ampere-mesh-instructions.patch` and is chained after it through the `Then` metadata of that `ShaderPatch` item (`scripts/apply_patch.py` takes several patch files in order).
+`spirv-nan.patch` (carried from SuperMarioWonderRecomp) is applied since 2026-11-07: float Clamp/Min/Max become NClamp/NMin/NMax (FMNMX and .SAT drop NaN). It patches the same file as `ampere-mesh-instructions.patch` and is chained after it through the `Then` metadata of that `ShaderPatch` item (`scripts/apply_patch.py` takes several patch files in order).
 
-## Structurizer: loop exits in goto elimination (OoT A8)
+## Structurizer: loop exits in goto elimination (the game A8)
 
 - `harness/translator/structured-goto-loop-exits.patch` (`StructuredIr/GotoElimination.cs`): Ryujinx eliminates gotos last to
   first. A goto that leaves a loop becomes `if (c) break;` in the loop (MoveOutward); when a later goto in the same loop body then
   encloses statements in a new do-while (EncloseDoWhile, Lift: the flag loops `do { ... } while (gotoTemp)`), that break was
-  enclosed too and left only the new loop. OoT's material shaders (a light loop with a `CALL.REL.NOINC` exit and a `BRX` switch
+  enclosed too and left only the new loop. The game's material shaders (a light loop with a `CALL.REL.NOINC` exit and a `BRX` switch
   inside whose cases jump to the switch's end) then never left the light loop: the GPU was lost after the driver's timeout. A new
   do-while now forwards every break/continue of an outer loop it encloses: the exit sets a flag and leaves the new loop, and
   `if (flag) { flag = false; break; }` (or `continue`) right after the new loop repeats it. The flags are cleared at the start of the
@@ -89,7 +89,7 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
   code take random values, goto-elimination flags are evaluated exactly, and every time the walk enters a basic block (its first AST
   statement) the block must be the one the block graph names after the previous block. A mismatch, a statement that runs outside its
   block or a walk that does not end is an exception, so `--batch` lists the block as `exception: ... CFG check`; a passing translation
-  prints `cfg check <function>: N walks ok, blocks seen/total, edges seen/total` on stderr. OoT corpus (47,203 blocks, 100 walks each,
+  prints `cfg check <function>: N walks ok, blocks seen/total, edges seen/total` on stderr. The game corpus (47,203 blocks, 100 walks each,
   `--batch ... --jobs 8`, ~6 min): 14,684 blocks fail before the fix, all pixel shaders with BRX/CALL.REL.NOINC, and none after it
   (one compute block branches on an undefined value and is not checked). The fix changes the SPIR-V of 14,692 blocks (the 8 more
   fail before it after 100-107 walks); 17,094 corpus blocks contain a BRX/BRXU or CALL.REL.NOINC.
@@ -97,7 +97,7 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
 ## Structurizer for reducible graphs (register pressure, 2026-11-09)
 
 - Ryujinx's structurizer (`StructuredProgramContext` + `GotoElimination`) makes a goto of every branch that does not land inside the
-  current `if` and then removes the gotos with the "Taming Control Flow" moves. OoT's material fragment shaders (a light loop with a
+  current `if` and then removes the gotos with the "Taming Control Flow" moves. The game's material fragment shaders (a light loop with a
   BRX switch whose cases leave to a common merge from different depths) came out with five `do { } while (flag)` loops nested in the
   light loop plus many `if (!flag)` guards, and NVIDIA's compiler (610.88) needed 235-255 registers (or capped at 168 and spilled) for
   code whose SASS uses 75-112.
@@ -110,7 +110,7 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
   while (true)` or `do { } while (c)` when the body ends with its only continue. `if (c) { ...; return/discard/break/continue; }` takes
   the else part after it, not in an else block. Flags nobody reads are removed. Irreducible graphs keep Ryujinx's path, and so do the
   translator's own helper functions (only fun0..N use the new one): with it the gmem page-walk helpers grew ~1% and the gmem compute
-  shaders that call them (OoT's HiZ a17259b2 & co.) ran ~30% slower in game.
+  shaders that call them (the game's HiZ a17259b2 & co.) ran ~30% slower in game.
   Off: `NXRT_HARNESS_STRUCTURIZER=ryujinx`; `=all` also the helpers; `=log` prints fallbacks. `NXRT_HARNESS_STRUCT_FLAT_ELSE=0` keeps
   else blocks (without the flat form small fragment shaders came out 1-8 registers above the old path).
 - Measured with `pipestat` on random corpus samples (old cache vs new, RTX 4080, 610.88): fragment n=200 registers mean 136.4 -> 93.1,
@@ -120,16 +120,16 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
   inlined: measurement only).
 - Only real loops are loops now, so the vertex/fragment loop cap (`NXRT_HARNESS_LOOP_CAP`) counts real back edges only. Ballots and
   votes stay where the IR has them (`structured-subgroup-propagation.patch` works on the AST afterwards as before).
-- Checked: the OoT corpus with `NXRT_HARNESS_CFG_CHECK=100` (47,202 blocks, 56,594 functions): 0 exceptions (the 7
+- Checked: the corpus with `NXRT_HARNESS_CFG_CHECK=100` (47,202 blocks, 56,594 functions): 0 exceptions (the 7
   GotoElimination NullReferenceExceptions of the old path translate now), 46,995 ok as before.
 - `BlockOrder.cs` (`cfg-block-order.patch`, a first guess: blocks in a loop-contiguous topological order before structuring) changes
-  nothing for OoT (the IR is already in such an order) and is kept as a guard for code laid out otherwise; `NXRT_HARNESS_BLOCK_ORDER=0`
+  nothing for the game (the IR is already in such an order) and is kept as a guard for code laid out otherwise; `NXRT_HARNESS_BLOCK_ORDER=0`
   turns it off, `=log` prints each function's block graph.
 
-## Pool arrays: texture handles computed per pixel (OoT A7)
+## Pool arrays: texture handles computed per pixel (the game A7)
 
 - A bindless sample whose handle neither the bindless-handle patch nor Ryujinx's `TryConvertBindless` can tie to something fixed per
-  draw (OoT: 4,336 fragment shaders sample their clustered-light shadow maps with `TEX.SCR.B.DC`, the handle read per light from a
+  draw (the game: 4,336 fragment shaders sample their clustered-light shadow maps with `TEX.SCR.B.DC`, the handle read per light from a
   storage buffer inside the light loop) used to be dropped (it read 0). `StaticGpuAccessor.QueryHostSupportsSeparateSampler` now
   answers true, so Ryujinx's `GenerateBindlessAccess` turns it into an index into a sampled-image array (texture id = handle & 0xfffff,
   65,536 entries) and one into a sampler array (sampler id = handle >> 20, 4,096 entries), with `NonUniform` decorations. Blocks whose
@@ -139,14 +139,14 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
   The runtime binds its persistent pool sets there (`runtime/src/gfx/nvn/nvn_pool_sets.cpp`, `pool_set_sync` in `nvn_replay.cpp`).
 - Off: `NXRT_HARNESS_POOL_BINDLESS=0` or `--no-pool-bindless` (the sample is dropped as before).
 
-## Ballots, votes and shuffles stay where the SASS runs them (OoT A18)
+## Ballots, votes and shuffles stay where the SASS runs them (the game A18)
 
 - NVN compute code counts with warp-aggregated atomics: `VOTE[U].ANY|ALL Rd, PT|Pp` (the active mask or a ballot), leader = FLO of it or
   lane 0, one ATOMG/RED by the leader with POPC(mask) or REDUX.SUM, SHFL.IDX of the result from the leader, rank = POPC(mask &
   lanemask_lt). The SASS runs the VOTE with every lane of the warp before the branch to the leader.
 - Ryujinx's `AstOptimizer` folded a single-assignment value into its uses; a unary operation of an operand (a ballot) counts as worth
   folding for any number of uses, so the ballot moved into each use, also into the leader-only branch, where it ran with the leader
-  alone. OoT's GPU culling (4c1e8564 and the compute chain after it, all from `main`) then reserved one slot per warp while every lane
+  alone. The game's GPU culling (4c1e8564 and the compute chain after it, all from `main`) then reserved one slot per warp while every lane
   wrote its record at base + rank: records overwrote each other differently every frame (f2422a7a: 46 records instead of 548), the mesh
   draw counts changed from replay loop to replay loop, and grass, bushes and leaves flickered.
 - `structured-subgroup-propagation.patch` (after `spirv-call-args.patch`): a value that contains a ballot, vote or shuffle is folded only
@@ -164,7 +164,7 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
 ## Pointer accesses: out-of-line helpers, inline fast path (A17 follow-up, 2026-11-09)
 
 - Ryujinx's `GlobalToStorage` makes one helper function per access kind and calls it for every 32-bit word; NVIDIA's compiler inlined
-  every call, so a pointer shader (`gpt`) carried the bound-slot search and the page walk once per word: OoT's fern mesh `fbb731e2`
+  every call, so a pointer shader (`gpt`) carried the bound-slot search and the page walk once per word: the game's fern mesh `fbb731e2`
   253 calls, 1.26 MB of driver code, 20 s to build; the heavier gpt mesh blocks 2.5 MB and 45-82 s.
 - Now (`ampere/frontend/AmpereGlobal.cs`, hooks in `spirv-g2s-c0-base.patch`, `ampere-mesh-instructions.patch`, `spirv-else-if.patch`):
   the fallback helpers are `DontInline` (the 610.88 driver honours it), take their in arguments by value (Ryujinx's pointer arguments put
@@ -176,7 +176,7 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
 - Measured (RTX 4080, driver 610.88, `pipestat`), code / build time before -> after: fern mesh fbb731e2 1.26 MB / 20 s -> 169 KB / 1.4 s;
   vertex 5332b131 1.22 MB / 16 s -> 140 KB / 1.0 s; mesh 596bf624 2.57 MB / 82 s -> 351 KB / 3.0 s (the other 2.5 MB mesh blocks
   99908ab2, acf920b7, a5bfd19f, a873d795, b8b873e5 took 46-68 s before). Registers stay at 255: the original SASS of 5332b131 / 40953571
-  already uses R247 / R252, and with the lookup removed altogether (`IDENTITY`) they are still 255. In game (Kokiri outside, 1920x1080,
+  already uses R247 / R252, and with the lookup removed altogether (`IDENTITY`) they are still 255. In game (village outside, 1920x1080,
   100-300 s, alone, same exe; two pairs): 35.0 vs 34.7 fps and 33.6 vs 34.3 (one slow window while new pipelines built in the
   background), steady windows +0.4: **fps unchanged**; the gain is the pipeline build time (on-demand builds, the shader preparation).
   Cost: the SPIR-V of the 3,425 gpt blocks grows from 742 MB to 1.85 GB (the per-word call sites). Dead end: helpers out of line with
@@ -191,28 +191,28 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
 ## Pointer accesses: vector loads (F1, 2026-11-10)
 
 - The front end splits LDG.64 / LDG.128 into 32-bit loads (the IR is scalar), so through the fast path each word made its own page-cache
-  test and its own 4-byte load: OoT's gpt mesh blocks read 61-66 light-probe records per lane with LDG.128 (scattered over memory), i.e.
+  test and its own 4-byte load: the game's gpt mesh blocks read 61-66 light-probe records per lane with LDG.128 (scattered over memory), i.e.
   four load instructions where the SASS has one.
 - Now the words of a vector load carry a tag (`AmpereGlobal.NoteVectorWord`, an extra constant argument of the fast helper call that the
   helper ignores; `FastArguments` = 2). At word 0 the back end (`TryGenerateHelperCall`) loads the whole `uvec2` / `uvec4` through the
   cached span (`Aligned` 8 / 16; an aligned LDG.64/.128 never crosses a 4 KiB page); on a miss the helper walks as before and the vector is
   loaded through the span its walk returned. The other words take their lane; only when a bound slot answered word 0 (no span) do they
   call the helper themselves. `NXRT_HARNESS_GMEM_VECTOR=0`: the old per-word form.
-- Measured: pipestat fbb731e2 165 -> 145 KB, 5332b131 136 -> 116 KB, 6ec65625 204 -> 184 KB (registers stay 255); in game (Kokiri
+- Measured: pipestat fbb731e2 165 -> 145 KB, 5332b131 136 -> 116 KB, 6ec65625 204 -> 184 KB (registers stay 255); in game (village
   outside, 1920x1080 uncapped, same exe, alone, warm): **36.6 -> 40.4 fps** (results in AGENTS.md "Session 2026-11-10 (F1)"). Village
   capture replay: the same picture as the old cache (SSIM 1.000000, max difference 2, as two shots of one cache).
 
 ## Pointer accesses in compute: the page cache with marked slots (C1, 2026-11-10)
 
 - A compute binding is the pool copy or a shadow, so the runtime marks bound slots in the c[0] slot mask (all of them before P4's
-  `[nvn] cs_gmem_held`; since then the slots over held results, ~5 of 11 per dispatch in Kokiri). The inline fast path required mask 0, so
-  OoT's HiZ / culling pointer shaders (submission #3, the one the game's main thread waits on) never took it: every 32-bit word (and every
+  `[nvn] cs_gmem_held`; since then the slots over held results, ~5 of 11 per dispatch in the village). The inline fast path required mask 0, so
+  The game's HiZ / culling pointer shaders (submission #3, the one the game's main thread waits on) never took it: every 32-bit word (and every
   word of an LDG.128) called its helper, searched the marked slots and walked the table.
 - Now (compute only, `AmpereGlobal.EmitSpanClip` / `CacheAloneDecides`): the helper hands main the span its walk ended in only when no
   marked slot overlaps it (64-bit range test per marked slot, on the slow path only), so a cached span can never hide a marked binding, and
   compute call sites test the cache alone. `NXRT_HARNESS_GMEM_CS_SPAN=0`: the old form. F1's vector loads stay off for compute
   (`NXRT_HARNESS_GMEM_CS_VECTOR=1`): on the village replay they changed ~175 pixels by more than 20, every loop alike, unexplained.
-- Measured (Kokiri outside 1080, stamped `gpu_passes`, P4 runtime): #3 5.63 -> 4.90 ms per frame, a17259b2 (6 dispatches) 0.77 -> 0.24 ms,
+- Measured (village outside 1080, stamped `gpu_passes`, P4 runtime): #3 5.63 -> 4.90 ms per frame, a17259b2 (6 dispatches) 0.77 -> 0.24 ms,
   39a1f760 / 5d8324bd 0.12 -> < 0.05 ms each; registers and code size unchanged (pipestat: a17259b2 still 255 registers, ~178 KB; the 255
   is not the lookup: with `GMEM_IDENTITY` + `NO_SLOTS` + forced inline it stays 255 at 115 KB). fps unchanged (render-thread bound).
 
@@ -225,7 +225,7 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
   arithmetic trees): the inputs then live until the attribute stores at the end. `structured-propagation-distance.patch`,
   `NXRT_HARNESS_PROPAGATE=near:K` (fold only into one of the next K statements of the same block; `none` = DebugMode's form; default
   `all` = Ryujinx's): fbb731e2 255 + 288 B spills -> 174 registers, no spills; 6ec65625 255 + 176 B -> 174-204; fragment sample (n=60)
-  mean 81.3 -> 72.4 registers (32 better / 4 worse), vertex n=60 unchanged; near:4 = near:16 = none. **No fps in game** (Kokiri outside:
+  mean 81.3 -> 72.4 registers (32 better / 4 worse), vertex n=60 unchanged; near:4 = near:16 = none. **No fps in game** (village outside:
   36.2 / 36.6 vs 36.9; with vector loads 40.2 vs 40.4), so it stays an experiment.
 - Cause 2: with the page-cache branches removed (straight-line loads, `GMEM_IDENTITY` + `FAST=0`), NVIDIA's compiler hoists every load
   and goes back to 255 even without propagation: the per-word diamonds were limiting it.
@@ -238,7 +238,7 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
 
 ## gpt pre-raster stages after F1: what is left, experiments (F2, 2026-11-10)
 
-- Measured in game (Kokiri outside, 1920x1080 uncapped, alone, exe of a70f2aa, paired `cpuperf_ab` windows from 100 s): `[nvn] skip_gpt = 2`
+- Measured in game (village outside, 1920x1080 uncapped, alone, exe of a70f2aa, paired `cpuperf_ab` windows from 100 s): `[nvn] skip_gpt = 2`
   (gpt draws without fragments) **+0.1 fps** (8 pairs, 43.0 vs 42.9): the gpt draws' rasterization and fragment work is off the critical
   path; `skip_gpt = 1` (gpt draws left out) +3.75 fps (9/9), and +3.95 with the mesh blocks emitting no primitives (below): the gpt draws'
   remaining cost (~1.9 ms per frame) is their pre-raster work plus the render thread's per-draw work, and the frame is render-thread bound
@@ -260,14 +260,14 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
   console's own SASS reads them with LDC as well); pointer tables bound as storage buffers (a load through them still needs a bounds check
   and a fallback, the same shape as the page-cache test).
 
-## TLD / TLD4 / TXD .F16 (OoT upscaler network, A22)
+## TLD / TLD4 / TXD .F16 (the game upscaler network, A22)
 
 - TEX, TLD, TLD4 and TXD all carry `.F16.RN` / `.F16.RZ` in bits 79..80 (nvdisasm 13.3 probe: `TLD4.SCR.R.F16.RN.PTP`,
   `TLD.SCR.F16.RN.LZ`, `TXD.F16.RN`; TMML ignores the bits). The decoder knew the field for TEX only, so TLD4.F16 was translated as an
   fp32 gather: four components into Rd, Rd+1, Rd2, Rd2+1 instead of two fp16 pairs into Rd and Rd2. That clobbered live registers (in
   f90d726d the blue gather's Rd2+1 = R34 was the x coordinate of the next gather) and left fp32 bits where the code reads half pairs.
-- With the field decoded the existing F16 path applies: Rd = packHalf2x16(t0, t1), Rd2 = packHalf2x16(t2, t3). For OoT's
+- With the field decoded the existing F16 path applies: Rd = packHalf2x16(t0, t1), Rd2 = packHalf2x16(t2, t3). For the game's
   `TLD4.PTP` with offsets (0,0) (1,0) (0,1) (1,1) the code stores Rd as the row-y pair and Rd2 as the row-y+1 pair of a shared-memory
   tile (`STS [R8], R12; STS [R8+0x90], R13`), which fits that order. TXD now takes `.F16.RN` the same way. `.F16.RZ` stays unsupported.
-- Affects only blocks from `main` (27 "runtime" compute blocks: OoT's upscaler network variants); no bfsha/vsetb corpus block has it.
+- Affects only blocks from `main` (27 "runtime" compute blocks: the game's upscaler network variants); no bfsha/vsetb corpus block has it.
 

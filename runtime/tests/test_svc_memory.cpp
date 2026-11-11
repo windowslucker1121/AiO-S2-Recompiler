@@ -162,8 +162,8 @@ NXTEST(set_heap_size_misaligned_gives_0xCA01) {
     teardown();
 }
 
-// Switch 1 kernels refuse a heap above 4 GiB. Switch 2 applications set heaps of several GiB: there only nxrt's heap region (mem::kHeapMax)
-// bounds the request. The platform is named because the test game may be either (oot is a Switch 2 title).
+// platform 1 kernels refuse a heap above 4 GiB. platform 2 applications set heaps of several GiB: there only nxrt's heap region (mem::kHeapMax)
+// bounds the request. The platform is named because the test game may be either (oot is a platform 2 title).
 NXTEST(set_heap_size_too_large_gives_0xD001) {
     {
         nxtest::ScopedPlatform sw1(nxrt::game::Platform::Switch1);

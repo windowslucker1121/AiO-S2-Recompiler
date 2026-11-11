@@ -50,7 +50,7 @@ struct VibValue {
     float amp_low = 0, freq_low = 0, amp_high = 0, freq_high = 0;   // Switchbrew VibrationValue field order
 };
 
-// ---- Joy-Con 2 mouse (Nmouse / Jcms) ------------------------------------------------------------------------------------------------
+// ---- platform 2 controller mouse (Nmouse / Jcms) ------------------------------------------------------------------------------------------------
 // Layout from the SDK 20.5 client (sdk nn::hid::detail::NmouseTransferMemoryAccessor, GetJcmsStates); docs/hid_mouse_sw2.md has the
 // addresses. Both blocks are the game's own buffers, lent as transfer memory (InitializeNmouse 3139, InitializeJcms 3110); the server
 // owns their contents and the game reads them directly.
@@ -138,7 +138,7 @@ struct HidState {
     uint32_t last_tag[kNpadCount] = {};     // style tag each entry had at the last sample
     bool connected[kNpadCount] = {};
     std::map<uint32_t, VibValue> vibration; // last value sent per VibrationDeviceHandle
-    // Joy-Con 2 mouse
+    // platform 2 controller mouse
     uint64_t nm_addr = 0, nm_size = 0;      // Nmouse transfer memory (guest address = host pointer), 0 when not set up
     int32_t nm_w = 1920, nm_h = 1080;       // pointer range from InitializeNmouse
     uint64_t jcms_addr = 0, jcms_size = 0;  // Jcms transfer memory
@@ -330,7 +330,7 @@ void apply_style(uint8_t* e, uint32_t tag, const NpadInput& in) {
     w32(e, kJoyColor + 8, in.color_buttons);
     w32(e, kJoyColor + 12, in.color_body);
     w32(e, kJoyColor + 16, in.color_buttons);
-    // NpadSystemProperties: powered Joy-Con bits 3..5 always; ABXY/Plus/Minus for the full pads, SL/SR and one of Plus/Minus for halves.
+    // NpadSystemProperties: powered controller bits 3..5 always; ABXY/Plus/Minus for the full pads, SL/SR and one of Plus/Minus for halves.
     uint64_t props = (1ull << 3) | (1ull << 4) | (1ull << 5);
     constexpr uint64_t kAbxy = 1ull << 11, kSlSr = 1ull << 12, kPlus = 1ull << 13, kMinus = 1ull << 14;
     uint32_t device = 0;
@@ -432,8 +432,8 @@ void sample_keyboard(uint8_t* host, const nxrt::hid::KeyboardInput& k) {
     ring_push(ring_at<KeyboardState>(host, kKeyboard), ks);
 }
 
-// ---- Joy-Con 2 mouse ----------------------------------------------------------------------------------------------------------------
-// Lists the virtual devices in the Nmouse block: a merged mouse (slot 0) and a Joy-Con 2 (R) mouse of player 1 (slot 1). Info first, the
+// ---- platform 2 controller mouse ----------------------------------------------------------------------------------------------------------------
+// Lists the virtual devices in the Nmouse block: a merged mouse (slot 0) and a platform 2 controller (R) mouse of player 1 (slot 1). Info first, the
 // handle's valid byte last, so a reader never sees a valid handle without its info. Caller holds st().mu.
 void nm_list_devices(HidState& s) {
     uint8_t* b = reinterpret_cast<uint8_t*>(s.nm_addr);
@@ -451,7 +451,7 @@ void nm_list_devices(HidState& s) {
         b[kNmHandles + i * 16 + 8] = 1;
     }
     g_jc2_listed.store(true);
-    NXLOG_I("hid", "Joy-Con 2 mouse: listed a merged mouse and a Joy-Con 2 (R) mouse for player 1 (mode %s, pointer range %dx%d)",
+    NXLOG_I("hid", "platform 2 controller mouse: listed a merged mouse and a platform 2 controller (R) mouse for player 1 (mode %s, pointer range %dx%d)",
             nxrt::hid::jc2_mouse_mode_name(nxrt::hid::jc2_mouse_mode()), s.nm_w, s.nm_h);
 }
 
@@ -510,14 +510,14 @@ void sample_nmouse(HidState& s) {
     ns.range_h = s.nm_h;
     if (active != g_jc2_active.exchange(active) && s.active_logs < 200) {
         s.active_logs++;
-        NXLOG_I("hid", "Joy-Con 2 mouse %s (mode %s)", active ? "ON: the game sees the PC mouse" : "off", nxrt::hid::jc2_mouse_mode_name(nxrt::hid::jc2_mouse_mode()));
+        NXLOG_I("hid", "platform 2 controller mouse %s (mode %s)", active ? "ON: the game sees the PC mouse" : "off", nxrt::hid::jc2_mouse_mode_name(nxrt::hid::jc2_mouse_mode()));
     }
     uint8_t* b = reinterpret_cast<uint8_t*>(s.nm_addr);
     for (uint32_t i = 0; i < 2; ++i) ring_push(ring_at<NmouseInternal>(b, kNmRings + i * kNmRingSize), ns);
     const bool moved = active && (ns.x != prev_x || ns.y != prev_y);
     if (active && s.nm_logged < 3 && (moved || ns.buttons || ns.wheel_x || ns.wheel_y)) {
         s.nm_logged++;
-        NXLOG_I("hid", "Joy-Con 2 mouse sample %u: pos %d,%d range %dx%d buttons %x wheel %d,%d attr %x (block %llx)", s.nm_logged, ns.x, ns.y,
+        NXLOG_I("hid", "platform 2 controller mouse sample %u: pos %d,%d range %dx%d buttons %x wheel %d,%d attr %x (block %llx)", s.nm_logged, ns.x, ns.y,
                 ns.range_w, ns.range_h, ns.buttons, ns.wheel_x, ns.wheel_y, ns.attributes, static_cast<unsigned long long>(s.nm_addr));
     }
     if (s.jcms_addr) {
@@ -975,7 +975,7 @@ void setup_hid(ipc::Service& svc) {
     });
     ignore_cmd(svc, 212, "SendVibrationValueInBool");
     svc.add_cmd(214, "SendVibrationValues2", [](ipc::Request& req, ipc::Response&) -> uint32_t {
-        // Switch 2: nn::hid::detail::SendVibrationValues (sdk 0x750064d360) sends this instead of 206 unless the Switch 1 compatible
+        // platform 2: nn::hid::detail::SendVibrationValues (sdk 0x750064d360) sends this instead of 206 unless the platform 1 compatible
         // mode is set, with the same two buffers (handles, VibrationValues) and an extra u16 (2). Forwarded like 206.
         const ipc::Buffer hb = req.in_buf(0), vb = req.in_buf(1);
         const uint32_t n = static_cast<uint32_t>(std::min<uint64_t>(std::min<uint64_t>(hb.size / 4, vb.size / 16), 16));
@@ -1029,9 +1029,9 @@ void setup_hid(ipc::Service& svc) {
     ignore_cmd(svc, 1002, "SetTouchScreenConfiguration");
     ignore_cmd(svc, 1003, "IsFirmwareUpdateNeededForNotification", 1);
     ignore_cmd(svc, 1004, "SetTouchScreenResolution");
-    // ---- Switch 2 Joy-Con 2 mouse (Nmouse / Jcms). Ids from the sdk proxy thunks (0x75006701b4..0x75006702ec, IHidServer vtable
+    // ---- platform 2 platform 2 controller mouse (Nmouse / Jcms). Ids from the sdk proxy thunks (0x75006701b4..0x75006702ec, IHidServer vtable
     // slots 0x538..0x5B8) matched to the nn::hid::detail callers; raw-data layouts from the thunks' CMIF writers. docs/hid_mouse_sw2.md.
-    // Pokopia imports only the wrappers behind 3110, 3111, 3112, 3131 and 3136-3139; the others get the answer a server with the two
+    // title A imports only the wrappers behind 3110, 3111, 3112, 3131 and 3136-3139; the others get the answer a server with the two
     // listed devices gives. There is no 3114-3129 or 3134 in the SDK's table.
     svc.add_cmd(3110, "InitializeJcms", [](ipc::Request& req, ipc::Response&) -> uint32_t {
         const uint64_t size = req.arg<uint64_t>(8);   // aruid at 0
@@ -1050,14 +1050,14 @@ void setup_hid(ipc::Service& svc) {
         return 0;
     });
     svc.add_cmd(3112, "StartJcms", [](ipc::Request& req, ipc::Response&) -> uint32_t {
-        // u32 JcmsHandle @0, aruid @8. The game calls it every frame for each Joy-Con 2 mouse it found, so a call proves it read the
+        // u32 JcmsHandle @0, aruid @8. The game calls it every frame for each platform 2 controller mouse it found, so a call proves it read the
         // Nmouse handle table. The Jcms rings are sampled whether started or not.
         std::lock_guard<std::mutex> lk(st().mu);
-        if (st().jcms_starts < 3) NXLOG_I("hid", "StartJcms(handle %x): the game found the Joy-Con 2 mouse", req.arg<uint32_t>(0));
+        if (st().jcms_starts < 3) NXLOG_I("hid", "StartJcms(handle %x): the game found the platform 2 controller mouse", req.arg<uint32_t>(0));
         st().jcms_starts++;
         return 0;
     });
-    // u32 JcmsHandle @0, aruid @8. Not imported by Pokopia; the rings keep sampling (nothing to stop).
+    // u32 JcmsHandle @0, aruid @8. Not imported by title A; the rings keep sampling (nothing to stop).
     ignore_cmd(svc, 3113, "StopJcms");
     // InitializeNmouse with an NmouseStateRange (sdk 0x75006576c0): the width and height come from the SDK's range table (720p, 1080p,
     // 1440p, 4K), the pointer type is 0. The SDK sends SetMergedNmouseSourceTypes(6) right after it.
@@ -1111,7 +1111,7 @@ void setup_hid(ipc::Service& svc) {
         st().nm_merged_types = req.arg<uint32_t>(0);   // aruid at 8
         return 0;
     });
-    // InitializeNmouse (sdk 0x75006569e0, the form Pokopia uses: 0xC000 bytes, 1920x1080).
+    // InitializeNmouse (sdk 0x75006569e0, the form title A uses: 0xC000 bytes, 1920x1080).
     svc.add_cmd(3139, "InitializeNmouse", [](ipc::Request& req, ipc::Response&) -> uint32_t { return nm_initialize(req, "InitializeNmouse"); });
     // SetNmousePointerPosition (sdk 0x7500657410): s32 x @0, s32 y @4, aruid @8, NmouseHandle @0x10. The pointer is the PC mouse, which
     // the game cannot move: accepted and logged.
@@ -1137,7 +1137,7 @@ void setup_hid(ipc::Service& svc) {
     ignore_cmd(svc, 3142, "RestrictNmousePointer");
     // 3143 (vtable slot 0x5B8): aruid @0, u64 @8; no nn::hid::detail caller in the SDK, name unknown. Accepted.
     ignore_cmd(svc, 3143, "Cmd3143");
-    // 3150 (SDK 22, Ocarina of Time): sent by nn::hid::InitializeMouse() (thunk sdk 0x75006f0900): u32 @0, aruid @8, sends PID; no
+    // 3150 (SDK 22, the game): sent by nn::hid::InitializeMouse() (thunk sdk 0x75006f0900): u32 @0, aruid @8, sends PID; no
     // output. The SDK aborts on any error. The mouse state reaches the game through the shared memory as before: accepted.
     ignore_cmd(svc, 3150, "InitializeMouse");
 }
@@ -1212,7 +1212,7 @@ void hid_set_background_sampling(bool enabled) {
 
 }  // namespace nxrt::services
 
-// ---- Joy-Con 2 mouse: the play layer's side (include/nxrt/jc2_mouse.h) -------------------------------------------------------------------
+// ---- platform 2 controller mouse: the play layer's side (include/nxrt/jc2_mouse.h) -------------------------------------------------------------------
 namespace nxrt::hid {
 
 Jc2MouseMode jc2_mouse_mode() {

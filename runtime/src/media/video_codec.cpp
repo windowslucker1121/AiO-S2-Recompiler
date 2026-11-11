@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// nn::codec hardware video decoders (VP9, VP8, AV1) + their fences on the host, decoding with libvpx and dav1d (AV1: Ocarina of Time's
+// nn::codec hardware video decoders (VP9, VP8, AV1) + their fences on the host, decoding with libvpx and dav1d (AV1: the game's
 // movies). See include/nxrt/video_codec.h. The AV1 calls take the VP9 shapes except: GetAv1DecoderSubmissionReadyEvent(dec) returns the event,
 // InitializeAv1DecoderByRemoteMemory has no extra size_t, and UnregisterAv1DecoderBuffer(dec, index) exists.
 //
-// Calling conventions, read off Pokopia's subsdk0 (movie::detail::*, which forwards its registers unchanged to nn::codec) and off the
-// mangled names (Mario Kart World's variants differ where noted):
+// Calling conventions, read off title A's subsdk0 (movie::detail::*, which forwards its registers unchanged to nn::codec) and off the
+// mangled names (title C's variants differ where noted):
 //   MakeDecodeImagePreference(u16 w, u16 h, OutputFormat, CodecMode) -> 64-byte VideoDecoderImagePreference returned through x8
 //   CalculateDecoderImagePoolBuffer(size_t* size, size_t* align, const Preference*, u32 count)
 //   InitializeDecoderImagePool(Pool*, void* mem, size_t, const Preference*, u32 count, CodecMode)    Pool = 32 bytes
@@ -13,14 +13,14 @@
 //   ReadDecoderOutputImageRgba(const Pool*, u32 image, u16 x, u16 y, u16 w, u16 h, void* dst, size_t stride, [sp] size_t size)
 //   CalculateVp9DecoderWorkBuffer(size_t* size, size_t* align, size_t, u16 w, u16 h)
 //   InitializeVp9Decoder(Vp9DecoderType*, void* work, size_t, size_t, u16, u16, u32, InputFormat, [sp] OutputFormat)   (transfer memory)
-//   InitializeVp9Decoder(Vp9DecoderType*, size_t, u16, u16, u32, InputFormat, OutputFormat)   (remote memory; MKW: an extra size_t)
+//   InitializeVp9Decoder(Vp9DecoderType*, size_t, u16, u16, u32, InputFormat, OutputFormat)   (remote memory; title C: an extra size_t)
 //   RegisterVp9DecoderBuffer(Vp9DecoderType*, u32 index, Pool*, u32)
 //   GetVp9DecoderSubmissionReadyEvent(os::SystemEventType** out, Vp9DecoderType*)
 //   SubmitVp9DecoderInputBuffer(u64* out, Vp9DecoderType*, const void* data, size_t size, TimeSpan pts, bool end_of_stream)
 //   AcquireVp9DecoderOutputBuffer(u32* index, gs::NativeSyncHandle* fence, Vp9DecoderType*)
 //   ReleaseVp9DecoderOutputBuffer(Vp9DecoderType*, u32 index, gs::NativeSyncHandle pre_fence (x2, x3))
 //   GetVp9DecoderOutputBufferProperties(u16* w, u16* h, u16*, u16*, TimeSpan* pts, bool* eos, Vp9DecoderType*, u32 index)
-//     (MKW: a movie::ColorSpace* after the four u16*, so the decoder is x7 and the index on the stack)
+//     (title C: a movie::ColorSpace* after the four u16*, so the decoder is x7 and the index on the stack)
 //   nn::syncpt::sdk::{Create,Destroy,Cancel}SyncPointEvent(SyncPointEventType*), RequestSyncPointEvent(evt, const SyncPointHandle&),
 //     InitializeMultiWaitHolder(os::MultiWaitHolderType*, evt), TryWaitSyncPointEvent(const evt*); nn::gs::TryWaitNativeSync(const handle&)
 // Every nn::codec call the player makes is checked (a non-zero nn::Result aborts), so these answer 0 unless noted.
@@ -242,7 +242,7 @@ bool vpx_open(Decoder& d) {
         s.n_threads = g_threads;
         // max_frame_delay stays 0 (dav1d picks it from the thread count): frame threading needs several pictures in flight, and the
         // player submits packets well ahead of the pictures it reads (kPacketBacklog), so pump() always has the next ones. With 1, dav1d
-        // only had tile threads and made ~21 pictures/s of OoT's 1080p intro on the Core Ultra 5.
+        // only had tile threads and made ~21 pictures/s of the game's 1080p intro on the Core Ultra 5.
         const int e = dav1d_open(&d.av1, &s);
         d.vpx_ok = e == 0;
         if (!d.vpx_ok) note_error("decoder %u: dav1d_open failed (%d)", d.id, e);
@@ -477,7 +477,7 @@ bool pump(Decoder& d) {
     while (!d.waiting.empty() && d.ready.empty() && !d.packets.empty()) {
         Packet p = std::move(d.packets.front());
         d.packets.pop_front();
-        if (g_max_pictures && d.pictures >= g_max_pictures) {   // the stream ends here (tests skip OoT's 5-minute intro this way)
+        if (g_max_pictures && d.pictures >= g_max_pictures) {   // the stream ends here (tests skip the game's 5-minute intro this way)
             d.packets.clear();
             p.data.clear();
             p.eos = true;
@@ -822,7 +822,7 @@ void props(::Ctx* c) {   // (u16*, u16*, u16*, u16*, TimeSpan*, bool*, dec, inde
     props_write(A(0), A(1), A(2), A(3), A(4), A(5), props_of(A(6), static_cast<uint32_t>(A(7))));
     RET(0);
 }
-void props_cs(::Ctx* c) {   // MKW: (u16*, u16*, u16*, u16*, ColorSpace*, TimeSpan*, bool*, dec, [sp] index)
+void props_cs(::Ctx* c) {   // title C: (u16*, u16*, u16*, u16*, ColorSpace*, TimeSpan*, bool*, dec, [sp] index)
     if (A(4)) wr32(A(4), 0);
     props_write(A(0), A(1), A(2), A(3), A(5), A(6), props_of(A(7), static_cast<uint32_t>(rd64(c->x[31]))));
     RET(0);
@@ -890,7 +890,7 @@ void gs_trywait(::Ctx* c) {   // (const NativeSyncHandle&) -> bool
 }
 
 // ---- nn::movie extractor trace ([media] movie_trace) ------------------------------------------------------------------------------
-// Pokopia's movie::Extractor (subsdk0) runs the SDK's nn::movie::MediaExtractor in media source mode: its ExtractorSourceModeThread
+// title A's movie::Extractor (subsdk0) runs the SDK's nn::movie::MediaExtractor in media source mode: its ExtractorSourceModeThread
 // reads the file through the game's ClientStreamReader (8 KiB at a time) and appends it with AppendMediaSourceData; the extractor
 // (nandroid MatroskaExtractor for WebM) parses from that. movie::Extractor::SetDataSource then checks the track count and the
 // "container-mime" of track 0 against the ContainerType (3 = WebM) and answers 0x4000 when they disagree, which the game's player
@@ -1042,7 +1042,7 @@ const Import kImports[] = {
     // H.264 / AV1: not decoded here (a clear error instead of the console driver path)
     {"_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm", unsupported_codec},
     {"_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm", unsupported_codec},
-    // SDK 22 (Ocarina of Time): the image calls without CodecMode, the decoders "By{Transfer,Remote}Memory" with an output mode, and the
+    // SDK 22 (the game): the image calls without CodecMode, the decoders "By{Transfer,Remote}Memory" with an output mode, and the
     // submission-ready event returned instead of written through a pointer
     {"_ZN2nn5codec25MakeDecodeImagePreferenceEttNS0_24VideoDecoderOutputFormatENS0_15ImageTilingModeE", make_pref},
     {"_ZN2nn5codec26InitializeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTypeEPvmRKNS0_27VideoDecoderImagePreferenceEj", init_pool},
@@ -1085,8 +1085,7 @@ bool install_video_codec_hle() {
     static std::once_flag once;
     std::call_once(once, [] {
         if (game::info().platform != game::Platform::Switch2) return;
-        const bool mkw = std::strcmp(game::info().id, "mkw") == 0;
-        const std::string mode = config_get_str("media", "video_decoder", mkw ? "off" : "host");
+        const std::string mode = config_get_str("media", "video_decoder", "host");
         if (mode == "off") {
             NXLOG_I("vcodec", "[media] video_decoder = off: nn::codec video decoders are not on the host (movies are left out)");
             return;

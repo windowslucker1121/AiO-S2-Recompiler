@@ -153,7 +153,7 @@ class Fn:
             return self.fpsimd(w, pc)
         # op0 0..3: reserved / unallocated / SVE. None of these is an instruction on the console's Cortex-A57
         # (ARMv8.0, no SVE): executing one raises an undefined-instruction exception, so the faithful translation is a
-        # trap. Nintendo's SDK uses this deliberately (UDF #0xdefe, the word 0xe7ffdefe, in Halt / DebugBreak paths).
+        # trap. the platform SDK uses this deliberately (UDF #0xdefe, the word 0xe7ffdefe, in Halt / DebugBreak paths).
         # [from smo-recomp; checked against Unicorn by the difftest's trap tests]
         return 'guest_trap("undefined instruction", 0x%xULL);' % pc
 
@@ -214,7 +214,7 @@ class Fn:
         if bits(w, 30, 26) == 5:
             target = pc + sext(bits(w, 25, 0), 26) * 4
             if bits(w, 31, 31):
-                # `bl .+8; .word d`: hand-written code (rtld of SDK 20+ modules, e.g. Super Mario Bros. Wonder NS2 Edition)
+                # `bl .+8; .word d`: hand-written code (rtld of SDK 20+ modules, e.g. title D)
                 # reads a PC-relative word through x30 and returns to its own caller, never to the data word. As a call, the
                 # lifted code would come back and run that word (an undefined-instruction trap), so it is a tail call.
                 if target == pc + 8 and self.is_data_word(pc + 4):
@@ -287,7 +287,7 @@ class Fn:
             return 'c->ex_addr = ~0ULL;'
         if (w & 0xfffff0ff) == 0xd50330df:
             return ';'                                   # isb
-        # SMO additions (SDK code: a data-cache maintenance loop in the audio server)
+        # smo-recomp additions (SDK code: a data-cache maintenance loop in the audio server)
         if (w & 0xffffffe0) == 0xd53b0020:               # mrs ctr_el0: the console's Cortex-A57 reset value 0x8444C004
             return SET(bits(w, 4, 0), 1, '0x8444c004ULL')  # [doc] ARM Cortex-A57 TRM, CTR_EL0: 64-byte I and D lines
         if (w & 0xffffffe0) == 0xd50b7e20:               # dc civac: clean + invalidate a data-cache line; the host
@@ -469,7 +469,7 @@ class Fn:
         raise Unimpl('ldst%d' % g)
 
     def ldst_lanes(self, w, rt, rn, rm, q, post, load, size, opcode, s_bit):
-        """SMO addition (audio DSP of the 7.3.2 SDK): LD2 / ST2 (opcode 0, 2, 4) and LD4 / ST4 (opcode 1, 3, 5), one
+        """smo-recomp addition (audio DSP of the 7.3.2 SDK): LD2 / ST2 (opcode 0, 2, 4) and LD4 / ST4 (opcode 1, 3, 5), one
         element (lane) of two or four consecutive registers to or from consecutive memory."""
         nstruct = 4 if opcode & 1 else 2
         base = opcode & 6
@@ -573,7 +573,7 @@ class Fn:
                 raise Unimpl('dp2')
             if bits(w, 20, 16) or bits(w, 29, 29):
                 # opcode2 != 0 is pointer authentication (PACIA/PACIB/... AUT*, XPAC*: tier 2, x_pac.py). Only opcode2 == 0 is
-                # RBIT/REV/CLZ/CLS: PACIB x30, sp (Switch 2 setjmp) was lifted as REV16 of xzr.
+                # RBIT/REV/CLZ/CLS: PACIB x30, sp (platform 2 setjmp) was lifted as REV16 of xzr.
                 raise Unimpl('dp1 opcode2')
             a = R(rn, sf)
             if opcode == 0:
@@ -788,7 +788,7 @@ class Fn:
                     return 'v_bitsel(%s, %s, %s, %d, %d);' % (V(rd), V(rn), V(rm), size, q)
                 op = {(0, 0x10): 'I_ADD', (1, 0x10): 'I_SUB', (0, 0x13): 'I_MUL', (1, 0x11): 'I_CMEQ', (0, 0x11): 'I_CMTST',
                       (0, 0x06): 'I_CMGT', (1, 0x06): 'I_CMHI', (0, 0x07): 'I_CMGE', (1, 0x07): 'I_CMHS',
-                      # SMO additions (audio DSP in the SDK): saturating add / subtract, multiply-accumulate (7.3.2)
+                      # smo-recomp additions (audio DSP in the SDK): saturating add / subtract, multiply-accumulate (7.3.2)
                       (0, 0x01): 'I_SQADD', (1, 0x01): 'I_UQADD', (0, 0x05): 'I_SQSUB', (1, 0x05): 'I_UQSUB',
                       (0, 0x12): 'I_MLA'}.get((u, opc))
                 if op is None or (op == 'I_MLA' and size == 3):
@@ -818,7 +818,7 @@ class Fn:
             if scalar and u and bits(w, 20, 17) == 8 and bits(w, 16, 12) == 0x0d and bits(w, 11, 10) == 2:
                 f, ft = ('df', 'double') if sz else ('f', 'float')   # faddp scalar
                 return '{ %s t = c->v[%d].%s[0] + c->v[%d].%s[1]; %s }' % (ft, rn, f, rn, f, vput(rd, f + '[0]'))
-            if bits(w, 11, 10) == 0 and not scalar and size < 3:    # SMO addition: three registers, different types
+            if bits(w, 11, 10) == 0 and not scalar and size < 3:    # smo-recomp addition: three registers, different types
                 acc = {0xc: 0, 0x8: 1, 0xa: 2}.get(bits(w, 15, 12))  # SMULL/UMULL, SMLAL/UMLAL, SMLSL/UMLSL (and the "2" forms)
                 if acc is not None:
                     return 'v_mull(%s, %s, %s, %d, %d, %d, %d, -1);' % (V(rd), V(rn), V(rm), size, q, u, acc)
@@ -828,7 +828,7 @@ class Fn:
                 if not q:
                     raise Unimpl('simd-across')
                 return 'v_fred32(%s, %s, %d, %d);' % (V(rd), V(rn), bits(w, 22, 22), int(bits(w, 16, 12) == 0x0c))
-            # SMO addition (audio DSP of the 7.3.2 SDK): ADDV, across lanes
+            # smo-recomp addition (audio DSP of the 7.3.2 SDK): ADDV, across lanes
             if not scalar and not u and bits(w, 20, 17) == 8 and bits(w, 16, 12) == 0x1b and bits(w, 11, 10) == 2:
                 if size == 3 or (size == 2 and not q):
                     raise Unimpl('simd-across')
@@ -866,14 +866,14 @@ class Fn:
                 return 'v_perm(%s, %s, %s, %d, %d, %d);' % (V(rd), V(rn), V(rm), bits(w, 14, 12), size, icount(size))
             raise Unimpl('simd-e')
         if bits(w, 10, 10) == 0:                          # by element
-            acc = {0xa: 0, 0x2: 1, 0x6: 2}.get(bits(w, 15, 12))       # SMO addition: SMULL / SMLAL / SMLSL (and U, "2") by element
+            acc = {0xa: 0, 0x2: 1, 0x6: 2}.get(bits(w, 15, 12))       # smo-recomp addition: SMULL / SMLAL / SMLSL (and U, "2") by element
             if acc is not None and not scalar and size in (1, 2):
                 if size == 1:
                     idx, em = (bits(w, 11, 11) << 2) | (bits(w, 21, 21) << 1) | bits(w, 20, 20), bits(w, 19, 16)
                 else:
                     idx, em = (bits(w, 11, 11) << 1) | bits(w, 21, 21), bits(w, 20, 16)
                 return 'v_mull(%s, %s, %s, %d, %d, %d, %d, %d);' % (V(rd), V(rn), V(em), size, q, u, acc, idx)
-            # SMO addition: integer MUL (U=0 opcode 1000), MLA (U=1 0000), MLS (U=1 0100) by element
+            # smo-recomp addition: integer MUL (U=0 opcode 1000), MLA (U=1 0000), MLS (U=1 0100) by element
             macc = {(0, 0x8): 0, (1, 0x0): 1, (1, 0x4): 2}.get((u, bits(w, 15, 12)))
             if macc is not None and not scalar and size in (1, 2):
                 if size == 1:
@@ -897,7 +897,7 @@ class Fn:
             return 'v_shift(%s, %s, %d, %d, 0, %d);' % (V(rd), V(rn), immhb - (8 << es), es, icount(es))
         if opc == 0:
             return 'v_shift(%s, %s, %d, %d, %d, %d);' % (V(rd), V(rn), (16 << es) - immhb, es, 2 if u else 1, icount(es))
-        # SMO addition (audio DSP in the SDK): saturating narrowing shifts. es = DESTINATION element size; the shift is
+        # smo-recomp addition (audio DSP in the SDK): saturating narrowing shifts. es = DESTINATION element size; the shift is
         # 2 * esize - immh:immb. U=0 0x12/0x13 SQSHRN/SQRSHRN, U=1 0x12/0x13 UQSHRN/UQRSHRN, U=1 0x10/0x11 SQSHRUN/SQRSHRUN.
         if opc in (0x12, 0x13) or (u and opc in (0x10, 0x11)):
             if es > 2:

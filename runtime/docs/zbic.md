@@ -14,7 +14,7 @@ compression instead of LZ4" ([switchbrew NSO0](https://switchbrew.org/wiki/NSO0)
 - Atmosphère's loader (`stratosphere/loader/source/ldr_process_creation.cpp`, read 2026-11-04) allows bit 7 only on `main`, and only
   when `rtld` and `sdk` are both present. It maps `main` with room from its start to the end of the whole module area for the
   in-place decode (`ZSTD_decompressionMargin`); a decoder writing into its own buffer needs no margin.
-- None of our dumps use it: every NSO of Pokopia 2.0.1a, DK Bananza (base and 458752), Mario Kart World and the Yoshi demo has
+- None of our dumps use it: every NSO of title A 2.0.1a, title B (base and 458752), title C and the title I demo has
   flags 0x3f (checked 2026-11-04). Which titles do is not known to us.
 
 ## The format
@@ -74,7 +74,7 @@ with 2048 or more sequences, off for Huffman weights), so it is a property of th
   at levels 1, 3, 9 and 19 and sizes from 1 byte to 12 MB (a compiler binary and a C source), decoded by `zbic_decompress`: 39 of 40
   streams decoded bit-exactly. The 40th (12 MB, level 3) is rejected by Atmosphère's own decoder in the same way ("Data corruption
   detected"), so that encoder can write a table description its reader refuses; our decoder agrees with the reference reader on
-  every stream. Nintendo's encoder is a different program; no stream of it was available.
+  every stream. The platform's encoder is a different program; no stream of it was available.
 - `tools/extract/tests/test_extract.cpp`: a synthetic three-segment ZBIC NSO converts to the plain NSO with the expected segments, and a
   damaged frame is refused.
 - Not checked: a real ZBIC NSO from a game. None of our dumps has one.

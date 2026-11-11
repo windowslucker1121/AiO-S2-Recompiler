@@ -48,7 +48,7 @@ bool win32_prompt(const Request& r, std::string* text);
 // ---- vi (vi_nv.cpp)----------------------------------------------------------------------------------------------------------------
 namespace viapi {
 // A new readable handle of the display's 60 Hz vsync event (starts the vsync thread on first use); 0 when no handle is left. For the
-// Switch 2 nn::vi functions that answer on the host (core/switch2.cpp).
+// platform 2 nn::vi functions that answer on the host (core/switch2.cpp).
 uint32_t display_vsync_handle();
 }
 

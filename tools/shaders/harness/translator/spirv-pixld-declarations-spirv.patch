@@ -1,6 +1,6 @@
 Ryujinx shader translator: implement the Maxwell PIXLD instruction (SampleRateShading capability and ClipDistance[7]).
 PIXLD.MY_INDEX returns the index of the sample the fragment shader invocation runs for; the NVN compiler puts it
-in the epilogue of almost every pixel shader (33,361 of 33,744 pixel blocks of Metroid Prime Remastered). Ryujinx
+in the epilogue of almost every pixel shader (33,361 of 33,744 pixel blocks of title E). Ryujinx
 logged "Pixld is not implemented" and left the destination register unwritten, which in SPIR-V is an undefined value.
 Lowering: MY_INDEX reads gl_SampleID (BuiltIn SampleId; 0 when the pipeline is not multisampled), the other modes
 (COVMASK, COVERED, OFFSET, CENTROID_OFFSET) write 0 and log. Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a

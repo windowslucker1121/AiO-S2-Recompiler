@@ -814,9 +814,9 @@ NXTEST(wait_synchronization_index_and_persistence) {
     end();
 }
 
-// ---- 17b: timeouts under the Switch 2 profile --------------------------------------------------------------------------
+// ---- 17b: timeouts under the platform 2 profile --------------------------------------------------------------------------
 
-// The system tick is 31.25 MHz on Switch 2 (19.2 MHz on Switch 1) and kernel::tick_hz caches it at first use, so this runs in a child process that
+// The system tick is 31.25 MHz on platform 2 (19.2 MHz on platform 1) and kernel::tick_hz caches it at first use, so this runs in a child process that
 // picks the platform first. A wait timeout is counted in ticks: counted at the wrong rate it ends early (here after 61 ms of a 100 ms wait).
 NXTEST_CHILD(kernel_sync_switch2_timeouts) {
     nxtest::use_platform_for_process(nxrt::game::Platform::Switch2);

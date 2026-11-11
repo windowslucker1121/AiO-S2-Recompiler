@@ -373,7 +373,7 @@ void keep_dpool_release(VkDescriptorPool p) {
 }
 
 // [nvn] alloc_batch (default off; cpuperf_ab_what alloc_batch): descriptor sets are allocated eight at a time per layout and handed out one
-// by one (one driver call instead of eight; ~1,000 sets per frame are allocated in Kokiri outside). Measured worse (Kokiri 1080, paired
+// by one (one driver call instead of eight; ~1,000 sets per frame are allocated in village outside). Measured worse (village 1080, paired
 // windows: render replay +0.30 ms per frame, 3 of 19 pairs better): the driver's cost is per set, and spare sets of a layout went unused.
 std::atomic<bool> g_alloc_batch_ab{true};
 void alloc_batch_enable(bool on) { g_alloc_batch_ab.store(on, std::memory_order_relaxed); }
@@ -1031,7 +1031,7 @@ bool wait_serial(uint64_t serial, uint64_t timeout_ns) {
 
 namespace {
 // The last serial queued before each of the game's presents (the end of that frame's GPU work), for the low-latency GPU wait (lowlat.h).
-// Written by the game thread in present(), read by the main thread at the frame boundary (the same thread in Pokopia).
+// Written by the game thread in present(), read by the main thread at the frame boundary (the same thread in title A).
 std::atomic<uint64_t> g_frame_work[4];
 std::atomic<uint64_t> g_frame_count{0};
 

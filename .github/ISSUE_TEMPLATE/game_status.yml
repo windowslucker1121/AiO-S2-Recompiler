@@ -47,7 +47,7 @@ body:
     id: fps
     attributes:
       label: Frame rate
-      placeholder: e.g. 30-38 fps in the first scene, 20 fps in Kokiri Forest
+      placeholder: e.g. 30-38 fps in the first scene, 20 fps in the village
   - type: input
     id: app
     attributes:

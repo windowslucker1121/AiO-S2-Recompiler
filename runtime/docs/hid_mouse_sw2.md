@@ -1,6 +1,6 @@
-# Switch 2 Joy-Con 2 mouse (Nmouse / Jcms) and hid cmd 214
+# Platform 2 controller mouse (Nmouse / Jcms) and hid cmd 214
 
-Found by reading the SDK 20.5 client in Pokopia 2.0.1a (`sdk` mapped at 0x7500000000, `main` at 0x7100000000). No public Switch 2
+Found by reading the SDK 20.5 client in title A 2.0.1a (`sdk` mapped at 0x7500000000, `main` at 0x7100000000). No public platform 2
 emulator source covers it: `refs/pound` and `refs/Instaurix` have no Nmouse/Jcms code, and Switchbrew lists none of these commands
 (checked Nov 2026). Confidence notes: **confirmed** = read in the client code; **inferred** = a guess that fits what the code does.
 
@@ -26,14 +26,14 @@ states into two counters clamped to ±600.
 
 **Mouse mode detection** `sub_7100318C1C` (confirmed): every frame it asks for the remembered side's mouse, then the other side's, and
 counts consecutive frames where `NmouseState.attributes & 2` is set; mouse controls switch on once the count reaches a tuning value
-(`*(cfg + 2560)`). So "the Joy-Con 2 is on its side on a surface" reaches the game as attribute bit 1 of the Nmouse state. Side 1 is
-type bit 2 (right Joy-Con), side 2 is type bit 1.
+(`*(cfg + 2560)`). So "the platform 2 controller is on its side on a surface" reaches the game as attribute bit 1 of the Nmouse state. Side 1 is
+type bit 2 (right controller), side 2 is type bit 1.
 
 **Cursor** `sub_710031935C` (placement / Rock Smash target) and `sub_7100EBF7E0`: the cursor is `NmouseState.x`, `.y` (+0x10, +0x14) in
 the 1920x1080 range given to InitializeNmouse, turned into a world ray (`sub_710091CD80`). `JcmsState+0x10` non-zero (plus a game
 condition) makes the player turn toward the cursor.
 
-Clicks: no reader of `NmouseState.buttons` was found in main; the button configs map the Joy-Con's own buttons, which still arrive as
+Clicks: no reader of `NmouseState.buttons` was found in main; the button configs map the controller's own buttons, which still arrive as
 npad buttons (inferred: the game takes R/ZR or L/ZL from the npad).
 
 ## IPC commands (IHidServer): confirmed
@@ -41,7 +41,7 @@ npad buttons (inferred: the game takes R/ZR or L/ZL from the npad).
 From the sdk proxy thunks at 0x75006701b4.. (vtable order from slot 0x538) matched to the `nn::hid::detail` callers' vtable slots.
 Raw-argument offsets are after the CMIF header.
 
-| Cmd | Slot | Function | Arguments | Output | Pokopia |
+| Cmd | Slot | Function | Arguments | Output | Title A |
 |---|---|---|---|---|---|
 | 3110 | 0x538 | InitializeJcms | aruid @0, u64 size @8, copy handle: transfer memory; sends PID | none | yes |
 | 3111 | 0x540 | FinalizeJcms | aruid | none | yes |
@@ -62,7 +62,7 @@ Raw-argument offsets are after the CMIF header.
 | 3143 | 0x5B8 | unknown (no nn::hid::detail caller) | aruid @0, u64 @8 | none | no |
 
 Ids are the `mov w, #id` of each thunk; the slots were checked against the IHidServer vtable in the sdk data (3110 at +0x538). There is
-no 3114-3129 or 3134. "Pokopia" = the game imports the nn::hid wrapper that sends it.
+no 3114-3129 or 3134. "title A" = the game imports the nn::hid wrapper that sends it.
 
 The old runtime names (3110 = InitializeNmouse … 3139 = StartJcms) were wrong; the boot order is 3139, 3110, 3138, 3136, 3137.
 
@@ -80,7 +80,7 @@ Read directly by `nn::hid::detail::NmouseTransferMemoryAccessor` (sdk 0x75006581
 Lifo: the usual hid ring (0x20 header: unused, buffer count, index of the newest entry, count; then 17 × (u64 seqlock, state)), states
 0x70 bytes. The reader (sdk 0x75006590a0) retries on an odd seqlock and checks neighbours' sampling numbers differ by 1.
 
-NmouseType bits: 0 merged (GetMergedNmouseHandle returns the first valid entry with bit 0), 1 Joy-Con (L) mouse, 2 Joy-Con (R) mouse
+NmouseType bits: 0 merged (GetMergedNmouseHandle returns the first valid entry with bit 0), 1 controller (L) mouse, 2 controller (R) mouse
 (GetNmouseHandles(npad) returns the entries of that npad whose type set is exactly 2, then exactly 4).
 
 Internal state (0x70) and the public `NmouseState` (0x30) copied from it (GetNmouseStates 0x7500658980); the field meanings come from
@@ -113,7 +113,7 @@ Wheel units: *inferred* 120 per notch (the game clamps its sum at ±600).
 ## What the runtime does
 
 - `src/services/hid.cpp`: the commands above; InitializeNmouse/InitializeJcms keep the guest buffer (a guest address is a host pointer),
-  zero it, set up the rings and, unless `[input] jc2_mouse = off`, list two devices: a merged mouse (slot 0, type 1) and a Joy-Con (R)
+  zero it, set up the rings and, unless `[input] jc2_mouse = off`, list two devices: a merged mouse (slot 0, type 1) and a controller (R)
   mouse of player 1 (slot 1, type 4, npad 0). The sampler (every 5 ms) pushes the same state into both rings and empty Jcms states
   for player 1.
 - The state comes from `nxrt::hid::jc2_mouse_feed()` (`include/nxrt/jc2_mouse.h`), which play mode calls once per frame with the pointer
@@ -122,7 +122,7 @@ Wheel units: *inferred* 120 per notch (the game clamps its sum at ±600).
   `jc2_mouse_active()`: mode not off, devices listed, window focused, a feed in the last 250 ms, and the mouse not captured.
 - Logs: InitializeNmouse/InitializeJcms with the block address, the device listing, the first three StartJcms calls (proof the game read
   the handle table), every on/off change of the mouse (first 200), and the first three samples with movement, buttons or wheel.
-- cmd 214 is `SendVibrationValues` in its Switch 2 form (the SDK uses it unless the Switch 1 compatible mode is on; 206 otherwise):
+- cmd 214 is `SendVibrationValues` in its platform 2 form (the SDK uses it unless the platform 1 compatible mode is on; 206 otherwise):
   same two buffers plus a u16 (2). It is stored and forwarded to the pad rumble like 206.
 
 ## Handing the mouse over (camera owner)
@@ -130,8 +130,8 @@ Wheel units: *inferred* 120 per notch (the game clamps its sum at ±600).
 - Before turning the camera with mouse counts each frame: if `nxrt::hid::jc2_mouse_active()` is true, drop the counts.
 - In auto mode, to give the mouse to the game (placement or Rock Smash, once detected, or a key): `jc2_mouse_request(true)`, and
   `jc2_mouse_request(false)` to take it back. Play mode stops capturing while `jc2_mouse_wants_pointer()` is true (mode on, or auto with
-  a request), so the pointer becomes absolute and the Joy-Con 2 mouse goes on its surface.
-- Placement / Rock Smash detection is not done: auto mode without a request means the Joy-Con 2 mouse is live only where the camera
+  a request), so the pointer becomes absolute and the platform 2 controller mouse goes on its surface.
+- Placement / Rock Smash detection is not done: auto mode without a request means the platform 2 controller mouse is live only where the camera
   does not hold the mouse.
 
 ## Menus outside play (`pick_extend`, KTGL menu adapter)
@@ -141,5 +141,5 @@ The title, settings, language, save and yes / no screens go through the same pan
 data and the screens are scripted), so no per-menu selection field was found; the selection is read off the cursor panes. Two extra rules:
 a part's entry inside a list entry is promoted to the list entry (settings: `Win_cursor` in each `CL_0020_parts_setting_menu_btn_N`),
 and sibling instances of one button layout with the triangle cursor in one of them form the entry list (yes / no, language, save choices).
-A click on a key guide listed in `[pkp] menu_key_guides` (default `881468973=btn_minus`, the title's "(-) Settings") sends its button.
+A click on a key guide listed in the game's `menu_key_guides` (default `881468973=btn_minus`, the title's "(-) Settings") sends its button.
 `menu_log 1` prints `menu: selection by <rule>: ...` whenever the rule or layout changes.

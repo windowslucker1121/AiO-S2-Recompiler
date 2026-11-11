@@ -45,7 +45,7 @@ void destroy_pool_gpu(PoolGpu* p);
 void release_texture_gpu(Texture* t);
 // [nvn] tex_park: the GPU-written image of a finalized texture is kept a few presents (any thread; false: not kept, destroy it as before). A
 // texture initialized again over the same storage with the same layout takes it back (tex_or_null) instead of a new image and an upload of
-// the storage: OoT makes its upscaler chain's 1920x1080 targets anew every frame (8.6 MB CPU untiles each). parked_cpu_wrote: the CPU wrote
+// the storage: the game makes its upscaler chain's 1920x1080 targets anew every frame (8.6 MB CPU untiles each). parked_cpu_wrote: the CPU wrote
 // [lo, hi): parked images there are stale (uploaded again when taken back).
 bool tex_park(const Texture& t, TexGpu* g);
 bool tex_release_shared(TexGpu* g);   // render thread: drops a finalized object's share of an image others still use (true: done, nothing to destroy)

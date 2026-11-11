@@ -17,10 +17,10 @@ L0|b60|TEX.SCR	fixed	our text differed from nvdisasm on 2 exemplar words; fixed 
 L0|b69|TMML.EF	fixed	our text differed from nvdisasm on 340 exemplar words; fixed in c4ed236
 L1|2a5|UIMAD|name-differs	justified	nxnative shares its IMAD.WIDE emitter (AImadWide) with the uniform form; same operation, only the name differs
 L1|357|BMOV|name-differs	justified	nxnative treats BMOV as a no-op; our front end handles BMOV ATEXIT_PC / MACTIVE and ignores the rest (AmpereEmit)
-L1|59f|.UNKNOWN|ours-unknown	fixed	SURED was undecoded (1 Mario Kart World instruction); decoded in c4ed236
+L1|59f|.UNKNOWN|ours-unknown	fixed	SURED was undecoded (1 title C instruction); decoded in c4ed236
 L1|8a5|UIMAD|name-differs	justified	nxnative shares its IMAD.WIDE emitter (AImadWide) with the uniform form; same operation, only the name differs
 L1|91a|DEPBAR|name-differs	justified	nxnative treats it as a no-op (ANop): it orders threads only, per thread nothing happens; our front end drops it too (AmpereEmit NOP/DEPBAR/BSSY/BSYNC/BREAK/WARPSYNC)
-L1|927|.UNKNOWN|ours-unknown	fixed	ISBEWR was undecoded (634 Mario Kart World instructions); decoded in 38a8a09
+L1|927|.UNKNOWN|ours-unknown	fixed	ISBEWR was undecoded (634 title C instructions); decoded in 38a8a09
 L1|941|BSYNC|name-differs	justified	nxnative treats it as a no-op (ANop): it orders threads only, per thread nothing happens; our front end drops it too (AmpereEmit NOP/DEPBAR/BSSY/BSYNC/BREAK/WARPSYNC)
 L1|942|BREAK|name-differs	justified	nxnative treats it as a no-op (ANop): it orders threads only, per thread nothing happens; our front end drops it too (AmpereEmit NOP/DEPBAR/BSSY/BSYNC/BREAK/WARPSYNC)
 L1|945|BSSY|name-differs	justified	nxnative treats it as a no-op (ANop): it orders threads only, per thread nothing happens; our front end drops it too (AmpereEmit NOP/DEPBAR/BSSY/BSYNC/BREAK/WARPSYNC)

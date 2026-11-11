@@ -1,5 +1,5 @@
 Ryujinx shader translator, HelperFunctionManager: the compare-and-swap loop of the small-integer shared stores (and the shared
-signed min/max) loaded the word into a temporary the structured program typed as float. A denormal bit pattern (OoT mesh
+signed min/max) loaded the word into a temporary the structured program typed as float. A denormal bit pattern (the game mesh
 programs pack primitive index bytes, words like 0x00020100) did not survive the float round trip on NVIDIA, so the CAS
 never saw the value it compared with and the loop never ended: device lost once the GPU culling gave the mesh draws work
 (AGENTS.md A9/A17). The word is now read with an atomic OR of 0, which has an integer type. The Ryujinx code in the context lines is MIT.
@@ -12,7 +12,7 @@ never saw the value it compared with and the loop never ended: device lost once 
 -            Operand oldValue = context.Load(StorageKind.SharedMemory, id, wordOffset);
 +            // The word as an integer, read with an atomic OR of 0 (shared-small-int-cas-integer.patch): a plain load became a float
 +            // temporary in the structured program, and a denormal pattern (byte indices like 0x00020100) did not come back bit-exact on NVIDIA, so the compare-and-swap
-+            // never matched and the loop never ended (OoT's mesh programs writing their primitive index bytes: device lost).
++            // never matched and the loop never ended (the game's mesh programs writing their primitive index bytes: device lost).
 +            Operand oldValue = context.AtomicOr(StorageKind.SharedMemory, Const(id), wordOffset, Const(0));
              Operand newValue = opCallback(oldValue);
  

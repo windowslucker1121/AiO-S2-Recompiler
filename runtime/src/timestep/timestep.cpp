@@ -226,7 +226,7 @@ void publish_dt(float dt) {
 float read_dt() { return g().dt; }
 std::atomic<double> g_movie_pics_at{-1.0};   // movie_pics_at for movie_showing() on other threads
 
-// Pictures of movies the game has taken so far: the movie list's (Switch 1 HLE) plus nn::codec's decoded pictures read (Switch 2).
+// Pictures of movies the game has taken so far: the movie list's (platform 1 HLE) plus nn::codec's decoded pictures read (platform 2).
 uint64_t movie_pictures() { return media::movie_stats().video_frames_delivered + media::video_codec_stats().frames_read; }
 
 // ---- the frame boundary: entry hook on CGameArchitectureSupport::Update -------------------------------------------------------------

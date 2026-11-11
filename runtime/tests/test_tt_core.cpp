@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Test tooling core (S5): a fake game whose memory has exactly the shape the registered test game's probes read (games/mpr/mpr_tt_probe.cpp), driven frame by frame
+// Test tooling core (S5): a fake game whose memory has exactly the shape the registered test game's probes read (games/<id>/mpr_tt_probe.cpp), driven frame by frame
 // through tt::frame_boundary. Covers scripted runs (pass, wait timeout, assert), record -> replay determinism, the virtual clock and RNG,
 // memory-region hashing, the warp sequence (host functions registered at the guest addresses of the real functions) and @shot.
 #include "test_framework.h"
@@ -33,8 +33,8 @@ const char* kWorld = "4b5e8635-0f43-4ffb-9427-2e62186e517d";
 const char* kAreaA = "4ca69978-0000-4000-8000-000000000001";
 const char* kAreaB = "4ca69978-0000-4000-8000-000000000002";
 
-// The fake game below has Metroid Prime Remastered's memory shape (docs/S5.md), which that game's probes read (nxrt/game.h Info::probes,
-// games/mpr/mpr_tt_probe.cpp). That module is not in every checkout (this one registers oot, which has no probes): then the cases that only
+// The fake game below has title E's memory shape (docs/S5.md), which that game's probes read (nxrt/game.h Info::probes,
+// games/<id>/mpr_tt_probe.cpp). That module is not in every checkout (this one registers oot, which has no probes): then the cases that only
 // need some probe readings (health, position, world and area for the script steps) get a stand-in probe table that reads the same shape, and
 // the cases that check those probes or the game's own warp sequence skip.
 bool mpr_probes_registered() { return game::info().probes && std::strcmp(game::info().id, "mpr") == 0; }
@@ -78,7 +78,7 @@ const GameProbes kRigProbes = [] {
     return p;
 }();
 
-// Registers the stand-in probes for one Rig's lifetime unless the registered game is Metroid Prime Remastered (restored in reverse order).
+// Registers the stand-in probes for one Rig's lifetime unless the registered game is title E (restored in reverse order).
 struct RigProbes {
     const game::Info* prev = game::current();
     game::Info copy = game::info();
@@ -261,7 +261,7 @@ const char* kSession =
 
 NXTEST(probes_read_the_fake_game) {
     if (!mpr_probes_registered()) {   // this case checks those probes' offsets, not the stand-in that copies them
-        nxtest::skip("needs Metroid Prime Remastered's tt probes (games/mpr, not in this checkout)");
+        nxtest::skip("needs title E's tt probes (games/mpr, not in this checkout)");
         return;
     }
     Rig r("probes");
@@ -390,7 +390,7 @@ NXTEST(virtual_clock_steps_per_frame) {
     Rig r("clock");
     begin(r, {{"deterministic", "1"}, {"trace", "none"}});
     uint64_t t0 = 0, t1 = 0, t2 = 0;
-    // system ticks at the platform's rate: 19.2 MHz on Switch 1 (320000 per 1/60 s frame), 31.25 MHz on Switch 2 (the test game's console)
+    // system ticks at the platform's rate: 19.2 MHz on platform 1 (320000 per 1/60 s frame), 31.25 MHz on platform 2 (the test game's console)
     const uint64_t hz = nxrt::kernel::tick_hz(), frame_ticks = hz / 60, ms_ticks = hz / 1000;
     REQUIRE(virtual_tick(&t0));
     REQUIRE(virtual_tick(&t1));
@@ -462,7 +462,7 @@ NXTEST(hash_regions_fold_memory_into_the_frame_hash) {
 
 NXTEST(warp_runs_the_practice_mod_sequence) {
     if (!mpr_probes_registered()) {   // the warp is the game's own function sequence (GameProbes::warp)
-        nxtest::skip("needs Metroid Prime Remastered's tt probes and warp (games/mpr, not in this checkout)");
+        nxtest::skip("needs title E's tt probes and warp (games/mpr, not in this checkout)");
         return;
     }
     Rig r("warp");
@@ -503,7 +503,7 @@ const char* kWarpScript = "2\n@warp frig frig_b\n@assert area == frig_b\n@pass\n
 // S42: @warp waits while the game's resource loader has work queued, and warps once it has been idle for 10 frames in a row.
 NXTEST(warp_waits_for_the_idle_resource_loader) {
     if (!mpr_probes_registered()) {
-        nxtest::skip("needs Metroid Prime Remastered's tt probes and warp (games/mpr, not in this checkout)");
+        nxtest::skip("needs title E's tt probes and warp (games/mpr, not in this checkout)");
         return;
     }
     Rig r("warpgate");
@@ -531,7 +531,7 @@ NXTEST(warp_waits_for_the_idle_resource_loader) {
 
 NXTEST(warp_gate_can_be_turned_off_and_gives_up_after_its_limit) {
     if (!mpr_probes_registered()) {
-        nxtest::skip("needs Metroid Prime Remastered's tt probes and warp (games/mpr, not in this checkout)");
+        nxtest::skip("needs title E's tt probes and warp (games/mpr, not in this checkout)");
         return;
     }
     for (int mode = 0; mode < 2; mode++) {

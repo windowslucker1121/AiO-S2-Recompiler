@@ -4,7 +4,7 @@
 Usage: python -I tools/shaders/scripts/census.py <corpus dir> --game <name> [--out-dir <dir>] [--jobs N] [--no-build] [--keep]
 
 <corpus dir> is either layout the project uses:
-  * Pokopia corpus (tools/shaders/scripts/extract_generic.py): unique.tsv, code/<h>.bin, ctrl/<h>.bin
+  * title A corpus (tools/shaders/scripts/extract_generic.py): unique.tsv, code/<h>.bin, ctrl/<h>.bin
   * runtime dump (NXRT_NVN_DUMP_MISSING, any game): manifest.tsv, code_<h>.bin, ctrl_<h>.bin (duplicate rows folded)
 
 Writes <out-dir>/census_<game>.tsv (default out-dir: <repo root>/work/audit) and census_<game>_summary.md.
@@ -77,7 +77,7 @@ def classify(opcode, nv_name):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('corpus')
-    ap.add_argument('--game', required=True, help='short name used in the output file names (pokopia, mkw, ...)')
+    ap.add_argument('--game', required=True, help='short name used in the output file names (e.g. oot)')
     ap.add_argument('--out-dir', default=None)
     ap.add_argument('--jobs', type=int, default=6)
     ap.add_argument('--no-build', action='store_true', help='skip `dotnet build` of sassdecode')

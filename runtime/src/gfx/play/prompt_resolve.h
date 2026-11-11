@@ -2,7 +2,7 @@
 // Button prompts (S17): which icon of the prompt pack stands in for each of the game's own button icons. Pure functions, no
 // game memory and no graphics; prompts.cpp does the texture side.
 //
-// A game draws its prompts ("PRESS (A) TO START", the footer of the menus, tutorial texts) with small textures, one per Switch button glyph
+// A game draws its prompts ("PRESS (A) TO START", the footer of the menus, tutorial texts) with small textures, one per console button glyph
 // (Icon below). Which textures those are, and how to find them in the game's files, is the game's (PromptGame, nxrt/game.h Info::prompts).
 // A game with its icons in textures, e.g. 19 small BC7 textures TXTR_ButtonA ... TXTR_DPadIdle and the two stick icons in GuiSysMP1.pak and
 // PreloadFrontEndMPT.pak (the game module).
@@ -15,7 +15,7 @@
 
 namespace nxrt::play {
 
-// The physical button an icon shows. None: the icon is not a button of the Switch pad (the stick icons).
+// The physical button an icon shows. None: the icon is not a button of the console pad (the stick icons).
 enum class Btn : uint8_t { A, B, X, Y, L, R, ZL, ZR, Plus, Minus, DPad, None, kCount };
 
 // The game's icon textures. The "Pressed" ones are the gold highlighted twins the game draws while the button is held.
@@ -32,7 +32,7 @@ struct PromptIcon {
     const char* asset;          // the texture's name in the game's files (logs): "TXTR_ButtonA"
     const char* uuid;           // its asset id there, canonical lower-case text
     const char* pak;            // the archive under the RomFS folder: "Preload/MPR1/GuiSysMP1.pak"
-    const char* front_uuid;     // a second copy of the icon (Metroid: the front end's own, in front_pak), or nullptr
+    const char* front_uuid;     // a second copy of the icon (title E: the front end's own, in front_pak), or nullptr
 };
 struct PromptGame {
     const PromptIcon* icons = nullptr;   // kIconCount entries in Icon order
@@ -60,14 +60,14 @@ struct ResolveIn {
 };
 
 // The name of the prompt pack entry that replaces the game's icon: "xbox/a", "ps/cross", "kbm/space", with "_pressed" appended for a
-// pressed icon. Pad styles show the physical button that presses the Switch button, following settings->pad.remap. Empty: keep the
+// pressed icon. Pad styles show the physical button that presses the console button, following settings->pad.remap. Empty: keep the
 // game's own icon (Switch style, a keyboard style button no input is bound to, or a pad style where nothing presses the button or the
 // pad source is a stick click or the d-pad).
 // The stick icons (LStick, RStick) are the map's controls: keyboard style on the map shows the mouse buttons that drive it (left button
 // rotates, middle button moves; kbm/mouse1 and kbm/mouse2). Every other style and context keeps the game's own stick icon.
 std::string resolve_icon(const ResolveIn& in, Icon icon);
 
-// Keyboard and mouse: the input that presses this Switch button in the given context, following the bindings of the settings.
+// Keyboard and mouse: the input that presses this console button in the given context, following the bindings of the settings.
 // Looks at actions whose [switch] output is exactly that button (confirm and back before the raw btn_ actions), in the bindings that
 // apply in ctx (a binding of the context beats the `all` layer for the same input), then in the other contexts. False: nothing is bound.
 bool input_for_button(const Settings& s, Ctx ctx, Btn b, InputId* out);

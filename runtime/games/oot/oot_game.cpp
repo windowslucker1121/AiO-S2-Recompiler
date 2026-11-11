@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Ocarina of Time: the whole game module as one nxrt::game::Info (oot_game.h). Play mode runs on the base engine (SDL gamepads and the
+// the game: the whole game module as one nxrt::game::Info (oot_game.h). Play mode runs on the base engine (SDL gamepads and the
 // keyboard as a Pro Controller); game-specific hooks come here as they are found.
 #include "oot_game.h"
 

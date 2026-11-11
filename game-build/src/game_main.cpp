@@ -845,7 +845,7 @@ int main(int argc, char** argv) {
 
     nxrt::kernel::fibers_install();   // nn::os fibers on host fibers (when the lifted sdk has the entryhook site)
 
-    // The game reaches NVN only through `nvnBootstrapLoader` (an import of main that the sdk defines: Nintendo's driver). The lifted PLT
+    // The game reaches NVN only through `nvnBootstrapLoader` (an import of main that the sdk defines: the platform's driver). The lifted PLT
     // stub of main calls host_import(), not the GOT that rtld fills, so the symbol is forced to the runtime's NVN front end here; the
     // sdk's own definition is also replaced in the call table for any indirect call that reaches it by address (debug note 120).
     if (nxrt::config_get_bool("boot", "nvn", true)) {

@@ -86,7 +86,7 @@ class ReverbCommand : public ICommand {
 
         IsLongSizePreDelaySupported = isLongSizePreDelaySupported;
 
-        // NOTE: We do the opposite as Nintendo here for now to restore previous behaviour
+        // NOTE: We do the opposite as the platform here for now to restore previous behaviour
         // TODO: Update reverb processing and remove this to use RemapLegacyChannelEffectMappingToChannelResourceMapping.
         DataSourceHelper::RemapChannelResourceMappingToLegacy(newEffectChannelMappingSupported, InputBufferIndices, _parameter.channel_count);
         DataSourceHelper::RemapChannelResourceMappingToLegacy(newEffectChannelMappingSupported, OutputBufferIndices, _parameter.channel_count);
@@ -104,7 +104,7 @@ class ReverbCommand : public ICommand {
         if (IsEffectEnabled) {
             // Also when the state was never built (an effect enabled after its Invalid pass). Built in place, not assigned: the slot
             // (EffectStateSlot) starts as zeroed bytes, and an assignment never sets the vtable pointers of the DelayLine members, so the
-            // first PreDelayLine call went through a null vtable (OoT's first scene: read at 0x20 on the audio thread).
+            // first PreDelayLine call went through a null vtable (the game's first scene: read at 0x20 on the audio thread).
             if (_parameter.status == UsageState::Invalid || state.FdnDelayLines.empty()) {
                 state.~ReverbState();
                 new (&state) ReverbState(_parameter, WorkBuffer, IsLongSizePreDelaySupported);

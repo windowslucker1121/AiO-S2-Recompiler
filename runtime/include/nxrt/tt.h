@@ -72,9 +72,9 @@ struct GameState {
     int32_t beam = -1;             // current beam, game numbering 0 power 1 ice 2 wave 3 plasma
     int32_t visor = -1;            // 0 combat 1 x-ray 2 scan 3 thermal
     int32_t missiles = -1;         // item 4 amount
-    bool have_tod = false;         // games with an in-game clock (Pokopia): the time of day, hours in [0, 24)
+    bool have_tod = false;         // games with an in-game clock (title A): the time of day, hours in [0, 24)
     float tod = 0;
-    bool have_prog = false;        // a game's own progress counter (Pokopia: tutorials seen), monotonic over a playthrough
+    bool have_prog = false;        // a game's own progress counter (title A: tutorials seen), monotonic over a playthrough
     int32_t prog = 0;
 };
 

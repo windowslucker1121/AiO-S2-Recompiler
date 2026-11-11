@@ -335,7 +335,7 @@ NXTEST(am_error_and_shop_applets_close) {
     REQUIRE(creator.valid());
     // The inline software keyboard (0x11 in a partial-foreground mode) is still refused: 128-712 = 0x59080.
     CHECK_EQ(creator.call(0, nxsvc::Args().u32(0x1010011).u32(1)).result, 0x59080u);
-    // The error applet as Pokopia creates it (0x100000E, mode 0): Start ends it at once and GetResult is success (exit reason Normal).
+    // The error applet as title A creates it (0x100000E, mode 0): Start ends it at once and GetResult is success (exit reason Normal).
     nxsvc::Session err = creator.sub(creator.call(0, nxsvc::Args().u32(0x100000E).u32(0)));
     REQUIRE(err.valid());
     CHECK_EQ(err.call(10).result, 0u);

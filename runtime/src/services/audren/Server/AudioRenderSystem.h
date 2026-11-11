@@ -879,7 +879,7 @@ class AudioRenderSystem {
 
     ResultCode ExecuteAudioRendererRendering() {
         if (_executionMode == server::AudioRendererExecutionMode::Manual && _renderingDevice == server::AudioRendererRenderingDevice::Cpu) {
-            // NOTE: Here Nintendo aborts with this error code, we don't want that.
+            // NOTE: Here the platform aborts with this error code, we don't want that.
             return ResultCode::InvalidExecutionContextOperation;
         }
 

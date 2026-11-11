@@ -67,10 +67,10 @@ namespace Nx.Shaders.Ampere
 
         static void RegisterTex()
         {
-            // TEX bits 79..80: .F16.RN / .F16.RZ (fp16 results packed in pairs), 3 is reserved [xcheck probe; 2 Pokopia TEX.SCR.F16.RN words]
+            // TEX bits 79..80: .F16.RN / .F16.RZ (fp16 results packed in pairs), 3 is reserved [xcheck probe; 2 title A TEX.SCR.F16.RN words]
             Action<Ctx> texMods = c => { c.Mod(79, 2, null, "F16.RN", "F16.RZ", "INVALID3"); c.Mod(87, 3, TexLod); c.Mod(c.B(76), "AOFFI"); c.Mod(c.B(78), "DC"); c.Mod(c.B(77), "NDV"); };
             // TLD, TLD4 and TXD have the same .F16.RN / .F16.RZ field at 79..80 [nvdisasm 13.3 probe, 2026-11-08]: printed after SCR
-            // (TLD: before the LOD mode; TLD4: after the component, before PTP/AOFFI; TXD: first). It was missing here, so OoT's
+            // (TLD: before the LOD mode; TLD4: after the component, before PTP/AOFFI; TXD: first). It was missing here, so the game's
             // upscaler f90d726d / 02dcb888 ("TLD4.SCR.R.F16.RN.PTP R13, R12, R10, R0, 0x0, 0x30, 2D") were translated as fp32 gathers
             // that wrote four registers (Rd, Rd+1, Rd2, Rd2+1) instead of two half pairs and clobbered live registers.
             Action<Ctx> f16Mod = c => c.Mod(79, 2, null, "F16.RN", "F16.RZ", "INVALID3");
@@ -107,7 +107,7 @@ namespace Nx.Shaders.Ampere
             Op12(0xb97, c => Surface(c, true, false));
             Op12(0x998, c => Surface(c, true, true));
             Op12(0xb9b, c => Surface(c, false, false));
-            // SURED 0x59f (surface reduction; one Mario Kart World instruction): SURED.D[.BA].<dim>.<op>[.<type>][.<evict>].<order>[.IGN|.TRAP] [Ra], Rb, slot, handle
+            // SURED 0x59f (surface reduction; one title C instruction): SURED.D[.BA].<dim>.<op>[.<type>][.<evict>].<order>[.IGN|.TRAP] [Ra], Rb, slot, handle
             // op 87..89 as ATOM, type 73..75, 59..60 = 0 IGN, 2 TRAP [xcheck probe]
             Op12(0x59f, c =>
             {
@@ -117,7 +117,7 @@ namespace Nx.Shaders.Ampere
                 c.Dst = 0; c.Add(MemOp(c, c.I(24, 8), null, -1, 0), c.R(32)); TexHandle(c, false);
             });
             Op12(0x99c, c => Surface(c, false, true));
-            // SURED 0x59f [probe] (Mario Kart World ee145ba8782ff91f@0xc0: "SURED.D.2D.ADD.STRONG.GPU.IGN [R4], R0, 0x0, 0xc"): BA 72, shape
+            // SURED 0x59f [probe] (title C ee145ba8782ff91f@0xc0: "SURED.D.2D.ADD.STRONG.GPU.IGN [R4], R0, 0x0, 0xc"): BA 72, shape
             // 61..63, op 87..89 (atomic op table), type 73..75 (SuatomSize order), evict 84..86, memory order 77..80, clamp 59..60
             // (0 IGN, 1 none, 2 TRAP); operands [Ra] (coordinates), Rb (data), bank 54..58, handle 40..53
             Op12(0x59f, c =>

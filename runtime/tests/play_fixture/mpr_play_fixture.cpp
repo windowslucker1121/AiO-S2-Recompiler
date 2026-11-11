@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Metroid Prime Remastered's play-mode vocabulary and factory controls.ini as a test fixture (see mpr_play_fixture.h for why and how).
+// title E's play-mode vocabulary and factory controls.ini as a test fixture (see mpr_play_fixture.h for why and how).
 #include "mpr_play_fixture.h"
 
 #include "nxrt/game.h"
@@ -109,7 +109,7 @@ const GameVocabulary kVocabulary = [] {
 
 // The factory controls.ini at revision 3. Every key is one the reader knows (the tests parse it without warnings); the display keys sit on
 // lines of their own, and the four that only apply at the next start say so on the comment line above them.
-constexpr const char* kSettingsText = R"INI(# Metroid Prime Remastered: keyboard, mouse and controller settings (test fixture)
+constexpr const char* kSettingsText = R"INI(# title E: keyboard, mouse and controller settings (test fixture)
 [meta]
 defaults_rev = 3
 

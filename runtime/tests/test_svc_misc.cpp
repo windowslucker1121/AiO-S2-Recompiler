@@ -88,7 +88,7 @@ NXTEST(misc_hwopus_size_and_refusal) {
     CHECK(size != 0);
     CHECK_EQ(size % 0x1000u, 0u);                   // official user processes page-align this size
     // OpenHardwareOpusDecoder (cmd 0): packed rate/channels, u32 work buffer size, transfer memory handle. There is no Opus decoder on
-    // the host, but the manager opens a decoder that decodes silence (Mario Kart World aborts on a refusal); it comes back as a session handle.
+    // the host, but the manager opens a decoder that decodes silence (title C aborts on a refusal); it comes back as a session handle.
     services::ServiceEvent ev;
     const uint32_t h = ev.new_handle();
     REQUIRE(h != 0);
@@ -150,7 +150,7 @@ NXTEST(misc_caps_su_saves_png) {
     config_set("album", "dir", dir.string().c_str());
     nxsvc::Session s = nxsvc::connect("caps:su");
     REQUIRE(s.valid());
-    // SaveScreenShotEx1 (cmd 205) as the Switch 2 sdk sends it: ScreenShotAttribute (0x40 bytes, ImageSize 0 = 1280x720), u32 report
+    // SaveScreenShotEx1 (cmd 205) as the platform 2 sdk sends it: ScreenShotAttribute (0x40 bytes, ImageSize 0 = 1280x720), u32 report
     // option, u64 aruid; buffer 0 the 0x404-byte ApplicationData, buffer 1 the RGBA8 image.
     std::vector<uint8_t> img(1280 * 720 * 4, 0x80);
     std::vector<uint8_t> app(0x404, 0);
