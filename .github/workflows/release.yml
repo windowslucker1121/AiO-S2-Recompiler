@@ -82,7 +82,7 @@ jobs:
           "release=$rel" >> $env:GITHUB_OUTPUT
           Write-Host "version $v, release $rel"
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
