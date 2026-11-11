@@ -15,7 +15,7 @@
 // scalar emulation matches only within the HMMA tolerance (hwcheck README, "Tolerances").
 //
 // A cooperative-matrix operation must be reached by the whole subgroup, as HMMA needs the whole warp: the game's code already obeys
-// that (OoT's network passes run their HMMAs in straight-line code between barriers). Compute stage only (32-lane subgroups).
+// that (the game's network passes run their HMMAs in straight-line code between barriers). Compute stage only (32-lane subgroups).
 //
 // Used when the harness translates a block in its cooperative-matrix variant (Active, per thread; NXRT_HARNESS_COOPMAT=1 turns
 // it on for every translation): the harness writes it as <hash>.cm.spv next to <hash>.spv (Program.cs TranslateVariants), and the
@@ -130,7 +130,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         /// Packed-half arithmetic of the variant (HADD2 / HMUL2 / HFMA2 with a half result): one lane's add (kind 0), multiply (1) or
         /// fused multiply-add (2) of fp32 operands holding fp16 values, done in float16. The hardware's own rounding (once, to nearest)
         /// instead of fp32 arithmetic rounded twice (and, for HFMA2, the fp64 round-to-odd step that avoids that: AmpereEmit.cs
-        /// HalfFmaOdd), which made most of the network passes' cost after HMMA (and up to ~100 fp64 operations in each of OoT's hot
+        /// HalfFmaOdd), which made most of the network passes' cost after HMMA (and up to ~100 fp64 operations in each of the game's hot
         /// material fragment shaders). Null outside the cooperative-matrix and float16 variants: the caller emits fp32.
         internal static IrOperand TryHalf(EmitterContext ctx, int kind, IrOperand a, IrOperand b, IrOperand c)
         {

@@ -51,7 +51,7 @@ std::vector<MapRec> g_maps;
 // RELRO after making it read-only; the kernel then refuses SetMemoryPermission there and QueryMemory reports the attribute.
 std::map<uint64_t, uint64_t> g_perm_locked;
 constexpr uint32_t kAttrUncached = 0x08, kAttrPermissionLocked = 0x10;   // svc::MemoryAttribute bits
-constexpr uint32_t kAttrGpuAccessible = 0x20;   // Switch 2 (svc 0x80 SetGpuMemoryAttribute): memory registered with the GPU
+constexpr uint32_t kAttrGpuAccessible = 0x20;   // platform 2 (svc 0x80 SetGpuMemoryAttribute): memory registered with the GPU
 // Ranges with the GpuAccessible attribute: start -> end, disjoint and not adjacent. Set and cleared by SetGpuMemoryAttribute, reported by
 // QueryMemory (NVN2 reads it back). Guarded by g_mu.
 std::map<uint64_t, uint64_t> g_gpu_attr;
@@ -220,7 +220,7 @@ void set_heap_size(::Ctx* c) {
         fail(c, "SetHeapSize", kernel::kInvalidSize, size, 0, 0);
         return;
     }
-    // Switch 1 kernels refuse more than 4 GiB; Switch 2 applications set heaps of several GiB (only nxrt's heap region bounds them)
+    // platform 1 kernels refuse more than 4 GiB; platform 2 applications set heaps of several GiB (only nxrt's heap region bounds them)
     const bool s2 = game::info().platform == game::Platform::Switch2;
     if ((!s2 && size > kMaxHeapSvc) || size > mem::kHeapMax) {
         fail(c, "SetHeapSize", kernel::kOutOfMemory, size, 0, 0);
@@ -328,12 +328,12 @@ void set_memory_attribute(::Ctx* c) {
     svc_ret(c, kernel::kOk);
 }
 
-// ---- SetGpuMemoryAttribute (0x80, Switch 2) ----------------------------------------------------------------------------------
+// ---- SetGpuMemoryAttribute (0x80, platform 2) ----------------------------------------------------------------------------------
 // svcSetGpuMemoryAttribute(address, size, mask, attr) (switchbrew [S2] 0x80). The only attribute is GpuAccessible (0x20): nn::gpu::sdk and the
 // native memory objects of nn::gs set it before they register memory with the GPU and clear it when they destroy it, and NVN2 sees it
 // through QueryMemory. Guest memory is plain host memory and the GPU is the host's Vulkan device, so nothing changes in the memory itself;
 // the attribute is tracked and reported. Checks as svcSetMemoryAttribute's, limited to that bit (Eglantine NX2_NOTES row 47, svc.cpp).
-// Switch 1 titles never call it (it is not in their SVC mask): they keep the old log-and-succeed answer.
+// platform 1 titles never call it (it is not in their SVC mask): they keep the old log-and-succeed answer.
 void set_gpu_memory_attribute(::Ctx* c) {
     const uint64_t addr = reg(c, 0), size = reg(c, 1);
     const uint32_t mask = static_cast<uint32_t>(reg(c, 2)), attr = static_cast<uint32_t>(reg(c, 3));
@@ -387,7 +387,7 @@ void map_memory(::Ctx* c) {
     const mem::VmInfo sv = mem::vm_query(src);
     const bool src_code_data = sv.state == mem::kMemCodeData && src >= sv.addr && src + size <= sv.addr + sv.size;
     // Or pages of MapPhysicalMemory (state Alias here, Normal memory on the console like the heap): nn::os's virtual address memory manager
-    // hands those out, and Ocarina of Time's thread stacks come from it. The vm map keeps those pages in one block per 64 KiB granule, so
+    // hands those out, and the game's thread stacks come from it. The vm map keeps those pages in one block per 64 KiB granule, so
     // every block across the range is checked.
     bool src_physical = sv.state == mem::kMemAlias;
     for (uint64_t p = src; src_physical && p < src + size;) {

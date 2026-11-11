@@ -6,7 +6,7 @@
 // layer 0 was attached, so faces 1..5 were never drawn into and stayed clear: case 1 fails without that fix.
 // Case 2 uses a passthrough geometry shader: it copies the Location 0 input to the Location 0 output (nvn_spirv_patch.cpp
 // spirv_gs_passthrough), so a fragment shader that reads Location 0 sees the interpolated (u, v, layer, 1) of each face.
-// Every scene uses REAL translated shaders of Metroid Prime Remastered (work/shader_cache) and reads the cube back per face.
+// Every scene uses REAL translated shaders of title E (work/shader_cache) and reads the cube back per face.
 // Skipped when the shader data is not on this machine.
 #include <algorithm>
 #include <cmath>

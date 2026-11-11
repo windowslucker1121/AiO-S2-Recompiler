@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Program list (programs.bin) of the shader preparation from Nintendo shader archives (BFSHA/BNSH, NVN2): which vertex, fragment and
+"""Program list (programs.bin) of the shader preparation from the platform shader archives (BFSHA/BNSH, NVN2): which vertex, fragment and
 geometry blocks are used together, so `<game>.exe --prepare-shaders` can compile the pipeline parts of every program before the first
 start (runtime/src/gfx/nvn/nvn_gpl.cpp gpl_prepare, format read_programs_file).
 
     python -I bnsh_programs.py --romfs <romfs> --out <shader_cache>/programs.bin [--cache <spirv dir>] [--self-test]
 
-Method (read from Ocarina of Time's files, no format spec): inside a 'BNSH' region every stage of a program has a 24-byte record
+Method (read from the game's files, no format spec): inside a 'BNSH' region every stage of a program has a 24-byte record
 {u64 control offset, u64 code offset, u32 code size, u32 control size} (offsets from the 'BNSH' magic), and
 the records of one program follow each other 0x40 bytes apart. A run of records 0x40 apart is one program; its stages come from the
 control section (u16 +0x56: 0 vertex, 1 fragment, 2 geometry; 6/7 are other stages, skipped). Block keys are the first 16 hex digits of

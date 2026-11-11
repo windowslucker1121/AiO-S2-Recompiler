@@ -1,5 +1,5 @@
-// Reflection section (type 3) of an NVN2 GLSLC output (Switch 2): uniform blocks and opaque uniforms with their per-stage
-// bindings. Layout read from the game's own outputs (tools/shaders/docs/AMPERE.md section 2b); it has the shape of Switch 1's
+// Reflection section (type 3) of an NVN2 GLSLC output (platform 2): uniform blocks and opaque uniforms with their per-stage
+// bindings. Layout read from the game's own outputs (tools/shaders/docs/AMPERE.md section 2b); it has the shape of platform 1's
 // GLSLC reflection (string pool + block, uniform, input, output tables), with record sizes 0x6c (block) and 0xa4 (uniform).
 //
 //   section header (0x98 bytes at output +0xa8 + 0x98*i, type 3), u32 words: [10] block table offset, [11] block count,

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
-// Block order for the structurizer (OoT register pressure, 2026-11-09).
+// Block order for the structurizer (the game register pressure, 2026-11-09).
 //
 // Ryujinx's structurizer (StructuredProgramContext) takes the blocks in their index order, which is the order the IR was emitted in,
 // i.e. the address order of the SASS, and treats every branch to a lower index as a loop: the target becomes the head of a do-while
 // that runs up to the branching block. SASS puts the cases of a BRX jump table before and after the BRX, so each case that lies before
-// the BRX became one more do-while around the switch (OoT's material shaders: the light loop held five such loops nested in each
+// the BRX became one more do-while around the switch (the game's material shaders: the light loop held five such loops nested in each
 // other, each with a goto-elimination flag, and NVIDIA's compiler kept the light record and the shading inputs alive through all of
 // them: 235-255 registers against 94 in the original code).
 //

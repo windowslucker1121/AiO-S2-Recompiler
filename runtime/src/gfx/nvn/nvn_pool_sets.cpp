@@ -3,7 +3,7 @@
 //
 // NVN shaders sample through 32-bit handles: texture id (bits 0..19) into the bound texture pool, sampler id (bits 20..31) into the bound
 // sampler pool. Most handles are fixed per draw (a binding slot, a uniform word, or an expression the runtime evaluates: HandleExpr), and
-// those keep their plain per-draw binding. A handle computed per pixel (OoT's clustered-light shadow maps: TEX.SCR.B.DC with the light
+// those keep their plain per-draw binding. A handle computed per pixel (the game's clustered-light shadow maps: TEX.SCR.B.DC with the light
 // index from a storage loop, 4,336 fragment shaders) cannot be bound that way: the harness turns such a sample into Ryujinx's
 // GenerateBindlessAccess (an index into a sampled-image array plus one into a sampler array, in extra descriptor sets), and the runtime
 // binds those to persistent sets that mirror the bound pools (bind_pool_sets in nvn_replay.cpp fills and binds them).

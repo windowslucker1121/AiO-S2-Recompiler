@@ -210,7 +210,7 @@ struct GplStats {
     uint64_t jobs_pending = 0;                       // shader-part jobs queued or running at this moment (0 once every job queued so far has finished)
     uint64_t prog_set = 0, prog_covered = 0, prog_new = 0, prog_bound = 0, prog_bound_new = 0, jobs_run = 0, jobs_no_layout = 0, jobs_no_modules = 0;
     uint64_t draws_deferred = 0, parts_async = 0;    // [nvn] gpl_async: draws skipped while their parts compiled, parts compiled for them
-    uint64_t prog_single = 0;                        // programs with only one of vertex and fragment shader (Pokopia sets them apart): nothing to queue per program
+    uint64_t prog_single = 0;                        // programs with only one of vertex and fragment shader (title A sets them apart): nothing to queue per program
     uint64_t prebuild_jobs = 0, prebuild_run = 0;    // key-file keys whose parts were queued, run
     uint64_t shader_parts_prepared = 0, shader_parts_new = 0;   // shader parts built on the background threads: ones a shader preparation made, the rest
     double prepared_ms = 0, new_ms = 0;                         // their build times (a prepared part comes from the pipeline cache: about 1 ms)

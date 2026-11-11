@@ -158,7 +158,7 @@ void page_table_stats(uint64_t* spans, uint64_t* pages);
 // The device address the page table gives a guest address (the shaders' walk, on the host), 0 when it maps nothing there (trace lines).
 uint64_t page_table_lookup(uint64_t guest);
 // Imports every chunk of every registered (non-virtual) pool, so the page table maps all of them: a pointer shader can reach any pool
-// address, while chunked pools are otherwise imported only where the render thread binds something (A15: OoT's foliage vertex shader read
+// address, while chunked pools are otherwise imported only where the render thread binds something (A15: the game's foliage vertex shader read
 // its light-probe tables through pointers into a 149 MiB pool nothing else bound, and got zeros). Does nothing while the pool registry is
 // unchanged since the last call. Render thread.
 void import_pools_for_pointers();

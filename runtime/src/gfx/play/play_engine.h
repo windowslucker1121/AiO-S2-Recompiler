@@ -8,7 +8,7 @@
 //  * Triggers: press = active while held. tap = a pulse of [timing] pulse_ms right after a release that came within the tap window.
 //    hold = active while held, from the hold delay on. toggle = each press flips it. doubletap = active while held when the press came
 //    within the window after the previous release of the same input. A mouse wheel notch is a pulse for every trigger except toggle (which flips).
-//  * Set A / set B selects (mpr: beams / visors) and the wheel cycling are edge actions: when the binding becomes active the select output is
+//  * Set A / set B selects (title E: beams / visors) and the wheel cycling are edge actions: when the binding becomes active the select output is
 //    pressed for pulse_ms, however long the key stays down. SetANext / SetAPrev walk the tracked set-A member (the last one selected through
 //    the engine or told by set_cycle_hint) over the members in the hint mask.
 //  * Changing the context consumes every held input whose bindings differ in the new context: it does nothing until it is released.
@@ -48,14 +48,14 @@ public:
     void wheel(int dir, uint64_t now_ns);                          // +1 up, -1 down: one notch
     void release_all(uint64_t now_ns);                             // focus lost: everything is released (no taps fire)
     void pulse(Act a, uint64_t now_ns, int ms = 0);                // ms 0 = [timing] pulse_ms
-    void set_aux_sticks(float lx, float ly, float rx, float ry);   // added to the sticks (the menu pointer dragging the map); 0 = none                            // one press of the action's Switch output for [timing] pulse_ms (the menu pointer's click on a plain screen)
+    void set_aux_sticks(float lx, float ly, float rx, float ry);   // added to the sticks (the menu pointer dragging the map); 0 = none                            // one press of the action's console output for [timing] pulse_ms (the menu pointer's click on a plain screen)
     // One call per game frame (the frame-boundary hook). Once it has been called, a select pulse also stays on for at least `kPulseFrames` frame
     // boundaries after the first poll that reported it: the game samples its input once per tick and other readers poll the pad in between, so
     // a pulse that is only a few milliseconds of one frame can be eaten before the tick sees it.
     void frame_tick();
 
     // What the game knows: the set-A member currently selected (0..3 = SetA1..SetA4; -1 = unknown) and a bit mask of the members the player
-    // can select (mpr: the beam in use and the beams owned).
+    // can select (title E: the beam in use and the beams owned).
     // The game's view is adopted only when no select of ours is pending or recent (the game needs a frame or two to act on a pulse).
     void set_cycle_hint(int current, unsigned mask, uint64_t now_ns);
     int tracked_cycle() const;

@@ -1,6 +1,6 @@
 Ryujinx shader translator (experiment, off by default): NXRT_HARNESS_PROPAGATE=near:K folds a single-use value only into one of the next
 K statements of its own block (none = no folding, as DebugMode). AstOptimizer otherwise sinks every single-use value (constant-buffer
-loads, texture results, arithmetic trees) to its use however far away, which keeps the inputs live (OoT fern mesh fbb731e2: 255 registers
+loads, texture results, arithmetic trees) to its use however far away, which keeps the inputs live (the game fern mesh fbb731e2: 255 registers
 with spills -> 174 without). No fps gain was measured (tools/shaders/README.md, F1). Applied after structured-subgroup-propagation.patch.
 The Ryujinx code in the context lines is MIT.
 --- a/StructuredIr/AstOptimizer.cs

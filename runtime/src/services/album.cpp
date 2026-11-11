@@ -2,14 +2,14 @@
 // caps:su (IScreenShotApplicationService): the photos the game saves are written as PNG files into the album folder ([album] dir,
 // default "album" next to the exe).
 //
-// The path from the game (Pokopia main, sdk module from the same title, read in IDA):
+// The path from the game (title A main, sdk module from the same title, read in IDA):
 //   nn::album::SaveScreenshot(const void* rgba, size_t size, ImageSize, AlbumReportOption)    sdk 0x1a2160
 //     -> nn::capsrv::SaveScreenShotForApplication(entry*, data, size, ScreenShotAttribute&, ApplicationData&, option)  sdk 0x28182c
 //     -> caps:su (InitializeForApplication, sdk 0x2815f8) cmd 205 SaveScreenShotEx1 (proxy sdk 0x281d40 / 0x2821ec).
 // ImageSize 0 is 1280x720 and 1 is 1920x1080 (nn::album::GetImageWidth / GetImageHeight, sdk 0x1a0ab0 / 0x1a0ae0); the data is linear
 // RGBA8, at least 4 * width * height bytes (SaveScreenshot aborts otherwise). Cmd 205 request: raw ScreenShotAttribute (0x40 bytes, u32
 // ImageSize first), u32 AlbumReportOption at 0x40, u64 AppletResourceUserId at 0x48; buffer 0 the ApplicationData (0x404 bytes on
-// Switch 2, 0x400 on Switch 1), buffer 1 the image (both MapAlias in-buffers). Reply: the 0x20-byte ApplicationAlbumEntry. Cmds 203
+// platform 2, 0x400 on platform 1), buffer 1 the image (both MapAlias in-buffers). Reply: the 0x20-byte ApplicationAlbumEntry. Cmds 203
 // (Ex0, no ApplicationData) and 210 (Ex2, a user id list) share the raw layout and take the image as their largest buffer.
 // ApplicationAlbumEntry layout from libnx caps.h (CapsApplicationAlbumEntry v1: u64 size, u64 hash, AlbumFileDateTime, storage,
 // content, pad, unk_x1f = 1). The PNG is encoded by the Windows Imaging Component.

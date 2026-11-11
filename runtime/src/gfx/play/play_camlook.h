@@ -2,7 +2,7 @@
 // Play mode: mouse look that moves a camera and not the player's body. Two uses:
 //   * free look (the FreeLook binding, Alt by default): with the key held the mouse turns the first-person view around the eye while the body
 //     keeps its heading; letting go puts the view back;
-//   * the alternate body's camera (mpr: the morph ball camera): the mouse orbits the camera around the ball, with its own sensitivity.
+//   * the alternate body's camera (title E: the morph ball camera): the mouse orbits the camera around the ball, with its own sensitivity.
 // The pieces here are plain maths and an accumulator; play.cpp feeds them the mouse counts (from the ProcessInput hook) and applies the
 // result to the camera object after the game's own Think (entry hooks on CFirstPersonCameraMP1::Think and CBallCameraMP1::Think).
 // Conventions (the game's world is Y up, forward is +Z at yaw 0 and left is +X, transforms are 3x4 row-major with the translation in column 3, local-to-world

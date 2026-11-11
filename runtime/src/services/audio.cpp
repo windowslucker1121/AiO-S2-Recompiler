@@ -285,7 +285,7 @@ std::shared_ptr<Service> make_audio_device(uint32_t revision) {
         s.add_cmd(15, "AcquireAudioOutputDeviceNotification", not_implemented);
         s.add_cmd(16, "ReleaseAudioOutputDeviceNotification", not_implemented);
         s.add_cmd(17, "AcquireAudioInputDeviceNotification", not_implemented);
-        // 19 / 20 (SDK 22, Ocarina of Time): nn::audio::SetDeviceOutputVolumeAutoTuneModeEnabled(bool) (bool @0, aruid @8) and
+        // 19 / 20 (SDK 22, the game): nn::audio::SetDeviceOutputVolumeAutoTuneModeEnabled(bool) (bool @0, aruid @8) and
         // IsDeviceOutputVolumeAutoTuneModeEnabled() (aruid in, bool out); the SDK aborts on an error. The flag is kept and reported back;
         // the PC's volume stays the player's own (off until the game sets it).
         static std::atomic<bool> auto_tune{false};
@@ -369,7 +369,7 @@ std::shared_ptr<Service> make_audren() {
 
 }  // namespace
 
-// aud:u (Switch 2): the SDK's user client session (nn::audio::CreateUserClientSessionByHipc). nn::audio::CreateAudioRendererManager(false)
+// aud:u (platform 2): the SDK's user client session (nn::audio::CreateUserClientSessionByHipc). nn::audio::CreateAudioRendererManager(false)
 // asks it for the renderer manager with cmd 2 instead of opening audren:u; the answer is the same IAudioRendererManager object.
 std::shared_ptr<Service> make_aud_user() {
     auto s = std::make_shared<Service>("aud:u");
@@ -396,16 +396,16 @@ std::shared_ptr<Service> make_aud_user() {
     return s;
 }
 
-// ---- auddmg:u (Switch 2, SDK 22) ----------------------------------------------------------------------------------------------------
+// ---- auddmg:u (platform 2, SDK 22) ----------------------------------------------------------------------------------------------------
 // nn::audio::devmgr, the audio device manager: virtual devices (speaker, microphone), capture streams, mix topology. Command 0
 // (devmgr::detail::InitializeImpl -> GetImpl: u32 2 @0, sends PID) answers with the session object every other call goes to; the client
-// aborts on an error. The session's commands are found as the game uses them (an unimplemented one is logged with its id): Ocarina of
-// Time lists the virtual input devices at boot.
+// aborts on an error. The session's commands are found as the game uses them (an unimplemented one is logged with its id): the game
+// lists the virtual input devices at boot.
 std::shared_ptr<Service> make_auddmg() {
     auto s = std::make_shared<Service>("auddmg:u");
     s->add_cmd(0, "OpenSession", [](Request&, Response& rsp) -> uint32_t {
         auto session = std::make_shared<Service>("nn::audio::devmgr::ISession");
-        // 0: ListVirtualDeviceNames (devmgr::ListVirtualDeviceNames: functionality, bool, names out, count out); Ocarina of Time asks for the
+        // 0: ListVirtualDeviceNames (devmgr::ListVirtualDeviceNames: functionality, bool, names out, count out); the game asks for the
         // input devices (microphones) at boot. None for now: the count is 0 and the client clears the names. A microphone comes with
         // capture support.
         session->add_cmd(0, "ListVirtualDeviceNames", [](Request&, Response& r) -> uint32_t {

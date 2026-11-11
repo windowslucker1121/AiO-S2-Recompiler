@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Ocarina of Time: who the game is and what its files are called (nxrt/game.h Info). Pure data, no runtime: the library links this
+// the game: who the game is and what its files are called (nxrt/game.h Info). Pure data, no runtime: the library links this
 // part alone. The values come from the game manifest (recomp/games/oot/game.toml) through the generated game_manifest.h.
 #include "oot_game.h"
 #include "game_manifest.h"
@@ -55,7 +55,7 @@ const game::Info& data_info() {
             "motion = none\n"
             "output = img1\n"
             // The real-time frame step (oot_core.cpp apply_step; [time] mode = off gives the console's fixed 1/60 s per frame). The game is
-            // made for 30-60 fps; on a PC that renders 15-25 fps in Kokiri Forest the step goes up to 1/10 s (scale 6; walking and the ladder
+            // made for 30-60 fps; on a PC that renders 15-25 fps in the village the step goes up to 1/10 s (scale 6; walking and the ladder
             // checked at 10 fps). Frames slower than that slow the game down instead of taking larger steps.
             "[time]\n"
             "min_rate = 10\n";

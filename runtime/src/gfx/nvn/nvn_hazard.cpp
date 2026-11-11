@@ -2,7 +2,7 @@
 // [nvn] hazard (default off: see the 2026-11-10 measurements in AGENTS.md): range-based hazard tracking for the render thread's command buffers.
 //
 // The replay used to put a full memory barrier (all commands, all memory) after every dispatch, around every copy, fill and memory write,
-// at the end of passes that wrote storage, and for every game barrier: ~900 per frame in Kokiri Forest at 1920x1080, ~3.85 ms of GPU time
+// at the end of passes that wrote storage, and for every game barrier: ~900 per frame in the village at 1920x1080, ~3.85 ms of GPU time
 // (K1: dropping all of them, as a measurement). Most of them order nothing: the commands on either side touch different memory. Here the
 // barrier calls of the replay (memory_barrier) are only counted, and a barrier is recorded where a command reads memory or an image that a
 // command wrote since the last barrier, or writes what one read or wrote since then. What each command touches comes from the Vulkan calls

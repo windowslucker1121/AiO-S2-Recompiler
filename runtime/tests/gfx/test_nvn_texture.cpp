@@ -281,7 +281,7 @@ NXTEST(layout_packaged_block_height_and_rejects) {
     b.packaged_layout[0] = 7;               // out of the range smo accepts (0..4): the default rule is used
     CHECK_EQ(be::compute_texture_layout(b).storage_size, 2048u);
 
-    // A buffer texture (Switch 2 games make small ones at start-up) is one tightly packed row of width texels, one level, not block-linear.
+    // A buffer texture (platform 2 games make small ones at start-up) is one tightly packed row of width texels, one level, not block-linear.
     const TexLayout buf = be::compute_texture_layout(mk(NVN_TEXTURE_TARGET_BUFFER, 64, 1, 1, 1, NVN_FORMAT_R8));
     CHECK(buf.valid);
     CHECK(!buf.block_linear);
@@ -643,7 +643,7 @@ NXTEST(write_read_round_trip_level0_and_level2) {
     CHECK(std::memcmp(src0.data(), back.data(), src0.size()) == 0);
     // The storage is block-linear, not row by row: texels 0..3 of row 0 are the first 16 bytes. Where the next 16-byte piece of the row goes
     // is the GOB byte order of the console (tegra_tiling.h gob_switch2), which follows the registered game's platform: texels 4..7 start at
-    // byte 32 on Switch 1 (row 1 at 16) and at byte 64 on Switch 2 (rows 1..3 at 16, 32, 48 first). Both are checked in
+    // byte 32 on platform 1 (row 1 at 16) and at byte 64 on platform 2 (rows 1..3 at 16, 32, 48 first). Both are checked in
     // block_linear_gob_order_follows_the_platform.
     const bool sw2 = nxrt::game::info().platform == nxrt::game::Platform::Switch2;
     CHECK(std::memcmp(&pool.mem[0], &src0[0], 16) == 0);
@@ -689,7 +689,7 @@ NXTEST(write_read_round_trip_level0_and_level2) {
 }
 
 // The GOB byte order of a block-linear texture is the console's (tegra_tiling.h gob_piece_offset): a 16-byte piece p of row y inside a GOB
-// lands at Switch 1: (y & 1) * 16 + (p & 1) * 32 + (y >> 1) * 64 (bits 4..8 = y0 x4 y1 y2 x5), Switch 2: (y & 1) * 16 + (y >> 1 & 1) * 32 +
+// lands at platform 1: (y & 1) * 16 + (p & 1) * 32 + (y >> 1) * 64 (bits 4..8 = y0 x4 y1 y2 x5), platform 2: (y & 1) * 16 + (y >> 1 & 1) * 32 +
 // (p & 1) * 64 + (y >> 2) * 128 (bits 4..8 = y0 y1 x4 y2 x5). The texture takes the order of the platform it was made under.
 NXTEST(block_linear_gob_order_follows_the_platform) {
     for (const nxrt::game::Platform plat : {nxrt::game::Platform::Switch1, nxrt::game::Platform::Switch2}) {
@@ -708,10 +708,10 @@ NXTEST(block_linear_gob_order_follows_the_platform) {
         NVNcopyRegion full = region(0, 0, 0, 64, 64, 1);
         a.write(&tex, nullptr, &full, src.data());
         auto piece = [&](uint32_t y, uint32_t p) { return &src[(y * 64 + p * 4) * 4]; };   // texels 4p..4p+3 of row y
-        const uint32_t s1[4][2] = {{0, 32}, {16, 48}, {64, 96}, {80, 112}};      // [y][p] byte offsets, Switch 1
-        const uint32_t s2[4][2] = {{0, 64}, {16, 80}, {32, 96}, {48, 112}};      // Switch 2
+        const uint32_t s1[4][2] = {{0, 32}, {16, 48}, {64, 96}, {80, 112}};      // [y][p] byte offsets, platform 1
+        const uint32_t s2[4][2] = {{0, 64}, {16, 80}, {32, 96}, {48, 112}};      // platform 2
         for (uint32_t y = 0; y < 4; ++y)
-            for (uint32_t p = 0; p < 2; ++p) CHECK_MSG(std::memcmp(&pool.mem[(sw2 ? s2 : s1)[y][p]], piece(y, p), 16) == 0, sw2 ? "Switch 2" : "Switch 1");
+            for (uint32_t p = 0; p < 2; ++p) CHECK_MSG(std::memcmp(&pool.mem[(sw2 ? s2 : s1)[y][p]], piece(y, p), 16) == 0, sw2 ? "platform 2" : "platform 1");
         a.finalize(&tex);
     }
 }

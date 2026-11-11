@@ -201,7 +201,7 @@ void hdr_refresh_levels() {
     const Settings es = settings();
     hdr_resolve_levels(es.hdr, hs.display_hdr, hs.display_peak_nits, hs.display_sdr_white_nits, &hs.paper_white_nits, &hs.peak_nits);
     if (es.hdr.mode == HdrMode::Native && es.hdr.paper_white_nits <= 0 && hs.game_standard_nits >= 80.0f) {
-        // the game's SDR-graded range is what a Switch 2 shows at the TV's paper white; [hdr] paper_white_nits, when set, still wins
+        // the game's SDR-graded range is what a platform 2 shows at the TV's paper white; [hdr] paper_white_nits, when set, still wins
         hs.paper_white_nits = std::clamp(hs.game_standard_nits, 80.0f, 500.0f);
         hs.peak_nits = std::max(hs.peak_nits, hs.paper_white_nits);
     }

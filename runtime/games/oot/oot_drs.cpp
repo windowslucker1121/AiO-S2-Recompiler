@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Ocarina of Time: the game's dynamic resolution, pinned to a set internal size (user rule: the render resolution stays at the set
+// the game: the game's dynamic resolution, pinned to a set internal size (user rule: the render resolution stays at the set
 // resolution; only an upscaler may lower it).
 //
 // What the game does (main 2.0.0): the renderer object R = [[main+0x4e30498] + 0x228] owns a resolution controller C = [R + 0xb48]

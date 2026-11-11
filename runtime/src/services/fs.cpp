@@ -555,7 +555,7 @@ uint32_t open_save(uint8_t space, const SaveAttr& a, bool read_only, std::shared
     }
     // Likewise the account save data of the user the title starts with (the console's launch path ensures it for the preselected
     // user; Ryujinx EnsureApplicationSaveData with the current profile): some titles mount it without EnsureSaveData first
-    // (Mario Kart World: nn::fs::MountSaveData(name, uid) right at boot, and a failure aborts).
+    // (title C: nn::fs::MountSaveData(name, uid) right at boot, and a failure aborts).
     if (a.type == 1 && (a.application_id == p.program_id || a.application_id == 0) && p.account_save_size > 0 && !save_exists(key)) {
         uint64_t hi = 0, lo = 0;
         std::memcpy(&hi, a.uid, 8);
@@ -565,7 +565,7 @@ uint32_t open_save(uint8_t space, const SaveAttr& a, bool read_only, std::shared
             fsapi::ensure_account_save(hi, lo, nullptr);
         }
     }
-    // And the temporary storage (type 4), which the system makes at launch from control.nacp's TemporaryStorageSize: Ocarina of Time calls
+    // And the temporary storage (type 4), which the system makes at launch from control.nacp's TemporaryStorageSize: the game calls
     // nn::fs::MountTemporaryStorage on a loader thread and aborts on TargetNotFound.
     if (a.type == 4 && (a.application_id == p.program_id || a.application_id == 0) && p.temporary_storage_size > 0 && !save_exists(key)) {
         SaveAttr t;

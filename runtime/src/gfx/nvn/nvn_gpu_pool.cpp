@@ -107,7 +107,7 @@ nxrt::GaugeCounter g_gauge_pools_live("nvn.pools_live");   // pools imported and
 // [nvn] pool_import_chunk_mb (default 64, rounded up to a multiple of 64; 0 = import every pool whole). A pool larger than one chunk is imported
 // in chunks of that many MiB plus a quarter of it overlapping the next chunk, each on the render thread the first time a draw, copy or texture
 // touches it. vkAllocateMemory of an import pins every page of it (about a quarter of a millisecond per MiB) and a vkQueueSubmit2 running beside
-// it waits: Pokopia's 3500 MiB graphics heap took ~0.9 s as one import, while draws read only a few MiB of it.
+// it waits: title A's 3500 MiB graphics heap took ~0.9 s as one import, while draws read only a few MiB of it.
 uint64_t import_stride() {
     static const uint64_t s = [] {
         const int64_t mb = std::max<int64_t>(0, config_get_int("nvn", "pool_import_chunk_mb", 64));
@@ -687,7 +687,7 @@ uint64_t physical_buffer_address(uint64_t gpu_address, uint64_t size) {
 
 namespace {
 // A range of a virtual (sparse) pool as the GPU address of its physical backing: the pool's nvnMemoryPoolMapVirtual mappings must cover all of
-// it with one physical pool at consecutive offsets (several adjacent mappings are fine). OoT keeps a 200 KB storage buffer of its post-process
+// it with one physical pool at consecutive offsets (several adjacent mappings are fine). the game keeps a 200 KB storage buffer of its post-process
 // chain there (0x200000382000: written by compute f05596b9, read by 54ecc4b4); bound as the dummy buffer, the passes could not talk.
 bool virtual_to_physical(MemoryPool& vp, uint64_t off, uint64_t size, uint64_t* phys_address) {
     std::lock_guard<std::mutex> lk(vp.vmu);
@@ -828,7 +828,7 @@ void pool_gpu_destroy(PoolGpu* p) {
 // pool itself, as before. A page written again soon after every copy (a ring buffer the game refills each frame) is "hot": it is left in
 // host memory for a while instead of faulting and being copied every frame.
 //
-// The copy is made of 64 MiB chunks, each created the first time a draw wants one of its pages, so a pool of gigabytes (Pokopia's 3.5 GiB
+// The copy is made of 64 MiB chunks, each created the first time a draw wants one of its pages, so a pool of gigabytes (title A's 3.5 GiB
 // graphics heap) costs video memory only for the parts draws read. A bind that spans two chunks reads the pool.
 //
 // [nvn] pool_mirror = on (default) | off.
@@ -1333,9 +1333,9 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
     auto hot = [&](uint64_t p) { return m.hot_until[static_cast<size_t>(p)] > now; };
     // A page newer in the copy whose tracking the CPU dropped (it wrote the page) and that no result of this submission covers: the result's
     // copy-back is recorded already (it runs before this submission), and the CPU wrote the pool page after that result, so the pool is the
-    // current one. It is copied in for this submission like a hot page (fresh). Before, the whole range went back to the pool instead: OoT
+    // current one. It is copied in for this submission like a hot page (fresh). Before, the whole range went back to the pool instead: the game
     // clears the counters in the first page of its GPU culling buffers (2-15 MB each), and every draw reading one flushed all of it.
-    // refill_written (the compute bindings, [nvn] refill_compute): the same for this caller only. OoT resets the counters in the first page of
+    // refill_written (the compute bindings, [nvn] refill_compute): the same for this caller only. the game resets the counters in the first page of
     // its GPU culling buffers every frame; the dispatch that writes them next found that page "newer in the copy" but unarmed, the fill
     // failed, and the range was bound as a shadow read over PCIe from the pool (2-6 MB per buffer), then copied back whole before the
     // indirect dispatch that reads its arguments there (compute out "indirect"). For every caller the refill cost a lot (the draws that
@@ -1793,7 +1793,7 @@ bool use_index() { return on_render_thread() && out_index_on(); }
 
 // [nvn] out_index_inc (default on): a result added on the render thread (out_add) goes into the index in place when the index was current,
 // instead of making the next query rebuild it from every entry (each dispatch adds results, and the next dispatch's storage checks rebuilt
-// the index: ~100 rebuilds per frame in Kokiri outside).
+// the index: ~100 rebuilds per frame in village outside).
 bool index_inc_on() {
     static const bool on = config_get_bool("nvn", "out_index_inc", true);
     return on && ab_index_inc_on();
@@ -1913,7 +1913,7 @@ uint64_t record_jobs(VkCommandBuffer cb, const std::vector<CopyJob>& jobs) {
 }
 
 // ---- delta copy-backs ([nvn] out_delta, default on) -----------------------------------------------------------------------------------
-// The copy-backs of held results sent ~1.9 GB/s over PCIe at 1920x1080 (first scene): OoT's GPU culling buffers (2-15 MB each) go back
+// The copy-backs of held results sent ~1.9 GB/s over PCIe at 1920x1080 (first scene): the game's GPU culling buffers (2-15 MB each) go back
 // whole every frame because the CPU reads and clears the counters in their first page, while the dispatches change a small part of them.
 // Before a dispatch writes a range in the pool copy that holds no unsent result (the copy is what the pool holds there), the range is
 // copied into a device-local snapshot (out_presnap, per 64 MiB chunk of the copy, at the same offset). The copy-back of that result then
@@ -2277,7 +2277,7 @@ bool out_overlaps(uint64_t addr, uint64_t size) {
 // out_overlaps(page, size) for the pointer windows of gmem_before_op (render thread): the same pages are asked about in draw after draw and
 // almost never overlap, so a "no overlap" answer is kept per (page, size, index version) in a small direct-mapped table.
 // [nvn] overlap_grow (default on): the answers are kept per g_out_grow instead, which moves only when live results may cover more pages
-// (g_out_ver moves on every copy-back, split and fetch too: ~140 times per frame in Kokiri outside, and every move emptied the table).
+// (g_out_ver moves on every copy-back, split and fetch too: ~140 times per frame in village outside, and every move emptied the table).
 bool overlap_grow_on() {
     static const bool on = config_get_bool("nvn", "overlap_grow", true);
     return on && ab_overlap_grow_on();
@@ -2294,7 +2294,7 @@ bool out_overlaps_window(uint64_t page, uint64_t size) {
     if (!out_any() || !size) return false;
     if (!use_index()) return out_overlaps(page, size);
     // pos: an overlap answer, kept per g_out_ver (out_overlaps is a function of the index, which moves with g_out_ver): the draw bindings over
-    // held results are asked about at every draw (~4,000 times per frame in Kokiri outside)
+    // held results are asked about at every draw (~4,000 times per frame in village outside)
     struct Slot { uint64_t page = ~0ull, size = 0, ver = 0; bool pos = false; };
     static Slot cache[4096];
     const uint64_t ov = g_out_ver.load(std::memory_order_acquire);
@@ -2385,7 +2385,7 @@ uint64_t out_flush(VkCommandBuffer cb, uint64_t addr, uint64_t size, int why) {
 }
 
 // [nvn] compute_out_split (default on): a result whose range holds pages the CPU has read (cpu_read) or that cannot be guarded (hot pages,
-// never tracked) used to go back whole at the end of every submission. OoT's big compute buffers (up to 16 MB) have such pages, and ~50 MB
+// never tracked) used to go back whole at the end of every submission. the game's big compute buffers (up to 16 MB) have such pages, and ~50 MB
 // per frame went back over PCIe. Now only those pages go back; the entry stays held and guarded for the others (OutEntry::partial).
 bool out_split_on() {
     static const bool on = config_get_bool("nvn", "compute_out_split", true);
@@ -2393,7 +2393,7 @@ bool out_split_on() {
 }
 
 // [nvn] compute_out_split_min_kb (default 1024): smaller results are not split; one with a CPU-read page goes back whole at the end of its
-// submission. OoT's job workers read small GPU results (16-192 KiB) a page at a time, a new page every second or so: split, each new page was
+// submission. the game's job workers read small GPU results (16-192 KiB) a page at a time, a new page every second or so: split, each new page was
 // a guard fault that waited for the submission still on the GPU (20-50 ms, the periodic hitches of the first scene). Whole, the copy-back
 // costs microseconds and the CPU finds the pool current.
 uint64_t out_split_min() {
@@ -2454,7 +2454,7 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
             if (!e.pending) continue;
             bool hold = out_lazy() && e.m && e.m->ww;
             // A result still held from an earlier submission is not split again (it goes back whole when the CPU has read some of it). Splitting
-            // it too (2026-11-08: OoT's eight GPU culling buffers, the CPU reads and clears only their first page) cut the end-of-submission
+            // it too (2026-11-08: the game's eight GPU culling buffers, the CPU reads and clears only their first page) cut the end-of-submission
             // copies from ~850 to ~150 MiB/s but took the first scene from ~31 to ~22 fps.
             if (hold && !e.guarded && e.last > e.first && out_split_on() && e.size >= out_split_min()) {
                 const int sp = out_split(i, serial, part_copies, part_bufs, rearm);
@@ -2581,7 +2581,7 @@ void out_retire() {
 
 // [nvn] compute_out_invalidate (default "guard"): what nvnMemoryPool/BufferInvalidateMappedRange does with held results. "fetch" (before
 // 2026-11-08): copies them back at once and marks the whole range CPU-read, so later results there go back at the end of every submission.
-// OoT invalidates four 4.4 MB GPU culling buffers whole every other frame (generic buffer code, lr main+0x3433cc) and reads little of them:
+// the game invalidates four 4.4 MB GPU culling buffers whole every other frame (generic buffer code, lr main+0x3433cc) and reads little of them:
 // that alone sent ~350 MB/s back over PCIe. "guard": nothing; the guard faults of the pages the CPU touches do the work.
 bool out_invalidate_by_guard() {
     static const bool on = config_get_str("nvn", "compute_out_invalidate", "guard") != "fetch";

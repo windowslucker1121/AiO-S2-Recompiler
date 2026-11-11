@@ -9,9 +9,9 @@
 // big-endian, the BFTTF file decryption (each little-endian word XOR 0x06186249 after a magic check) and the reply of a u8 flag and a u32 count.
 //
 // What is served: the font data in the shared memory is plain TrueType (Switchbrew: "Font data is TTF, located at the offset returned by
-// GetSharedMemoryAddressOffset"; Ryujinx and ScarletNX also store it decrypted). The real Nintendo fonts are not available: every slot takes
+// GetSharedMemoryAddressOffset"; Ryujinx and ScarletNX also store it decrypted). The console's real fonts are not available: every slot takes
 // the same freely licensed DejaVu Sans (assets/fonts/DejaVuSans.ttf, Bitstream Vera licence). DejaVu Sans has no CJK glyphs and lacks
-// several symbols that the system fonts carry, so Chinese, Korean and the Nintendo symbols do not render with it.
+// several symbols that the system fonts carry, so Chinese, Korean and the console's own symbols do not render with it.
 //
 // Lookup, per slot: a real dump file in [pl] font_dir (FontStandard.bfttf ... in BFTTF form, decrypted here) replaces its slot; otherwise the
 // first existing DejaVuSans.ttf of: [pl] font_dir, fonts\ next to the exe, assets\fonts\ under the working directory, the exe's folder.
@@ -47,7 +47,7 @@ constexpr uint32_t kSizeKey = 0x49621806;      // XORed with the size in the hea
 constexpr uint32_t kFileKey = 0x06186249;      // XORed with every little-endian word of a BFTTF file (and its magic)
 
 // SharedFontType (Switchbrew): 0 Standard (Japan, US, Europe), 1 Chinese Simplified, 2 Extended Chinese Simplified, 3 Chinese Traditional,
-// 4 Korean, 5 Nintendo Extended. The dump file names are the ones of the console's font archive as they are named in it; ScarletNX and
+// 4 Korean, 5 the console's extended symbols. The dump file names are the ones of the console's font archive as they are named in it; ScarletNX and
 // Ryujinx call slot 2 FontExtendedChineseSimplified.
 constexpr const char* kDumpNames[kFontCount] = {
     "FontStandard.bfttf",          "FontChineseSimplified.bfttf", "FontChineseSimplifiedExtension.bfttf",
@@ -284,10 +284,10 @@ std::shared_ptr<ipc::Service> make_pl(const char* name) {
         s.add_cmd(5, "GetSharedFontInOrderOfPriority", in_priority_order);
         // 6 GetSharedFontInOrderOfPriorityForSystem: the same answer ([4.0.0-15.0.1] in Switchbrew, ScarletNX and Ryujinx).
         s.add_cmd(6, "GetSharedFontInOrderOfPriorityForSystem", in_priority_order);
-        // Switch 2 SDKs (nn::pl::GetBuiltInFontData, Splatoon Raiders; Eglantine NX2_NOTES row 36) read the fonts as plain TrueType through two
+        // platform 2 SDKs (nn::pl::GetBuiltInFontData, title F; Eglantine NX2_NOTES row 36) read the fonts as plain TrueType through two
         // new commands instead of the BFTTF slots above. The shared memory already holds plain TTF, so both answer from it.
         // 2000 GetBuiltInFontSharedMemory() -> u32 size to map, copy handle of the shared memory (mapped read-only).
-        s.add_cmd(2000, "GetBuiltInFontSharedMemory (Switch 2)", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+        s.add_cmd(2000, "GetBuiltInFontSharedMemory (platform 2)", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
             State& st = state();
             uint32_t end = 0;
             for (uint32_t i = 0; i < kFontCount; ++i) end = std::max(end, st.slot[i].offset + st.slot[i].size);
@@ -298,7 +298,7 @@ std::shared_ptr<ipc::Service> make_pl(const char* name) {
         // 2010 GetBuiltInFontData(u8 SharedFontType, u8 flag (+2 padding bytes)) -> 24 bytes: u32 found at 0, then a descriptor at 8 of
         // {u8 flags, u8 flag bit, u16, u32 offset into the 2000 memory, u32 size, u32}. Types are the SharedFontType values; an empty slot
         // (no TTF found) or an unknown type answers "not found" with zeros.
-        s.add_cmd(2010, "GetBuiltInFontData (Switch 2)", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+        s.add_cmd(2010, "GetBuiltInFontData (platform 2)", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
             const uint32_t args = req.arg<uint32_t>(0);
             const uint32_t type = args & 0xFF;
             State& st = state();

@@ -471,7 +471,7 @@ NXTEST(session_plays_pcm16_voice_to_device_sink) {
     nxrt::audio::set_sink(std::make_shared<nxrt::audio::NullSink>());
 }
 
-// Switch 2 native renderer tag: 'REv' (lower-case v) + the revision digit, native revisions run one past ours (Eglantine NX2_NOTES rows
+// platform 2 native renderer tag: 'REv' (lower-case v) + the revision digit, native revisions run one past ours (Eglantine NX2_NOTES rows
 // 38-39). The tag is accepted up to revision 16 and an update header may differ from the open call in the case of the 'V' only.
 NXTEST(native_revision_tag_is_accepted_and_compared_by_number) {
     constexpr int32_t kCase = 0x20 << 16;

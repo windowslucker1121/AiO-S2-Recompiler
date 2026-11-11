@@ -215,7 +215,7 @@ namespace SpirvHarness
         {
             // A request comes only for a block without a results.tsv row, so a .spv already there is stale (its row was removed to have
             // the block translated again, or it is from another translator build) and is replaced: keeping it left a new row next to the
-            // old words, and the runtime rejected the pair ("resources record does not match the SPIR-V": five of OoT's culling-chain
+            // old words, and the runtime rejected the pair ("resources record does not match the SPIR-V": five of the game's culling-chain
             // compute shaders never ran, run game_1). The other writer writes the same words, so the last replace wins harmlessly.
             string tmp = $"{dst}.{Environment.ProcessId}.tmp";
             File.WriteAllBytes(tmp, bytes);

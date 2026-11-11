@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The common face of the spatial upscalers (AMD FSR 1 in fsr1_spatial.h, NVIDIA Image Scaling in nis_spatial.h), so the output pass and the
 // scene upscaler can run either one. Temporal upscalers (FSR 3, DLSS, XeSS) need per-pixel motion vectors and a jittered projection, which
-// Pokopia does not render (no velocity target, no TAA pass in the shaders it uses), so they are not offered through this interface.
+// title A does not render (no velocity target, no TAA pass in the shaders it uses), so they are not offered through this interface.
 #pragma once
 #include <volk.h>
 

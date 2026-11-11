@@ -432,7 +432,7 @@ ServicePtr make_common_state_getter() {
 // ISelfController: exit, the notification flags (real state), the display layers, the idle and sleep settings.
 ServicePtr make_self_controller() {
     return make_iface("ISelfController", [](Service& s) {
-        // Switch 2 ([S2], switchbrew): 2000 GetGraphicsSupervisor hands out a TIPC session (a move handle, also from a domain);
+        // platform 2 ([S2], switchbrew): 2000 GetGraphicsSupervisor hands out a TIPC session (a move handle, also from a domain);
         // 2100-2402 switch recording / sharing / copyright layers and audio sharing on or off, which a PC run has nothing to do for.
         s.add_cmd(2000, "GetGraphicsSupervisor", [](Request&, Response& rsp) -> uint32_t {
             const uint32_t h = create_session_handle(std::make_shared<ipc::StubService>("GraphicsSupervisor"));
@@ -527,7 +527,7 @@ ServicePtr make_window_controller() {
 }
 
 // ---- library applets -------------------------------------------------------------------------------------------------------------
-// Every applet Pokopia's main (and the SDK functions it imports) can create gets its own answer; the list and the reasons are in
+// Every applet title A's main (and the SDK functions it imports) can create gets its own answer; the list and the reasons are in
 // docs/IPC_ANSWERS.md. The software keyboard (LibraryAppletId 0x11) in its normal, full-screen form answers a text, the player select
 // (0x10) answers the one user or, for its network-account modes, that the player backed out; the error applet (0x0E) logs the error it
 // was given; the shop, friends, data management, network connection and GameShare matchmaking applets end as cancelled by the player
@@ -535,8 +535,8 @@ ServicePtr make_window_controller() {
 // follow the Switchbrew "Applet Manager services" page (IAppletAccessor / ILibraryAppletAccessor). The keyboard storages follow Ryujinx
 // src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard (MIT: SoftwareKeyboardConfig, the 0x7D8-byte output) and Eden / yuzu
 // applet_software_keyboard_types.h (GPL-3.0-or-later); the accessor's channel model follows the user's Afterpulse runtime (am.cpp, same
-// licence). Switch 2 games pass the applet id with more bits above it (Pokopia: 0x1020011 for the keyboard), so the low 16 bits pick it.
-constexpr uint32_t kAppletIdError = 0x0E;                     // LibraryAppletError (Pokopia: 0x100000E, nn::err::ShowError)
+// licence). platform 2 games pass the applet id with more bits above it (title A: 0x1020011 for the keyboard), so the low 16 bits pick it.
+constexpr uint32_t kAppletIdError = 0x0E;                     // LibraryAppletError (title A: 0x100000E, nn::err::ShowError)
 constexpr uint32_t kAppletIdShop = 0x14;                      // LibraryAppletShop (0x1000014, nn::ec::detail::ShowShopPage)
 // LibraryAppletMyPage (0x100001A): nn::friends::StartFriendInvitation / StartSendingFriendInvitation (sdk 0x75003e32a0, 0x75003e33b0)
 // run it with a 0x10A8-byte argument (kind 8 / 9). CreateMyPageApplet aborts if creating it fails, so it is created and ends as
@@ -547,7 +547,7 @@ constexpr uint32_t kAppletIdMyPage = 0x1A;
 // nn::la::StartLibraryAppletEasy when IApplicationFunctions reports a required size above 0 (the save does not fit). Ends cancelled:
 // the fs call then returns 0x3E02 (not enough space), as when the player leaves data management without freeing anything.
 constexpr uint32_t kAppletIdDataErase = 0x0D;
-// LibraryAppletNetConnect (0x0F): nn::nifm::HandleNetworkRequestErrorResult. Pokopia's two imports of it are answered before the SDK
+// LibraryAppletNetConnect (0x0F): nn::nifm::HandleNetworkRequestErrorResult. title A's two imports of it are answered before the SDK
 // gets here (core/switch2.cpp); if it is reached anyway it ends cancelled (the network problem is not resolved).
 constexpr uint32_t kAppletIdNetConnect = 0x0F;
 // GameShare matchmaking (0x1000024, or 0x1030024 for the other StreamPlayType): nn::streamplay::detail::ShowMatchmakeSupportCore
@@ -558,8 +558,8 @@ constexpr uint32_t kAppletIdPlayerSelect = 0x10;              // nn::applet::App
 // The player select's UiSettings (in data 1, 0xA0 bytes): u32 mode at 0 (nn::account::detail::StartPselApplet, sdk 0x75001844c0,
 // pushes it and pops a 0x18-byte {u64 result, Uid} answer whose result it returns). Mode 0 is ShowUserSelector; 2 is
 // EnsureNetworkServiceAccountAvailable, 10 / 11 ShowLicenseRequirementsForNetworkService (also from nn::err::ShowError for some
-// network results). Offline there is no Nintendo Account to link and no Switch Online licence, so every mode but the user selector
-// answers ResultCancelledByUser (124-1, 0x27C). Pokopia's callers (main 0x7100542f20, 0x7100583860 ...) read 0x27C as "the player
+// network results). Offline there is no console account to link and no online-service licence, so every mode but the user selector
+// answers ResultCancelledByUser (124-1, 0x27C). title A's callers (main 0x7100542f20, 0x7100583860 ...) read 0x27C as "the player
 // backed out" and stop quietly; a success from mode 2 would make them retry the token request in a loop.
 constexpr uint32_t kPselModeUserSelector = 0;
 constexpr uint32_t kAccountCancelledByUser = 0x27C;
@@ -862,7 +862,7 @@ const char* cancelled_applet(uint32_t id) {
     }
 }
 
-// The error applet: in data 0 is CommonArguments, 1 the error argument; the first byte of that is its type (sdk nn::err, Pokopia's sdk
+// The error applet: in data 0 is CommonArguments, 1 the error argument; the first byte of that is its type (sdk nn::err, title A's sdk
 // module: ShowError 0x38e580, ShowApplicationError 0x38ead0, ApplicationErrorArg 0x38fb9c..0x38fe60). Type 0 (ShowError(Result), 0x20
 // bytes): the Result at 0x10. Type 4 (a pctl Result, 12 bytes): the Result at 8. Type 2 (ApplicationErrorArg, 0x1014 bytes): u32
 // error code number at 8, language code char[8] at 0xC, dialog message char[0x800] at 0x14, full-screen message char[0x800] at 0x814.
@@ -954,7 +954,7 @@ ServicePtr make_library_applet_accessor(uint32_t full_id, uint32_t mode) {
                 NXLOG_I("am", "library applet 0x%x started (%s): it ends as cancelled by the player", a->full_id, why);
                 applet_finish(*a);
             } else {
-                NXLOG_W("am", "library applet 0x%x started (not one Pokopia was seen to launch): it ends at once with no output", a->full_id);
+                NXLOG_W("am", "library applet 0x%x started (no tested title was seen to launch it): it ends at once with no output", a->full_id);
                 applet_finish(*a);
             }
             return 0;
@@ -1017,7 +1017,7 @@ ServicePtr make_library_applet_accessor(uint32_t full_id, uint32_t mode) {
             return 0;
         });
         s.add_cmd(150, "RequestForAppletToGetForeground", ignored("RequestForAppletToGetForeground"));
-        // Switch 2: one input bool, no output (sdk proxy at 0x75001bd560). Name and meaning unknown; accepted.
+        // platform 2: one input bool, no output (sdk proxy at 0x75001bd560). Name and meaning unknown; accepted.
         s.add_cmd(90, "Cmd90", ignored("ILibraryAppletAccessor Cmd90"));
     });
 }
@@ -1149,7 +1149,7 @@ ServicePtr make_application_functions() {
             return 0;
         });
         s.add_cmd(22, "SetTerminateResult", ignored("SetTerminateResult"));
-        // Switch 2 commands with no input (sdk proxies 0x75001bd9f8 / 0x75001bda04): 320 returns two bytes, 321 one byte. Names unknown;
+        // platform 2 commands with no input (sdk proxies 0x75001bd9f8 / 0x75001bda04): 320 returns two bytes, 321 one byte. Names unknown;
         // zeros (false) is what boot ran on, and nothing reads them as an object.
         s.add_cmd(320, "Cmd320", ignored("IApplicationFunctions Cmd320", 2));
         s.add_cmd(321, "Cmd321", ignored("IApplicationFunctions Cmd321", 1));
@@ -1304,7 +1304,7 @@ ServicePtr make_application_proxy() {
             rsp.push_object(make_iface("IDisplayController", [](Service&) {}));
             return 0;
         });
-        // Switch 2 (switchbrew [S2]): 40 IPerformanceFunctions, 60 IGraphicsScalingParametersFunctions. Commands unknown so far:
+        // platform 2 (switchbrew [S2]): 40 IPerformanceFunctions, 60 IGraphicsScalingParametersFunctions. Commands unknown so far:
         // stub objects that log what the game asks of them.
         s.add_cmd(40, "GetPerformanceFunctions", [](Request&, Response& rsp) -> uint32_t {
             rsp.push_object(std::make_shared<ipc::StubService>("IPerformanceFunctions"));
@@ -1312,7 +1312,7 @@ ServicePtr make_application_proxy() {
         });
         s.add_cmd(60, "GetGraphicsScalingParametersFunctions", [](Request&, Response& rsp) -> uint32_t {
             // nn::oe::GetCurrentGraphicsScale (sdk) maps the first word of cmd 10 to a scale level: 10 -> 0, 20 -> 1, 30 -> 2 (anything else
-            // aborts). Level 0 is the console's full-quality one: Pokopia's dynamic resolution (main 0x710022d338 / 0x710022cd20) tops out
+            // aborts). Level 0 is the console's full-quality one: title A's dynamic resolution (main 0x710022d338 / 0x710022cd20) tops out
             // at its level 30 (1920x1080) at scale 0 docked, 24 (1728x972) at scale 1 and 22 (1664x936) at scale 2. [am] graphics_scale
             // (10, 20 or 30) picks another answer.
             rsp.push_object(make_iface("IGraphicsScalingParametersFunctions", [](Service& g) {
@@ -1360,7 +1360,7 @@ ServicePtr make_applet_service(const char* name, bool is_system) {
                       rsp.push_object(make_application_proxy());
                       return 0;
                   });
-        if (!is_system)   // Switch 2 SDKs open the proxy with OpenApplicationProxy2 (10); same answer
+        if (!is_system)   // platform 2 SDKs open the proxy with OpenApplicationProxy2 (10); same answer
             s.add_cmd(10, "OpenApplicationProxy2", [](Request& req, Response& rsp) -> uint32_t {
                 close_copies(req);
                 rsp.push_object(make_application_proxy());

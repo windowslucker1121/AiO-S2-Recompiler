@@ -88,7 +88,7 @@ struct TexGpu {
     bool untiled = false;                               // the last upload went through gpu_untile (cheap enough to repeat every frame)
 };
 
-// A virtual-pool texture too big to back fully (Mario Kart World's terrain virtual texture caches: 8192x8192 arrays of 68 layers, 1.4 to
+// A virtual-pool texture too big to back fully (title C's terrain virtual texture caches: 8192x8192 arrays of 68 layers, 1.4 to
 // 5.8 GB, of which a few hundred MB of tiles are mapped) is a Vulkan sparse-residency image. Host sparse blocks get device memory when a
 // mapped guest tile lands on them; the mip tail and the levels whose guest tiles are not whole GOB-block runs are bound at creation.
 struct SparseState {
@@ -191,7 +191,7 @@ VkFormat float_alias(VkFormat f) {
     }
 }
 // RGB9E5 has a raw 32-bit view too: the hardware cannot store RGB9E5 formatted, so NVN's compiler packs it in the shader and stores the
-// word through an r32ui image (OoT's compute 4c60af1f composites the scene that way); desktop GPUs cannot store to RGB9E5 either.
+// word through an r32ui image (the game's compute 4c60af1f composites the scene that way); desktop GPUs cannot store to RGB9E5 either.
 VkFormat uint_alias(VkFormat f) {
     switch (f) {
         case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32: return VK_FORMAT_R32_UINT;
@@ -224,7 +224,7 @@ bool format_view_ok(const TexGpu& g, VkFormat fmt) {
 VkFormat promoted_view_format(const TexGpu& g, VkFormat f) {
     if (g.promoted && (f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_R8G8B8A8_UNORM)) return g.format;
     // An ASTC view (a texture view naming its ASTC format, sRGB or not) of an image stored transcoded (BC7, or the disk cache's RGBA8/BC5)
-    // reads the image's own format, as its sRGB or UNORM partner like the view asks. Mario Kart World's character and course materials
+    // reads the image's own format, as its sRGB or UNORM partner like the view asks. title C's character and course materials
     // name their format in the view; before, they sampled the black dummy.
     if (g.transcoded && f >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK) {
         const bool want_srgb = ((f - VK_FORMAT_ASTC_4x4_UNORM_BLOCK) & 1) != 0;
@@ -533,7 +533,7 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
         return g;
     };
     if (!g->fmt) return fail("no format");
-    // A texture of a virtual (sparse) pool would be a fully backed image here: Mario Kart World's virtual texture caches are 8192x8192 arrays
+    // A texture of a virtual (sparse) pool would be a fully backed image here: title C's virtual texture caches are 8192x8192 arrays
     // of 68 layers (5.8 GB each as BC7) of which the console maps a few hundred MB of tiles. Until sparse residency images exist, such a
     // texture over [nvn] sparse_image_max_mb gets no image (it samples as missing) instead of exhausting the host's memory.
     if (t->vpool) {
@@ -687,7 +687,7 @@ ParkKey g_expired_keys[64];                       // the keys of the latest expi
 uint64_t g_expired_at[64];                        // the present each expired at
 size_t g_expired_n = 0;
 // [nvn] tex_park_presents / tex_park_max (240 / 128): how long (presents) and how many parked images are kept. 8 / 64 missed the game's re-creation
-// of its post-process targets after more than 8 presents (Link's house: bursts of ~16 new images and ~17 MB of uploads, frames of 30-40 ms;
+// of its post-process targets after more than 8 presents (the house scene: bursts of ~16 new images and ~17 MB of uploads, frames of 30-40 ms;
 // 240 / 128: uploads 446 -> 63 KB per frame, frames over 2x the median 75 -> 15, 1% low 31 -> 39 fps).
 uint64_t park_presents() {
     static const uint64_t n = static_cast<uint64_t>(std::max<int64_t>(1, nxrt::config_get_int("nvn", "tex_park_presents", 240)));
@@ -778,7 +778,7 @@ bool tex_park(const Texture& t, TexGpu* g) {
 }
 
 // Render thread, a finalized texture object's image that other objects still share: their count drops now. destroy_texture_gpu defers the
-// drop until the GPU is done with the frame, so when the game finalized all the objects over one storage within that time (OoT's
+// drop until the GPU is done with the frame, so when the game finalized all the objects over one storage within that time (the game's
 // post-process targets: two or three objects each, every few frames) each saw the others' references, none was parked, and the next
 // objects over that storage made new images and uploaded the stale pool bytes (~2.5 ms per 1920x1080 target on the render thread).
 // The image itself lives on: the remaining objects hold it, and the last one to go parks it or defers its destruction.
@@ -1647,7 +1647,7 @@ void tex_poll_cpu_writes() {
 }
 
 // ---- GPU untile ([nvn] gpu_untile, default on) ----------------------------------------------------------------------------------
-// A block-linear texture the CPU rewrites every frame (Pokopia: three 1024x1024 RGBA8 textures in turn) cost the render thread ~3 ms
+// A block-linear texture the CPU rewrites every frame (title A: three 1024x1024 RGBA8 textures in turn) cost the render thread ~3 ms
 // per upload: untile 4 MiB on the CPU, copy it into staging, copy that to the image. Instead a compute shader untiles straight from
 // the pool (the game's memory, imported) into a device-local linear buffer, which is copied to the image: no CPU work. Like a sampler
 // on the console, it reads the storage when the GPU runs the command. One level, one layer, 2D, block depth 1, rows of whole 16-byte
@@ -1829,12 +1829,12 @@ void tex_ensure_current(Texture* t, Frame& f) {
     TexGpu* g = tex_or_null(t);
     if (!g || g->depth) return;
     if (t->b.samples > 1 || target_is_multisample(t->b.target)) return;   // multisampled images are only ever rendered
-    // A coherent texture the CPU rewrites every frame (Pokopia: three 1024x1024 RGBA8 textures in turn) cost one write-watch fault per 4 KiB
+    // A coherent texture the CPU rewrites every frame (title A: three 1024x1024 RGBA8 textures in turn) cost one write-watch fault per 4 KiB
     // page per rewrite (~3500 a second on the main thread, inside the game's writes) because each upload armed its pages again. Once its CPU
     // uploads come kStreamGap presents apart or closer kStreamAfter times in a row, and the GPU untile path takes it, it is "streamed": never
     // armed again, and read from the pool once per present at its first use (a compute untile; the bytes the CPU wrote that frame, as a
     // console GPU sampling the memory would see them). [nvn] tex_stream = false: off.
-    constexpr uint32_t kStreamGap = 4, kStreamAfter = 8;   // gap 4: Pokopia rewrites its three in turn (every third present each)
+    constexpr uint32_t kStreamGap = 4, kStreamAfter = 8;   // gap 4: title A rewrites its three in turn (every third present each)
     static const bool stream_on = nxrt::config_get_bool("nvn", "tex_stream", true);
     const uint32_t now = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
     if (g->streamed) {
@@ -2639,7 +2639,7 @@ uint32_t copy_texel_bytes(VkFormat f, VkImageAspectFlags aspect) {
     return 0;
 }
 
-// Bytes per 4x4 block of the BC formats (0: not one). Frame captures read and write such images whole: OoT's 3D fog noise volumes (BC4,
+// Bytes per 4x4 block of the BC formats (0: not one). Frame captures read and write such images whole: the game's 3D fog noise volumes (BC4,
 // 64x64x64) are filled by the GPU at load and have no content in game memory; without them a replay's volumetric fog came out far too thick.
 uint32_t bc_block_bytes(VkFormat f) {
     if (f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_BC1_RGBA_SRGB_BLOCK) return 8;

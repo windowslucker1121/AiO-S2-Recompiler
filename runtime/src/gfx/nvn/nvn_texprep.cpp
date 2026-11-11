@@ -150,12 +150,12 @@ void schedule_locked(Texture* t) {
     uint64_t est = std::min<uint64_t>(t->storage_size, 1ull << 30);
     // [gfx] astc_quality = uncompressed: a job holds the texture as RGBA8, 4 bytes a texel against 16 per ASTC block
     if (t->fmt && t->fmt->astc && !S().caps.astc && astc_quality() == AstcQuality::Uncompressed) est = std::min<uint64_t>(est * t->fmt->block_w * t->fmt->block_h / 4, 1ull << 30);
-    // ASTC held as BC7: 16 bytes per 4x4 block instead of per ASTC block (an 8x8 texture's result is 4 times its storage: OoT's two 56 MB
+    // ASTC held as BC7: 16 bytes per 4x4 block instead of per ASTC block (an 8x8 texture's result is 4 times its storage: the game's two 56 MB
     // ASTC 8x8 textures are 226 MB each, which the old estimate let in and the budget then evicted again)
     else if (t->fmt && t->fmt->astc && !S().caps.astc) est = std::min<uint64_t>(est * t->fmt->block_w * t->fmt->block_h / 16, 1ull << 30);
     // Over budget: finished results of textures not used yet go, those prepared on the render thread if needed. Among results older than 2 s
     // the smallest go first: a small texture redone later is one of many jobs the workers share, a big one is a single job on the critical
-    // path (OoT's two 219 MB array textures, prepared when registered at the title and evicted again by the area's ~800 MB of other results,
+    // path (the game's two 219 MB array textures, prepared when registered at the title and evicted again by the area's ~800 MB of other results,
     // cost the area entry ~900 ms each). Results under 2 s old (a camera cut's, named by the look-ahead for the frame being replayed) go last,
     // oldest first.
     const uint64_t now = now_ns(), keep_ns = 2000ull * 1000000ull;
@@ -405,7 +405,7 @@ void init_once() {
 }
 
 // Block-compressed textures only: they are the game's assets (ASTC, BCn). Uncompressed ones are mostly render targets and small UI data whose
-// storage is not final when the texture is initialized. (Tried 2026-11-09: uncompressed textures named by the look-ahead too. OoT's new
+// storage is not final when the texture is initialized. (Tried 2026-11-09: uncompressed textures named by the look-ahead too. the game's new
 // render-target objects are named before the render thread gives them a parked image, so ~600 useless jobs a second ran and the area
 // entries did not get faster.)
 bool eligible(const Texture* t) {

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Per-game configuration of The Legend of Zelda: Ocarina of Time (Nintendo Switch 2).
+"""Per-game configuration of the game (platform 2).
 
 Identity, build id, version and the module list come from game.toml in this folder (as for every game). What stays here is lifter
 knowledge that is not manifest data.
@@ -28,6 +28,6 @@ class Config(GameConfig):
     build_id = _BUILD_ID
     modules = [ModuleSpec(m['name'], m['base'], m['file']) for m in MANIFEST['module']]
     overrides = {}
-    # rtld's process entry (0x0) has no FDE, symbol or direct branch, so discovery never roots it (as for pkp)
+    # rtld's process entry (0x0) has no FDE, symbol or direct branch, so discovery never roots it (as for title A)
     extra_entries = {'rtld': [0x0]}
     patches = None

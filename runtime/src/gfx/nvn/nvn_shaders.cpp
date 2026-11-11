@@ -166,7 +166,7 @@ ShaderControl read_control(const uint8_t* control) {
     ShaderControl c;
     c.valid = rd32(control) == kShaderControlMagic;
     if (c.valid && rd32(control + 4) == 201) {
-        // NVN2 (Switch 2) layout, from the game's GLSLC outputs (tools/shaders/docs/AMPERE.md section 3): program length +0x38,
+        // NVN2 (platform 2) layout, from the game's GLSLC outputs (tools/shaders/docs/AMPERE.md section 3): program length +0x38,
         // constants +0x3c/+0x40, code area +0x44, local memory +0x50 (not read), stage u16 +0x56, compute work group +0x58, shared memory +0x64.
         c.nvn2 = true;
         c.program_size = rd32(control + 0x38);
@@ -223,12 +223,12 @@ void support_buffer_set_viewport(SupportBuffer& sb, float width, float height, b
 
 // ---- SPIR-V reflection (from nvn_spirv_reflect.cpp) -----------------------------------------------------------------
 
-// [nvn] graphics_ssbo_slot_xor (default 0; OoT 1): the graphics stages' storage buffer descriptors in c[0] hold the bound slots in pairs swapped,
-// slot n at base + 0x10 * (n ^ 1). Measured on OoT's first scene (A12, AGENTS.md): its material shaders read 96-byte light records through
+// [nvn] graphics_ssbo_slot_xor (default 0; the game 1): the graphics stages' storage buffer descriptors in c[0] hold the bound slots in pairs swapped,
+// slot n at base + 0x10 * (n ^ 1). Measured on the game's first scene (A12, AGENTS.md): its material shaders read 96-byte light records through
 // fragment 0x520 and a cluster index through 0x510, while the game binds the light list (records with the type at +16) at slot 0 and the
 // 9.9 MB GPU-built cluster grid at slot 1; 0x530 holds the sky lighting written by compute 16a42858 (slot 3) and 0x540 a 64-byte per-material
 // table (slot 2). Mapped straight, the scene was lit roughly 20x too brightly and washed out white; swapped (vertex and fragment: the fragment
-// stage alone left it white) it renders as expected. Pokopia's measurements (0x510 = slot 0) keep the default.
+// stage alone left it white) it renders as expected. title A's measurements (0x510 = slot 0) keep the default.
 int graphics_ssbo_slot_xor() {
     static const int x = static_cast<int>(nxrt::config_get_int("nvn", "graphics_ssbo_slot_xor", 0)) & 1;
     return x;
@@ -498,7 +498,7 @@ bool reflect_spirv(const uint32_t* words, size_t count, ShaderReflection& out, s
                 if (!derives_or_reads && !literal_operands_only(op)) {
                     // [nvn] reflect_literals (default on): literal operands are not ids. Before, a literal equal to a storage variable's id
                     // marked it written: OpExtInst's instruction number (GLSL.std.450 Exp2 = 29, ... up to 81) collides with the low ids of
-                    // the variables, and 84% of OoT's translated shaders had a read-only storage buffer counted as written (their descriptor
+                    // the variables, and 84% of the game's translated shaders had a read-only storage buffer counted as written (their descriptor
                     // sets were never reused or kept, every draw marked the bound ranges GPU-written). Pointers never appear at those positions.
                     for (size_t k = 0; k < n; k++)
                         if (!literal_operand(op, k))
@@ -969,13 +969,13 @@ std::string describe_like_harness(const ShaderReflection& refl) {
 // ---- one stage ------------------------------------------------------------------------------------------------------
 
 namespace {
-// NVN2 compute shaders read their resources from a per-program table in c[0] (Switch 1 used 0x210/0x310 and c[2]):
+// NVN2 compute shaders read their resources from a per-program table in c[0] (platform 1 used 0x210/0x310 and c[2]):
 // 0x10 header bytes, the push constant area (ShaderControl::c0_push bytes, usually none), then 0x10 per uniform block descriptor,
 // 0x10 per storage buffer descriptor, 8 per texture handle, 8 per image handle, slot n = NVN binding n. The counts are control
 // bytes +0xb1/+0xb2/+0xb3/+0xb6, and the table size at u16 +0xba equals 0x10 + 0x10 * (ubos + ssbos) + 8 * (textures + images)
-// in all 3,142 compute blocks of the Pokopia corpus and 3,741 of OoT's 3,743 (the other two, NDVE, push 0x40 bytes).
+// in all 3,142 compute blocks of the title A corpus and 3,741 of the game's 3,743 (the other two, NDVE, push 0x40 bytes).
 // Checked on e764a3f2 (sb at 0x10), 62619a57 (3 ubos: sb at 0x40, texture at 0x50), 7dbc445a (texture 0x40, image 0x48)
-// and 0034791c (2 ubos, 30 textures from 0x30 by GLSLC binding, image at 0x120). OoT's post-process chain (compute programs built
+// and 0034791c (2 ubos, 30 textures from 0x30 by GLSLC binding, image at 0x120). the game's post-process chain (compute programs built
 // into main) pushes 0x80 bytes: fea98fe7 (3 ssbos, 1 texture, 2 images, table 0xd8) reads its push words at c[0] 0x18..0x80, its
 // storage buffer at 0xb0 (= 0x90 + 2 * 0x10: slot 2), texture 0xc0 (slot 0) and image 0xd0 (slot 1); 54ecc4b4 (11 ubos, 9 ssbos,
 // 7 textures, 2 images, table 0x218) uniform block 10 at 0x130, storage buffer 8 at 0x1c0, textures 4 and 6, image 1.

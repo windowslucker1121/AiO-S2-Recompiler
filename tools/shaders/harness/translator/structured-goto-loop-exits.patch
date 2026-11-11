@@ -2,7 +2,7 @@ Ryujinx shader translator, goto elimination: a break or continue that an earlier
 place (MoveOutward: "if (c) break;" where a goto leaves a loop) could end up inside a do-while that a later goto
 creates around it (EncloseDoWhile, also through Lift). Gotos are eliminated last to first, so the exit of a loop is
 handled before the gotos in its body; when one of those encloses the exit in a new loop, the break leaves only the new
-loop and control falls back into the old one. If it was that loop's only exit, the shader never ends: OoT A8, the light
+loop and control falls back into the old one. If it was that loop's only exit, the shader never ends: the game A8, the light
 loop of a family of material shaders (BRA back edge, CALL.REL.NOINC exit, a BRX switch inside whose cases jump to the
 switch's end): the GPU was lost after the driver's timeout (AGENTS.md, artifact A8). Now a newly created do-while
 checks what it encloses: a break or continue that is not inside a loop nested in it sets a flag and leaves the new
@@ -91,7 +91,7 @@ for (the flag is also cleared at the start of the function). Eliminate takes a f
 +        // Gotos are eliminated last to first, so a goto that left a loop earlier (MoveOutward: "if (c) break;" before
 +        // the loop's end, the goto moved after the loop) may already sit in the statements a later goto encloses in a
 +        // new do-while. That break (or continue) would then leave (or restart) the new loop instead of the loop it was
-+        // made for, and control falls back into the old loop: an endless loop when it was the loop's only exit (OoT A8,
++        // made for, and control falls back into the old loop: an endless loop when it was the loop's only exit (the game A8,
 +        // the light loop of the material shaders). Exits that belong to an outer loop leave the new loop with a flag
 +        // set, and the flag repeats them right after it ("if (flag) { flag = false; break; }"). The flag is cleared at
 +        // the start of the function and where it is used, not before the new loop: later gotos may put an "if (!c)"

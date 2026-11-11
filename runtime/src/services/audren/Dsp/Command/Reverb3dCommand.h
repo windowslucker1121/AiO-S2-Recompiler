@@ -79,7 +79,7 @@ class Reverb3dCommand : public ICommand {
             OutputBufferIndices[i] = static_cast<uint16_t>(bufferOffset + _parameter.output[i]);
         }
 
-        // NOTE: We do the opposite as Nintendo here for now to restore previous behaviour
+        // NOTE: We do the opposite as the platform here for now to restore previous behaviour
         // TODO: Update reverb 3d processing and remove this to use RemapLegacyChannelEffectMappingToChannelResourceMapping.
         DataSourceHelper::RemapChannelResourceMappingToLegacy(newEffectChannelMappingSupported, InputBufferIndices, _parameter.channel_count);
         DataSourceHelper::RemapChannelResourceMappingToLegacy(newEffectChannelMappingSupported, OutputBufferIndices, _parameter.channel_count);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Port of Ryujinx.Audio/Renderer/Server/Effect/CompressorEffect.cs (Ryubing fork, MIT). The version 1 Update does nothing
-// except initialise the error info (Nintendo's behaviour, kept); only the version 2 Update applies the parameter.
+// except initialise the error info (the platform's behaviour, kept); only the version 2 Update applies the parameter.
 #pragma once
 #include "../../Dsp/State/CompressorState.h"
 #include "../../audren_common.h"
@@ -34,7 +34,7 @@ class CompressorEffect : public BaseEffect {
 
     void Update(BehaviourParameter::ErrorInfo& updateErrorInfo, [[maybe_unused]] const EffectInParameterVersion1& parameter,
                 [[maybe_unused]] PoolMapper& mapper) override {
-        // Nintendo doesn't do anything here but we still require updateErrorInfo to be initialised.
+        // the platform doesn't do anything here but we still require updateErrorInfo to be initialised.
         updateErrorInfo = BehaviourParameter::ErrorInfo{};
     }
 

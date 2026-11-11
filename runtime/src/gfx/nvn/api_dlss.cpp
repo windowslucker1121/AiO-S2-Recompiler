@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// NVN2 DLSS (family dlss): the 57 nvnDlss* functions and nvnCommandBufferEvaluateDlss, which a Switch 2 title calls to upscale with the console's own
+// NVN2 DLSS (family dlss): the 57 nvnDlss* functions and nvnCommandBufferEvaluateDlss, which a platform 2 title calls to upscale with the console's own
 // DLSS. None of them is in the NVN1 table, so the game fetches them by name and NVN2_REG hands the thunks out (nvn_loader.cpp).
 //
 // What each one does here:
@@ -10,7 +10,7 @@
 //   - nvnCommandBufferEvaluateDlss is recorded (Op::EvaluateDlss) and replayed by nvn_replay.cpp: DLSS or FSR 3 on the game's colour, depth and
 //     motion vectors when [upscale] mode asks for one and its SDK is there, else a plain bilinear scale of the colour rectangle into the output.
 //
-// Evidence for the layouts (SDK NintendoSDK_NVN-20_5_25, the game's own `sdk` module read in IDA/Hex-Rays, docs/nvn2_abi.md section 3; addresses are
+// Evidence for the layouts (SDK SDK_NVN-20_5_25, the game's own `sdk` module read in IDA/Hex-Rays, docs/nvn2_abi.md section 3; addresses are
 // the sdk's): builder = 0x5DF290-0x5DF430 (SetDefaults clears +8..+0xB8 then max evaluation entries +0x34 = 1) and the storage-size function 0x5DE620;
 // network = 0x5DE390 (Initialize: memset 0x220, copies the builder into it); parameters = 0x5DF440-0x5DF6E0 (SetDefaults) and the record
 // nvnCommandBufferEvaluateDlss 0x5DEBC0 reads. Offsets are listed beside the accessors below. Not proven by code: the argument order of the six

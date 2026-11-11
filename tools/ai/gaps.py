@@ -22,7 +22,7 @@ import sys
 
 # Known gaps -> the row of the artifact table in AGENTS.md (pattern on "area what detail", first match wins). Extend as rows are added.
 KNOWN = [
-    (r"DrawMeshTasks|stage 6|stage 7|mesh|task", "A9/A15 mesh shaders (foliage, Deku Tree)"),
+    (r"DrawMeshTasks|stage 6|stage 7|mesh|task", "A9/A15 mesh shaders (foliage, giant tree)"),
     (r"WaitEvent", "GPU-side WaitEvent (nvn)"),
     (r"TEX\.SCR\.B\.DC|shadow", "A7 clustered-light shadows"),
 ]

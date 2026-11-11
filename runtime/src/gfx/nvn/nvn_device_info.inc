@@ -8,7 +8,7 @@
 //   4. refs/ssbu-recomp/runtime/nvn_stub.c g_devinfo (identical to smo, checked); refs/LASRecomp/runtime/nvn/objects.c (not used per line)
 //   API_MAJOR/API_MINOR = 55.15: the game's own check (main.elf NVNManaged::CDevice::Init at 0xffb48) refuses to start unless major == 55 and
 //   minor >= 8 ("NVN API version does not match driver version! Application: 55.8"). 55.15 is the value SuperMarioWonderRecomp reports.
-//   smo gives minor 312 and wonder gives 55.15 (its own game's check, main+5a7b48); neither is used.
+//   smo-recomp gives minor 312 and SuperMarioWonderRecomp gives 55.15 (its own game's check, main+5a7b48); neither is used.
 
 NVN_DEVICE_INFO_VALUE(NVN_DEVICE_INFO_API_MAJOR_VERSION, 55)  // the game requires 55
 NVN_DEVICE_INFO_VALUE(NVN_DEVICE_INFO_API_MINOR_VERSION, 15)  // the game requires >= 8

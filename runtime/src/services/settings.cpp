@@ -34,7 +34,7 @@ constexpr size_t kNickNameSize = 0x80;                // nn::settings::system::D
 constexpr size_t kFirmwareSize = 0x100;               // nn::settings::system::FirmwareVersion (user processes: hard-coded 0x100)
 constexpr size_t kSerialSize = 0x18;                  // nn::settings::factory::SerialNumber (Switchbrew: 0x18-byte string)
 constexpr size_t kSettingsNameSize = 0x48;            // nn::settings::SettingsName and SettingsItemKey
-constexpr int32_t kProductModelNx = 1;                // nn::settings::system::ProductModel: 1 Nx ("HAC", Switch 1)
+constexpr int32_t kProductModelNx = 1;                // nn::settings::system::ProductModel: 1 Nx ("HAC", platform 1)
 
 // ---- state -----------------------------------------------------------------------------------------------------------------------
 // The state set:sys keeps for the run and that its getters report: the theme (ColorSetId: 0 Basic White, 1 Basic Black, Switchbrew)
@@ -93,7 +93,7 @@ bool parse_version(const std::string& s, uint8_t out[3]) {
 // The 0x100-byte SystemVersion of the System Version Title (Switchbrew "System Version Title", Format table): major, minor, micro
 // at 0..2; revision major and minor at 4 and 5; platform "NX" at 0x08; version hash at 0x28 (40 hex characters); display version at
 // 0x68 (0x18 bytes); display title at 0x80 (0x80 bytes). The version is profile().firmware ("12.1.0" by default), the title is
-// "NintendoSDK Firmware for NX <version>-1.0" and the revision is 1.0 to match it. The hash is Switchbrew's for 12.1.0-1.0; other
+// "SDK Firmware for NX <version>-1.0" and the revision is 1.0 to match it. The hash is Switchbrew's for 12.1.0-1.0; other
 // versions get an empty hash because no source for it was checked.
 std::array<uint8_t, kFirmwareSize> firmware_version() {
     constexpr char kHash121[] = "76b10c2dab7d3aa73fc162f8dff1655e6a21caf4";

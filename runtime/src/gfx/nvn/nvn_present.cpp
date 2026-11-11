@@ -113,7 +113,7 @@ void present_on_render_thread(Window* w, int index) {
         if (!(extras::pace_in_main() && extras::pace_boundary_consume())) { NXFT("limiter"); nxrt::HitchTimer ht(nxrt::kHpRenderLimiter); lim->begin_frame_nohook(); }
         else if (present_pace_on()) {
             // [display] present_pace: the game's main thread is paced at the frame boundary, but how long its frame takes to replay varies,
-            // so presents came 10-24 ms apart at a steady 60 (Link's house: stdev 4.2 ms): uneven motion with an even game step. A present
+            // so presents came 10-24 ms apart at a steady 60 (the house scene: stdev 4.2 ms): uneven motion with an even game step. A present
             // never follows the previous one sooner than [display] present_pace_min (0.95) of the cap's period: the short intervals, the
             // other half of every long one, go. Relative to the last present (no grid), so a late frame adds no lasting delay.
             static const double frac = std::clamp(nxrt::config_get_double("display", "present_pace_min", 0.95), 0.5, 1.0);

@@ -119,7 +119,7 @@ struct ShaderStats {
 };
 ShaderStats shader_stats();
 
-// The game's own upscaler replaced on the PC ([nvn] upscaler_replace, a game module's default; OoT). configured: the configuration names a
+// The game's own upscaler replaced on the PC ([nvn] upscaler_replace, a game module's default; the game). configured: the configuration names a
 // program to replace. The switch is live (any thread): off lets the game's own passes run again, for comparison.
 bool upscaler_replace_configured();
 void set_upscaler_replace_enabled(bool on);

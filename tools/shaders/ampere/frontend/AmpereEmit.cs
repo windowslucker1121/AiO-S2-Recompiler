@@ -391,7 +391,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                             // fp32 (the error of a rounded product is representable) as long as it does not fall below FLT_MIN.
                             // That needs |r| >= 2^-79 (|e| >= |r| * 2^-47); below 2^-78 both operands are scaled by 2^32 and r by 2^64
                             // first, exactly: an operand above 2^96 there means the other is below FLT_MIN, so r is 0 (left alone) and
-                            // an infinite e changes nothing. No fp64: FMUL.FTZ.RZ is in 25,000 of OoT's fragment shaders (the x / 2pi
+                            // an infinite e changes nothing. No fp64: FMUL.FTZ.RZ is in 25,000 of the game's fragment shaders (the x / 2pi
                             // before MUFU.SIN/COS, about 20 in each hot material shader), and the earlier fp64 compare cost five fp64
                             // operations each (1/64 rate on GeForce). hwcheck checks it.
                             IrOperand tiny = ctx.FPCompareLess(ctx.FPAbsolute(r), ConstF(MathF.ScaleB(1f, -78)));
@@ -1496,7 +1496,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             Op d = i.Operands[0];
             string name = i.Operands[1].Text;
-            // the coarse shading rate of the pixel (variable-rate shading, 350 OoT fragment shaders): the host shades every pixel, so the
+            // the coarse shading rate of the pixel (variable-rate shading, 350 the game fragment shaders): the host shades every pixel, so the
             // rate is 1x1, 0 (inferred: no game word shows the encoding)
             if (name == "SR_VARIABLE_RATE") { Dst(ctx, d, Const(0)); return; }
             if (!SRegs.TryGetValue(name, out SReg sr)) throw Unsup(name);
@@ -1593,14 +1593,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (o[0].Kind != OperandKind.Reg) throw Unsup("destination");
             if (IsPredKind(o[1])) throw Unsup("predicate destination");
             // .CENTROID samples at the covered centroid of a multisampled pixel; Ryujinx's Maxwell IPA decodes the sample mode (Msi)
-            // and ignores it, so the input is read as at the pixel centre, which equals centroid without multisampling (Mario Kart
-            // World: nearly every fragment shader).
+            // and ignores it, so the input is read as at the pixel centre, which equals centroid without multisampling (title C:
+            // nearly every fragment shader).
             if (Has(i, "OFFSET") || Has(i, "SAT")) throw Unsup("interpolation mode");
             if (o[1].Kind == OperandKind.Attr && o[1].IndexIsUReg && o[1].IndexReg >= 0)
             {
                 // a[URn+imm] (0x526): a user attribute picked at run time, as Ryujinx's indexed Maxwell IPA (InstEmitAttribute.Ipa, op.Idx), with
                 // the immediate added. PASS returns attr/w for a perspective input; the indexed form cannot look up the SPH imap per element, so
-                // every element is taken as perspective, as Ryujinx does (OoT 471bac84: the six face varyings are perspective).
+                // every element is taken as perspective, as Ryujinx does (the game 471bac84: the six face varyings are perspective).
                 if (!Has(i, "PASS")) throw Unsup("indexed attribute interpolation");
                 if (o.Count > 2 && !(o[2].Kind == OperandKind.Reg && o[2].Reg == 255)) throw Unsup("offset register");
                 IrOperand addr = o[1].IndexReg >= 63 ? Const((int)o[1].Offset) : ctx.IAdd(UGpr(o[1].IndexReg), Const((int)o[1].Offset));
@@ -1668,7 +1668,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return;
             }
             // Every word is loaded before the first is written: the destination pair may overlap the index register
-            // ("LDC.64 R58, c[0x6][R58+0x28]", OoT's skinning vertex shaders), and the second load must use the old index.
+            // ("LDC.64 R58, c[0x6][R58+0x28]", the game's skinning vertex shaders), and the second load must use the old index.
             IrOperand[] vals = new IrOperand[words];
             for (int w = 0; w < words; w++) vals[w] = LoadCbuf(ctx, c, w);
             for (int w = 0; w < words; w++) DstWord(ctx, o[0], w, vals[w]);
@@ -1804,7 +1804,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         /// The data type of an atomic as the decoder names it (AtomTypeG / AtomTypeS: "S32", "64", "F32.FTZ.RN", "F16x2.RN", "S64", "F64.RN"),
         /// up to the first dot; null for the default unsigned 32-bit type. Matching the whole modifier ("F32") missed the decorated forms, so
-        /// RED.E.ADD.F32.FTZ.RN was translated as an integer add of the float bits (OoT's sky lighting compute 16a42858: garbage sums such as
+        /// RED.E.ADD.F32.FTZ.RN was translated as an integer add of the float bits (the game's sky lighting compute 16a42858: garbage sums such as
         /// 1.8e29 in the spherical harmonics every material reads, NaN in the scene, the white frames of A12).
         static string AtomType(SassInst i)
         {
@@ -1882,7 +1882,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         /// allowHandles: also the forms without a bound handle, bank and handle -1 then: .B (the handle is the first register of Rb) and
         /// the handle in a uniform register (0xf60, "URn, 0x0": ur = URn).
         /// gatherComponent (TLD4): .B names the blue component when a bound handle follows ("TLD4.SCR.B.F16.RN.PTP R33, R32, R10, R0, 0x0,
-        /// 0x30, 2D" in OoT's compute upscaler f90d726d, next to .R and .G gathers of the same texture), not the bindless form.
+        /// 0x30, 2D" in the game's compute upscaler f90d726d, next to .R and .G gathers of the same texture), not the bindless form.
         static (Op rd2, Op rd, Op ra, Op rb, int bank, int handle, string dim, int mask) TexOperands(SassInst i, out Op pred, bool allowPred, out Op ur, bool allowHandles,
                                                                                                       bool gatherComponent = false)
         {
@@ -1959,7 +1959,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 if (m is not ("SCR" or "LZ" or "LL" or "LB" or "DC" or "AOFFI" or "NODEP" or "MS" or "NDV" or "EF" or "EL" or "LU" or "EU" or "NA" or "F16" or "RN" or "F16.RN")) throw Unsup($"modifier {m}");
             }
             // .F16(.RN): the components come back as FP16, two per register: Rd = (c0, c1), Rd2 = (c2, c3), the first component in the low
-            // half, missing ones 0 (Ryujinx's TEXS.F16 rule). Seen in OoT's compute upscaler fea98fe7 ("TEX.SCR.F16.RN.LZ R19, R0, R13, R67,
+            // half, missing ones 0 (Ryujinx's TEXS.F16 rule). Seen in the game's compute upscaler fea98fe7 ("TEX.SCR.F16.RN.LZ R19, R0, R13, R67,
             // 0x0, 0x30, 2D, 0x7": R0 is read as a half2 and R19 only through R19.H0_H0; the luminance weight 0.2126 goes with R0.H0, red).
             bool f16 = Has(i, "F16") || Has(i, "F16.RN");
             bool scr = Has(i, "SCR");
@@ -2074,7 +2074,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
             if (rb == null) throw Unsup("missing Rb");
             bool aoffi = Has(i, "AOFFI");
-            bool f16 = Has(i, "F16.RN");   // as TEX .F16.RN: Rd = (c0, c1), Rd2 = (c2, c3) as fp16 pairs (no TXD.F16 seen in OoT yet)
+            bool f16 = Has(i, "F16.RN");   // as TEX .F16.RN: Rd = (c0, c1), Rd2 = (c2, c3) as fp16 pairs (no TXD.F16 seen in the game yet)
             (SamplerType type, bool array) = DimOf(dim);
             int coords = (type & SamplerType.Mask) switch { SamplerType.Texture1D => 1, SamplerType.Texture2D => 2, _ => 3 };
             int a = ra.Reg, bReg = rb.Reg;
@@ -2185,7 +2185,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if ((type & SamplerType.Mask) != SamplerType.Texture2D || array && (!scr || dc)) throw Unsup("gather shape");
             // .PTP: one offset per gathered texel (textureGatherOffsets), as Maxwell TLD4.PTP (Ryujinx EmitTld4): two Rb registers with
             // eight signed 6-bit fields in 8-bit lanes, x0 y0 x1 y1 | x2 y2 x3 y3. With .SCR the four parameters split as Ra = [x, y],
-            // Rb = [offsets 0-1, offsets 2-3] (OoT's compute block 54ecc4b4: "MOV R18, 0xfe00ff; MOV R19, 0xfc00fd; TLD4.SCR.R.PTP R20, R26,
+            // Rb = [offsets 0-1, offsets 2-3] (the game's compute block 54ecc4b4: "MOV R18, 0xfe00ff; MOV R19, 0xfc00fd; TLD4.SCR.R.PTP R20, R26,
             // R6, R18, 0x0, 0x7c, 2D": taps (-1,0) (-2,0) (-3,0) (-4,0)). Only that shape: no depth compare, no array, no AOFFI with it.
             if (ptp && (dc || array || aoffi)) throw Unsup("TLD4.PTP with DC, array or AOFFI");
             IrOperand Ra(int k) => ra.Reg >= 255 ? Const(0) : ctx.Copy(Gpr(ra.Reg + k));
@@ -2375,7 +2375,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         // A18 diagnosis switch, off by default: NXRT_HARNESS_VOTE_SELF=1 makes VOTE Rd, PT the lane's own bit and REDUX the lane's own value
-        // in compute programs. That was the first stopgap for OoT's culling counts; the cause was the translator folding ballots into
+        // in compute programs. That was the first stopgap for the game's culling counts; the cause was the translator folding ballots into
         // branches (structured-subgroup-propagation.patch), and the own bit changes warp-wide results the game relies on (a max over the
         // warp became the lane's own value).
         internal static bool VoteSelf = System.Environment.GetEnvironmentVariable("NXRT_HARNESS_VOTE_SELF") == "1";
@@ -2425,7 +2425,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 IrOperand take = ctx.BitwiseAnd(active, ctx.ICompareNotEqual(first, Const(l)));
                 // Only active lanes are read: an inactive lane's slot reads the first active lane instead (its value is not taken). Reading
                 // a lane that is not active is undefined in SPIR-V, and on NVIDIA it waited for lanes that never come: a mesh program's lanes
-                // past its count leave at the start and wait at the end-of-program barrier while the others REDUX (OoT mesh f3054ac2,
+                // past its count leave at the start and wait at the end-of-program barrier while the others REDUX (the game mesh f3054ac2,
                 // device lost once the GPU culling gave the mesh draws work).
                 IrOperand src = ctx.ConditionalSelect(active, Const(l), first);
                 acc = ctx.ConditionalSelect(take, f(acc, ReadLane(ctx, v, src)), acc);

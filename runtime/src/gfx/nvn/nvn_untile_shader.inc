@@ -12,7 +12,7 @@
 //       uint total;    // pieces in the level (ppr * block rows)
 //       uint gobs_x;   // GOBs per row of the level
 //       uint ys;       // log2 of the level's block height in GOBs
-//       uint sw2;      // 1: Switch 2 GOB byte order, 0: Maxwell
+//       uint sw2;      // 1: platform 2 GOB byte order, 0: Maxwell
 //   } p;
 //   void main() {
 //       const uint i = gl_GlobalInvocationID.x;

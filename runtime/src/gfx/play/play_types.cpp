@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Play mode: names and parsers for contexts, triggers, actions, Switch outputs and inputs. The contract is play_types.h.
+// Play mode: names and parsers for contexts, triggers, actions, console outputs and inputs. The contract is play_types.h.
 #include "play_types.h"
 
 #include <SDL3/SDL_keyboard.h>
@@ -240,7 +240,7 @@ bool parse_act(const std::string& name, Act* out) {
     return false;
 }
 
-// ---- Switch outputs ----------------------------------------------------------------------------------------------------------
+// ---- console outputs ----------------------------------------------------------------------------------------------------------
 
 namespace {
 using nxrt::hid::NpadButtonBit;
