@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Host implementation of the Switch 2 SDK's hardware video decoders (nn::codec Vp9Decoder / Vp8Decoder, the decoder image pools) and of
+// Host implementation of the platform 2 SDK's hardware video decoders (nn::codec Vp9Decoder / Vp8Decoder, the decoder image pools) and of
 // the sync objects their output is fenced with (nn::syncpt::sdk SyncPointEvent, nn::gs::TryWaitNativeSync), decoding with libvpx.
 //
-// Why this layer: on Switch 2 every movie player (Pokopia's movie:: compatibility library in subsdk0, the nn::movie player Mario Kart
-// World links into main) demuxes with the SDK's nn::movie::MediaExtractor and decodes with nn::codec, which drives NVDEC through the
+// Why this layer: on platform 2 every movie player (title A's movie:: compatibility library in subsdk0, the nn::movie player title C
+// links into main) demuxes with the SDK's nn::movie::MediaExtractor and decodes with nn::codec, which drives NVDEC through the
 // GraphicsSupervisor of the GPU boot nxrt skips. nn::codec is the narrowest interface both games import by name, so the demuxer, the
 // players and their A/V clocks stay guest code and only the decoder and its fences answer on the host.
 //
@@ -13,7 +13,7 @@
 // and re-acquires the buffer. Here a submitted frame is decoded at once on the submitting thread; decoded pictures fill the acquired
 // buffers first in first out, and a buffer's fence is signalled when its picture is in it.
 //
-//   [media] video_decoder = host | off      default host (off for Mario Kart World until its movie paths are checked there).
+//   [media] video_decoder = host | off      default host.
 //                                          off keeps nn::movie::Initialize answering "unavailable" (src/core/switch2.cpp)
 //   [media] video_decoder_threads = 4       libvpx worker threads per decoder
 //   [media] video_decoder_log = 1           one log line per decoder call (verbose)
@@ -26,7 +26,7 @@
 
 namespace nxrt::media {
 
-// Registers the host handlers (Switch 2 games only) and forces the imports to them. False when off, not Switch 2, or built without
+// Registers the host handlers (platform 2 games only) and forces the imports to them. False when off, not platform 2, or built without
 // libvpx (NXRT_HAVE_LIBVPX). Safe to call more than once.
 bool install_video_codec_hle();
 

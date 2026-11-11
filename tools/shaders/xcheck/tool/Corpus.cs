@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Corpus access shared with sassdecode's census: Pokopia layout (unique.tsv + code/ + ctrl/) or runtime dump layout
+// Corpus access shared with sassdecode's census: title A layout (unique.tsv + code/ + ctrl/) or runtime dump layout
 // (manifest.tsv + code_<h>.bin + ctrl_<h>.bin).
 using System;
 using System.Collections.Generic;

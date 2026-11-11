@@ -163,14 +163,14 @@ namespace Nx.Shaders.XCheck
             var nl = "\n";
             using (var w = new StreamWriter(Path.Combine(dir, "disagreements.tsv"), false, new UTF8Encoding(false)) { NewLine = nl })
             {
-                w.WriteLine("key\tlevel\tkind\top12\tbit\tours\tnx_emitter\tn_pkp\tn_dkb\tn_mkw\texample_hash\texample_word\ttwin_word\tnvdisasm\tnvdisasm_twin\tours_text\tnx_detail\tauto\tstatus\tnote");
+                w.WriteLine("key\tlevel\tkind\top12\tbit\tours\tnx_emitter\tn_a\tn_b\tn_c\texample_hash\texample_word\ttwin_word\tnvdisasm\tnvdisasm_twin\tours_text\tnx_detail\tauto\tstatus\tnote");
                 foreach (var f in fs)
                     w.WriteLine(string.Join("\t", f.Key, f.Level, f.Kind, f.Op12.ToString("x3"), f.Bit < 0 ? "" : f.Bit.ToString(), f.Ours, f.NxEmitter, f.N[0], f.N[1], f.N[2], f.Hash, W(f.Lo, f.Hi),
                         f.Level == "L2-bit" ? W(f.Lo2, f.Hi2) : "", f.Nv, f.Level == "L2-bit" ? f.NvFlip : "", f.OursText, f.Level == "L2-bit" ? f.NxText : f.Detail, f.Auto, f.Status, f.Note));
             }
             var sb = new StringBuilder();
             var s = new StringWriter(sb) { NewLine = nl };
-            s.WriteLine($"instructions: pkp {d.Instructions[0]}  dkb {d.Instructions[1]}  mkw {d.Instructions[2]}   blocks: {d.Blocks[0]} / {d.Blocks[1]} / {d.Blocks[2]}");
+            s.WriteLine($"instructions: a {d.Instructions[0]}  b {d.Instructions[1]}  c {d.Instructions[2]}   blocks: {d.Blocks[0]} / {d.Blocks[1]} / {d.Blocks[2]}");
             int forms = d.L1.Count, agree = forms - fs.Count(f => f.Level == "L1-opcode");
             s.WriteLine($"L1 opcode rows (opcode x our mnemonic): {forms}, agreeing {agree}");
             s.WriteLine($"level 2: {cells.Count} (opcode, bit) cells compared over {d.Forms.Count} forms");

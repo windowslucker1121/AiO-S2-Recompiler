@@ -18,8 +18,8 @@ for s in samples:
     for th in s.split('\nthread ')[1:]:
         name = th.split()[0]
         frames = re.findall(r'^\s+#\d+ (.*)$', th, re.M)
-        mp = [f for f in frames if f.startswith('mpr.exe')]
-        top = ' < '.join(re.sub(r'^mpr.exe\+0x[0-9a-f]+ ', '', f)[:90] for f in mp[:4]) if mp else (frames[0] if frames else '?')
+        mp = [f for f in frames if re.match(r'[\w.-]+\.exe\+0x', f)]   # frames in the game exe
+        top = ' < '.join(re.sub(r'^[\w.-]+\.exe\+0x[0-9a-f]+ ', '', f)[:90] for f in mp[:4]) if mp else (frames[0] if frames else '?')
         waiting = any(w in top for w in WAIT[:3]) or ('wait' in (mp[0] if mp else '') and not show_all)
         if any(w in ' '.join(mp[:3]) for w in WAIT) and not show_all: continue
         cnt[name][top] += 1

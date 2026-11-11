@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // xcheck: decode a shader corpus with our Ampere decoder and with nxnative's Ampere front end and list where they disagree. See ../README.md.
-//   dotnet run --project tools\shaders\xcheck\tool -c Release [-- --out <dir>] [--corpus pkp=<dir>] [--corpus dkb=<dir>] [--corpus mkw=<dir>] [--jobs N] [--no-nvdisasm] | --layout | --words <file> | --ops <hex,hex,..>
+//   dotnet run --project tools\shaders\xcheck\tool -c Release [-- --out <dir>] [--corpus a=<dir>] [--corpus b=<dir>] [--corpus c=<dir>] [--jobs N] [--no-nvdisasm] | --layout | --words <file> | --ops <hex,hex,..>
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -12,7 +12,7 @@ namespace Nx.Shaders.XCheck
 {
     static class Program
     {
-        static readonly string[] CorpusNames = { "pkp", "dkb", "mkw" };
+        static readonly string[] CorpusNames = { "a", "b", "c" };
 
         static int Main(string[] args)
         {
@@ -20,8 +20,8 @@ namespace Nx.Shaders.XCheck
             string root = FindRoot();
             var dirs = new string[3];
             dirs[0] = Path.Combine(root, "work", "shaders", "corpus");
-            dirs[1] = Path.Combine(root, "work", "shaders_dkb", "corpus");
-            dirs[2] = Path.Combine(root, "work", "mkw", "shader_dump");
+            dirs[1] = Path.Combine(root, "work", "shaders_b", "corpus");
+            dirs[2] = Path.Combine(root, "work", "shaders_c", "corpus");
             string outDir = Path.Combine(root, "work", "xcheck");
             int jobs = 6;
             bool nvdisasm = true, layout = false;
@@ -41,7 +41,7 @@ namespace Nx.Shaders.XCheck
                     case "--corpus":
                         var kv = args[++i].Split('=', 2);
                         int ci = Array.IndexOf(CorpusNames, kv[0]);
-                        if (ci < 0) { Console.Error.WriteLine("corpus name must be pkp, dkb or mkw"); return 2; }
+                        if (ci < 0) { Console.Error.WriteLine("corpus name must be a, b or c"); return 2; }
                         dirs[ci] = kv[1];
                         break;
                     default: Console.Error.WriteLine("unknown option " + args[i]); return 2;
