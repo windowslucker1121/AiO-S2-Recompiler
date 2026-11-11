@@ -226,6 +226,40 @@ void map(uint64_t guest, uint64_t size, uint64_t dev, uint64_t lo, uint64_t hi) 
     }
 }
 
+// [nvn] pt_copy: page entries pointed at a device-local copy, with what they held before (by entry offset).
+std::unordered_map<uint64_t, uint64_t> g_saved;
+uint64_t g_split = 0;
+// The entry offset of the 4 KiB leaf of `guest` (a 2 MiB leaf is split into a node of 512 page leaves first: the node is filled before the
+// middle entry points at it, so a walk on the GPU meanwhile sees one or the other, both right). 0: not mapped.
+uint64_t page_entry(uint64_t guest) {
+    if (!g_buf.buffer) return 0;
+    const uint64_t ri = guest >> kShift[0];
+    if (ri >= kRootEntries) return 0;
+    const uint64_t n1 = words()[ri];
+    if (!n1 || (n1 & 1)) return 0;
+    const uint64_t e1 = n1 + ((guest >> kShift[1]) & (kNodeEntries - 1)) * 8;
+    uint64_t v1 = words()[e1 / 8];
+    if (!v1) return 0;
+    if (v1 & 1) {
+        if (g_used + kNodeBytes > g_bytes && !grow(g_used + kNodeBytes)) return 0;
+        const uint64_t n2 = g_used;
+        g_used += kNodeBytes;
+        const uint64_t base = v1 & ~uint64_t{1};
+        for (uint64_t k = 0; k < kNodeEntries; ++k) put(n2 + k * 8, (base + k * kPage) | 1);
+        put(e1, n2);
+        v1 = n2;
+        ++g_split;
+    }
+    return v1 + ((guest >> kShift[2]) & (kNodeEntries - 1)) * 8;
+}
+void restore_saved(uint64_t e2) {
+    if (g_saved.empty()) return;
+    const auto it = g_saved.find(e2);
+    if (it == g_saved.end()) return;
+    put(e2, it->second);
+    g_saved.erase(it);
+}
+
 // Clears the entries of [guest, guest + size) that point into [dev, dev + size).
 void unmap(uint64_t guest, uint64_t size, uint64_t dev) {
     if (!g_buf.buffer) return;
@@ -245,6 +279,7 @@ void unmap(uint64_t guest, uint64_t size, uint64_t dev) {
         const uint64_t stop = std::min(span_end, end);
         for (; cur < stop; cur += kPage) {
             const uint64_t e2 = v1 + ((cur >> kShift[2]) & (kNodeEntries - 1)) * 8;
+            restore_saved(e2);   // [nvn] pt_copy: the import's own address first
             if (mine(words()[e2 / 8])) put(e2, 0);
         }
     }
@@ -863,6 +898,13 @@ struct Mirror {
     std::unique_ptr<std::atomic<uint64_t>[]> back;
     bool any_fresh = false;
     std::vector<gfx::Buffer> snap_chunks;   // out_delta (below): the snapshots of results before their dispatch, per chunk of the copy
+    // [nvn] pt_copy: the guest page table points pages of this pool at the copy (pointer shaders read video memory there)
+    bool pt_target = false;
+    std::vector<uint64_t> redir;          // bitmap: the page's table entry points at the copy
+    uint64_t redir_n = 0;
+    std::vector<uint64_t> chunk_dev;      // device address of each chunk of the copy (0: not asked yet)
+    std::vector<uint64_t> pt_pending;     // pages copied in (or found valid) that may point at the copy once settled
+    bool pt_scan = false;                 // look at every page once (just made a target, or pt_copy switched on again)
 };
 
 // Bits [first, last] of Mirror::back (any thread).
@@ -1052,6 +1094,121 @@ Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
     return pg->mirror;
 }
 
+// ---- [nvn] pt_copy (default off; cpuperf_ab_what pt_copy): the guest page table points pointer shaders at the pool copy -----------------
+// Pointer shaders (A17 "gpt") read game memory through the page table, which maps the pools' host imports: every such load crosses the bus.
+// For pools whose pointers the replay sees in a pointer shader's bound storage buffers (pt_note_pointer), the whole pool is copied (the
+// mirror's own copy-in and write tracking) and the table entries of pages that are valid in the copy, hold no newer result and were copied
+// at least kPtSettle presents ago (the copy-in has run on the GPU) point at the copy. A GPU write into the pool (note_gpu_write) points its
+// pages back at once (before the write is submitted); pages the CPU wrote go back at the next submission start (absorb_writes).
+constexpr uint32_t kPtSettle = 4;
+int g_pt_on = -1;
+uint64_t g_pt_redirects = 0, g_pt_restores = 0, g_pt_targets = 0;
+bool pt_mode() {
+    static const bool on = config_get_bool("nvn", "pt_copy", false) && device().features().buffer_device_address;
+    return on;
+}
+bool pt_active() { return pt_mode() && g_pt_on != 0; }
+void pt_restore_page(Mirror& m, uint64_t p) {
+    if (!bit_get(m.redir, p)) return;
+    bit_put(m.redir, p, false);
+    --m.redir_n;
+    ++g_pt_restores;
+    std::lock_guard<std::mutex> lk(g_addr_mu);
+    const uint64_t e2 = pt::page_entry(reinterpret_cast<uint64_t>(m.pg->base) + p * kPageBytes);
+    if (e2) pt::restore_saved(e2);
+}
+void pt_restore_range(Mirror& m, uint64_t first, uint64_t last) {
+    if (m.redir.empty()) return;
+    last = std::min(last, m.npages - 1);
+    for (uint64_t p = first; p <= last && m.redir_n;) {
+        if (!m.redir[static_cast<size_t>(p >> 6)]) { p = (p | 63) + 1; continue; }
+        pt_restore_page(m, p);
+        ++p;
+    }
+}
+void pt_restore_pages(Mirror& m, const std::vector<uint64_t>& pages) {
+    if (m.redir.empty()) return;
+    for (uint64_t p : pages)
+        if (p < m.npages && bit_get(m.redir, p)) {
+            pt_restore_page(m, p);
+            bit_put(m.want, p, true);   // copied in again (unless hot), then pointed at the copy again
+            m.any_want = true;
+        }
+}
+bool new_get(const Mirror& m, uint64_t p);
+bool page_valid(const Mirror& m, uint64_t p);
+// Once per present, at the first submission: pages that may point at the copy do, the others go back.
+void pt_pass(uint32_t now) {
+    static uint32_t last = ~0u;
+    if (now == last) return;
+    last = now;
+    const bool on = pt_active();
+    for (Mirror* mp : g_mirrors) {
+        Mirror& m = *mp;
+        if (!m.pt_target) continue;
+        if (m.redir.empty()) m.redir.assign(static_cast<size_t>((m.npages + 63) / 64), 0);
+        if (m.chunk_dev.size() != m.chunks.size()) m.chunk_dev.assign(m.chunks.size(), 0);
+        if (!on) {
+            if (m.redir_n) pt_restore_range(m, 0, m.npages - 1);
+            m.pt_scan = true;
+            continue;
+        }
+        static std::vector<uint64_t> todo, keep;
+        todo.clear();
+        keep.clear();
+        if (m.pt_scan) {   // every page once
+            m.pt_scan = false;
+            for (uint64_t p = 0; p < m.npages; ++p) todo.push_back(p);
+            m.pt_pending.clear();
+        } else {
+            todo.swap(m.pt_pending);
+        }
+        std::lock_guard<std::mutex> lk(g_addr_mu);
+        const uint64_t base = reinterpret_cast<uint64_t>(m.pg->base);
+        const uint64_t chunk_pages = kChunkBytes / kPageBytes;
+        for (uint64_t p : todo) {
+            if (p >= m.npages) continue;
+            const bool valid = page_valid(m, p);
+            const uint32_t at = m.copied_at[static_cast<size_t>(p)];
+            const bool settled = at && now - at >= kPtSettle;
+            const bool ok = valid && settled && m.chunks[static_cast<size_t>(p / chunk_pages)].buffer;
+            const bool r = bit_get(m.redir, p);
+            if (valid && !settled && !r) keep.push_back(p);   // copied lately: next present
+            if (ok && !r) {
+                const size_t ci = static_cast<size_t>(p / chunk_pages);
+                if (!m.chunk_dev[ci]) m.chunk_dev[ci] = device().buffer_address(m.chunks[ci].buffer);
+                if (!m.chunk_dev[ci]) continue;
+                const uint64_t e2 = pt::page_entry(base + p * kPageBytes);
+                if (!e2) continue;
+                const uint64_t old = pt::words()[e2 / 8];
+                if (!(old & 1)) continue;
+                pt::g_saved.emplace(e2, old);
+                pt::put(e2, (m.chunk_dev[ci] + (p - ci * chunk_pages) * kPageBytes) | 1);
+                bit_put(m.redir, p, true);
+                ++m.redir_n;
+                ++g_pt_redirects;
+            } else if (!ok && r) {
+                bit_put(m.redir, p, false);
+                --m.redir_n;
+                ++g_pt_restores;
+                const uint64_t e2 = pt::page_entry(base + p * kPageBytes);
+                if (e2) pt::restore_saved(e2);
+            }
+            if (!valid && !new_get(m, p)) { bit_put(m.want, p, true); m.any_want = true; }
+        }
+        m.pt_pending.insert(m.pt_pending.end(), keep.begin(), keep.end());
+    }
+    static uint32_t last_log = 0;
+    if (now - last_log >= 1200) {
+        last_log = now;
+        uint64_t n = 0, pages = 0;
+        for (Mirror* mp : g_mirrors) if (mp->pt_target) { ++n; pages += mp->redir_n; }
+        NXLOG_I(kTag, "pt_copy: %llu pools, %llu MiB of pages read from the copy now; %llu redirects, %llu back, %llu spans split",
+                (unsigned long long)n, (unsigned long long)(pages * kPageBytes >> 20), (unsigned long long)g_pt_redirects,
+                (unsigned long long)g_pt_restores, (unsigned long long)pt::g_split);
+    }
+}
+
 // The CPU wrote these pages since their copy: they wait for the next draw that wants them. A copy the CPU overwrote before any draw read it
 // was wasted (data the game writes for one frame, a ring buffer): after kHotHits of those in a row the page is hot and stays in the pool for
 // a hold that doubles every time it comes back.
@@ -1059,6 +1216,7 @@ void absorb_writes(Mirror& m, uint32_t now) {
     g_written_tmp.clear();
     mem::ww::take_written(m.ww, g_written_tmp);
     m.st_written += static_cast<int64_t>(g_written_tmp.size());
+    if (m.redir_n) pt_restore_pages(m, g_written_tmp);   // [nvn] pt_copy: the CPU wrote them
     for (uint64_t p : g_written_tmp) {
         const size_t i = static_cast<size_t>(p);
         back_put(m, p, p, false);
@@ -1169,7 +1327,8 @@ VkBuffer mirror_chunk(Mirror& m, uint64_t page) {
     // back to the pool from it (nvn_replay.cpp, compute shadows)
     const VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
+                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
+                                     (device().features().buffer_device_address ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);   // [nvn] pt_copy
     if (device().create_buffer(bytes, usage, gfx::MemoryUse::GpuOnly, &c, "nvn pool mirror") != VK_SUCCESS) {
         c = gfx::Buffer{};
         static bool logged = false;
@@ -1387,6 +1546,22 @@ void flush_copy_cpu_wrote(uint64_t addr, uint64_t n) {   // any thread: nvnMemor
     g_fc_flush_pages.fetch_add(last - first + 1, std::memory_order_relaxed);
 }
 void flush_copy_enable(bool on) { g_fc_on = on ? 1 : 0; }
+void pt_copy_enable(bool on) { g_pt_on = on ? 1 : 0; }
+// A pointer a pointer shader may follow (render thread): its pool becomes a pt_copy target (copied whole, its pages pointed at the copy).
+void pt_note_pointer(uint64_t v) {
+    if (!pt_mode() || v < (uint64_t{1} << 32) || v >= (uint64_t{1} << 47)) return;
+    const PoolHit hit = pool_lookup(v);
+    if (!hit.pool || !hit.pool->gpu) return;
+    Mirror* m = mirror_for(hit.pool->gpu, hit.pool);
+    if (!m || m->pt_target) return;
+    m->pt_target = true;
+    m->pt_scan = true;
+    ++g_pt_targets;
+    bits_put(m->want, 0, m->npages - 1, true);
+    m->any_want = true;
+    NXLOG_I(kTag, "pt_copy: pool %p (%llu KiB) is read through pointers: copied whole, the page table points at the copy",
+            static_cast<void*>(hit.pool->gpu->base), static_cast<unsigned long long>(hit.pool->gpu->size >> 10));
+}
 
 BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) { return resolve_read_dep(gpu_address, size, use, nullptr); }
 
@@ -1637,6 +1812,7 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
     g_wr_calls[use % 6]++;
     g_wr_pages[use % 6] += static_cast<int64_t>(last - first + 1);
     back_put(m, first, last, false);
+    if (m.redir_n) pt_restore_range(m, first, last);   // [nvn] pt_copy: the pool gets the GPU's write, pointer reads go there again
     bool stale = mem::ww::any_valid(m.ww, first, last - first + 1);
     mem::ww::invalidate(m.ww, first, last - first + 1);
     if (m.any_fresh) {             // the pool there is written: what fill copied is old now
@@ -1667,6 +1843,7 @@ void mirror_begin_submit(Frame& f, bool on) {
     }
     const uint32_t now = presents_now();
     log_summary(now);
+    pt_pass(now);   // [nvn] pt_copy
     uint64_t budget = kCopyBudget;
     bool barrier_done = false;
     g_arm_spent_ns = 0;          // the arming budget is per submission (mirror_fill and mirror_span_written during recording count too)
@@ -1696,6 +1873,7 @@ void mirror_begin_submit(Frame& f, bool on) {
                 if (!armed) continue;
                 m.copied_at[static_cast<size_t>(i)] = now ? now : 1;
                 bit_put(m.used, i, false);
+                if (m.pt_target) m.pt_pending.push_back(i);   // [nvn] pt_copy: points at the copy once settled
             }
             if (armed) {
                 for (uint64_t i = p; i < q; ++i) g_st_back_pages.fetch_add(back_get(m, i) ? 1 : 0, std::memory_order_relaxed);
@@ -1746,6 +1924,7 @@ void mirror_destroy(PoolGpu* p) {
     Mirror* m = p->mirror;
     if (!m) return;
     srv_note_mirror_gone();
+    if (m->redir_n) pt_restore_range(*m, 0, m->npages - 1);   // [nvn] pt_copy
     p->mirror = nullptr;
     snaps_forget_locked(m);
     g_fresh_mirrors.erase(std::remove(g_fresh_mirrors.begin(), g_fresh_mirrors.end(), m), g_fresh_mirrors.end());

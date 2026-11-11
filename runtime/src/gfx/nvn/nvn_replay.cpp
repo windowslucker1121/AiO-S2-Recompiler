@@ -241,14 +241,14 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbVrs = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbViUpload = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbSigTex = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbVrs = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbViUpload = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbSigTex = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbChunkRec = 1ull << 60, kAbPtCopy = 1ull << 61 };
 uint64_t ab_mask() {
     static const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"vrs", kAbVrs}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"vi_upload", kAbViUpload}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"sig_tex", kAbSigTex}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"vrs", kAbVrs}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"vi_upload", kAbViUpload}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"sig_tex", kAbSigTex}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"chunk_rec", kAbChunkRec}, {"pt_copy", kAbPtCopy}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -3361,6 +3361,22 @@ void pool_table_words(uint8_t* c0, bool old_table) {
 }
 
 constexpr VkDeviceSize kComputeC0Bytes = 0x1000;
+// [nvn] pt_copy (nvn_gpu_pool.cpp): the 64-bit words at the start of a pointer shader's bound storage buffer that point into a pool make
+// that pool a target (its pages read from the copy through the page table). Each binding address is looked at once.
+void pt_scan_binding(uint64_t addr, uint64_t size) {
+    static const bool on = nxrt::config_get_bool("nvn", "pt_copy", false);
+    if (!on || !addr) return;
+    static std::unordered_set<uint64_t> seen;
+    if (!seen.insert(addr).second) return;
+    const uint64_t n = std::min<uint64_t>(size ? size : 256, 256);
+    if (!host_readable(addr, n)) return;
+    const uint8_t* p = host_ptr(addr);
+    for (uint64_t k = 0; k + 8 <= n; k += 8) {
+        uint64_t v;
+        std::memcpy(&v, p + k, 8);
+        pt_note_pointer(v);
+    }
+}
 // [nvn] cs_gmem_held (default on; cpuperf_ab_what name cs_gmem_held): a compute pointer shader (A17 "gmem") that does not store through
 // pointers checks only the storage slots whose binding may differ from the pool before the page table: a result held in the pool copy or a
 // shadow (out_overlaps), a virtual pool. As graphics_c0 does for draws. The other slots are bound to the pool copy or a shadow made from the
@@ -3385,6 +3401,8 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_tabl
     };
     for (int i = 0; i < c.c0_ubos; ++i) desc(i < 16 ? &S.ubo[kCompute][i] : nullptr);
     for (int i = 0; i < c.c0_ssbos; ++i) desc(i < 16 ? &S.ssbo[kCompute][i] : nullptr);
+    if (S.stage[kCompute] && S.stage[kCompute]->refl.global_fallback)
+        for (int i = 0; i < c.c0_ssbos && i < 16; ++i) pt_scan_binding(S.ssbo[kCompute][i].addr, S.ssbo[kCompute][i].size);
     for (int i = 0; i < c.c0_textures; ++i, off += 8) put64(i < 64 ? S.tex[kCompute][i] : 0);
     for (int i = 0; i < c.c0_images; ++i, off += 8) put64(i < 16 ? S.img[kCompute][i] : 0);
     if (n >= kPoolTableC0 + 8 && off <= kGmemSlotMaskC0) {
@@ -3469,6 +3487,7 @@ uint64_t graphics_c0_build_raw(bool old_table) {
         for (int k = 0; k < 16; ++k) {
             const GState::Bind& b = S.ssbo[st][k];
             if (!b.addr) continue;
+            pt_scan_binding(b.addr, b.size);   // [nvn] pt_copy
             const PoolHit hit = pool_lookup(b.addr);
             if (!hit.pool || hit.pool->is_virtual || !hit.pool->base || out_overlaps(b.addr, b.size ? b.size : 1)) mask_of[st] |= 1u << k;
         }
@@ -8386,6 +8405,7 @@ void replay_begin_submit(Frame& f) {
     note_frame_for_pacing();
     F = &f;
     if (g_tl) g_tl->replay_serial.store(f.serial, std::memory_order_relaxed);   // the texture look-ahead stops scanning this submission
+    cmdq::set_chunk(ab_on(kAbChunkRec));   // [nvn] chunk_on_recorder
     cmdq::begin_submission(ab_on(kAbCmdThread));   // [nvn] cmd_thread: a recorder thread makes the vkCmd* calls (nvn_cmdq.cpp)
     hazard::begin_submission(f.cb, ab_on(kAbHazard), ab_on(kAbHazardPiggy));   // [nvn] hazard: barriers where commands touch what others wrote (nvn_hazard.cpp)
     tex_poll_cpu_writes();
@@ -8448,6 +8468,7 @@ void replay_begin_submit(Frame& f) {
             cmdq::set_desc(ab_on(kAbCmdDesc));
             cmdq::set_publish_batch(ab_on(kAbCmdBatch));
             flush_copy_enable(ab_on(kAbFlushCopy));
+            pt_copy_enable(ab_on(kAbPtCopy));
             render_priority_apply(ab_on(kAbRenderPrio));
             servable_cache_enable(ab_on(kAbSrvCache));
             handle_cache_enable(ab_on(kAbHandleCache));

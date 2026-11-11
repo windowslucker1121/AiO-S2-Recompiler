@@ -20,9 +20,11 @@
 //     transfer reaches a read-only layout only through a layout transition, and that image barrier orders the write;
 //   - image barriers (layout transitions) end the tracking of their image; with [nvn] hazard_piggyback (default on) a full memory barrier is
 //     added to such a call whenever anything is unordered, so the transition and the barrier cost one call;
-//   - a render pass cannot hold a barrier, and what its draws touch is known only as they are recorded: at vkCmdBeginRendering a placeholder
-//     goes into the command queue (cmdq::ph_insert, the recorder waits there) and is decided at the first draw of the pass that conflicts with
-//     what was unordered before the pass, or at vkCmdEndRendering (nothing);
+//   - the tracking runs on the recorder thread (nvn_cmdq.cpp: these hooks are behind the command queue's), so it costs the render thread
+//     nothing. A render pass cannot hold a barrier, and what its draws touch is known only from its commands: at vkCmdBeginRendering the
+//     recorder looks ahead through the queued commands of the pass (cmdq::scan_pass, tracked without driver calls) up to its
+//     vkCmdEndRendering; the first one that conflicts with what was unordered before the pass makes it a barrier before the pass, else none.
+//     Then the pass is recorded. When the render thread needs the recorder meanwhile (a drain, a full ring), the barrier is made;
 //   - at the end of a command buffer, unordered writes get a barrier that includes the host (the CPU reads results after the fence). Reads
 //     stay tracked into the next command buffer of the render thread; when anything else was submitted in between, the next command buffer
 //     starts with everything unknown (its first access gets a barrier).
@@ -62,6 +64,11 @@ int mode() {   // 0 off, 1 on, 2 verify
     return m;
 }
 bool g_piggy_ab = true;   // cpuperf_ab_what hazard_piggyback
+// The recorder thread's mode while it looks ahead through a render pass (cmdq::scan_pass): 0 normal (track, then the driver call), 1 dry (track,
+// no driver call: the pass's commands are looked at before its barrier is decided), 2 pass-through (the driver call only: those commands were
+// tracked in the dry run).
+thread_local int tl_mode = 0;
+inline bool dry() { return tl_mode == 1; }
 bool piggyback_on() {
     static const bool on = config_get_bool("nvn", "hazard_piggyback", true);
     return on && g_piggy_ab;
@@ -324,17 +331,23 @@ VkResult VKAPI_PTR h_cbv(VkDevice d, const VkBufferViewCreateInfo* ci, const VkA
     if (r == VK_SUCCESS) { std::lock_guard<std::mutex> lk(g_mu); g_bview[H(*out)] = {ci->buffer, ci->offset, ci->range}; }
     return r;
 }
+void sums_forget(const uint64_t* h, uint32_t n) {   // handles allocated again: their old contents go (a new one has none)
+    std::lock_guard<std::mutex> lk(g_mu);
+    for (uint32_t i = 0; i < n; ++i) {
+        const auto it = g_sums.find(h[i]);
+        if (it == g_sums.end() || it->second.e.empty()) continue;
+        it->second.e.clear();
+        it->second.ver = ++g_ver;
+        sum_refresh(it->second);
+    }
+}
 VkResult VKAPI_PTR h_ads(VkDevice d, const VkDescriptorSetAllocateInfo* ai, VkDescriptorSet* out) {
     const VkResult r = o_ads(d, ai, out);
     if (r == VK_SUCCESS) {
-        std::lock_guard<std::mutex> lk(g_mu);
-        for (uint32_t i = 0; i < ai->descriptorSetCount; ++i) {   // a handle used before: its old contents go (a new one has none)
-            const auto it = g_sums.find(H(out[i]));
-            if (it == g_sums.end() || it->second.e.empty()) continue;
-            it->second.e.clear();
-            it->second.ver = ++g_ver;
-            sum_refresh(it->second);
-        }
+        static_assert(sizeof(VkDescriptorSet) == 8);
+        // on the recorder, in order with the queued updates of these sets (the summaries are its own); else now
+        if (!cmdq::post_words(&sums_forget, reinterpret_cast<const uint64_t*>(out), ai->descriptorSetCount))
+            sums_forget(reinterpret_cast<const uint64_t*>(out), ai->descriptorSetCount);
     }
     return r;
 }
@@ -355,7 +368,8 @@ void put(Sum& s, uint32_t key, const Res* r) {   // r null: the descriptor holds
 }
 
 void VKAPI_PTR h_uds(VkDevice d, uint32_t n, const VkWriteDescriptorSet* w, uint32_t nc, const VkCopyDescriptorSet* c) {
-    o_uds(d, n, w, nc, c);
+    if (tl_mode != 1) o_uds(d, n, w, nc, c);
+    if (tl_mode == 2) return;
     std::lock_guard<std::mutex> lk(g_mu);
     for (uint32_t i = 0; i < n; ++i) {
         Sum& s = g_sums[H(w[i].dstSet)];
@@ -580,7 +594,8 @@ struct Stats {
 };
 Stats g_st;
 
-std::atomic<VkCommandBuffer> g_cb{VK_NULL_HANDLE};   // the tracked command buffer (render thread), null: none
+std::atomic<VkCommandBuffer> g_cb{VK_NULL_HANDLE};   // the tracked command buffer (recorder side), null: none
+VkCommandBuffer g_rt_cb = VK_NULL_HANDLE;             // the same as the render thread queues it (takes; a chunk switch is queued)
 bool g_on = false;              // this submission is tracked
 bool g_in_pass = false, g_ph = false;
 bool g_pre = false;             // Dp / Rp hold what was unordered when the open pass began
@@ -588,6 +603,9 @@ std::atomic<uint64_t> g_foreign{0};   // submissions of anything but the tracked
 uint64_t g_foreign_seen = 0;
 VkCommandBuffer g_last_ended = VK_NULL_HANDLE;
 bool g_req_since = false;       // verify: a barrier was requested since the last access
+bool g_ph_bar = false;          // the open pass's placeholder was decided as a barrier (recorder look-ahead)
+// The pass's barrier: decided while the recorder looks ahead (g_ph), recorded before vkCmdBeginRendering by h_br.
+void ph_decide(bool barrier) { g_ph_bar = barrier; }
 
 // Bound state per bind point (0 graphics, 1 compute).
 struct BindPt {
@@ -682,19 +700,20 @@ bool conflict(const Acc& d, const Acc& r) {
     return c != 0;
 }
 
-// A placeholder the recorder resolved by itself (a drain or a full ring): it is a barrier at the start of the pass.
-void ph_check_forced() {
-    if (g_ph && !cmdq::ph_pending()) {
-        g_ph = false;
-        g_pre = false;
-        ++g_st.ph_forced;
-        ++g_st.emitted;
-        gpu::count_tracked_barrier();
-        Dp.clear();
-        Rp.clear();
-        all_pending();
-    }
+// The look-ahead stopped inside the pass (the render thread needed the recorder: a drain or a full ring): a barrier at the pass start.
+void ph_force() {
+    if (!g_ph) return;
+    g_ph = false;
+    g_ph_bar = true;
+    g_pre = false;
+    ++g_st.ph_forced;
+    ++g_st.emitted;
+    gpu::count_tracked_barrier();
+    Dp.clear();
+    Rp.clear();
+    all_pending();
 }
+void ph_check_forced() {}
 
 // The accesses in cr / cw (built by `build`, which may be called again after a barrier: what was already registered since the last
 // barrier is left out of it) against what is unordered; a barrier when they conflict; then they are registered.
@@ -713,7 +732,7 @@ void access(VkCommandBuffer cb, Why why, F&& build) {
             g_pre = false;
         }
         if (g_ph && conflict(Dp, Rp)) {
-            cmdq::ph_resolve(true);
+            ph_decide(true);
             g_ph = false;
             ++g_st.ph_need;
             ++g_st.emitted;
@@ -738,7 +757,7 @@ void access(VkCommandBuffer cb, Why why, F&& build) {
     R.merge(cr);
 }
 
-inline bool tracking(VkCommandBuffer cb) { return g_on && cb == g_cb.load(std::memory_order_relaxed) && cb; }
+inline bool tracking(VkCommandBuffer cb) { return tl_mode != 2 && g_on && cb == g_cb.load(std::memory_order_relaxed) && cb; }
 
 // The bound sets / push descriptors / pipeline flags of a bind point into cr / cw.
 // The bindings of set slot `k` a pipeline writes (~0: all).
@@ -865,7 +884,7 @@ void VKAPI_PTR h_bp(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) {
         if (!b.push.empty() && (wmask(f, b.push_set) & ~wmask(b.pi, b.push_set))) b.push_pend = true;
         b.pi = f;
     }
-    n_bp(cb, bp, p);
+    if (!dry()) n_bp(cb, bp, p);
 }
 void VKAPI_PTR h_bds(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout l, uint32_t first, uint32_t n, const VkDescriptorSet* sets, uint32_t nd, const uint32_t* dyn) {
     if (tracking(cb)) {
@@ -875,7 +894,7 @@ void VKAPI_PTR h_bds(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayou
             b.pend |= 1u << (first + i);
         }
     }
-    n_bds(cb, bp, l, first, n, sets, nd, dyn);
+    if (!dry()) n_bds(cb, bp, l, first, n, sets, nd, dyn);
 }
 void VKAPI_PTR h_pds(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout l, uint32_t set, uint32_t n, const VkWriteDescriptorSet* w) {
     if (tracking(cb)) {
@@ -901,7 +920,7 @@ void VKAPI_PTR h_pds(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayou
             }
         b.push_pend = true;
     }
-    n_pds(cb, bp, l, set, n, w);
+    if (!dry()) n_pds(cb, bp, l, set, n, w);
 }
 void VKAPI_PTR h_bvb(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer* bufs, const VkDeviceSize* off) {
     if (tracking(cb))
@@ -910,7 +929,7 @@ void VKAPI_PTR h_bvb(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuf
             if (bufs[i]) { g_vb[s] = brng(bufs[i], off[i], kEnd); g_vb_set |= 1u << s; g_vb_pend |= 1u << s; }
             else { g_vb_set &= ~(1u << s); g_vb_pend &= ~(1u << s); }
         }
-    n_bvb(cb, first, n, bufs, off);
+    if (!dry()) n_bvb(cb, first, n, bufs, off);
 }
 void VKAPI_PTR h_bvb2(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer* bufs, const VkDeviceSize* off, const VkDeviceSize* sz, const VkDeviceSize* st) {
     if (tracking(cb))
@@ -919,11 +938,11 @@ void VKAPI_PTR h_bvb2(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBu
             if (bufs[i]) { g_vb[s] = brng(bufs[i], off[i], sz ? sz[i] : kEnd); g_vb_set |= 1u << s; g_vb_pend |= 1u << s; }
             else { g_vb_set &= ~(1u << s); g_vb_pend &= ~(1u << s); }
         }
-    n_bvb2(cb, first, n, bufs, off, sz, st);
+    if (!dry()) n_bvb2(cb, first, n, bufs, off, sz, st);
 }
 void VKAPI_PTR h_bib(VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkIndexType t) {
     if (tracking(cb)) { g_ib = brng(b, off, kEnd); g_ib_set = g_ib_pend = true; }
-    n_bib(cb, b, off, t);
+    if (!dry()) n_bib(cb, b, off, t);
 }
 
 void draw_access(VkCommandBuffer cb, VkBuffer ind = VK_NULL_HANDLE, VkDeviceSize ioff = 0, VkDeviceSize isize = 0, VkBuffer cnt = VK_NULL_HANDLE,
@@ -939,47 +958,47 @@ void draw_access(VkCommandBuffer cb, VkBuffer ind = VK_NULL_HANDLE, VkDeviceSize
         if (g_xfb_on) for (uint32_t m = g_xfb_set; m; m &= m - 1) cw.add(g_xfb[__builtin_ctz(m)]);
     });
 }
-void VKAPI_PTR h_d(VkCommandBuffer cb, uint32_t a, uint32_t b, uint32_t c, uint32_t d) { if (tracking(cb)) draw_access(cb); n_d(cb, a, b, c, d); }
-void VKAPI_PTR h_di(VkCommandBuffer cb, uint32_t a, uint32_t b, uint32_t c, int32_t d, uint32_t e) { if (tracking(cb)) draw_access(cb); n_di(cb, a, b, c, d, e); }
+void VKAPI_PTR h_d(VkCommandBuffer cb, uint32_t a, uint32_t b, uint32_t c, uint32_t d) { if (tracking(cb)) draw_access(cb); if (!dry()) n_d(cb, a, b, c, d); }
+void VKAPI_PTR h_di(VkCommandBuffer cb, uint32_t a, uint32_t b, uint32_t c, int32_t d, uint32_t e) { if (tracking(cb)) draw_access(cb); if (!dry()) n_di(cb, a, b, c, d, e); }
 void VKAPI_PTR h_dind(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t s) {
     if (tracking(cb)) draw_access(cb, b, o, n ? static_cast<VkDeviceSize>(s) * (n - 1) + 16 : 16);
-    n_dind(cb, b, o, n, s);
+    if (!dry()) n_dind(cb, b, o, n, s);
 }
 void VKAPI_PTR h_diind(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t s) {
     if (tracking(cb)) draw_access(cb, b, o, n ? static_cast<VkDeviceSize>(s) * (n - 1) + 20 : 20);
-    n_diind(cb, b, o, n, s);
+    if (!dry()) n_diind(cb, b, o, n, s);
 }
 void VKAPI_PTR h_dic(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkBuffer cbuf, VkDeviceSize co, uint32_t n, uint32_t s) {
     if (tracking(cb)) draw_access(cb, b, o, n ? static_cast<VkDeviceSize>(s) * (n - 1) + 16 : 16, cbuf, co);
-    n_dic(cb, b, o, cbuf, co, n, s);
+    if (!dry()) n_dic(cb, b, o, cbuf, co, n, s);
 }
 void VKAPI_PTR h_diic(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkBuffer cbuf, VkDeviceSize co, uint32_t n, uint32_t s) {
     if (tracking(cb)) draw_access(cb, b, o, n ? static_cast<VkDeviceSize>(s) * (n - 1) + 20 : 20, cbuf, co);
-    n_diic(cb, b, o, cbuf, co, n, s);
+    if (!dry()) n_diic(cb, b, o, cbuf, co, n, s);
 }
-void VKAPI_PTR h_dm(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) { if (tracking(cb)) draw_access(cb); n_dm(cb, x, y, z); }
+void VKAPI_PTR h_dm(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) { if (tracking(cb)) draw_access(cb); if (!dry()) n_dm(cb, x, y, z); }
 void VKAPI_PTR h_dmi(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t s) {
     if (tracking(cb)) draw_access(cb, b, o, n ? static_cast<VkDeviceSize>(s) * (n - 1) + 12 : 12);
-    n_dmi(cb, b, o, n, s);
+    if (!dry()) n_dmi(cb, b, o, n, s);
 }
 void VKAPI_PTR h_dmic(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkBuffer cbuf, VkDeviceSize co, uint32_t n, uint32_t s) {
     if (tracking(cb)) draw_access(cb, b, o, n ? static_cast<VkDeviceSize>(s) * (n - 1) + 12 : 12, cbuf, co);
-    n_dmic(cb, b, o, cbuf, co, n, s);
+    if (!dry()) n_dmic(cb, b, o, cbuf, co, n, s);
 }
 void VKAPI_PTR h_dibc(VkCommandBuffer cb, uint32_t ic, uint32_t fi, VkBuffer cbuf, VkDeviceSize co, uint32_t cof, uint32_t vs) {
     if (tracking(cb)) draw_access(cb, cbuf, co, 4);
-    n_dibc(cb, ic, fi, cbuf, co, cof, vs);
+    if (!dry()) n_dibc(cb, ic, fi, cbuf, co, cof, vs);
 }
 void VKAPI_PTR h_disp(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
     if (tracking(cb)) access(cb, kWDispatch, [] { build_bp(1); });
-    n_disp(cb, x, y, z);
+    if (!dry()) n_disp(cb, x, y, z);
 }
 void VKAPI_PTR h_dispi(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o) {
     if (tracking(cb)) {
         const Rng ir = brng(b, o, 12);
         access(cb, kWDispatch, [&] { build_bp(1); cr.add(ir); });
     }
-    n_dispi(cb, b, o);
+    if (!dry()) n_dispi(cb, b, o);
 }
 
 void VKAPI_PTR h_cpb(VkCommandBuffer cb, VkBuffer s, VkBuffer d, uint32_t n, const VkBufferCopy* r) {
@@ -991,7 +1010,7 @@ void VKAPI_PTR h_cpb(VkCommandBuffer cb, VkBuffer s, VkBuffer d, uint32_t n, con
         }
         access(cb, kWCopy, [&] { for (const Rng& x : rs) cr.add(x); for (const Rng& x : ws) cw.add(x); });
     }
-    n_cpb(cb, s, d, n, r);
+    if (!dry()) n_cpb(cb, s, d, n, r);
 }
 // Bytes a buffer-image copy region can touch: 16 bytes per texel (no format here; the widest uncompressed texel), from its buffer offset.
 VkDeviceSize region_bytes(const VkBufferImageCopy& c) {
@@ -1005,7 +1024,7 @@ void VKAPI_PTR h_cbti(VkCommandBuffer cb, VkBuffer b, VkImage img, VkImageLayout
         for (uint32_t i = 0; i < n; ++i) rs.push_back(brng(b, r[i].bufferOffset, region_bytes(r[i])));
         access(cb, kWImage, [&] { for (const Rng& x : rs) cr.add(x); cw.add_img(H(img)); });
     }
-    n_cbti(cb, b, img, l, n, r);
+    if (!dry()) n_cbti(cb, b, img, l, n, r);
 }
 void VKAPI_PTR h_citb(VkCommandBuffer cb, VkImage img, VkImageLayout l, VkBuffer b, uint32_t n, const VkBufferImageCopy* r) {
     if (tracking(cb)) {
@@ -1013,38 +1032,38 @@ void VKAPI_PTR h_citb(VkCommandBuffer cb, VkImage img, VkImageLayout l, VkBuffer
         for (uint32_t i = 0; i < n; ++i) ws.push_back(brng(b, r[i].bufferOffset, region_bytes(r[i])));
         access(cb, kWImage, [&] { for (const Rng& x : ws) cw.add(x); cr.add_img(H(img)); });
     }
-    n_citb(cb, img, l, b, n, r);
+    if (!dry()) n_citb(cb, img, l, b, n, r);
 }
 void img_rw(VkCommandBuffer cb, VkImage s, VkImage d) {
     access(cb, kWImage, [&] { if (s) cr.add_img(H(s)); cw.add_img(H(d)); cr.add_img(H(d)); });
 }
 void VKAPI_PTR h_ci(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageCopy* r) {
     if (tracking(cb)) img_rw(cb, s, d);
-    n_ci(cb, s, sl, d, dl, n, r);
+    if (!dry()) n_ci(cb, s, sl, d, dl, n, r);
 }
 void VKAPI_PTR h_bi(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageBlit* r, VkFilter f) {
     if (tracking(cb)) img_rw(cb, s, d);
-    n_bi(cb, s, sl, d, dl, n, r, f);
+    if (!dry()) n_bi(cb, s, sl, d, dl, n, r, f);
 }
 void VKAPI_PTR h_ri(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageResolve* r) {
     if (tracking(cb)) img_rw(cb, s, d);
-    n_ri(cb, s, sl, d, dl, n, r);
+    if (!dry()) n_ri(cb, s, sl, d, dl, n, r);
 }
 void VKAPI_PTR h_cci(VkCommandBuffer cb, VkImage i, VkImageLayout l, const VkClearColorValue* c, uint32_t n, const VkImageSubresourceRange* r) {
     if (tracking(cb)) img_rw(cb, VK_NULL_HANDLE, i);
-    n_cci(cb, i, l, c, n, r);
+    if (!dry()) n_cci(cb, i, l, c, n, r);
 }
 void VKAPI_PTR h_cdsi(VkCommandBuffer cb, VkImage i, VkImageLayout l, const VkClearDepthStencilValue* c, uint32_t n, const VkImageSubresourceRange* r) {
     if (tracking(cb)) img_rw(cb, VK_NULL_HANDLE, i);
-    n_cdsi(cb, i, l, c, n, r);
+    if (!dry()) n_cdsi(cb, i, l, c, n, r);
 }
 void VKAPI_PTR h_fb(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkDeviceSize s, uint32_t v) {
     if (tracking(cb)) { const Rng w = brng(b, o, s); access(cb, kWWrite, [&] { cw.add(w); }); }
-    n_fb(cb, b, o, s, v);
+    if (!dry()) n_fb(cb, b, o, s, v);
 }
 void VKAPI_PTR h_ub(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkDeviceSize s, const void* d) {
     if (tracking(cb)) { const Rng w = brng(b, o, s); access(cb, kWWrite, [&] { cw.add(w); }); }
-    n_ub(cb, b, o, s, d);
+    if (!dry()) n_ub(cb, b, o, s, d);
 }
 void VKAPI_PTR h_cqpr(VkCommandBuffer cb, VkQueryPool q, uint32_t first, uint32_t n, VkBuffer b, VkDeviceSize o, VkDeviceSize st, VkQueryResultFlags fl) {
     if (tracking(cb)) {
@@ -1052,7 +1071,7 @@ void VKAPI_PTR h_cqpr(VkCommandBuffer cb, VkQueryPool q, uint32_t first, uint32_
         const Rng w = brng(b, o, n ? st * (n - 1) + one : one);
         access(cb, kWWrite, [&] { cw.add(w); });
     }
-    n_cqpr(cb, q, first, n, b, o, st, fl);
+    if (!dry()) n_cqpr(cb, q, first, n, b, o, st, fl);
 }
 
 bool ro_layout(VkImageLayout l) {
@@ -1060,7 +1079,7 @@ bool ro_layout(VkImageLayout l) {
            l == VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL || l == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || l == VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
 }
 void VKAPI_PTR h_br(VkCommandBuffer cb, const VkRenderingInfo* ri) {
-    if (!tracking(cb)) return n_br(cb, ri);
+    if (!tracking(cb)) return dry() ? void() : (void)n_br(cb, ri);
     std::vector<std::pair<uint64_t, bool>> att;   // image, written
     {
         std::lock_guard<std::mutex> lk(g_mu);
@@ -1081,8 +1100,8 @@ void VKAPI_PTR h_br(VkCommandBuffer cb, const VkRenderingInfo* ri) {
     if (!D.empty() || !R.empty()) {
         if (conflict(D, R)) {
             emit(cb, kWAttach);
-        } else if (mode() == 2 || cmdq::ph_insert(cb)) {   // verify: no placeholder, the pre-pass state only for counting
-            if (mode() == 1) { ++g_st.ph_in; g_ph = true; }
+        } else if (mode() == 2 || cmdq::on_recorder()) {   // verify: no placeholder, the pre-pass state only for counting
+            if (mode() == 1) { ++g_st.ph_in; g_ph = true; g_ph_bar = false; }
             g_pre = true;
             std::swap(D, Dp);
             std::swap(R, Rp);
@@ -1093,13 +1112,24 @@ void VKAPI_PTR h_br(VkCommandBuffer cb, const VkRenderingInfo* ri) {
     D.merge(cw);
     R.merge(cr);
     g_in_pass = true;
-    n_br(cb, ri);
+    if (g_ph) {
+        // The recorder looks at the pass's commands (dry: tracked, not recorded) up to its vkCmdEndRendering, a conflict with what was unordered
+        // before the pass decides the barrier; then the barrier (or none), the pass begins and its commands are recorded.
+        cmdq::scan_pass();
+        if (g_ph && g_in_pass) ph_force();   // stopped early: the render thread waits for the recorder
+        if (g_ph_bar) record_barrier(cb, false);
+        g_ph_bar = false;
+        n_br(cb, ri);
+        cmdq::replay_scanned();
+        return;
+    }
+    if (!dry()) n_br(cb, ri);
 }
 void VKAPI_PTR h_er(VkCommandBuffer cb) {
     if (tracking(cb) && g_in_pass) {
         ph_check_forced();
         if (g_ph) {   // nothing in the pass needed what came before it ordered
-            cmdq::ph_resolve(false);
+            ph_decide(false);
             g_ph = false;
             ++g_st.ph_skip;
         }
@@ -1114,12 +1144,12 @@ void VKAPI_PTR h_er(VkCommandBuffer cb) {
         }
         g_in_pass = false;
     }
-    n_er(cb);
+    if (!dry()) n_er(cb);
 }
 
 // Image barriers (layout transitions): they order their image. Piggyback: a full memory barrier rides along when anything is unordered.
 void VKAPI_PTR h_pb2(VkCommandBuffer cb, const VkDependencyInfo* di) {
-    if (!tracking(cb) || g_in_pass) return n_pb2(cb, di);
+    if (!tracking(cb) || g_in_pass) return dry() ? void() : (void)n_pb2(cb, di);
     bool full = false;
     for (uint32_t i = 0; i < di->memoryBarrierCount; ++i) {
         const VkMemoryBarrier2& m = di->pMemoryBarriers[i];
@@ -1130,7 +1160,7 @@ void VKAPI_PTR h_pb2(VkCommandBuffer cb, const VkDependencyInfo* di) {
         D.clear();
         R.clear();
         all_pending();
-        return n_pb2(cb, di);
+        return dry() ? void() : (void)n_pb2(cb, di);
     }
     for (uint32_t i = 0; i < di->imageMemoryBarrierCount; ++i) {
         const uint64_t img = H(di->pImageMemoryBarriers[i].image);
@@ -1145,16 +1175,16 @@ void VKAPI_PTR h_pb2(VkCommandBuffer cb, const VkDependencyInfo* di) {
         b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
         VkDependencyInfo d2 = *di;   // di has no memory barriers here (a full one returned above; narrower ones are not made)
-        if (di->memoryBarrierCount) return n_pb2(cb, di);
+        if (di->memoryBarrierCount) return dry() ? void() : (void)n_pb2(cb, di);
         d2.memoryBarrierCount = 1;
         d2.pMemoryBarriers = &b;
         ++g_st.piggy;
         D.clear();
         R.clear();
         all_pending();
-        return n_pb2(cb, &d2);
+        return dry() ? void() : (void)n_pb2(cb, &d2);
     }
-    n_pb2(cb, di);
+    if (!dry()) n_pb2(cb, di);
 }
 
 // Commands the tracker does not follow: a barrier before when anything is unordered, everything unknown after.
@@ -1162,7 +1192,7 @@ void unknown(VkCommandBuffer cb) {
     if (g_in_pass) {
         ph_check_forced();
         if (g_ph) {
-            cmdq::ph_resolve(true);
+            ph_decide(true);
             g_ph = false;
             ++g_st.ph_need;
             ++g_st.emitted;
@@ -1180,23 +1210,23 @@ void unknown(VkCommandBuffer cb) {
 void VKAPI_PTR h_pb1(VkCommandBuffer cb, VkPipelineStageFlags s, VkPipelineStageFlags d, VkDependencyFlags f, uint32_t nm, const VkMemoryBarrier* m, uint32_t nb,
                      const VkBufferMemoryBarrier* b, uint32_t ni, const VkImageMemoryBarrier* im) {
     if (tracking(cb)) unknown(cb);
-    n_pb1(cb, s, d, f, nm, m, nb, b, ni, im);
+    if (!dry()) n_pb1(cb, s, d, f, nm, m, nb, b, ni, im);
 }
-void VKAPI_PTR h_ec(VkCommandBuffer cb, uint32_t n, const VkCommandBuffer* c) { if (tracking(cb)) unknown(cb); n_ec(cb, n, c); }
-void VKAPI_PTR h_cbti2(VkCommandBuffer cb, const VkCopyBufferToImageInfo2* i) { if (tracking(cb)) unknown(cb); n_cbti2(cb, i); }
-void VKAPI_PTR h_citb2(VkCommandBuffer cb, const VkCopyImageToBufferInfo2* i) { if (tracking(cb)) unknown(cb); n_citb2(cb, i); }
+void VKAPI_PTR h_ec(VkCommandBuffer cb, uint32_t n, const VkCommandBuffer* c) { if (tracking(cb)) unknown(cb); if (!dry()) n_ec(cb, n, c); }
+void VKAPI_PTR h_cbti2(VkCommandBuffer cb, const VkCopyBufferToImageInfo2* i) { if (tracking(cb)) unknown(cb); if (!dry()) n_cbti2(cb, i); }
+void VKAPI_PTR h_citb2(VkCommandBuffer cb, const VkCopyImageToBufferInfo2* i) { if (tracking(cb)) unknown(cb); if (!dry()) n_citb2(cb, i); }
 void VKAPI_PTR h_btfb(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer* b, const VkDeviceSize* o, const VkDeviceSize* s) {
     if (tracking(cb))
         for (uint32_t i = 0; i < n && first + i < 4; ++i) { g_xfb[first + i] = brng(b[i], o[i], s ? s[i] : kEnd); g_xfb_set |= 1u << (first + i); }
-    n_btfb(cb, first, n, b, o, s);
+    if (!dry()) n_btfb(cb, first, n, b, o, s);
 }
 void VKAPI_PTR h_btf(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer* b, const VkDeviceSize* o) {
     if (tracking(cb)) { unknown(cb); g_xfb_on = true; }   // the counter buffers: read and written, not followed
-    n_btf(cb, first, n, b, o);
+    if (!dry()) n_btf(cb, first, n, b, o);
 }
 void VKAPI_PTR h_etf(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer* b, const VkDeviceSize* o) {
     if (tracking(cb)) { unknown(cb); g_xfb_on = false; }
-    n_etf(cb, first, n, b, o);
+    if (!dry()) n_etf(cb, first, n, b, o);
 }
 
 void begin_cb(VkCommandBuffer cb) {
@@ -1220,7 +1250,7 @@ inline bool on_rt() {
 
 VkResult VKAPI_PTR h_ecb(VkCommandBuffer cb) {
     if (tracking(cb)) {
-        if (g_ph) { cmdq::ph_resolve(true); g_ph = false; }
+        if (g_ph) { ph_decide(true); g_ph = false; }
         if (!D.empty()) emit(cb, kWEnd, true);   // what the CPU reads after the fence, and anything submitted later
         g_last_ended = cb;
     }
@@ -1232,26 +1262,36 @@ bool ours(uint32_t n, const VkCommandBuffer* c) {
 }
 VkResult VKAPI_PTR h_qs(VkQueue q, uint32_t n, const VkSubmitInfo* s, VkFence f) {
     bool mine = false;
-    if (on_rt()) for (uint32_t i = 0; i < n; ++i) mine |= ours(s[i].commandBufferCount, s[i].pCommandBuffers);
+    if (on_rt() || cmdq::on_recorder()) for (uint32_t i = 0; i < n; ++i) mine |= ours(s[i].commandBufferCount, s[i].pCommandBuffers);
     if (!mine) g_foreign.fetch_add(1, std::memory_order_relaxed);
     return n_qs(q, n, s, f);
 }
 VkResult VKAPI_PTR h_qs2(VkQueue q, uint32_t n, const VkSubmitInfo2* s, VkFence f) {
     bool mine = false;
-    if (on_rt())
+    if (on_rt() || cmdq::on_recorder())
         for (uint32_t i = 0; i < n; ++i)
             for (uint32_t k = 0; k < s[i].commandBufferInfoCount; ++k) mine |= s[i].pCommandBufferInfos[k].commandBuffer == g_last_ended && g_last_ended;
     if (!mine) g_foreign.fetch_add(1, std::memory_order_relaxed);
     return n_qs2(q, n, s, f);
 }
 
+const void* g_hooks[96];
+int g_nhooks = 0;
 template <typename P> void hk(P& slot, P& next, P fn) {
     if (slot && slot != fn) { next = slot; slot = fn; }
+    if (g_nhooks < 96) g_hooks[g_nhooks++] = reinterpret_cast<const void*>(fn);
 }
 
 }  // namespace
 
 bool enabled() { return mode() != 0; }
+bool is_hook(const void* fn) {
+    if (!fn) return false;
+    for (int i = 0; i < g_nhooks; ++i) if (g_hooks[i] == fn) return true;
+    return false;
+}
+void set_thread_mode(int m) { tl_mode = m; }
+bool scan_open() { return g_ph; }
 bool verify() { return mode() == 2; }
 
 void note_buffer(VkBuffer b, VkBufferUsageFlags usage, VkDeviceSize size) {
@@ -1261,7 +1301,11 @@ void note_buffer(VkBuffer b, VkBufferUsageFlags usage, VkDeviceSize size) {
     i = BufInfo();
     i.space = H(b);
     i.size = size;
-    i.bda = (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0;
+    // [nvn] hazard_bda_host (default on): pointer shaders reach game memory only (the guest page table maps the pool imports, which
+    // bound_locked marks), so the runtime's own buffers with a device address (upload ring, copies) are not "every buffer with a device
+    // address" for them.
+    static const bool host_only = config_get_bool("nvn", "hazard_bda_host", true);
+    i.bda = !host_only && (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0;
 }
 
 void install_create_hooks() {
@@ -1341,23 +1385,31 @@ void begin_submission(VkCommandBuffer cb, bool on, bool piggyback) {
         }
         g_on = false;
         g_cb.store(VK_NULL_HANDLE, std::memory_order_relaxed);
+        g_rt_cb = VK_NULL_HANDLE;
         D.clear(); R.clear(); Dp.clear(); Rp.clear();
         return;
     }
     if (!g_on) { D.clear(); R.clear(); D.all = true; }   // switching on: nothing is known about what came before
     g_on = true;
+    g_rt_cb = cb;
     begin_cb(cb);
 }
 
 void switch_cb(VkCommandBuffer from, VkCommandBuffer to) {
-    if (g_on && on_rt() && from && from == g_cb.load(std::memory_order_relaxed)) begin_cb(to);
+    if (on_rt() && from && from == g_rt_cb) g_rt_cb = to;
+    if (g_on && (on_rt() || cmdq::on_recorder()) && from && from == g_cb.load(std::memory_order_relaxed)) begin_cb(to);
+}
+void note_rt_switch(VkCommandBuffer from, VkCommandBuffer to) {   // render thread: the switch is queued (the recorder makes switch_cb)
+    if (from && from == g_rt_cb) g_rt_cb = to;
 }
 
 void external(VkCommandBuffer cb) {
-    if (tracking(cb) && on_rt() && !g_in_pass) unknown(cb);
+    if (!(tracking(cb) && on_rt())) return;
+    // in order with the queued commands: the recorder makes it (the tracking runs there)
+    cmdq::post(+[](VkCommandBuffer c) { if (tracking(c) && !g_in_pass) unknown(c); }, cb);
 }
 
-bool takes(VkCommandBuffer cb) { return mode() == 1 && tracking(cb) && on_rt(); }
+bool takes(VkCommandBuffer cb) { return mode() == 1 && g_on && cb && cb == g_rt_cb && on_rt(); }
 
 void request(uint32_t) {
     ++g_st.requests;
@@ -1377,6 +1429,12 @@ std::string stats_line() {
         o += std::snprintf(b + o, sizeof b - o, "pass starts %llu), placeholders %llu: %llu nothing, %llu barrier, %llu forced; %llu image barriers, %llu with a full barrier added",
                            (unsigned long long)g_st.by[kWAttach], (unsigned long long)g_st.ph_in, (unsigned long long)g_st.ph_skip,
                            (unsigned long long)g_st.ph_need, (unsigned long long)g_st.ph_forced, (unsigned long long)g_st.img_bar, (unsigned long long)g_st.piggy);
+    if (o < (int)sizeof b) {
+        uint64_t sc = 0, ss = 0, sw = 0;
+        cmdq::scan_stats(&sc, &ss, &sw);
+        o += std::snprintf(b + o, sizeof b - o, "; recorder look-aheads %llu (%llu stopped early, %llu waits for queued commands)", (unsigned long long)sc,
+                           (unsigned long long)ss, (unsigned long long)sw);
+    }
     if (o < (int)sizeof b) {
         std::lock_guard<std::mutex> lk(g_pmu);
         o += std::snprintf(b + o, sizeof b - o, "; modules %llu: %llu pointer loads, %llu pointer stores, %llu storage stores, %llu unknown", (unsigned long long)g_mods_n,

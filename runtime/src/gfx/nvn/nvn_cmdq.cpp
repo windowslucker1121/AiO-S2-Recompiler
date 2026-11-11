@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <cstdint>
 #include <cstring>
 #include <new>
@@ -34,6 +35,7 @@
 #include "nvn_gpu_internal.h"
 #include "nvn_hazard.h"
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/log.h"
 
 namespace nxrt::nvn::be::cmdq {
@@ -64,7 +66,29 @@ inline bool queue_here() {
     return tl_render == 1;
 }
 
+// [nvn] hazard on the recorder: the look-ahead through a render pass (scan_pass / replay_scanned).
+thread_local bool tl_recorder = false;
+uint64_t g_rec_next = 0;      // recorder: the position after the packet it runs (replay_scanned moves it past the scanned packets)
+uint64_t g_scan_end = 0;      // recorder: the position after the last packet scan_pass looked at
+alignas(64) std::atomic<uint32_t> g_need{0};   // the producer waits for the recorder (a drain, a full ring): a look-ahead stops
+ExecFn g_haz_fns[64];         // packets whose call goes through the hazard tracker's hooks (looked at in the dry run)
+int g_nhaz = 0;
+ExecFn g_er_exec = nullptr;   // vkCmdEndRendering's packet
+uint64_t g_scans = 0, g_scan_stopped = 0, g_scan_waits = 0;
+bool g_chunk_ab = true;       // cpuperf_ab (chunk_rec)
+void mark_haz(ExecFn f, const void* orig) {
+    if (hazard::is_hook(orig) && g_nhaz < 64) g_haz_fns[g_nhaz++] = f;
+}
+inline bool is_haz(ExecFn f) {
+    for (int i = 0; i < g_nhaz; ++i) if (g_haz_fns[i] == f) return true;
+    return false;
+}
+
 void recorder_loop() {
+    tl_recorder = true;
+    log_set_thread_name("nvn-recorder");
+    diag_register_thread("nvn-recorder", nullptr);   // the sampler ([prof] sample_hz) and the freeze watchdog see its stack
+    struct Unreg { ~Unreg() { diag_unregister_thread(); } } unreg;
     uint64_t tail = g_tail.load(std::memory_order_relaxed);
     for (;;) {
         uint64_t head = g_head.load(std::memory_order_acquire);
@@ -92,8 +116,10 @@ void recorder_loop() {
                 tail += kRingBytes - at;
                 continue;
             }
+            g_rec_next = tail + h->size;
             h->fn(g_ring + at + sizeof(PacketHdr));
-            tail += h->size;
+            tail = g_rec_next;   // past a looked-ahead render pass too
+            if (tail > head) head = g_head.load(std::memory_order_acquire);
         }
         g_tail.store(tail, std::memory_order_release);
     }
@@ -137,6 +163,7 @@ uint8_t* reserve(ExecFn fn, size_t payload) {
             g_tail_seen = g_tail.load(std::memory_order_acquire);
         }
         if (g_wr + need - g_tail_seen <= kRingBytes) {
+            if (g_need.load(std::memory_order_relaxed)) g_need.store(0, std::memory_order_relaxed);
             if (at + size > kRingBytes) {   // wrap
                 reinterpret_cast<PacketHdr*>(g_ring + at)->fn = nullptr;
                 g_wr += kRingBytes - at;
@@ -149,6 +176,7 @@ uint8_t* reserve(ExecFn fn, size_t payload) {
             return g_ring + at + sizeof(PacketHdr);
         }
         if (g_ph) { ++g_ph_forced; ph_set(1); }   // the recorder may be held at a placeholder: it becomes a barrier
+        g_need.store(1, std::memory_order_release);   // a look-ahead stops
         _mm_pause();   // full: the recorder makes room
     }
 }
@@ -162,8 +190,10 @@ void drain_now() {
     if (g_ph) { ++g_ph_forced; ph_set(1); }
     if (g_tail.load(std::memory_order_acquire) == g_wr) return;
     ++g_drains;
+    g_need.store(1, std::memory_order_seq_cst);   // a look-ahead through a pass stops (its end may not be queued yet)
     if (g_sleeping.load(std::memory_order_seq_cst)) WakeByAddressSingle(&g_head);
     while (g_tail.load(std::memory_order_acquire) != g_wr) { _mm_pause(); ++g_drain_spins; }
+    g_need.store(0, std::memory_order_relaxed);
 }
 
 // ---- hooks ----------------------------------------------------------------------------------------------------------------------
@@ -198,7 +228,7 @@ struct Queued<Slot, void(VKAPI_PTR*)(A...)> {
         new (reserve(&exec, sizeof(Args))) Args(a...);
         commit();
     }
-    static void install() { if (*Slot && !orig) { orig = *Slot; *Slot = &call; } }
+    static void install() { if (*Slot && !orig) { orig = *Slot; *Slot = &call; mark_haz(&exec, reinterpret_cast<const void*>(orig)); } }
 };
 
 #define NXQ_DIRECT(name) Direct<&name, PFN_##name>::install(#name)
@@ -669,6 +699,7 @@ void VKAPI_PTR h_uds(VkDevice dev, uint32_t n, const VkWriteDescriptorSet* w, ui
 template <typename P> void hook(P& slot, P& orig, P fn) { if (slot && !orig) { orig = slot; slot = fn; } }
 
 void install_all() {
+    hazard::install_cmd_hooks();   // [nvn] hazard: behind these hooks, so the recorder thread runs the tracking
     // queued, by value
     NXQ_QUEUED(vkCmdBindPipeline); NXQ_QUEUED(vkCmdDraw); NXQ_QUEUED(vkCmdDrawIndexed); NXQ_QUEUED(vkCmdDrawIndirect);
     NXQ_QUEUED(vkCmdDrawIndexedIndirect); NXQ_QUEUED(vkCmdDrawIndirectCount); NXQ_QUEUED(vkCmdDrawIndexedIndirectCount);
@@ -728,7 +759,19 @@ void install_all() {
     NXQ_DIRECT(vkAllocateCommandBuffers); NXQ_DIRECT(vkFreeCommandBuffers); NXQ_DIRECT(vkTrimCommandPool); NXQ_DIRECT(vkDestroyCommandPool);
     NXQ_DIRECT(vkQueueSubmit); NXQ_DIRECT(vkQueueSubmit2); NXQ_DIRECT(vkQueueWaitIdle); NXQ_DIRECT(vkDeviceWaitIdle); NXQ_DIRECT(vkQueuePresentKHR);
     o_pb2_raw = o_pb2;
-    hazard::install_cmd_hooks();   // [nvn] hazard: in front of these hooks
+    // the packets the hazard look-ahead runs dry (their calls go through the tracker's hooks)
+    mark_haz(&x_bds, reinterpret_cast<const void*>(o_bds)); mark_haz(&x_bvb2, reinterpret_cast<const void*>(o_bvb2));
+    mark_haz(&x_cpb, reinterpret_cast<const void*>(o_cpb)); mark_haz(&x_upd, reinterpret_cast<const void*>(o_upd));
+    mark_haz(&x_pb2, reinterpret_cast<const void*>(o_pb2)); mark_haz(&x_br, reinterpret_cast<const void*>(o_br));
+    mark_haz(&x_uds, reinterpret_cast<const void*>(o_uds));
+    if (more) {
+        mark_haz(&x_cbti, reinterpret_cast<const void*>(o_cbti)); mark_haz(&x_citb, reinterpret_cast<const void*>(o_citb));
+        mark_haz(&x_ci, reinterpret_cast<const void*>(o_ci)); mark_haz(&x_bi, reinterpret_cast<const void*>(o_bi));
+        mark_haz(&x_ri, reinterpret_cast<const void*>(o_ri)); mark_haz(&x_cci, reinterpret_cast<const void*>(o_cci));
+        mark_haz(&x_cdsi, reinterpret_cast<const void*>(o_cdsi)); mark_haz(&x_bvb, reinterpret_cast<const void*>(o_bvb));
+        mark_haz(&x_pds, reinterpret_cast<const void*>(o_pds));
+    }
+    g_er_exec = &Queued<&vkCmdEndRendering, PFN_vkCmdEndRendering>::exec;
 }
 
 }  // namespace
@@ -776,6 +819,112 @@ void set_publish_batch(bool on) { g_pub_batch = on ? g_pub_batch_cfg : 1; }
 void desc_stats(uint64_t* queued, uint64_t* direct) { *queued = g_uds_queued; *direct = g_uds_direct; }
 
 bool queuing() { return g_ring && queue_here(); }
+bool on_recorder() { return tl_recorder; }
+
+// The recorder, inside vkCmdBeginRendering's packet (the hazard tracker's h_br): the packets after it up to the pass's vkCmdEndRendering (or
+// the first one that decides the pass's barrier) are run dry (the tracker's hooks track them, no driver call), waiting for the render thread to queue them. Stops early when the render
+// thread waits for the recorder (g_need).
+void scan_pass() {
+    ++g_scans;
+    hazard::set_thread_mode(1);
+    uint64_t pos = g_rec_next;
+    bool done = false;
+    for (;;) {
+        const uint64_t head = g_head.load(std::memory_order_acquire);
+        while (pos != head) {
+            const size_t at = static_cast<size_t>(pos % kRingBytes);
+            const PacketHdr* h = reinterpret_cast<const PacketHdr*>(g_ring + at);
+            if (!h->fn) { pos += kRingBytes - at; continue; }
+            const ExecFn fn = h->fn;
+            if (is_haz(fn) || fn == g_er_exec) fn(g_ring + at + sizeof(PacketHdr));
+            pos += h->size;
+            if (fn == g_er_exec || !hazard::scan_open()) { done = true; break; }   // the pass's end, or its barrier is decided
+        }
+        if (done) break;
+        if (g_need.load(std::memory_order_acquire)) { ++g_scan_stopped; break; }
+        ++g_scan_waits;
+        bool more = false;
+        for (int i = 0; i < 4000; ++i) {
+            _mm_pause();
+            if (g_head.load(std::memory_order_acquire) != pos || g_need.load(std::memory_order_relaxed)) { more = true; break; }
+        }
+        if (!more) {
+            g_sleeping.store(1, std::memory_order_seq_cst);
+            uint64_t seen = pos;
+            if (g_head.load(std::memory_order_seq_cst) == pos && !g_need.load(std::memory_order_seq_cst)) WaitOnAddress(&g_head, &seen, sizeof seen, 1);
+            g_sleeping.store(0, std::memory_order_relaxed);
+        }
+    }
+    hazard::set_thread_mode(0);
+    g_scan_end = pos;
+}
+// Then (after the barrier, if any, and vkCmdBeginRendering): the looked-at packets for real, without tracking.
+void replay_scanned() {
+    hazard::set_thread_mode(2);
+    uint64_t pos = g_rec_next;
+    while (pos != g_scan_end) {
+        const size_t at = static_cast<size_t>(pos % kRingBytes);
+        const PacketHdr* h = reinterpret_cast<const PacketHdr*>(g_ring + at);
+        if (!h->fn) { pos += kRingBytes - at; continue; }
+        h->fn(g_ring + at + sizeof(PacketHdr));
+        pos += h->size;
+    }
+    hazard::set_thread_mode(0);
+    g_rec_next = g_scan_end;
+}
+void scan_stats(uint64_t* scans, uint64_t* stopped, uint64_t* waits) { *scans = g_scans; *stopped = g_scan_stopped; *waits = g_scan_waits; }
+
+// A call made by the recorder in order with the queued ones (or now when nothing is queued).
+struct PostArgs { void (*fn)(VkCommandBuffer); VkCommandBuffer cb; };
+void x_post(const uint8_t* p) { const PostArgs& a = *reinterpret_cast<const PostArgs*>(p); a.fn(a.cb); }
+void post(void (*fn)(VkCommandBuffer), VkCommandBuffer cb) {
+    if (!queuing()) return fn(cb);
+    new (reserve(&x_post, sizeof(PostArgs))) PostArgs{fn, cb};
+    commit();
+}
+struct PostNArgs { void (*fn)(const uint64_t*, uint32_t); uint32_t n; };
+void x_postn(const uint8_t* p) { const PostNArgs& a = *reinterpret_cast<const PostNArgs*>(p); a.fn(reinterpret_cast<const uint64_t*>(p + sizeof(PostNArgs)), a.n); }
+// [nvn] chunk_on_recorder: the end of a submission chunk (frame_chunk) on the recorder.
+struct ChunkArgs { VkCommandBuffer cb, next; VkQueue q; std::mutex* mu; void (*after)(VkCommandBuffer, VkCommandBuffer); };
+uint64_t g_chunks_queued = 0;
+void x_chunk(const uint8_t* p) {
+    const ChunkArgs& a = *reinterpret_cast<const ChunkArgs*>(p);
+    Direct<&vkEndCommandBuffer, PFN_vkEndCommandBuffer>::orig(a.cb);
+    VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    cbi.commandBuffer = a.cb;
+    VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    si.commandBufferInfoCount = 1;
+    si.pCommandBufferInfos = &cbi;
+    VkResult r;
+    {
+        std::lock_guard<std::mutex> lk(*a.mu);
+        r = Direct<&vkQueueSubmit2, PFN_vkQueueSubmit2>::orig(a.q, 1, &si, VK_NULL_HANDLE);
+    }
+    if (r != VK_SUCCESS) NXLOG_E(kTag, "submission chunk (recorder): vkQueueSubmit2 failed (%d)", static_cast<int>(r));
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    Direct<&vkBeginCommandBuffer, PFN_vkBeginCommandBuffer>::orig(a.next, &bi);
+    if (a.after) a.after(a.cb, a.next);
+}
+bool chunk_submit(VkCommandBuffer cb, VkCommandBuffer next, VkQueue q, std::mutex* mu, void (*after)(VkCommandBuffer, VkCommandBuffer)) {
+    static const bool on = config_get_bool("nvn", "chunk_on_recorder", true);
+    if (!on || !g_chunk_ab || !queuing() || !Direct<&vkEndCommandBuffer, PFN_vkEndCommandBuffer>::orig || !Direct<&vkQueueSubmit2, PFN_vkQueueSubmit2>::orig ||
+        !Direct<&vkBeginCommandBuffer, PFN_vkBeginCommandBuffer>::orig)
+        return false;
+    new (reserve(&x_chunk, sizeof(ChunkArgs))) ChunkArgs{cb, next, q, mu, after};
+    commit();
+    ++g_chunks_queued;
+    return true;
+}
+void set_chunk(bool on) { g_chunk_ab = on; }
+bool post_words(void (*fn)(const uint64_t*, uint32_t), const uint64_t* w, uint32_t n) {
+    if (!queuing() || n > 4096) return false;
+    uint8_t* p = reserve(&x_postn, sizeof(PostNArgs) + 8 * size_t{n});
+    new (p) PostNArgs{fn, n};
+    std::memcpy(p + sizeof(PostNArgs), w, 8 * size_t{n});
+    commit();
+    return true;
+}
 
 bool ph_insert(VkCommandBuffer cb) {
     if (!queuing() || !o_pb2) return false;

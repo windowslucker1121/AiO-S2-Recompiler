@@ -27,6 +27,7 @@
 #include "nxrt/gaps.h"
 #include "vk_gauges.h"
 #include "nvn_capture.h"
+#include "nvn_cmdq.h"
 #include "nvn_hazard.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_gpu_stats.h"
@@ -869,6 +870,13 @@ bool frame_chunk(Frame& f) {
     const bool ck = g->cpool && s.timed && s.ck_n + 2 <= kCkMax;   // frame trace: when this part ends and the next begins on the GPU
     const uint32_t ck_base = static_cast<uint32_t>(&s - g->slots) * kCkMax;
     if (ck) vkCmdWriteTimestamp(f.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->cpool, ck_base + s.ck_n++);
+    if (cmdq::chunk_submit(f.cb, next, g->dev->queue(), &g->dev->queue_mutex(), &hazard::switch_cb)) {   // [nvn] chunk_on_recorder
+        hazard::note_rt_switch(f.cb, next);
+        if (ck) vkCmdWriteTimestamp(next, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g->cpool, ck_base + s.ck_n++);
+        f.cb = next;
+        g->ctr.submit_chunks.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
     vkEndCommandBuffer(f.cb);
     VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
     cbi.commandBuffer = f.cb;

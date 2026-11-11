@@ -74,6 +74,8 @@ bool download_texture(Texture* t);
 void cpu_will_read(uint64_t addr, uint64_t size);
 void flush_copy_cpu_wrote(uint64_t addr, uint64_t n);   // [nvn] flush_copy: a CPU flush of pool memory (any thread)
 void flush_copy_enable(bool on);                        // cpuperf_ab (flush_copy)
+void pt_copy_enable(bool on);                           // cpuperf_ab (pt_copy)
+void pt_note_pointer(uint64_t v);                       // [nvn] pt_copy: a pointer a pointer shader may follow
 
 // nvnDeviceSetWindowOriginMode / nvnDeviceSetDepthMode: the replay needs them to place viewports and the depth range.
 void set_window_modes(int origin_mode, int depth_mode);
