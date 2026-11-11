@@ -3364,7 +3364,7 @@ constexpr VkDeviceSize kComputeC0Bytes = 0x1000;
 // [nvn] pt_copy (nvn_gpu_pool.cpp): the 64-bit words at the start of a pointer shader's bound storage buffer that point into a pool make
 // that pool a target (its pages read from the copy through the page table). Each binding address is looked at once.
 void pt_scan_binding(uint64_t addr, uint64_t size) {
-    static const bool on = nxrt::config_get_bool("nvn", "pt_copy", false);
+    static const bool on = nxrt::config_get_bool("nvn", "pt_copy", true);
     if (!on || !addr) return;
     static std::unordered_set<uint64_t> seen;
     if (!seen.insert(addr).second) return;
