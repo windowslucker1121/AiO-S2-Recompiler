@@ -184,6 +184,14 @@ struct GameItem {
     bool killed = false;
     std::chrono::steady_clock::time_point stop_at;
     bool play_after = false;             // Play pressed before the setup was done: start the game when it is
+    bool play_now = false;               // "Play now": the setup was stopped, start the game once its steps have ended
+    // The game program exists and no step that rewrites it runs: the game can start now, shaders translate and compile while it plays.
+    bool can_play_now() const {
+        if (!def || !gid.ok || !exe_ok() || queued) return false;
+        if (!running) return !need[S_EXTRACT];
+        for (int s : {S_EXTRACT, S_BUILD}) if (run[s].planned && !run[s].finished) return false;
+        return true;
+    }
     StepRun run[S_COUNT];
     // How far the whole job is, 0..1: finished and not needed steps count as done.
     double overall() const {
@@ -281,6 +289,7 @@ private:
     std::wstring py_args(const std::wstring& script, const std::wstring& rest) const;
     void rebuild_dialog(GameItem& g);
     void play(GameItem& g);
+    void play_now(GameItem& g);          // stop the setup (what is done stays) and start the game without its "Preparing shaders" window
     void make_shortcut(GameItem& g);
     void about();
     void report(GameItem* g);
@@ -995,6 +1004,10 @@ void App::finish_job(GameItem& g) {
         g.play_after = false;
         if (g.error.empty() && g.ready()) play(g);
     }
+    if (g.play_now) {
+        g.play_now = false;
+        play(g);
+    }
     refresh();
     InvalidateRect(wnd_, nullptr, FALSE);
     InvalidateRect(cards_, nullptr, FALSE);
@@ -1135,7 +1148,7 @@ void App::cancel(GameItem& g) {
         g.play_after = false;
         log(g, L"--- removed from the queue ---");
     } else if (g.running) {
-        g.play_after = false;
+        g.play_after = g.play_now = false;
         g.cancel_requested = true;
         request_stop(g);
         schedule(g);   // ends the job at once when nothing runs
@@ -1177,6 +1190,8 @@ void App::play(GameItem& g) {
     if (!game_args_.empty()) cmd += L" " + game_args_;
     // the game program is built into <data>\program: point it at the library's downloaded DLSS files (inherited environment)
     if (dlss_state(tools_) == 2) SetEnvironmentVariableW(L"NXRT_UPSCALE_DLSS_DLL", dlss_dir(tools_).c_str());
+    // setup not done: no "Preparing shaders" window at start; missing shaders are translated and compiled while the game runs
+    SetEnvironmentVariableW(L"NXRT_NVN_SETUP_ON_START", g.ready() ? nullptr : L"0");
     std::vector<wchar_t> buf(cmd.begin(), cmd.end());
     buf.push_back(0);
     STARTUPINFOW si{sizeof si};
@@ -1200,6 +1215,19 @@ void App::play(GameItem& g) {
     }
     if (!g.ready()) return;
     ShowWindow(wnd_, SW_MINIMIZE);
+}
+
+void App::play_now(GameItem& g) {
+    if (!g.can_play_now()) return;
+    if (!g.running) { play(g); return; }
+    g.play_after = false;
+    g.play_now = true;        // finish_job starts the game once every step has ended (Compile saves its progress when cancelled)
+    g.cancel_requested = true;
+    log(g, L"--- stopping the setup: the game starts when the steps have ended ---");
+    request_stop(g);
+    schedule(g);
+    refresh();
+    InvalidateRect(cards_, nullptr, FALSE);
 }
 
 void App::make_shortcut(GameItem& g) {
@@ -1478,8 +1506,9 @@ void App::more_menu() {
     auto item = [&](int id, const wchar_t* t, bool en) { AppendMenuW(m, MF_STRING | (en ? 0 : MF_GRAYED), id, t); };
     item(ID_DETAILS, details_ ? L"Hide details" : L"Show details", true);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    if (g->playable() && !g->ready()) {     // setup wants to run (new release, update): start the program built last time as it is
-        item(ID_PLAY_AS_IS, L"Play last build (skip setup)", idle);
+    if (g->can_play_now() && !g->ready()) {   // setup not done (or still running): start the program built last time as it is
+        item(ID_PLAY_AS_IS, g->running ? L"Play now (stop the setup; shaders compile while playing)" : L"Play now (skip setup)",
+             !g->cancel_requested && !g->play_now);
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     }
     item(ID_SRC_NUP, L"Choose another .nup file...", idle && g->def);
@@ -1940,7 +1969,7 @@ void App::command(int id, int code) {
     GameItem* g = sel();
     switch (id) {
         case ID_PLAY: if (g) primary(*g); break;
-        case ID_PLAY_AS_IS: if (g) play(*g); break;
+        case ID_PLAY_AS_IS: if (g) play_now(*g); break;
         case ID_MORE: more_menu(); break;
         case ID_DETAILS: details_ = !details_; break;
         case ID_PREP:
