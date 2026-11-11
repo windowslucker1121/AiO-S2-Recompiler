@@ -264,6 +264,7 @@ NVNboolean nvnMemoryPoolMapVirtual(NVNmemoryPool* pool, int count, const NVNmapp
             }
             vp->vmaps = std::move(kept);
         }
+        gpu::virtual_maps_changed();
         virtual_textures_remapped(vp, v0, r[i].size);
     }
     return 1;

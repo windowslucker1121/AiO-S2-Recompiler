@@ -125,6 +125,8 @@ uint64_t handle_register(Ref<CmdList> list) {
 
 std::atomic<bool> g_cache_on{true};
 void handle_cache_enable(bool on) { g_cache_on.store(on, std::memory_order_relaxed); }
+std::atomic<uint32_t> g_cache_mask{16383};
+void handle_cache_big(bool on) { g_cache_mask.store(on ? 16383u : 1023u, std::memory_order_relaxed); }
 
 namespace {
 Ref<CmdList> handle_lookup_table(uint64_t handle);
@@ -136,8 +138,10 @@ Ref<CmdList> handle_lookup(uint64_t handle) {
     static const bool cfg = config_get_bool("nvn", "handle_cache", true);
     if (!cfg || !g_cache_on.load(std::memory_order_relaxed)) return handle_lookup_table(handle);
     struct Slot { uint64_t h = 0; Ref<CmdList> l; };
-    thread_local Slot cache[1024];
-    Slot& s = cache[(handle >> 3) & 1023];
+    // 16k slots: handles are issued 8 apart, and the lists a frame calls span tens of thousands of handles (1024 slots thrashed: the
+    // table look-up under the shared lock, contended by the game's registrations, was ~4% of the render thread in the village scene)
+    thread_local Slot* cache = new Slot[16384];
+    Slot& s = cache[(handle >> 3) & g_cache_mask.load(std::memory_order_relaxed)];
     if (s.h == handle && s.l && !s.l->dropped.load(std::memory_order_acquire)) {
         s.l->calls.fetch_add(1, std::memory_order_relaxed);
         return s.l;

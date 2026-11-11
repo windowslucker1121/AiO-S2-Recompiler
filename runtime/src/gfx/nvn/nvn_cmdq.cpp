@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <new>
 #include <string>
 #include <thread>
@@ -591,8 +592,12 @@ void VKAPI_PTR h_smk(VkCommandBuffer cb, VkSampleCountFlagBits s, const VkSample
 PFN_vkCmdPushDescriptorSetKHR o_pds = nullptr;
 struct PdsArgs { VkCommandBuffer cb; VkPipelineBindPoint bp; VkPipelineLayout layout; uint32_t set, n; const VkWriteDescriptorSet* w; };
 void x_pds(const uint8_t* p) { const PdsArgs& a = *reinterpret_cast<const PdsArgs*>(p); o_pds(a.cb, a.bp, a.layout, a.set, a.n, a.w); }
+// [nvn] cmd_thread_pds (default on; cpuperf_ab_what pds_q): queued without the image copies of cmd_thread_copies (those made the recorder
+// fall behind in the first scene); each direct one waited for the whole ring (~20 per frame in the village scene).
+std::atomic<bool> g_pds_q{true};
 void VKAPI_PTR h_pds(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout layout, uint32_t set, uint32_t n, const VkWriteDescriptorSet* w) {
-    if (!q_copy()) return o_pds(cb, bp, layout, set, n, w);
+    if (!queue_here()) return o_pds(cb, bp, layout, set, n, w);
+    if (!g_pds_q.load(std::memory_order_relaxed)) { drain_now(); ++g_direct; return o_pds(cb, bp, layout, set, n, w); }
     size_t extra = room<VkWriteDescriptorSet>(n);
     for (uint32_t i = 0; i < n; ++i) {
         if (w[i].pNext) { drain_now(); ++g_direct; return o_pds(cb, bp, layout, set, n, w); }
@@ -709,7 +714,9 @@ void install_all() {
         NXQ_DIRECT(vkCmdSetSampleMaskEXT); NXQ_DIRECT(vkCmdSetColorBlendEnableEXT); NXQ_DIRECT(vkCmdSetColorBlendEquationEXT);
         NXQ_DIRECT(vkCmdSetColorWriteMaskEXT); NXQ_DIRECT(vkCmdSetPolygonModeEXT); NXQ_DIRECT(vkCmdSetDepthClampEnableEXT);
         NXQ_DIRECT(vkCmdSetLogicOpEnableEXT); NXQ_DIRECT(vkCmdSetAlphaToCoverageEnableEXT); NXQ_DIRECT(vkCmdSetRasterizationSamplesEXT);
-        NXQ_DIRECT(vkCmdSetDepthClipEnableEXT); NXQ_DIRECT(vkCmdPushDescriptorSetKHR);
+        NXQ_DIRECT(vkCmdSetDepthClipEnableEXT);
+        if (config_get_bool("nvn", "cmd_thread_pds", true)) hook(vkCmdPushDescriptorSetKHR, o_pds, &h_pds);
+        else NXQ_DIRECT(vkCmdPushDescriptorSetKHR);
     }
     // everything else the replay records: drained first, then called directly
     NXQ_DIRECT(vkCmdPipelineBarrier); NXQ_DIRECT(vkCmdCopyImageToBuffer2); NXQ_DIRECT(vkCmdCopyBufferToImage2);
@@ -761,6 +768,45 @@ void begin_submission(bool on) {
 }
 
 void set_copies(bool on) { g_copies_q.store(on, std::memory_order_relaxed); }
+void set_pds(bool on) { g_pds_q.store(on, std::memory_order_relaxed); }
+
+// [nvn] chunk_async (default on; cpuperf_ab_what chunk_async): a submission chunk (frame_chunk: end the command buffer, submit it without a
+// fence or signal, begin the next one) is one packet the recorder runs in order, instead of a drain of the ring and the three calls on the
+// render thread. The render thread never waits for a chunk's submission (no fence, no signal): later waits on the queue go through calls
+// that drain first (the end of the submission, splits, presents).
+namespace {
+struct ChunkArgs { VkCommandBuffer old, next; VkQueue q; std::mutex* mu; };
+std::atomic<uint64_t> g_chunk_fail{0};
+void x_chunk(const uint8_t* p) {
+    const ChunkArgs& a = *reinterpret_cast<const ChunkArgs*>(p);
+    vkEndCommandBuffer(a.old);   // the recorder thread: the hooks call the driver directly
+    VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    cbi.commandBuffer = a.old;
+    VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    si.commandBufferInfoCount = 1;
+    si.pCommandBufferInfos = &cbi;
+    VkResult r;
+    {
+        std::lock_guard<std::mutex> lk(*a.mu);
+        r = vkQueueSubmit2(a.q, 1, &si, VK_NULL_HANDLE);
+    }
+    if (r != VK_SUCCESS && g_chunk_fail.fetch_add(1) < 4) NXLOG_E(kTag, "submission chunk (recorder): vkQueueSubmit2 failed (%d)", static_cast<int>(r));
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(a.next, &bi);
+}
+}  // namespace
+std::atomic<bool> g_chunk_async{true};
+void set_chunk_async(bool on) { g_chunk_async.store(on, std::memory_order_relaxed); }
+bool queue_chunk(VkCommandBuffer old, VkCommandBuffer next, VkQueue q, std::mutex* mu) {
+    static const bool cfg = config_get_bool("nvn", "chunk_async", true);
+    if (!cfg || !g_chunk_async.load(std::memory_order_relaxed) || !queuing()) return false;
+    if (g_ph) ph_set(1);   // a hazard placeholder still open in `old` becomes a barrier before the buffer ends
+    new (reserve(&x_chunk, sizeof(ChunkArgs))) ChunkArgs{old, next, q, mu};
+    commit();
+    publish();
+    return true;
+}
 void set_desc(bool on) { g_desc_q.store(on, std::memory_order_relaxed); }
 void apply_render_priority(bool on) {
     static const std::string mode = config_get_str("nvn", "render_priority", "highest");

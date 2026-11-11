@@ -2,6 +2,7 @@
 // [nvn] cmd_thread (nvn_cmdq.cpp): the render thread's vkCmd* calls are made by a recorder thread, in order, from a ring of copied calls.
 #pragma once
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 #include <volk.h>
@@ -12,6 +13,11 @@ bool enabled();                       // [nvn] cmd_thread (read once)
 // At the start of a submission (render thread, nothing recorded yet): installs the hooks the first time, waits for the recorder, and
 // switches queuing on or off for what follows (paired windows).
 void begin_submission(bool on);
+void set_pds(bool on);                // [nvn] cmd_thread_pds under cpuperf_ab (pds_q): push descriptor sets queued or drained
+// [nvn] chunk_async (pds_q's sibling, cpuperf_ab_what chunk_async): ends `old`, submits it (no fence, no signal) and begins `next` on the
+// recorder thread, in order. False: not queuing now; the caller does it itself.
+bool queue_chunk(VkCommandBuffer old, VkCommandBuffer next, VkQueue q, std::mutex* mu);
+void set_chunk_async(bool on);
 void set_copies(bool on);             // [nvn] cmd_thread_copies under cpuperf_ab (cmd_copies): image copies and clears queued or drained
 void apply_render_priority(bool on);   // [nvn] render_priority: the calling (render) thread and the recorder; on false: NORMAL
 void set_publish_batch(bool on);       // [nvn] cmd_publish_batch under cpuperf_ab (cmd_batch)

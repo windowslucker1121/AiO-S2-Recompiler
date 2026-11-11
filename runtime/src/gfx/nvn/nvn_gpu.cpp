@@ -29,6 +29,7 @@
 #include "nvn_capture.h"
 #include "nvn_hazard.h"
 #include "nvn_gpu_internal.h"
+#include "nvn_cmdq.h"
 #include "nvn_gpu_stats.h"
 #include "nvn_impl.h"
 #include "nvn_pipeline.h"
@@ -869,25 +870,27 @@ bool frame_chunk(Frame& f) {
     const bool ck = g->cpool && s.timed && s.ck_n + 2 <= kCkMax;   // frame trace: when this part ends and the next begins on the GPU
     const uint32_t ck_base = static_cast<uint32_t>(&s - g->slots) * kCkMax;
     if (ck) vkCmdWriteTimestamp(f.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->cpool, ck_base + s.ck_n++);
-    vkEndCommandBuffer(f.cb);
-    VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
-    cbi.commandBuffer = f.cb;
-    VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
-    si.commandBufferInfoCount = 1;
-    si.pCommandBufferInfos = &cbi;
-    VkResult r;
-    {
-        nxrt::HitchTimer ht(nxrt::kHpRenderSubmit);
-        std::lock_guard<std::mutex> lk(g->dev->queue_mutex());
-        r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
+    VkResult r = VK_SUCCESS;
+    if (!cmdq::queue_chunk(f.cb, next, g->dev->queue(), &g->dev->queue_mutex())) {   // [nvn] chunk_async: on the recorder thread, in order
+        vkEndCommandBuffer(f.cb);
+        VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+        cbi.commandBuffer = f.cb;
+        VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        si.commandBufferInfoCount = 1;
+        si.pCommandBufferInfos = &cbi;
+        {
+            nxrt::HitchTimer ht(nxrt::kHpRenderSubmit);
+            std::lock_guard<std::mutex> lk(g->dev->queue_mutex());
+            r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
+        }
+        if (r != VK_SUCCESS) {
+            NXLOG_E(kTag, "submission chunk: vkQueueSubmit2 failed (%d)", static_cast<int>(r));
+            if (r == VK_ERROR_DEVICE_LOST) device_lost("NVN submission chunk");
+        }
+        VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(next, &bi);
     }
-    if (r != VK_SUCCESS) {
-        NXLOG_E(kTag, "submission chunk: vkQueueSubmit2 failed (%d)", static_cast<int>(r));
-        if (r == VK_ERROR_DEVICE_LOST) device_lost("NVN submission chunk");
-    }
-    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(next, &bi);
     hazard::switch_cb(f.cb, next);
     if (ck) vkCmdWriteTimestamp(next, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g->cpool, ck_base + s.ck_n++);
     f.cb = next;
