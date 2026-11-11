@@ -215,7 +215,7 @@ const std::vector<Opt>& options() {
         {T_DISPLAY, "display", "aspect", L"Aspect ratio", L"The shape of the 3D view and the HUD.", "auto",
          {{"auto", L"Auto (the window's)"}, {"16:9", L"16:9"}, {"16:10", L"16:10"}, {"21:9", L"21:9"}, {"32:9", L"32:9"}, {"4:3", L"4:3"}}},
         {T_DISPLAY, nullptr, nullptr, L"Frame rate", nullptr, nullptr, {}},
-        {T_DISPLAY, "display", "fps_limit", L"Frame rate limit", L"Auto: the console's rate for games with a fixed step.", "auto",
+        {T_DISPLAY, "display", "fps_limit", L"Frame rate limit", L"Auto: up to 100 fps; the console's rate for games with a fixed step.", "auto",
          {{"auto", L"Auto"}, {"30", L"30 fps"}, {"60", L"60 fps"}, {"120", L"120 fps"}, {"144", L"144 fps"}, {"0", L"Unlimited"}}},
         {T_DISPLAY, "display", "vsync", L"VSync", L"With G-Sync or FreeSync, leave it off and set a limit.", "0", {}},
         {T_DISPLAY, "fps", "show", L"Frame rate counter", L"F2 shows and hides it in the game.", "0", {}},

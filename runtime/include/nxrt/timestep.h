@@ -93,7 +93,7 @@ struct Sites {
     // A game that takes its step from data instead of immediates (Ocarina of Time: a frame-step scale it derives from a target fps): called on
     // the frame_update entry after the step of this frame is known, in real and fixed mode only. c: the guest context at that entry (x0 = this).
     void (*apply_step)(::Ctx* c, uint64_t game_base, float dt) = nullptr;
-    // fps_limit = auto: true caps at the display's refresh rate (the step follows real time). false keeps the console's 60 ([display]
+    // fps_limit = auto: true caps at [display] auto_fps (default 100; 0 = the display's refresh rate; the step follows real time). false keeps the console's 60 ([display]
     // console_fps): for a game that still advances something one unit per frame (OoT's movie pictures), so it never runs above 60.
     bool cap_at_display_rate = true;
     // The game's movie player shows one decoded picture per frame (OoT): while the game reads pictures (nn::codec, the last one under 0.5 s ago)

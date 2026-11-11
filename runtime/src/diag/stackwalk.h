@@ -11,5 +11,6 @@ namespace nxrt::detail {
 // Walks the host stack described by *ctx with RtlLookupFunctionEntry/RtlVirtualUnwind. Writes up to `max` return
 // addresses (the first is ctx->Rip). Does not modify *ctx. Never allocates.
 size_t capture_stack(const CONTEXT* ctx, uint64_t* frames, size_t max);
+size_t capture_stack_guarded(const CONTEXT* ctx, uint64_t* frames, size_t max);   // a fault while walking: 0 frames
 
 }  // namespace nxrt::detail

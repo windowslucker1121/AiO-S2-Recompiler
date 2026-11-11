@@ -343,10 +343,13 @@ void apply_frame_cap(const Settings& s) {
         // 60 Hz display paces it: there auto means 60, whatever the monitor runs at. OoT on a Remote Desktop display (32 Hz) ran at 32 fps,
         // its 60 fps movies at half speed against their voice lines (A11); a 144 Hz monitor would have run it 2.4 times too fast.
         // A game with sites that still advances something per frame (Sites::cap_at_display_rate false) stays at the console's rate.
+        // [display] auto_fps (default 100): the cap auto means for such a game, whatever the display runs at; 0 = the display's
+        // refresh rate (the behaviour before 2026-11-11). Movies stay at console_fps through movie_cap.
         const timestep::Sites* ts = game::info().timestep;
         if (ts && ts->frame_update && ts->cap_at_display_rate && timestep::active_mode()) {
+            const double amax = config_get_double("display", "auto_fps", 100.0);
             const float hz = st.window ? platform::display_refresh_hz() : 0.f;
-            cap = hz > 0 ? static_cast<double>(hz) : 0;
+            cap = amax > 0 ? amax : (hz > 0 ? static_cast<double>(hz) : 0);
         } else {
             cap = config_get_double("display", "console_fps", 60.0);
         }
