@@ -294,9 +294,11 @@ void begin_frame() {
         s.n_elapsed++;
         s.st.mean_elapsed = s.sum_elapsed / static_cast<double>(s.n_elapsed);
     }
-    if (s.csv)
+    if (s.csv) {
         std::fprintf(s.csv, "%llu,%.6f,%.6f,%.6f,%.6f,%llu,%.4f\n", static_cast<unsigned long long>(s.frame), now, elapsed, static_cast<double>(s.dt), s.st.sim_seconds,
                      static_cast<unsigned long long>(movie_pictures()), s.st.render_seconds);
+        if ((s.frame & 7) == 0) std::fflush(s.csv);   // readable while the game runs (test tooling times captures by game time)
+    }
     if (c.log_every > 0 && s.frame % static_cast<uint64_t>(c.log_every) == 0)
         NXLOG_I(kTag, "frame %llu: step %.3f ms (%.1f Hz), elapsed min/mean/max %.3f/%.3f/%.3f ms, waits %llu, sim %.3f s, movie frames %llu",
                 static_cast<unsigned long long>(s.frame), s.dt * 1e3, 1.0 / std::max(1e-9, static_cast<double>(s.dt)), s.st.min_elapsed * 1e3,

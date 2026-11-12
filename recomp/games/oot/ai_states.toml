@@ -24,9 +24,11 @@ steps = [
 ]
 
 [route.new_game]
-description = "title: A on New Game until the title movie is cut (a decoder finalized after fewer than 120 pictures)"
+# Stops pressing once A cut the title movie (fewer than 120 pictures) or a second movie (the intro) started. The old pattern (a decoder finalized after fewer than 120 pictures) never matched once a cut movie ended
+# after 122 pictures, so A kept being pressed for 120 s, into the cutscene (2026-11-12).
+description = "title: A on New Game until the intro movie starts"
 steps = [
-  { press_until = { input = ["key Return"], every_s = 3, until = { until = "log", pattern = "finalized after ([0-9]|[1-9][0-9]|1[01][0-9]) pictures" }, timeout_s = 120 } },
+  { press_until = { input = ["key Return"], every_s = 3, until = { until = "log", pattern = "finalized after ([0-9]|[1-9][0-9]|1[01][0-9]) pictures|decoder [2-9] started" }, timeout_s = 120 } },
 ]
 
 [route.continue]
