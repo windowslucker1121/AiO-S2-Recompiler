@@ -54,6 +54,11 @@ pairs). Paired windows (`cpuperf_ab_what = r6`, the old path on the same dynamic
   the kept-set table. Made once from the persistent pools; a destroyed image never returns its stamp. Paired against the kept-set path
   (`cpuperf_ab_what = r6t`, final form): replay -0.64 ms (44/45), fps +1.2 (39/45); verify 6.7 M look-ups, 0 differences; A18 4,398 every
   loop, capture replay pixel-identical. Before/after the early placement alone: replay -0.13 ms (39/45), 1% low +0.65.
+- **Final R6 run** (same settings as the baseline run, 60-200 s, quiet machine): 88.8 fps, 1% low 61.1, frames over 10 ms 62.4% (baseline
+  97.8%), over 15 ms 1.31%, render replay median 9.41 ms (baseline 10.88), render idle 1.52 ms (baseline 0.38). Mean fps barely moved
+  against the first ubo_dynamic run (90.0) because the 4-frame cycle locked into 12.8 / 13.0 / 9.3 / 10.0 ms: the two heavy frames are
+  no longer the render thread's.
+- **Dropped:** `submit_async` again (now `cpuperf_ab_what = r6b`): replay -0.21 ms in two runs, fps +0.35 (29/45) / +0.05 (24/45): off.
 - **Where the frame is now** (village, no trace, ~88-90 fps): render replay median ~9.7-10.0 ms, render idle ~1.0-1.5 ms, GPU 91-95% busy
   (nvidia-smi) and the game's own CPU frame alternating: by draw-count rank in the 4-frame cycle 12.9 / 13.1 / 9.4 / 10.0 ms with render
   idle 2.1-2.5 ms in the two heavy frames (the game's main thread waits longer on its workers there). The game's GPU sync waits on the big
