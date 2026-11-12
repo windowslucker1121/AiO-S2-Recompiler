@@ -174,6 +174,10 @@ bool init(Ctx& c) {
     VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &f12};
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f11};
     vkGetPhysicalDeviceFeatures2(c.pd, &f2);
+    // the runtime turns robustness off ([gfx] robust_access, default off): with it on every storage load gets a bounds check and
+    // vector loads split into words, which inflated the counts of earlier pipestat runs
+    f2.features.robustBufferAccess = std::getenv("PIPESTAT_ROBUST") ? f2.features.robustBufferAccess : VK_FALSE;
+    f13.robustImageAccess = std::getenv("PIPESTAT_ROBUST") ? f13.robustImageAccess : VK_FALSE;
     mesh.multiviewMeshShader = VK_FALSE;
     mesh.primitiveFragmentShadingRateMeshShader = VK_FALSE;
     const char* exts[] = {VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME, VK_EXT_MESH_SHADER_EXTENSION_NAME};

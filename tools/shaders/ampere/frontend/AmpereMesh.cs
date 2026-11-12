@@ -300,6 +300,8 @@ namespace Ryujinx.Graphics.Shader.Translation
                     SpvInstruction u = ctx.TypeU32();
                     SpvInstruction cnt = ctx.Get(AggregateType.U32, op.GetSource(2));
                     cnt = ctx.Select(u, ctx.ULessThan(ctx.TypeBool(), cnt, ctx.Constant(u, _cur.Info.MaxPrimitives)), cnt, ctx.Constant(u, _cur.Info.MaxPrimitives));
+                    if (Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_EXP") is "zeroprims" or "empty")   // measurement only: no primitive
+                        cnt = ctx.Select(u, ctx.IEqual(ctx.TypeBool(), cnt, ctx.Constant(u, unchecked((int)0xdeadbeef))), cnt, ctx.Constant(u, 0));
                     SpvInstruction smo = ctx.NewInstruction(SetMeshOutputs);
                     smo.AddOperand(ctx.Constant(u, _cur.Info.MaxVertices)); smo.AddOperand(cnt);
                     Emit(ctx, smo);
@@ -364,6 +366,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         [ThreadStatic] static int ProvenCount, UnprovenCount;
         /// NXRT_HARNESS_MESH_PROOF=0: every direct attribute store checks its address form at run time.
         static readonly bool NoProof = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_PROOF") == "0";
+        static readonly bool ProofShift = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_PROOF_SHIFT") == "1";
 
         /// What the address expression is known to be: Form = lineBytes * q + r with r in [0, Max], r a multiple of 2^Align (q any);
         /// Pure: q is 0 (the value itself is in [0, Max]).
@@ -423,6 +426,9 @@ namespace Ryujinx.Graphics.Shader.Translation
                 {
                     long? s = Cst(1);
                     if (s == null || s.Value > 31) return Unknown;
+                    // NXRT_HARNESS_MESH_PROOF_SHIFT=1 (opt-in, G4: shadow mesh 7477b2c8 40 stores proven, 1590 -> 938 host instructions, but the
+                    // in-game GPU time did not move): anything shifted by a multiple of lineBytes' power of two, (v >> 5) << 10 with eight lines
+                    if (ProofShift && ((1L << (int)s.Value) % lineBytes) == 0) return new AddrForm(true, false, 0, 31);
                     AddrForm x = S(0);
                     if (!x.Form) return Unknown;
                     if (x.Max == 0) return new AddrForm(true, x.Pure, 0, 31);
@@ -543,7 +549,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             count = ctx.Select(u32, ctx.ULessThan(boolT, count, C(m.MaxPrimitives)), count, C(m.MaxPrimitives));
             // measurement only (F2): NXRT_HARNESS_MESH_EXP=noprims: every mesh work group runs as before but outputs no primitive (a count
             // the compiler cannot fold: 0 unless the program wrote 0xdeadbeef), so the time left is the shader's own
-            if (Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_EXP") == "noprims")
+            if (Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_EXP") is "noprims" or "zeroprims" or "empty")
                 count = ctx.Select(u32, ctx.IEqual(boolT, count, C(unchecked((int)0xdeadbeef))), count, C(0));
             SpvInstruction tid = ctx.CompositeExtract(u32, ctx.Load(ctx.TypeVector(u32, 3), s.ThreadIdVar), (LiteralInteger)0);
             SpvInstruction f32 = ctx.TypeFP32();

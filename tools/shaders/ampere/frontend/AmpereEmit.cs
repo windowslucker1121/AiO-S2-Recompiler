@@ -69,7 +69,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                         return;
                 }
                 IrOperand skip = null;
-                if (guard != null)
+                if (guard != null && !(ExpNoPred && IsPureAlu(i)) && !prog.Speculated.Contains(i.Address))
                 {
                     skip = Label();
                     ctx.BranchIfFalse(skip, guard);
@@ -87,6 +87,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 prog.Fail(i, $"{e.GetType().Name} {e.Message}");
             }
         }
+
+        /// NXRT_HARNESS_EXP_NOPRED=1 (measurement only, wrong results): predicated pure ALU instructions run unconditionally, to see what
+        /// the predication's merges cost in host code.
+        static readonly bool ExpNoFtz = Environment.GetEnvironmentVariable("NXRT_HARNESS_EXP_NOFTZ") == "1";
+        static readonly bool ExpNoPred = Environment.GetEnvironmentVariable("NXRT_HARNESS_EXP_NOPRED") == "1";
+        static bool IsPureAlu(SassInst i) => i.Opcode is "FADD" or "FMUL" or "FFMA" or "FSEL" or "SEL" or "MOV" or "IADD3" or "IMAD" or "LOP3"
+            or "SHF" or "LEA" or "FMNMX" or "IMNMX" or "MUFU" or "FRND" or "F2I" or "I2F" or "I2FP" or "PRMT" or "FSETP" or "ISETP" or "PLOP3";
 
         static IrOperand Guard(EmitterContext ctx, SassInst i)
         {
@@ -240,6 +247,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             IrOperand v = FSrc(ctx, o);
             if (!Has(i, "FTZ") || o.Kind == OperandKind.FImm || (o.Kind == OperandKind.Reg && o.Reg == 255)) return v;
+            if (ExpNoFtz) return v;   // measurement only
             IrOperand denormal = ctx.FPCompareLess(ctx.FPAbsolute(v), ConstF(1.17549435e-38f));
             return ctx.ConditionalSelect(denormal, ctx.BitwiseAnd(v, Const(unchecked((int)0x80000000))), v);
         }
@@ -381,6 +389,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 case "FMUL":
                     {
                         IrOperand fa = FSrc(ctx, o[1]), fb = FSrc(ctx, o[2]);
+                        if (prog.SinSources.Contains(i.Address))
+                            { IrOperand xc = Local(); ctx.Copy(xc, o[2].Kind == OperandKind.FImm ? fa : fb); prog.SinArg[i.Address] = xc; }   // for the MUFU (AmpereFuse)
                         float scale = Has(i, "M2") ? 2 : Has(i, "M4") ? 4 : Has(i, "M8") ? 8 : Has(i, "D2") ? 0.5f : Has(i, "D4") ? 0.25f : Has(i, "D8") ? 0.125f : 1;
                         if (scale != 1)
                         {
@@ -484,7 +494,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                         Dst(ctx, o[0], Has(i, "FLOOR") ? ctx.FPFloor(a) : Has(i, "CEIL") ? ctx.FPCeiling(a) : Has(i, "TRUNC") ? ctx.FPTruncate(a) : ctx.FPRound(a));
                         return;
                     }
-                case "MUFU": EmitMufuAmpere(ctx, i); return;
+                case "MUFU": EmitMufuAmpere(ctx, prog, i); return;
                 case "DADD": case "DMUL": case "DFMA": EmitDArithAmpere(ctx, i); return;
                 case "DSETP": EmitDsetpAmpere(ctx, i); return;
                 case "F2I": EmitF2iAmpere(ctx, i); return;
@@ -1149,9 +1159,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         const float TwoPi = 6.28318530717958647692f;
 
-        static void EmitMufuAmpere(EmitterContext ctx, SassInst i)
+        static void EmitMufuAmpere(EmitterContext ctx, AmpereProgram prog, SassInst i)
         {
             IReadOnlyList<Op> o = i.Operands;
+            if (prog.SinFrom.TryGetValue(i.Address, out SassInst turns))
+            {
+                // sin/cos of the FMUL.RZ's own source (AmpereFuse): the host compiler makes the same FMUL.RZ + MUFU pair of it
+                IrOperand xv = prog.SinArg[turns.Address];
+                Dst(ctx, o[0], Has(i, "SIN") ? ctx.FPSine(xv) : ctx.FPCosine(xv));
+                return;
+            }
             bool f16 = Has(i, "F16");
             IrOperand a = f16 ? HalfLane(ctx, o[1]) : FSrc(ctx, o[1]);
             IrOperand r;

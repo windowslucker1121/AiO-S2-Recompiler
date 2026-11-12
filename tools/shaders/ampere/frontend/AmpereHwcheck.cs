@@ -45,6 +45,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             int[] memZero = memKind == "global" && mf.Length > 2 && mf[2].Length > 0 ? mf[2].Split(',').Select(int.Parse).ToArray() : System.Array.Empty<int>();
             program = new AmpereProgram(test.ToList(), gpu);
             AmpereProgram prog = program;
+            AmpereFuse.Analyse(prog);   // a FMUL.RZ + MUFU.SIN pair checks the fused form
             int localX = gpu.QueryComputeLocalSizeX();
             ShaderDefinitions definitions = new(ShaderStage.Compute, localX, gpu.QueryComputeLocalSizeY(), gpu.QueryComputeLocalSizeZ());
             prog.Stage = ShaderStage.Compute;
