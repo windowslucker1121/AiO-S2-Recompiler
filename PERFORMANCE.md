@@ -143,6 +143,8 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | R8 | handle expressions once per command; virtual-texture registry indexed and grouped by pool (find_alias and CPU-write checks no longer walk every texture under the registry lock) | alternating exes: replay 12.9 / 13.4 vs 14.6 / 13.95 ms |
 | R8 | unbiased cpuperf_ab; hot config switches read without guarded statics (`nvn_cfg.h`) | measurement; neutral |
 | R8 | runtime PGO, opt-in (`NXRT_PGO = generate | <profdata>`; the profile is not in the repository) | replay ~12.3 vs ~14.8 ms; no fps while GPU-bound |
+| gpu-time | `indirect_from_held`: indirect arguments inside one held result read from its copy (no whole 6.5 MB copy-back per indirect dispatch) | culling submission 3.31 → 3.08 ms (stamped), main submission and mesh invocations unchanged |
+| gpu-time | `pt_copy` measured again without the frame trace, hazard off (the fps verdict) | **fps +2.7 median (25/25), 1% low +4.7 (24/25)** |
 
 Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
 - F1's set: 3,419 gpt corpus blocks plus 12 runtime blocks; backup `gpt_backup_v9`.
@@ -204,6 +206,15 @@ Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
 
 - **R8 (2026-11-12):** `park_shared` (the last reference of a shared image parks it): replay +0.14 ms, 1% low -2.3 (4/12), removed.
   The earlier paired gains of `handle_big` / `chunk_async` / `fb_image` alone were biased (see How to measure); re-measured together.
+- **gpu-time round 2 (2026-11-12), village 1080, paired windows:**
+  - `hazard` moved onto the recorder thread (pass barrier by a look-ahead through the queued commands; also fixed: the old tracker read
+    descriptor summaries before the queued `cmd_thread_desc` updates). GPU busy −1.1 ms (22/23), barriers 615 → 177 per frame, but
+    without the frame trace the frame is render-thread bound and it cost fps −1.9 (replay +0.46 ms); without the look-ahead (barrier at
+    every pass with anything unordered) −3.6. Stays off; turn it on when the GPU is the limit.
+  - `exp_ssbo_copy` (read-only storage buffers of pointer draws bound from the pool copy and their slots marked): GPU busy +0.6 ms (the
+    slot search costs more than the bus). Removed.
+  - `gmem_scan_memo` (skip pointer-shader uniform scans when nothing changed): neutral (8/26), removed.
+  - pt_copy that split 2 MiB leaves into page leaves: HiZ a17259b2 0.24 → 0.48 ms (a walk per 4 KiB page); now spans stay whole.
 
 ## What is open, by expected gain
 
