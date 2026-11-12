@@ -185,6 +185,10 @@ constexpr uint64_t kTickHzSwitch1 = 19200000;   // platform 1 system tick (CNTFR
 constexpr uint64_t kTickHzSwitch2 = 31250000;   // platform 2 system tick (SDK 20.5 for platform 2 uses 31.25 MHz)
 uint64_t tick_hz();                      // the registered game's platform tick frequency
 void sleep_ns(int64_t ns);               // high-resolution sleep; <= 0 yields
+// [sched] short_sleep (P1): how sleeps up to 200 us wait. "yield" (SwitchToThread until the deadline) or "pause" (spin on the pause
+// instruction, a SwitchToThread every ~25 us): the game's job workers poll with 20 us sleeps (~110 per frame); a kernel entry per round left
+// little of the core to the second hardware thread. short_sleep_ab: the off windows of the p1 feature sleep_pause use "yield".
+void short_sleep_ab(bool on);
 
 // ---- kernel-level synchronisation (the SVC semantics; kernel_sync.cpp) -------------------------------------------------------
 // ArbitrateLock / WaitProcessWideKeyAtomic / WaitForAddress ... operate on guest memory words. Exposed for tests and for HLE code.

@@ -24,6 +24,14 @@ void set_copies(bool on);             // [nvn] cmd_thread_copies under cpuperf_a
 bool queue_submit_end(VkDevice dev, VkCommandBuffer cb, VkQueue q, std::mutex* mu, VkSemaphore sem, uint64_t value);
 void set_submit_async(bool on);       // under cpuperf_ab (submit_async): with it, cmd_nodrain_begin
 void apply_render_pin(bool on);       // [nvn] render_cpus under cpuperf_ab (render_pin)
+// [nvn] recorder_spin (P1): pauses the idle recorder spins before it sleeps (default 4000). set_recorder_spin_ab: off windows of the p1
+// feature rec_spin use 4000.
+void set_recorder_spin_ab(bool on);
+// [nvn] helper_cpus (P1): helper threads that walk the game's lists (nvn-front, nvn-texlook) on the second hardware threads of the render
+// thread's and the recorder's cores, away from the guest threads' cores. Each helper calls helper_pin_tick(seen) once per job (cheap when
+// nothing changed). helper_pin_ab: the off windows of the p1 feature helper_pin let them run anywhere.
+void helper_pin_tick(uint32_t& seen);
+void helper_pin_ab(bool on);
 void set_copy_image(bool on);       // [nvn] cmd_thread_copy_image under cpuperf_ab (copy_image_q): vkCmdCopyImage queued or drained
 void apply_render_priority(bool on);   // [nvn] render_priority: the calling (render) thread and the recorder; on false: NORMAL
 void set_publish_batch(bool on);       // [nvn] cmd_publish_batch under cpuperf_ab (cmd_batch)

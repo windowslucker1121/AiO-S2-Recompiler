@@ -38,6 +38,9 @@
 #include "extras/output_pass.h"
 #include "play/play_selftest.h"
 
+#include <windows.h>
+#pragma comment(lib, "Synchronization.lib")   // WaitOnAddress (sync_lead)
+
 namespace nxrt::nvn::be::gpu {
 namespace {
 
@@ -141,6 +144,11 @@ struct Gpu {
 
 Gpu* g = nullptr;
 std::mutex g_install_mu;
+// [nvn] sync_lead: game threads waiting for a serial to be submitted (WaitOnAddress on last_submitted)
+std::atomic<int> g_lead_waiters{0};
+inline void lead_note_submitted() {
+    if (g_lead_waiters.load(std::memory_order_seq_cst)) WakeByAddressAll(&g->last_submitted);
+}
 
 uint64_t read_completed() {
     uint64_t v = 0;
@@ -810,6 +818,7 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         s.serial = serial;
         g->submitted = serial;
         g->last_submitted.store(serial);
+        lead_note_submitted();
         g->recording = 0;
         g->ctr.submits.fetch_add(1);
         g->ctr.submit_replay_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()));
@@ -853,6 +862,7 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
     s.serial = serial;
     g->submitted = serial;
     g->last_submitted.store(serial);
+    lead_note_submitted();
     g->recording = 0;
     g->ctr.submits.fetch_add(1);
     g->ctr.submit_replay_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()));
@@ -1117,6 +1127,74 @@ bool gpu_wait_frames(int frames_back, uint64_t timeout_ns) {
     return wait_serial(serial, timeout_ns);
 }
 }  // namespace
+
+// [nvn] sync_lead (P1 / W5; default 0 = off): the game's frame throttle. After it queues frame N the game waits on a queue fence of
+// frame N-1 (its big submission) before it starts frame N+1: the GPU end of that submission gated the next frame, so the frame time was
+// about (game CPU + queue + replay + GPU tail) / 2 instead of the slowest of the three loops. With the lead a game wait for work of a frame
+// already presented returns once that serial is submitted to the GPU by the render thread and the GPU has completed the frame before it
+// (mode 1) or once it is submitted only (mode 2, measurement: no GPU bound besides present_ahead). Waits for work queued after the latest
+// present (uploads, readbacks inside a frame), polls (timeout 0) and window syncs keep the full GPU wait. present_ahead still holds the game
+// thread at most one present ahead of the render thread. Risk: the game may write per-frame data the GPU still reads from host memory, and
+// read GPU results (occlusion reports) a frame early; held compute results stay guarded. [nvn] cpuperf_ab_what sync_lead: paired windows.
+namespace {
+std::atomic<bool> g_lead_ab{true};
+std::atomic<uint64_t> g_lead_calls{0}, g_lead_full{0}, g_lead_early{0}, g_lead_behind{0}, g_lead_wait_ns{0};
+}  // namespace
+void sync_lead_enable(bool on) { g_lead_ab.store(on, std::memory_order_relaxed); }
+int sync_lead_mode() {
+    static const int m = static_cast<int>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "sync_lead", 0), 0, 2));
+    return m;
+}
+
+bool wait_serial_game(uint64_t serial, uint64_t timeout_ns) {
+    const int mode = sync_lead_mode();
+    if (!g || !mode || timeout_ns == 0 || !g_lead_ab.load(std::memory_order_relaxed)) return wait_serial(serial, timeout_ns);
+    const uint64_t n = g_frame_count.load(std::memory_order_acquire);
+    if (n < 3 || serial > g_frame_work[(n - 1) & 3].load(std::memory_order_relaxed)) { g_lead_full.fetch_add(1, std::memory_order_relaxed); return wait_serial(serial, timeout_ns); }
+    // the end of the newest frame queued before `serial` (frame_work of frame j: the last serial queued before its present)
+    uint64_t prev = 0;
+    for (uint64_t j = n - 1; j + 4 > n && j > 0; --j) {
+        const uint64_t w = g_frame_work[(j - 1) & 3].load(std::memory_order_relaxed);
+        if (w < serial) { prev = w; break; }
+    }
+    if (!prev) { g_lead_full.fetch_add(1, std::memory_order_relaxed); return wait_serial(serial, timeout_ns); }
+    g_lead_calls.fetch_add(1, std::memory_order_relaxed);
+    NXFT("sync.lead");
+    nxrt::HitchTimer ht(nxrt::kHpGameSyncWait);
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto deadline = timeout_ns == UINT64_MAX ? std::chrono::steady_clock::time_point::max() : t0 + std::chrono::nanoseconds(timeout_ns);
+    if (g->last_submitted.load(std::memory_order_acquire) < serial) {
+        g_lead_waiters.fetch_add(1, std::memory_order_seq_cst);
+        for (;;) {
+            uint64_t seen = g->last_submitted.load(std::memory_order_seq_cst);
+            if (seen >= serial) break;
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) { g_lead_waiters.fetch_sub(1, std::memory_order_seq_cst); return false; }
+            const uint64_t left_ms = deadline == std::chrono::steady_clock::time_point::max() ? 50 :
+                std::min<uint64_t>(50, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count()) + 1);
+            WaitOnAddress(&g->last_submitted, &seen, sizeof seen, static_cast<DWORD>(left_ms));
+        }
+        g_lead_waiters.fetch_sub(1, std::memory_order_seq_cst);
+    }
+    if (mode == 1 && !serial_done(prev)) {
+        const auto now = std::chrono::steady_clock::now();
+        const uint64_t left = deadline == std::chrono::steady_clock::time_point::max() ? UINT64_MAX :
+            static_cast<uint64_t>(std::max<int64_t>(1, std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now).count()));
+        if (!wait_serial(prev, left)) return false;
+    }
+    const uint64_t done = poll_completed();
+    if (done < serial) { g_lead_early.fetch_add(1, std::memory_order_relaxed); g_lead_behind.fetch_add(serial - done, std::memory_order_relaxed); }
+    g_lead_wait_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
+    static std::atomic<int64_t> last_log{0};
+    const int64_t now_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    int64_t ls = last_log.load(std::memory_order_relaxed);
+    if (now_s - ls >= 10 && last_log.compare_exchange_strong(ls, now_s)) {
+        const uint64_t c = g_lead_calls.exchange(0), e = g_lead_early.exchange(0), b = g_lead_behind.exchange(0), f = g_lead_full.exchange(0), w = g_lead_wait_ns.exchange(0);
+        NXLOG_I(kTag, "sync_lead %d over ~10 s: %llu frame waits led (%llu returned before the GPU finished the serial, %.2f submissions behind on average; %.2f ms waited each), %llu waits in full",
+                mode, (unsigned long long)c, (unsigned long long)e, e ? static_cast<double>(b) / static_cast<double>(e) : 0.0, c ? w / 1e6 / static_cast<double>(c) : 0.0, (unsigned long long)f);
+    }
+    return true;
+}
 
 // [nvn] present_ahead (default 1; 0 = wait for each present): the game thread queues the present and goes on while fewer than this many
 // presents are still pending on the render thread (the frame limiter and the swapchain's frame slots pace the render thread). 1 keeps the

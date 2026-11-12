@@ -24,6 +24,8 @@ void finish() {}
 void finish_on_render_thread() {}
 uint64_t last_serial() { return g_serial.load(); }
 bool wait_serial(uint64_t, uint64_t) { return true; }
+bool wait_serial_game(uint64_t, uint64_t) { return true; }
+void sync_lead_enable(bool) {}
 bool serial_done(uint64_t) { return true; }
 void present(Window*, int) {}
 void destroy_texture_gpu(TexGpu*) {}
