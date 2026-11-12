@@ -646,7 +646,10 @@ void make_dummy() {
 
 void prefetch_pool(MemoryPool* p) {
     const bool enabled = NX_CFG_BOOL("nvn", "pool_prefetch", true);   // [nvn] pool_prefetch = false: import on first use only
-    if (!enabled || !p || p->is_virtual || !p->base || !p->size || !active()) return;
+    if (!enabled || !p || p->is_virtual || !p->base || !p->size) return;
+    // Queued or imported already (prefetch never goes back to 0): every nvnBufferInitialize of the game's threads asks again, and
+    // taking the importer's mutex for that was ~1.5% of their busy time (contended between the game's threads).
+    if (p->prefetch.load(std::memory_order_relaxed) != 0 || !active()) return;
     // a pool larger than one chunk is imported chunk by chunk: by the importer in its idle time ([nvn] pool_prefetch_chunks), or as the
     // render thread touches it (pool_chunk), never whole
     if (!prefetch_chunks_on() && import_stride() && p->size > import_stride() + import_overlap()) return;

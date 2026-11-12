@@ -270,6 +270,7 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | R5 | `front_plan`: submissions walked ahead on `nvn-front` (called lists, physical addresses, per-draw layouts and set-signature hashes as a stream the replay reads with one cursor); list frees off the render thread; occlusion-flush and prepare_textures scratch kept across calls | **fps +1.92 (47/48)**, replay -0.65 ms, 1% low +0.48 (no frame trace) |
 | R6 | `ubo_dynamic`: set 0's uniform blocks as dynamic uniform buffers, sets by buffers, per-address copy-or-pool memo; the hazard tracker applies dynamic offsets | replay -0.60 ms (45/45), fps +1.4 (45/45); village 87.5 -> ~90 fps |
 | R6 | `tex_img_sets` + `tex_img_early`: texture sets looked up by image (the game makes new texture objects every frame for the same images) | replay -0.64 ms (44/45), fps +1.2 (39/45) |
+| P4 (GS) | `hle_direct`: NVN entry points from the call site's inline cache; `prefetch_pool` fast path; handle drop log without allocation; command lists grow by doubling | game time per frame -0.26 ms (alternating exes) |
 | R3 | `occ_mark_late`: samples-passed reports' GPU writes noted at the flush; per-set binding index lists (`ProgLayout::set_idx`) | replay -0.10 ms (17/23); index lists not paired (always on) |
 
 Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
@@ -455,6 +456,45 @@ trace's `gpu.busy`), so a GPU change is judged by GPU busy *and* render-thread r
   - `keep_tex_keyed` again (after tex_share): 7% of first sightings found, failed texture checks; set 2 kept checks 0.16 -> 0.52 ms: stays off.
   - `ban_skip` (ranges of banned pages): 0 banned uniform pages in the village: removed. A persistent content-keyed texture-set cache: not built
     (set 2 builds spend 0.57 of 0.69 ms resolving, the cache could save <= 0.1 ms).
+
+## Game side P4 (GS, 2026-11-12, branch `perf/game-side`)
+
+Village outside, 1080, uncapped, alone; G = frame - game GPU sync wait from `[diag] frame_csv` (no frame trace: the trace times every
+HLE call with two clock reads and inflates the game side ~15%). Builds cannot be paired: alternating exes, one run each.
+- **Base:** G mean 7.63 / 7.59 ms; sorted within each 4-frame block 10.05 / 7.71 / 6.80 / 5.97 ms. Main thread (traced): busy only ~2.7 ms
+  per frame, ~5.8 ms waiting in WaitForAddress on its job workers (main+0x60188); wake latency ~7 us (main ~36, others ~420 wakes per
+  frame): not the problem. Game threads' busy samples: lifted code 74%, NVN API emulation 11%, kernel svc 8.5%, dispatch_call self 4.7%.
+- **Kept: `[cpu] hle_direct`** (default on): implemented NVN entry points are cached in the inline cache of the indirect call site
+  that calls them (they need no `hle_current_name`), so NVN calls through the game's proc pointers skip `nx_icall_miss` /
+  `dispatch_call`. With it: `prefetch_pool` returns before the importer's mutex once a pool is queued (every nvnBufferInitialize took
+  it), the command-handle drop log is a fixed table, command lists grow by doubling. **G mean 7.36 / 7.34 vs 7.63 / 7.59 (-0.26 ms),
+  heaviest frame 10.00 / 9.60 vs 10.05 / 9.88**, fps within noise (GPU ~95% busy).
+- **Phase tool:** `[prof] sample_raw = <file>` writes every sample with its time on the frame-trace clock (16 frames);
+  `work/gs/phase.py` (worktree scratch, not committed) cuts frames at the `main.update` mark, counts busy game threads per 0.5 ms,
+  attributes samples to jobs (the frame right under the job runner f_710005fe60; main runs jobs too) and compares heavy (G p75+)
+  with light frames. Findings (run gsphase1, traced, so absolute times ~+40%):
+  - **The single-thread stage** after ~6.5 ms is main running job **f_7100064de0**, the command-list recording job: 48% of its
+    samples are NVN API emulation (EndRecording 13% = handle_register's hash/map nodes, a fifth of it waiting for the handle table's
+    exclusive lock; BindUniformBuffer 5%, CallCommands 4.6%, BindProgram 4% (shared program refcount, held-vector growth), Finalize,
+    Reset/ReportCounter, each command also locking the command buffer's std::mutex).
+  - **The serial tail** is job **f_710004cd60**, run one thread at a time (rotating over main and guest-141..145): 85% lifted game code
+    (f_710003ed00, f_7100344080, f_7100235be0 ...), 12% NVN.
+  - **The heavy 4th frame** has more of f_7100064de0, f_7100001ca0 and f_710004cd60, and ~4 busy threads at 6.5-7.5 ms where light
+    frames are already serial: it records more and longer before the tail. Main's late f_7100537420 (nvnTextureFinalize) is negligible.
+- **Dropped (measured):** "runtime B" (handle_register reusing the dropped list's table nodes and freeing them after the lock; an
+  exchange lock instead of std::mutex for the command buffer; held-object vector doubling): G 6.36 vs 6.34 ms, neutral, reverted
+  (the NVN costs above are smaller untraced). **Lifter `callee_locals`** (x0..x8, x19..x29 and SP as function locals, write-back only
+  of registers changed since the last sync by a per-function dataflow, x0..x8 reloaded after calls; oracles pass: difftest, e2e
+  30/30, hooks): **G 6.75 / 6.72 vs 6.36 (same runtime, old libraries): ~6% slower** (clang loads every local at entry and spills most
+  to the host stack again; 21 live values for 15 registers). Kept as an opt-in (`NX_CALLEE_LOCALS=1`, `NX_CALLEE_LOCALS_REGS`), off by
+  default: the default lift output is unchanged, no re-lift needed. SP alone or SP + x19..x29 were not measured.
+- **Lock protocol bug** (the r6 `lock.py` every agent copied): with no oot.exe running, the German `tasklist` message is in the OEM
+  code page and `text=True` (cp1252) cannot decode it, stdout comes back None and `acquire` dies exactly when the lock frees; batch
+  scripts that do not check the exit code then run without the lock and leave `game.next` behind. Fix: read tasklist as bytes,
+  tolerate PermissionError on remove, check `$LASTEXITCODE` after acquire.
+- **Next on the game side:** the recording job and the tail are the critical path. Leads: fewer NVN calls' runtime costs measured
+  untraced (paired windows, not runs); PGO of the lifted code (-3% G measured earlier, opt-in); a narrower register localisation
+  (SP only) measured against the same exe; lift-time inlining of tiny leaves.
 
 ## What is open, by expected gain
 

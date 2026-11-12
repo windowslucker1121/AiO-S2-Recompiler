@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Play mode, TEST ONLY: an in-process SDL virtual gamepad that the test scripts drive with text commands ("vpad attach ps5",
-// "vpad button south 1", "vpad axis lx -0.5", ...). The text arrives through the key_sink test step; play.cpp hands the text
+// "vpad button south 1", "vpad axis lx -0.5", ...; a second pad for two-player tests: "vpad attach2 xbox", "vpad button2 south 1",
+// "vpad detach2"). The text arrives through the key_sink test step; play.cpp hands the text
 // after "vpad " to vpad_command. Nothing here runs outside the test build paths.
 #pragma once
 

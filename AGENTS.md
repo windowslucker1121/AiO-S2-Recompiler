@@ -359,6 +359,15 @@ frame at 854x480 (24.5 ms, the scene is split into passes every few draws), stor
 7.9 ms (844 per frame), gaps between passes 7.1 ms (788), compute 5.4 ms (largest: the network pass fea98fe7 1.9 ms, 20593fd9 0.8,
 beb1205f 0.6, culling root 0.5). First targets for FPS: the write-watch checks in `build_set` and the pass splitting.
 
+**System dialogs (library applets), 2026-11-12:** per-applet policies `[applet] <key> = auto | cancel | prompt` (`am.cpp` table, native
+windows in `src/services/applet_ui.cpp`; keys in runtime/docs/CONFIG.md, the applets oot can reach in runtime/docs/IPC_ANSWERS.md). Checked
+in game (house scene, test keys `[test] unplug_player1_at_s`, `controller_min_players`, `applet_windows_at_s`; `vpad attach2` for a second
+virtual pad): oot's own ShowControllerSupport call (player 1 missing) gets "1 player" and play goes on; the controller dialog lists the pads
+and OK stays disabled until enough are connected; the error / network notices and the web question open beside the running game. Found
+on the way: accessor command 170 (every applet creation aborted without it) and oot asking again every frame when answered more players
+than its own maximum (answers are capped now, DisconnectNpad takes an assigned pad back). Not reachable in oot offline, so not seen with the
+game's own call: error, web, net-connect, amiibo; two-player play with pads 2.. as players 2.. is unit-tested only (oot is single-player).
+
 ## Boot progress (`oot.exe --game game\oot\updates\131072 --log work\run\bootN\oot.log --max-seconds 60`)
 
 Each fix below moved the boot further; all are in the branch. Crash reports land next to the exe (`game-build\build\release\oot_crash.txt`,
@@ -1453,6 +1462,17 @@ read/write knowledge), a two-entry cache for polymorphic call sites (sites freez
 `inline caches:` summary line only appears on a clean exit), the HLE call counter per thread. Measured (first scene, 1920x1080, 30-200 s, one run each, alone): **G p50 base 12.72 ms, inline caches
 11.67, inline caches + FRSQRTE + PGO 9.91 (-22% against base)**, p90 14.69 / 13.32 / 11.42; fps 37.9 / 39.8 / 40.3 (GPU / render-thread
 bound).
+
+**Game side P4 (GS, 2026-11-12, branch `perf/game-side`; details in PERFORMANCE.md "Game side P4").** Kept `[cpu] hle_direct`
+(implemented NVN entry points run from the call site's inline cache; `hle_mark_direct` in nvn_loader.cpp, a replaced handler empties
+every cache) plus prefetch_pool's fast path, the fixed command-handle drop log and command-list growth by doubling: game time per
+frame (frame - GPU sync wait, `[diag] frame_csv`) -0.26 ms. Measure the game side untraced (the trace inflates HLE calls ~15%).
+New tools: `[prof] sample_raw = <file>` (each sample with its frame-trace time; relative paths go into the instance folder) and
+`[prof] sample_from_s`. Phase profile: the single-thread stage is main running the recording job f_7100064de0 (~half NVN API
+emulation), the serial tail is job f_710004cd60 (85% game code, one thread at a time), the heavy 4th frame records more before the
+tail. Dropped: "runtime B" (handle-table node reuse, exchange lock for the command buffer: neutral) and the lifter's
+`callee_locals` (x0..x8, x19..x29, SP as locals: oracles pass, but ~6% slower; opt-in `NX_CALLEE_LOCALS=1`, default lift unchanged).
+Lock pitfall: tasklist output decoded as cp1252 crashed `lock.py acquire` whenever no game ran (read it as bytes).
 
 **Render resolution pinned (WP7, 2026-11-08, `runtime/games/oot/oot_drs.cpp`, no lifted rebuild).** The game's dynamic resolution: renderer
 R = `[[main+0x4e30498] + 0x228]` (found by a pointer search from main's data at run time), its controller C = `[R + 0xb48]` (per-frame step

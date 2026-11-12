@@ -190,7 +190,11 @@ uint64_t proc_address(const char* name) {
             auto it = g_extra_impl.find(name);
             if (it != g_extra_impl.end()) fn = it->second;
         }
-        if (fn) return hle_register(name, fn);
+        if (fn) {
+            const uint64_t a = hle_register(name, fn);
+            hle_mark_direct(name);       // implemented: needs no hle_current_name (only the logging stub does)
+            return a;
+        }
     }
     if (std::strncmp(name, "nvn", 3) == 0 && unknown_policy() == UnknownPolicy::Stub) {
         NXLOG_W(kTag, "UNKNOWN NVN PROC requested by name: %s (not in the table): handing out a logging stub", name);
@@ -205,6 +209,7 @@ bool register_impl(const char* name, HleFn fn) {
     if (idx < 0 || !fn) return false;
     if (!g_installed.load()) install();
     hle_register(name, fn);
+    hle_mark_direct(name);               // implemented: an indirect call site may cache the handler (nx_icall_miss)
     g_impl[idx] = true;
     return true;
 }
