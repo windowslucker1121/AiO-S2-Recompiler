@@ -5158,6 +5158,8 @@ bool set_has_textures(const ProgLayout& pl, uint32_t set) {
 }
 uint64_t g_sstat_tk[4][2] = {};   // r3_diag: first sightings by set, and how many an image-keyed signature had seen in an earlier present
 uint64_t g_sstat[4][5] = {};   // r3 statistics per graphics set index: memo hit, kept (valid or built), first sighting, keep refused, all binds
+struct R6Diag { uint64_t n = 0, src[4] = {}; std::string vs, fs; uint32_t set = 0; };
+std::unordered_map<uint64_t, R6Diag> g_r6diag;   // [nvn] r6_diag
 // ---- [nvn] ubo_dynamic (R6) -------------------------------------------------------------------------------------------------------
 // With ubo_dynamic_layouts() (nvn_pipeline.cpp) set 0's uniform blocks of graphics programs are dynamic uniform buffers. A draw's set 0 is
 // then the program's set for the buffers (and ranges) its blocks resolve to, bound with the blocks' offsets as dynamic offsets. Per draw
@@ -5409,6 +5411,17 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
             const uint64_t kf0 = g_keep_first;
             ds = keep_lookup_or_build(pl, set, sig_tex_on() ? keep_sig_tex(pl, set) : g_keep_sig, mode);
             ++g_sstat[set][ds ? 1 : (g_keep_first != kf0 ? 2 : 3)];   // r3 statistics: kept / first sighting / other
+            if (!ds && g_keep_first != kf0 && NX_CFG_BOOL("nvn", "r6_diag", false)) {   // [nvn] r6_diag: first sightings by program and set
+                const uint64_t k = (reinterpret_cast<uint64_t>(S.stage[kFragment]) * 31 + reinterpret_cast<uint64_t>(S.stage[kVertex])) * 8 + set;
+                R6Diag& g = g_r6diag[k];
+                if (!g.n) { g.vs = S.stage[kVertex] ? S.stage[kVertex]->hash : "-"; g.fs = S.stage[kFragment] ? S.stage[kFragment]->hash : "-"; g.set = set; }
+                ++g.n;
+                for (const uint16_t bi : pl.set_idx[set]) {   // which kinds of texture bindings the set has
+                    const BindingDesc& bd = pl.bindings[bi];
+                    const NvnSource src = bd.shader->refl.bindings[bd.index].nvn.source;
+                    ++g.src[src == NvnSource::SamplerBinding ? 0 : src == NvnSource::HandleInUniform ? 1 : src == NvnSource::HandleExpr ? 2 : 3];
+                }
+            }
             if (!ds && g_keep_first != kf0 && NX_CFG_BOOL("nvn", "r3_diag", false)) {
                 // [nvn] r3_diag (diagnosis): would this first sighting have been found keyed by its images instead of its texture handles
                 // (render targets made as new texture objects every frame over a parked image)?
@@ -9614,6 +9627,19 @@ void replay_begin_submit(Frame& f) {
                         (unsigned long long)g_sstat[2][0], (unsigned long long)g_sstat[2][1], (unsigned long long)g_sstat[2][2], (unsigned long long)g_sstat[2][3], (unsigned long long)g_sstat[2][4],
                         (unsigned long long)g_sstat[3][0], (unsigned long long)g_sstat[3][1], (unsigned long long)g_sstat[3][2], (unsigned long long)g_sstat[3][3], (unsigned long long)g_sstat[3][4]);
                 NXLOG_I(kTag, "keep_tex_keyed: %llu first sightings looked up by image, %llu found (or kept)", (unsigned long long)g_tk_tries, (unsigned long long)g_tk_hits);
+                if (!g_r6diag.empty()) {
+                    std::vector<const R6Diag*> v;
+                    for (const auto& [k, g] : g_r6diag) v.push_back(&g);
+                    std::sort(v.begin(), v.end(), [](const R6Diag* a, const R6Diag* b) { return a->n > b->n; });
+                    std::string s;
+                    for (size_t i = 0; i < v.size() && i < 16; ++i) {
+                        char t[200];
+                        std::snprintf(t, sizeof t, " [set %u vs %.8s fs %.8s %llu: bound %llu uniform %llu expr %llu other %llu]", v[i]->set, v[i]->vs.c_str(), v[i]->fs.c_str(),
+                                      (unsigned long long)v[i]->n, (unsigned long long)v[i]->src[0], (unsigned long long)v[i]->src[1], (unsigned long long)v[i]->src[2], (unsigned long long)v[i]->src[3]);
+                        s += t;
+                    }
+                    NXLOG_I(kTag, "r6_diag first sightings by program:%s", s.c_str());
+                }
                 if (ubo_dynamic_layouts())
                     NXLOG_I(kTag, "ubo_dynamic: %llu set-0 binds with dynamic offsets (last set %llu, by content %llu, built %llu; blocks resolved again %llu); "
                             "old path: update range %llu, unresolved %llu, unaligned %llu, not keepable %llu, render scale or eager results %llu; verify %llu of %llu differ (%llu more raced); exp_set0_free %llu",
