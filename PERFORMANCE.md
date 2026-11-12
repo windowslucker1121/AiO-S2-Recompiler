@@ -238,6 +238,21 @@ per frame < 10 ms; the CPU chain cannot shorten it.
   - `work\game.next` holds a reservation.
   - Other agents' builds run at below-normal priority with at most 6 jobs.
 - Runs: `load_state("<state>", instance="<name>", settings={"memory.limit_gb": 24})`.
+- **Standard benchmark scenes (since 2026-11-12): `bench_balcony_far` and `bench_village_walk`** (tools/ai/README.md "Benchmark
+  states"). Earlier numbers were taken with the camera looking down at the ground and read too high. Both use the village save, a
+  scripted pad and a fixed game step, so the view and the path are the same on every run; 1920x1080, uncapped (`controls.ini`
+  `[display] fps_limit = 0`), `settings={"memory.limit_gb": 24, "diag.frame_csv": "frames.csv"}`.
+  - **balcony far** (static, the distance in view): measure **30-90 s after the log line `bench: balcony_far ready`** (the first
+    30 s are warm-up: pipelines and textures of the far view).
+  - **village walk**: the window is the walk itself, **`bench: village_walk start` .. `bench: village_walk end`** (660 frames at
+    1/60 s; ~6.7 s at 100 fps). Its 1% low is from ~7 frames: compare several runs. In one run after the balcony window:
+    `load_state("village_outside", route=["title", "continue", "in_game", "bench_balcony_far", {"sleep": 95},
+    {"script": "bench/village_walk.nxs"}], ...)`.
+  - `tools/perf/bench_window.py <log> <frames.csv> --from "bench: balcony_far ready" --skip 30 --seconds 60` (or `--from "bench:
+    village_walk start" --to "bench: village_walk end"`) prints frames, fps, 1% low, median and worst frame.
+  - First numbers (2026-11-13, exe of feat/perf-generic-runtime f644cf5 era, RTX 4080, alone, three runs): balcony far **91.8 / 93.0 /
+    91.8 fps, 1% low 64.5 / 65.3 / 64.4**, median 10.7-10.9 ms; village walk **100.7 / 100.7 / 100.8 fps, 1% low 41.6 / 42.0 / 42.6**,
+    median 9.4-9.6 ms, worst 29-33 ms. Reference pictures (git-ignored): `work\bench\*.png` of the main checkout.
 - **Uncapped:** pre-create the instance folder `work\ai_run\oot\<name>` with a `controls.ini` holding `[display] fps_limit = 0`.
   The MCP setting `display.fps_limit` does NOT reach the limiter.
 - **Paired windows**, the standard method:
