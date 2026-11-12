@@ -574,6 +574,18 @@ public:
     LRESULT on(UINT m, WPARAM w, LPARAM l);
     void set_fonts(const Fonts& f) { fonts_ = f; rebuild(); }
     void set_dlss(int state, std::function<void()> dl) { dlss_ = state; dlss_dl_ = std::move(dl); }
+    void set_dlss_status(const std::wstring& status, bool busy) {
+        dlss_status_ = status;
+        dlss_busy_ = busy;
+        for (Row& r : rows_) {
+            if (r.kind != RowKind::dlss_dl || !r.ctl) continue;
+            SetWindowTextW(r.ctl, dlss_button_text());
+            EnableWindow(r.ctl, !busy);
+            InvalidateRect(r.ctl, nullptr, FALSE);
+            RECT rc{0, r.y - scroll_, 100000, r.y - scroll_ + r.h};
+            InvalidateRect(wnd_, &rc, FALSE);
+        }
+    }
     void set_tab(int t) {
         if (t < 0 || t >= T_COUNT) return;
         tab_ = t;
@@ -645,6 +657,9 @@ private:
     std::wstring saved_note_;
     int dlss_ = 0;
     std::function<void()> dlss_dl_;
+    std::wstring dlss_status_;   // under "NVIDIA DLSS": what is missing, the download's progress or its result
+    bool dlss_busy_ = false;     // a download runs: the button is disabled
+    const wchar_t* dlss_button_text() const { return dlss_busy_ ? L"Downloading..." : dlss_ == 3 ? L"What is missing?" : L"Download DLSS"; }
 };
 
 std::string Panel::file_stamp() const {
@@ -779,10 +794,12 @@ void Panel::rebuild() {
                 std::vector<Choice> c;   // DLSS / DLAA need the DLLs and an RTX card
                 for (const Choice& ch : o[i].choices) if (std::string(ch.value) != "dlss" && std::string(ch.value) != "dlaa") c.push_back(ch);
                 p->ctl = make_combo(*p, c, v);
-                if (dlss_ == 1) {
+                if (dlss_ == 1 || dlss_ == 3) {   // 1: nvngx_dlss.dll to download; 3: downloaded, Streamline DLLs missing
                     Row d{RowKind::dlss_dl};
                     d.textv = L"NVIDIA DLSS";
-                    add(d, S(48))->ctl = make_button(L"Download DLSS", 2);
+                    Row* q = add(d, S(64));
+                    q->ctl = make_button(dlss_button_text(), 2);
+                    EnableWindow(q->ctl, !dlss_busy_);
                 }
             } else if (std::string(o[i].section) == "pad" && std::string(o[i].key) == "label_abxy" && pad_kind() == PadKind::playstation) {
                 rows_.pop_back();   // PlayStation buttons have no letters: always by position
@@ -1075,7 +1092,10 @@ void Panel::command(int id, int code, HWND ctl) {
     (void)id;
     for (Row& r : rows_) {
         if (r.kind == RowKind::dlss_dl && ctl == r.ctl) {
-            if (code == BN_CLICKED && dlss_dl_) dlss_dl_();
+            if (code != BN_CLICKED) return;
+            if (dlss_dl_) dlss_dl_();
+            else MessageBoxW(GetAncestor(wnd_, GA_ROOT), L"The DLSS download is not available here (no handler). Please report this.", L"DLSS",
+                             MB_ICONWARNING);
             return;
         }
         if (r.kind == RowKind::pad_test && (ctl == r.ctl || ctl == r.ctl2)) {
@@ -1227,10 +1247,12 @@ void Panel::draw_item(const DRAWITEMSTRUCT* d) {
             text(g, t, f, gp::RectF(0, pressed ? Sf(2) : 0, W, H - Sf(4)), kText, gp::StringAlignmentCenter, gp::StringAlignmentCenter);
         } else {
             COLORREF fill = kind == 3 ? (hot ? RGB(0x5A, 0x2A, 0x2E) : kCard) : (hot ? kButtonHi : kButton);
-            if (pressed) fill = RGB(0x24, 0x28, 0x31);
+            const bool enabled = IsWindowEnabled(d->hwndItem) != FALSE;
+            if (pressed || !enabled) fill = RGB(0x24, 0x28, 0x31);
             gp::SolidBrush b(C(fill));
             fill_round(g, gp::RectF(0, 0, W, H), Sf(8), b);
-            text(g, t, f, gp::RectF(0, 0, W, H), kind == 3 ? RGB(0xFF, 0xA0, 0xA0) : kText, gp::StringAlignmentCenter, gp::StringAlignmentCenter);
+            text(g, t, f, gp::RectF(0, 0, W, H), kind == 3 ? RGB(0xFF, 0xA0, 0xA0) : enabled ? kText : kMuted, gp::StringAlignmentCenter,
+                 gp::StringAlignmentCenter);
         }
         ring(Sf(7));
     });
@@ -1300,7 +1322,10 @@ void Panel::paint(HDC hdc) {
                          gp::StringAlignmentCenter);
                 }
             } else if (r.kind == RowKind::dlss_dl) {
-                text(g, r.textv, font, gp::RectF(Sf(32), y, lw, static_cast<float>(r.h)), kText, gp::StringAlignmentNear, gp::StringAlignmentCenter);
+                const float hh = static_cast<float>(r.h);
+                text(g, r.textv, font, gp::RectF(Sf(32), y + Sf(6), lw, hh / 2 - Sf(4)), kText, gp::StringAlignmentNear, gp::StringAlignmentCenter);
+                text(g, dlss_status_, little, gp::RectF(Sf(32), y + hh / 2, lw, hh / 2 - Sf(6)), kMuted, gp::StringAlignmentNear,
+                     gp::StringAlignmentCenter);
             } else if (r.kind == RowKind::pad_test) {
                 paint_pad(g, y + Sf(8), font, bold, little);
             } else if (r.kind == RowKind::binding) {
@@ -1503,6 +1528,10 @@ void set_game(HWND panel, const std::wstring& title, const std::wstring& control
 
 void set_dlss(HWND panel, int state, std::function<void()> download) {
     if (Panel* p = panel_of(panel)) p->set_dlss(state, std::move(download));
+}
+
+void set_dlss_status(HWND panel, const std::wstring& status, bool busy) {
+    if (Panel* p = panel_of(panel)) p->set_dlss_status(status, busy);
 }
 
 void set_tab(HWND panel, int tab) { if (Panel* p = panel_of(panel)) p->set_tab(tab); }

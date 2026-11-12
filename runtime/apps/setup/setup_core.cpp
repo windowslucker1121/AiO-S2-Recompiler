@@ -531,8 +531,16 @@ int dlss_state(const Tools& t) {
         for (const GpuInfo& g : query_gpus(&err)) if (g.vendor == 0x10DE && g.name.find(L"RTX") != std::wstring::npos) return true;
         return false;
     }();
-    if (!rtx) return 0;
-    return file_exists(join(dlss_dir(t), L"sl.interposer.dll")) && file_exists(join(dlss_dir(t), L"nvngx_dlss.dll")) ? 2 : 1;
+    if (!rtx) return kDlssNoRtx;
+    if (!file_exists(join(dlss_dir(t), L"nvngx_dlss.dll"))) return kDlssDownload;
+    return dlss_missing_files(t).empty() ? kDlssReady : kDlssNoStreamline;
+}
+
+std::wstring dlss_missing_files(const Tools& t) {
+    std::wstring out;
+    for (const wchar_t* f : {L"nvngx_dlss.dll", L"sl.interposer.dll", L"sl.common.dll", L"sl.dlss.dll"})
+        if (!file_exists(join(dlss_dir(t), f))) out += (out.empty() ? L"" : L", ") + std::wstring(f);
+    return out;
 }
 
 std::vector<Check> run_system_checks(const Tools& t) {
@@ -593,8 +601,18 @@ std::vector<Check> run_system_checks(const Tools& t) {
         if (d == 2) { k.state = L"OK"; k.detail = dlss_dir(t); }
         else {
             k.level = Level::warn;
-            if (d == 0) { k.state = L"Not available"; k.detail = L"no NVIDIA RTX graphics card"; }
-            else { k.state = L"Files missing"; k.detail = dlss_dir(t); k.fix = L"Settings > Graphics > Download DLSS (asks for NVIDIA's licence first)."; }
+            if (d == kDlssNoRtx) { k.state = L"Not available"; k.detail = L"no NVIDIA RTX graphics card"; }
+            else if (d == kDlssDownload) {
+                k.state = L"Files missing";
+                k.detail = dlss_dir(t) + L": " + dlss_missing_files(t);
+                k.fix = L"Press Download DLSS below (or Settings > Graphics > Download DLSS); it asks for NVIDIA's licence first.";
+            } else {
+                k.state = L"Streamline missing";
+                k.detail = dlss_dir(t) + L": " + dlss_missing_files(t);
+                k.fix = L"nvngx_dlss.dll is downloaded. The Streamline DLLs (sl.interposer.dll, sl.common.dll, sl.dlss.dll; MIT) come with release "
+                        L"packages built with Streamline; the library cannot download them. Copy them from NVIDIA's Streamline SDK v2.14.16 "
+                        L"(bin\\x64) into the folder above, then press Check again.";
+            }
         }
         out.push_back(k);
     }

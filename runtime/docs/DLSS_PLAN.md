@@ -5,7 +5,7 @@ Status (2026-11-10, branch feat/dlss-wp1): WP1 done (d58ee2c). WP2 mechanism don
 and no capture). WP0 code done: `tools/release/fetch_dlss.py` (licence flag, pinned sha256, test), `package.ps1 -Streamline` (its
 `$SlSha256` and zip name are still to fill on the first real download), LEGAL.md section. WP4 done in the library: This PC "DLSS" row,
 Settings hides DLSS/DLAA until the files are there and offers "Download DLSS" (licence dialog first); Play passes the folder as
-`NXRT_UPSCALE_DLSS_DLL`. Nothing tested with real Streamline/DLSS DLLs. WP3 not started (optional per section 4). Goal: NVIDIA DLSS Super Resolution / DLAA in the runtime for any recompiled game,
+`NXRT_UPSCALE_DLSS_DLL`. Nothing tested with real Streamline/DLSS DLLs. Library fix (2026-11-12): "Download DLSS" said nothing after a successful download and the button never went away, because the library also wants sl.interposer.dll / sl.common.dll / sl.dlss.dll, which nothing downloads (only `package.ps1 -Streamline` would ship them, and its sha256 is still TODO). Now `dlss_state` 3 = nvngx_dlss.dll there, Streamline missing (button "What is missing?", This PC names the files); the download shows its progress under the button and a message for every result; This PC has its own Download DLSS button (works without a game). Test switch `RECOMP_LIBRARY_DLSS_SCRIPT=<script>`: runs that script instead of fetch_dlss.py, without the licence dialog. WP3 not started (optional per section 4). Goal: NVIDIA DLSS Super Resolution / DLAA in the runtime for any recompiled game,
 with no per-game code. A game may at most add *data*: config defaults or manifest keys.
 
 ## 1. What already exists (more than expected)

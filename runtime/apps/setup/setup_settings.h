@@ -46,8 +46,10 @@ void set_fonts(HWND panel, const Fonts& f);
 void set_game(HWND panel, const std::wstring& title, const std::wstring& controls_ini, const std::wstring& why_not);
 
 // DLSS availability (setup::dlss_state): 2 shows the DLSS/DLAA entries; 1 hides them and offers a "Download DLSS" button that calls
-// download; 0 hides them. Call before set_game.
+// download; 3 (downloaded, Streamline DLLs missing) offers the same button as "What is missing?"; 0 hides them. Call before set_game.
 void set_dlss(HWND panel, int state, std::function<void()> download);
+// The line under "NVIDIA DLSS" (what is missing, the download's progress or result); busy disables the button while a download runs.
+void set_dlss_status(HWND panel, const std::wstring& status, bool busy);
 
 // Opens a tab: 0 graphics, 1 display, 2 controller, 3 keyboard and mouse, 4 audio (the game's Settings entries pass it as --tab).
 void set_tab(HWND panel, int tab);

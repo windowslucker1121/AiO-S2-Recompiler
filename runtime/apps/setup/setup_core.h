@@ -126,10 +126,13 @@ struct GpuInfo {
     std::wstring why;             // not usable: why
 };
 std::vector<GpuInfo> query_gpus(std::wstring* error);
-// DLSS (optional): 0 no NVIDIA RTX GPU, 1 RTX but sl.interposer.dll / nvngx_dlss.dll missing, 2 ready. The DLLs live in
-// <exe dir>\upscalers\streamline. The GPU answer is asked once and kept.
+// DLSS (optional): 0 no NVIDIA RTX GPU, 1 RTX but nvngx_dlss.dll missing (the library downloads it), 2 ready, 3 nvngx_dlss.dll there
+// but Streamline's sl.interposer.dll / sl.common.dll / sl.dlss.dll missing (MIT; only packages built with -Streamline carry them, the
+// library cannot download them). The DLLs live in <exe dir>\upscalers\streamline. The GPU answer is asked once and kept.
+enum : int { kDlssNoRtx = 0, kDlssDownload = 1, kDlssReady = 2, kDlssNoStreamline = 3 };
 int dlss_state(const Tools& t);
 std::wstring dlss_dir(const Tools& t);
+std::wstring dlss_missing_files(const Tools& t);   // the missing DLLs, comma-separated (empty: none)
 // The PC's checks (Windows, GPU, memory, translator, Python): the same for every game.
 std::vector<Check> run_system_checks(const Tools& t);
 // One game's checks: disk space for its remaining steps, its program and the DLLs it needs, its dump. disk_need: bytes still to write.
