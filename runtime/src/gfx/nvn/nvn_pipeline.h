@@ -30,6 +30,7 @@ struct BindingDesc {
     const ShaderInfo* shader = nullptr;         // the stage module that declares it
     int index = -1;                             // into shader->refl.bindings
     int nvn_stage = 0;                          // NVNshaderStage of that module (0 vertex, 1 fragment, 2 geometry, 5 compute)
+    uint8_t dyn = 0xff;                         // [nvn] ubo_dynamic: index of its dynamic offset (set 0 uniform blocks, by binding number); 0xff: none
 };
 
 // A pool array (A7): a texture or sampler array the size of the NVN pool, indexed in the shader by a handle the draw does not determine
@@ -62,7 +63,11 @@ struct ProgLayout {
     bool has_set[4] = {};
     VkShaderStageFlags push_stages = 0;         // push constant range [0, push_bytes) of generated stages (ShaderInfo::push_bytes); 0 = none
     uint32_t push_bytes = 0;
+    uint8_t dyn_n = 0;                          // [nvn] ubo_dynamic: set 0's uniform blocks are UNIFORM_BUFFER_DYNAMIC (this many offsets at every bind)
 };
+// [nvn] ubo_dynamic (R6, read once): set 0's uniform blocks of graphics programs as dynamic uniform buffers, so a set can be bound again with
+// other offsets instead of being checked or built per draw. Changes every graphics pipeline layout (pipelines rebuild).
+bool ubo_dynamic_layouts();
 
 // Stages by NVN stage index (0 vertex, 1 fragment, 2 geometry, 5 compute); null = absent.
 // Stages by NVN stage number: 0 vertex, 1 fragment, 2 geometry, 3 tessellation control, 4 evaluation, 5 compute, 6 task, 7 mesh.

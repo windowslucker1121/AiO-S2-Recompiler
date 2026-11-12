@@ -266,7 +266,9 @@ uint64_t save_cache() {
 // the write takes seconds. The ordinary small cache is written whenever something new appeared, as before.
 bool pipeline_cache_dirty() {
     if (!g_cache_dirty.load(std::memory_order_relaxed)) return false;
-    return !g_cache_big || g_new_since_save.load(std::memory_order_relaxed) >= 3000;
+    // [nvn] pipeline_cache_save_new (default 3000): new pipelines and parts before a big cache is written again
+    static const uint32_t every = static_cast<uint32_t>(std::max<int64_t>(1, config_get_int("nvn", "pipeline_cache_save_new", 3000)));
+    return !g_cache_big || g_new_since_save.load(std::memory_order_relaxed) >= every;
 }
 uint64_t pipeline_cache_save() { return save_cache(); }
 // The write at the end of a session: skipped when nothing changed since the last save (the preparation has just written its gigabytes),
@@ -519,6 +521,10 @@ static VkShaderModule producer_module(const ShaderInfo* producer, const ShaderIn
     return m;
 }
 
+bool ubo_dynamic_layouts() {
+    static const bool on = config_get_bool("nvn", "ubo_dynamic", true);
+    return on;
+}
 static const ProgLayout* prog_layout_locked(const LayoutKey& key);
 const ProgLayout* prog_layout(const ShaderInfo* const stages[kProgStages]) {
     LayoutKey key;
@@ -583,6 +589,20 @@ static const ProgLayout* prog_layout_locked(const LayoutKey& key) {
     }
     for (size_t i = 0; i < pl.bindings.size(); ++i)
         if (pl.bindings[i].set < 4) pl.set_idx[pl.bindings[i].set].push_back(static_cast<uint16_t>(i));
+    if (ubo_dynamic_layouts() && !stages[5]) {   // graphics programs: set 0's uniform blocks get dynamic offsets (by binding number)
+        std::vector<uint16_t> u;
+        for (const uint16_t i : pl.set_idx[0]) {
+            const BindingDesc& d = pl.bindings[i];
+            const DescriptorBinding& b = d.shader->refl.bindings[d.index];
+            if (d.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b.nvn.source == NvnSource::UniformBlock && b.count <= 1) u.push_back(i);
+        }
+        std::sort(u.begin(), u.end(), [&](uint16_t a, uint16_t c) { return pl.bindings[a].binding < pl.bindings[c].binding; });
+        const uint32_t lim = std::min<uint32_t>(16, device().properties().limits.maxDescriptorSetUniformBuffersDynamic);
+        if (!u.empty() && u.size() <= lim) {
+            for (size_t k = 0; k < u.size(); ++k) pl.bindings[u[k]].dyn = static_cast<uint8_t>(k);
+            pl.dyn_n = static_cast<uint8_t>(u.size());
+        }
+    }
     std::vector<VkDescriptorSetLayoutBinding> lbs[4];
     std::string sig;                                 // the descriptors of the program, as bytes: the key of the shared layout
     for (int set = 0; set < 4; ++set) {
@@ -590,7 +610,7 @@ static const ProgLayout* prog_layout_locked(const LayoutKey& key) {
             if (d.set != static_cast<uint32_t>(set)) continue;
             VkDescriptorSetLayoutBinding b = {};
             b.binding = d.binding;
-            b.descriptorType = d.type;
+            b.descriptorType = d.dyn != 0xff ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : d.type;
             b.descriptorCount = std::max<uint32_t>(1, d.shader->refl.bindings[d.index].count);
             b.stageFlags = d.stages;
             lbs[set].push_back(b);
