@@ -255,7 +255,7 @@ inline bool is_overflow_addr(uint64_t a) { return a >= kOverflowAddrBase; }
 // Handle table: handle -> list. Lists live until the game records over their command memory, the memory pool goes away, or
 // the command buffer is finalized (nvn_cmd_handles.cpp).
 uint64_t handle_register(Ref<CmdList> list);
-Ref<CmdList> handle_lookup(uint64_t handle);
+Ref<CmdList> handle_lookup(uint64_t handle, bool count_call = true);   // count_call false: a look-ahead (not a replayed call)
 // [nvn] handle_cache (default on): handle_lookup answers from a per-thread cache while the cached list is still in the table (handles are
 // never reused, a list leaves the table only through drop_locked, which marks it dropped). The replay switches it per ab window.
 void handle_cache_enable(bool on);
