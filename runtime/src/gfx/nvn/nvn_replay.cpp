@@ -1414,8 +1414,17 @@ bool tl_page_held(uint64_t addr) {
 // The handle of a HandleExpr texture (nvn_shaders.h HandleExprOp) from what the draw binds now. Words outside a buffer read 0.
 // ubo / ssbo: the stage's bindings (null: the replay's S); ssbo_ok false: a storage word makes the handle unknown (*unknown set, 0 returned).
 uint32_t eval_handle_expr_in(const BindingDesc& d, const std::vector<HandleExprOp>& prog, const GState::Bind* ubo, const GState::Bind* ssbo, bool* unknown);
+extern uint64_t g_resolve_gen;   // below: moves at every command of the replay
 uint32_t eval_handle_expr(const BindingDesc& d, const std::vector<HandleExprOp>& prog) {
-    return eval_handle_expr_in(d, prog, S.ubo[d.nvn_stage], S.ssbo[d.nvn_stage], nullptr);
+    // per command (g_resolve_gen): set_signature and resolve_texture both evaluate a draw's expressions; inside one command the bindings and
+    // the memory the expression reads are those of the same moment
+    struct Slot { const BindingDesc* d = nullptr; const void* prog = nullptr; uint64_t gen = 0; uint32_t v = 0; };
+    static Slot slots[64];
+    Slot& s = slots[(reinterpret_cast<uintptr_t>(&d) >> 4) & 63];
+    if (s.d == &d && s.prog == &prog && s.gen == g_resolve_gen && on_render_thread()) return s.v;
+    const uint32_t v = eval_handle_expr_in(d, prog, S.ubo[d.nvn_stage], S.ssbo[d.nvn_stage], nullptr);
+    if (on_render_thread()) s = {&d, &prog, g_resolve_gen, v};
+    return v;
 }
 uint32_t eval_handle_expr_in(const BindingDesc& d, const std::vector<HandleExprOp>& prog, const GState::Bind* ubo, const GState::Bind* ssbo, bool* unknown) {
     uint32_t st[64];
