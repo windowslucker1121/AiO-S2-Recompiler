@@ -57,8 +57,10 @@ void host_import(Ctx* c, uint32_t import_id) {
 // site's cache and is called; everything else (HLE thunks, guest longjmp landings, unknown addresses, a site that keeps changing its
 // target) goes the ordinary way.
 void nx_icall_miss(Ctx* c, uint64_t addr, NxIc* ic) {
-    if (__atomic_load_n(&ic->state, __ATOMIC_RELAXED) != 2 && addr - nxrt::mem::kHleBase >= nxrt::mem::kHleSize && nxrt::ic_enabled()) {
-        if (nxrt::GuestFn fn = nxrt::fn_lookup(addr)) {
+    if (__atomic_load_n(&ic->state, __ATOMIC_RELAXED) != 2 && nxrt::ic_enabled()) {
+        // a lifted function, or the handler of an HLE thunk that needs no bookkeeping (NVN entry points called through proc pointers)
+        const nxrt::GuestFn fn = addr - nxrt::mem::kHleBase >= nxrt::mem::kHleSize ? nxrt::fn_lookup(addr) : nxrt::hle_direct_fn(addr);
+        if (fn) {
             nxrt::ic_fill(ic, addr, fn);
             fn(c);
             return;

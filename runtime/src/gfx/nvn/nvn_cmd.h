@@ -9,6 +9,7 @@
 // copied by value (raw bytes of the guest object), because the game reuses its structs right after the call. Memory
 // addresses (NVNbufferAddress) are stored as given; the replay resolves them against the pool registry at submit time.
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -177,6 +178,9 @@ private:
         const uint32_t p = (payload_size + 7u) & ~7u, b = (blob_size + 7u) & ~7u;
         const uint32_t total = static_cast<uint32_t>(sizeof(RecHeader)) + p + b;
         const size_t at = bytes.size();
+        // grow by doubling from 1 KiB: the game's threads record ~4,000 lists per frame, and the library's 1.5x growth from empty
+        // reallocated each of them many times (vector reallocations were ~1.5% of the game threads' busy time)
+        if (at + total > bytes.capacity()) bytes.reserve(std::max<size_t>({at + total, bytes.capacity() * 2, size_t{1024}}));
         bytes.resize(at + total);   // zero-initialised padding
         RecHeader h{static_cast<uint16_t>(op), 0, total};
         std::memcpy(&bytes[at], &h, sizeof h);

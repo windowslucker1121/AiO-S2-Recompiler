@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // In-process sampling profiler (S34), for machines where no profiler can run without administrator rights.
 // `[prof] sample_hz` (env NXRT_PROF_SAMPLE_HZ, default 0 = off): a thread suspends every registered thread (or those named in `[prof]
-// sample_threads`, comma-separated) in turn, reads its context, walks
+// sample_threads`, comma-separated; `[prof] sample_from_s` delays the first sample) in turn, reads its context, walks
 // its host stack (the same allocation-free walk as the freeze watchdog) and resumes it. A thread whose instruction pointer sits right after a
 // `syscall` instruction is blocked in the kernel (a wait, a sleep, a yield); its sample gets the leaf frame `[wait]`. Every other sample is
 // the thread running user code. Samples are written as folded stacks, equal stacks added up, to `[prof] sample_out` (default
@@ -86,6 +86,11 @@ void loop() {
     auto next = std::chrono::steady_clock::now() + period;
     auto last_flush = std::chrono::steady_clock::now();
     std::vector<Sample> batch;
+    // [prof] sample_from_s (default 0): no samples before this many seconds after the sampler started (leave the boot and load out).
+    const auto from = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                                             std::chrono::duration<double>(config_get_double("prof", "sample_from_s", 0.0)));
+    while (!s.stop.load() && std::chrono::steady_clock::now() < from) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    next = std::chrono::steady_clock::now() + period;
     while (!s.stop.load()) {
         std::this_thread::sleep_until(next);
         next += period;
