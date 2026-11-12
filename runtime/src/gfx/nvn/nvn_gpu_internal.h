@@ -223,6 +223,8 @@ bool out_any();                                                    // any thread
 bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff, const BufRef& host, bool in_mirror = true);
 // The same range is out: its place in the copy (*in_mirror, optional: whether that is the pool copy or a shadow).
 bool out_exact(uint64_t addr, VkDeviceSize size, VkBuffer* buf, VkDeviceSize* off, bool* in_mirror = nullptr);
+// [nvn] indirect_from_held: a held result covers [addr, +size) whole and its copy is current there (nvn_gpu_pool.cpp).
+bool out_covering(uint64_t addr, uint64_t size, VkBuffer* buf, VkDeviceSize* off);
 // Some entry, held or with its copy-back still running (its pages may be guarded), shares a page with [addr, +size).
 bool out_touches(uint64_t addr, uint64_t size);
 // Some held shadow result (out_add with in_mirror false) shares a page with [addr, +size).

@@ -2502,6 +2502,7 @@ bool out_draw_read(uint64_t addr, uint64_t size, bool copy_ok, int why) {
 // The buffer for [addr, +size) that a command reads through a plain buffer binding (storage buffers, indirect arguments, copy sources): the
 // pool copy when it holds a compute result there and is current for the whole range, else the pool, after the results there went back
 // (flush: false inside a pass, where out_before_op has done that already).
+uint64_t g_ind_held = 0;   // statistics: indirect arguments read from a held result's copy (indirect_from_held)
 BufRef held_or_pool(uint64_t addr, uint64_t size, int why, bool flush) {
     if (size && out_overlaps(addr, size)) {
         if (out_lazy() && out_servable(addr, size)) {
@@ -2512,6 +2513,24 @@ BufRef held_or_pool(uint64_t addr, uint64_t size, int why, bool flush) {
                 r.offset = ms.offset;
                 r.avail = ms.avail;
                 return r;
+            }
+        }
+        // [nvn] indirect_from_held (default on): indirect arguments inside one held result are read from its copy (the culling chain's
+        // dispatches take their group counts from the first page of buffers the CPU also writes, which is never servable as a page): no
+        // copy-back of the whole result before the dispatch
+        static const bool ind_held = nxrt::config_get_bool("nvn", "indirect_from_held", true);
+        if (why == kOutIndirect && ind_held) {
+            VkBuffer hb = VK_NULL_HANDLE;
+            VkDeviceSize ho = 0;
+            if (out_covering(addr, size, &hb, &ho)) {
+                BufRef r = resolve_buffer(addr, size);
+                if (r.ok) {
+                    r.buffer = hb;
+                    r.offset = ho;
+                    r.avail = size;
+                    ++g_ind_held;
+                    return r;
+                }
             }
         }
         if (flush) {
@@ -3364,14 +3383,19 @@ void pool_table_words(uint8_t* c0, bool old_table) {
 }
 
 constexpr VkDeviceSize kComputeC0Bytes = 0x1000;
+bool pt_ubo_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "pt_copy_ubo", true);
+    return on;
+}
 // [nvn] pt_copy (nvn_gpu_pool.cpp): the 64-bit words at the start of a pointer shader's bound storage buffer that point into a pool make
-// that pool a target (its pages read from the copy through the page table). Each binding address is looked at once.
-void pt_scan_binding(uint64_t addr, uint64_t size) {
+// that pool a target (its pages read from the copy through the page table). Each binding address is looked at once. Uniform blocks
+// ([nvn] pt_copy_ubo, default on): their first KiB (the pointer tables of the culling chain and the light grids).
+void pt_scan_binding(uint64_t addr, uint64_t size, uint64_t max = 256) {
     static const bool on = nxrt::config_get_bool("nvn", "pt_copy", true);
     if (!on || !addr) return;
     static std::unordered_set<uint64_t> seen;
     if (!seen.insert(addr).second) return;
-    const uint64_t n = std::min<uint64_t>(size ? size : 256, 256);
+    const uint64_t n = std::min<uint64_t>(size ? size : max, max) & ~uint64_t{7};
     if (!host_readable(addr, n)) return;
     const uint8_t* p = host_ptr(addr);
     for (uint64_t k = 0; k + 8 <= n; k += 8) {
@@ -3404,8 +3428,10 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_tabl
     };
     for (int i = 0; i < c.c0_ubos; ++i) desc(i < 16 ? &S.ubo[kCompute][i] : nullptr);
     for (int i = 0; i < c.c0_ssbos; ++i) desc(i < 16 ? &S.ssbo[kCompute][i] : nullptr);
-    if (S.stage[kCompute] && S.stage[kCompute]->refl.global_fallback)
+    if (S.stage[kCompute] && S.stage[kCompute]->refl.global_fallback) {
         for (int i = 0; i < c.c0_ssbos && i < 16; ++i) pt_scan_binding(S.ssbo[kCompute][i].addr, S.ssbo[kCompute][i].size);
+        if (pt_ubo_on()) for (int i = 0; i < 16; ++i) pt_scan_binding(S.ubo[kCompute][i].addr, S.ubo[kCompute][i].size, 1024);
+    }
     for (int i = 0; i < c.c0_textures; ++i, off += 8) put64(i < 64 ? S.tex[kCompute][i] : 0);
     for (int i = 0; i < c.c0_images; ++i, off += 8) put64(i < 16 ? S.img[kCompute][i] : 0);
     if (n >= kPoolTableC0 + 8 && off <= kGmemSlotMaskC0) {
@@ -3487,6 +3513,7 @@ uint64_t graphics_c0_build_raw(bool old_table) {
     uint32_t mask_of[kStages] = {};
     for (int st : kStagesWithStorage) {
         if (!S.stage[st] || !S.stage[st]->refl.global_fallback) continue;
+        if (pt_ubo_on()) for (const GState::Bind& u : S.ubo[st]) pt_scan_binding(u.addr, u.size, 1024);   // [nvn] pt_copy_ubo
         for (int k = 0; k < 16; ++k) {
             const GState::Bind& b = S.ssbo[st][k];
             if (!b.addr) continue;

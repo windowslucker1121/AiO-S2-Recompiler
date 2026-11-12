@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// [nvn] hazard (default off: see the 2026-11-10 measurements in AGENTS.md): range-based hazard tracking for the render thread's command buffers.
+// [nvn] hazard (default off: on the recorder thread it cuts GPU busy ~1.1 ms but costs the render thread ~0.5 ms; PERFORMANCE.md): range-based hazard tracking for the render thread's command buffers.
 //
 // The replay used to put a full memory barrier (all commands, all memory) after every dispatch, around every copy, fill and memory write,
 // at the end of passes that wrote storage, and for every game barrier: ~900 per frame in the village at 1920x1080, ~3.85 ms of GPU time
@@ -68,6 +68,13 @@ bool g_piggy_ab = true;   // cpuperf_ab_what hazard_piggyback
 // no driver call: the pass's commands are looked at before its barrier is decided), 2 pass-through (the driver call only: those commands were
 // tracked in the dry run).
 thread_local int tl_mode = 0;
+// [nvn] hazard_lookahead (default off): decide a pass's barrier by looking at its commands first. ~90% of the passes with anything
+// unordered before them need the barrier anyway (village: 11.5 such passes per frame, 1 without a conflict), and the look-ahead holds
+// the recorder until the render thread has queued the deciding command, so drains wait longer. Off: the barrier is recorded right away.
+bool lookahead_on() {
+    static const bool on = config_get_bool("nvn", "hazard_lookahead", false);
+    return on;
+}
 inline bool dry() { return tl_mode == 1; }
 bool piggyback_on() {
     static const bool on = config_get_bool("nvn", "hazard_piggyback", true);
@@ -1100,7 +1107,7 @@ void VKAPI_PTR h_br(VkCommandBuffer cb, const VkRenderingInfo* ri) {
     if (!D.empty() || !R.empty()) {
         if (conflict(D, R)) {
             emit(cb, kWAttach);
-        } else if (mode() == 2 || cmdq::on_recorder()) {   // verify: no placeholder, the pre-pass state only for counting
+        } else if (mode() == 2 || (cmdq::on_recorder() && lookahead_on())) {   // verify: no placeholder, the pre-pass state only for counting
             if (mode() == 1) { ++g_st.ph_in; g_ph = true; g_ph_bar = false; }
             g_pre = true;
             std::swap(D, Dp);

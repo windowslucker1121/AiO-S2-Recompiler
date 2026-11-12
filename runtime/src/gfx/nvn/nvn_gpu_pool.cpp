@@ -2732,6 +2732,21 @@ bool out_exact(uint64_t addr, VkDeviceSize size, VkBuffer* buf, VkDeviceSize* of
     return false;
 }
 
+// [nvn] indirect_from_held: one held result's place in the copy (or shadow) covers [addr, +size) whole, and the copy is current for it: a
+// result of the submission being recorded (its binding range was filled or shadowed current before the dispatch, and the dispatch's writes
+// land there) or a guarded one (a CPU access is a fault that sends it back first and unregisters it). Not after a partial copy-back.
+bool out_covering(uint64_t addr, uint64_t size, VkBuffer* buf, VkDeviceSize* off) {
+    if (!out_any() || !size) return false;
+    OutLock ol;
+    for (const OutEntry& e : g_out)
+        if (e.mbuf && !e.partial && !e.fetching && !e.flushed && (e.pending || e.guarded) && addr >= e.addr && addr + size <= e.addr + e.size) {
+            *buf = e.mbuf;
+            *off = e.moff + (addr - e.addr);
+            return true;
+        }
+    return false;
+}
+
 bool out_touches(uint64_t addr, uint64_t size) {
     if (!out_any() || !size) return false;
     const uint64_t lo = addr & ~(kPageBytes - 1), hi = size >= UINT64_MAX - addr ? UINT64_MAX : (addr + size + kPageBytes - 1) & ~(kPageBytes - 1);
