@@ -772,9 +772,11 @@ void occ_flush_batched() {
         return;
     }
     // per destination buffer: the regions of the report words and of the counts
+    // kept across flushes with their capacity (a flush per submission end: the vectors and the set below were allocated anew each time,
+    // ~1% of the render thread in operator new / free)
     struct Dst { VkBuffer buf; std::vector<VkBufferCopy> rep, cnt; };
     static std::vector<Dst> dsts;
-    dsts.clear();
+    size_t ndst = 0;
     uint64_t* w = reinterpret_cast<uint64_t*>(words.ptr);
     uint32_t cmds = 0;
     // query result copies: runs of reports whose slots follow each other (report i's count goes to res + 8 * i)
@@ -799,29 +801,39 @@ void occ_flush_batched() {
     }
     if (g_occ_pend[run_start].slot >= 0) flush_run(n);
     // a report written twice in this batch: only the last one is copied (regions of one copy must not overlap)
-    static std::unordered_set<uint64_t> later;
+    static FlatMap64<uint8_t> later;
     static std::vector<uint8_t> skip;
     later.clear();
     skip.assign(n, 0);
-    for (size_t i = n; i-- > 0;)
-        if (!later.insert(g_occ_pend[i].addr).second) skip[i] = 1;
+    for (size_t i = n; i-- > 0;) {
+        if (later.find(g_occ_pend[i].addr)) skip[i] = 1;
+        else later.put(g_occ_pend[i].addr, 1);
+    }
     for (size_t i = 0; i < n; ++i) {
         const OccReport& q = g_occ_pend[i];
         if (skip[i]) continue;
         const BufRef b = resolve_buffer(q.addr, 16);
         if (!b.ok) continue;
         Dst* d = nullptr;
-        for (Dst& x : dsts) if (x.buf == b.buffer) { d = &x; break; }
-        if (!d) { dsts.push_back({b.buffer, {}, {}}); d = &dsts.back(); }
+        for (size_t k = 0; k < ndst; ++k) if (dsts[k].buf == b.buffer) { d = &dsts[k]; break; }
+        if (!d) {
+            if (ndst == dsts.size()) dsts.emplace_back();
+            d = &dsts[ndst++];
+            d->buf = b.buffer;
+            d->rep.clear();
+            d->cnt.clear();
+        }
         d->rep.push_back({words.offset + 16ull * i, b.offset, 16});
         if (q.slot >= 0) d->cnt.push_back({res.offset + 8ull * i, b.offset, 8});
     }
     memory_barrier(F->cb);   // earlier GPU work on the report words, and the result copies, before the copies below
-    for (const Dst& d : dsts)
+    for (size_t k = 0; k < ndst; ++k) {
+        const Dst& d = dsts[k];
         if (!d.rep.empty()) { vkCmdCopyBuffer(F->cb, words.buffer, d.buf, static_cast<uint32_t>(d.rep.size()), d.rep.data()); ++cmds; }
+    }
     memory_barrier(F->cb);   // the counts land on the words they replace
-    for (const Dst& d : dsts)
-        if (!d.cnt.empty()) { vkCmdCopyBuffer(F->cb, res.buffer, d.buf, static_cast<uint32_t>(d.cnt.size()), d.cnt.data()); ++cmds; }
+    for (size_t k = 0; k < ndst; ++k)
+        if (const Dst& d = dsts[k]; !d.cnt.empty()) { vkCmdCopyBuffer(F->cb, res.buffer, d.buf, static_cast<uint32_t>(d.cnt.size()), d.cnt.data()); ++cmds; }
     memory_barrier(F->cb);
     g_occ_batch_reports += n;
     g_occ_batch_cmds += cmds;
@@ -2395,7 +2407,10 @@ void pool_sets_reset() {
 uint64_t g_pt_breaks = 0, g_pt_from[7] = {}, g_pt_dirty = 0, g_pt_storage = 0;   // statistics: prepare_textures ending an open pass
 void prepare_textures(const ProgLayout& pl) {
     vol3d_prepare(pl);
-    std::vector<Texture*> need, need_storage;
+    // kept with their capacity (render thread only; nothing below prepares textures again): a draw that needs work allocated them each time
+    static std::vector<Texture*> need, need_storage;
+    need.clear();
+    need_storage.clear();
     for (const BindingDesc& d : pl.bindings) {
         if (d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
             TexResolved r = resolve_image(d);
