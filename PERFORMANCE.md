@@ -3,7 +3,7 @@
 Living document for the frame-rate work. Detailed per-session notes, with every key, measurement and pitfall, stay in
 `AGENTS.md` ("Performance work" and the "Session 2026-11-xx" paragraphs). Config keys are in `runtime/docs/CONFIG.md`.
 This file is the overview: where we are, how we measure, what paid, what did not, and what is next.
-Last update: 2026-11-12, branch `perf/render-r5` (R5).
+Last update: 2026-11-12, branch `perf/render-r6` (R6).
 
 ## Goal and constraints (from the user)
 
@@ -16,6 +16,36 @@ Last update: 2026-11-12, branch `perf/render-r5` (R5).
   area-load frame work.
 
 ## Where we are (2026-11-12, RTX 4080, Ryzen 7 5800X3D, 1920x1080, uncapped)
+
+**2026-11-12 (R6, `perf/render-r6`): set 0's uniform blocks are dynamic uniform buffers (`[nvn] ubo_dynamic`, default on).** Village
+outside 1080 uncapped, no frame trace, 60-200 s, same machine: before 87.5 fps, 1% low 65.9, frames over 10 ms 97.8%, render replay median
+10.88 ms; after 90.0 fps, 1% low 65.7, frames over 10 ms 80.7%, replay median 10.21 ms (first form; the tuned path adds ~0.2 ms more in
+pairs). Paired windows (`cpuperf_ab_what = r6`, the old path on the same dynamic layouts): first form replay -0.38 ms (47/49), fps +1.0
+(45/49); tuned form replay -0.60 ms (45/45), fps +1.4 (45/45); with the frame trace replay -0.54 ms, fps +1.25 (32/33).
+- **What it is:** graphics programs' set-0 uniform blocks are `UNIFORM_BUFFER_DYNAMIC` (up to the device's limit, by binding number). A
+  draw's set 0 is the program's set for the *buffers* its blocks resolve to (pool-copy chunk or pool chunk), bound with the blocks' offsets
+  as dynamic offsets. Per draw only each block's copy-or-pool decision is taken: a per-address memo (and a per-stage-slot cache of the last
+  draw's entry) checked with `read_dep_check`, exactly as a kept set checks it; then the program's last set (61%) or a set by content
+  (39%). No signature, memo, kept-set table or build for the ~2,000 per-object constant sets per frame. Sets come from the persistent pools
+  and are forgotten when a pool unregisters or the persistent pools start a new era. Update ranges, unresolved or unaligned blocks,
+  render scales and eager results take the old path (zero offsets).
+- **Ceiling first:** `[nvn] exp_set0_free` (measurement only: set 0 bound unchecked from the program's last kept set, wrong picture) gave
+  replay -1.05 ms in pairs; the dynamic path keeps ~0.35 us per draw of decision checks and the bind (exp_op_cost: 0.73 ms per frame for
+  ~2,100 draws), so it realizes ~60% of the ceiling.
+- **Costs:** every graphics pipeline layout changes, so every pipeline builds again (a fresh instance needed one ~5 minute run of background
+  builds; the full shader preparation at the end covers it). The hazard tracker now applies each bind's dynamic offsets (it took dynamic
+  descriptors to the buffer's end before).
+- **Correctness:** `set_reuse = verify` compares every block decision with a fresh resolve: 0 of 173 M differ (an early run without the
+  race classification showed 2 of 148 M; with it 0 real and 0 raced); kept sets / memo / `odb_incremental` verify 0; A18 on the nb3
+  capture 41 mesh draws, x sum 4,398 in every traced loop; village capture replay with and without it pixel-identical; runtime tests
+  170/170; in-game screenshot normal.
+- **What is left (exp_op_cost per present, village):** bind_sets 2.6 ms (set 0 dynamic path 0.73, set 2 textures 0.96 of which 0.67 builds
+  for ~420 first sightings, set 1 0.41), prepare_textures 0.70, out_before_op 0.50, pipeline 0.37, vertex buffers 0.27, dynamic state
+  0.27. Set 2's first sightings (`[nvn] r6_diag`, by program): mostly bound textures (`SamplerBinding`) whose handles are new every
+  frame (fs 05a99b18 ~13 textures per set, 95d3ec66, a14ae378, ...): the sets are new by handle, not by content; R3/R4's image-keyed
+  variants did not pay. **The GPU is now close:** with the frame trace GPU busy ~10.9 ms and exec ~12.0 ms per frame (88-90% load at
+  2.8 GHz without it), and the render thread idles more in the faster windows (+0.35..0.42 ms): further replay cuts convert into fps at
+  less than half their size.
 
 **2026-11-12 (R5, structural render-thread work, `perf/render-r5`): a front thread walks every submission ahead of the replay
 (`[nvn] front_plan`, default on).** Paired windows without the frame trace (village outside, 48 pairs): **fps +1.92 (47/48), render
@@ -218,6 +248,7 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | R4 | `keep_chain`: kept descriptor sets remember their successor per set index (~78% right), take it without the hash table and prefetch it | replay -0.08 / -0.11 ms (17/23, 22/23), fps +0.15 / +0.40 |
 | R4 | `hot_skip`: uniform blocks over hot pages resolve to the pool until the hold ends; their kept-set checks skip the page checks | replay -0.04 / -0.10 ms (14/23, 21/24), fps +0.05 / +0.37 |
 | R5 | `front_plan`: submissions walked ahead on `nvn-front` (called lists, physical addresses, per-draw layouts and set-signature hashes as a stream the replay reads with one cursor); list frees off the render thread; occlusion-flush and prepare_textures scratch kept across calls | **fps +1.92 (47/48)**, replay -0.65 ms, 1% low +0.48 (no frame trace) |
+| R6 | `ubo_dynamic`: set 0's uniform blocks as dynamic uniform buffers, sets by buffers, per-address copy-or-pool memo; the hazard tracker applies dynamic offsets | replay -0.60 ms (45/45), fps +1.4 (45/45); village 87.5 -> ~90 fps |
 | R3 | `occ_mark_late`: samples-passed reports' GPU writes noted at the flush; per-set binding index lists (`ProgLayout::set_idx`) | replay -0.10 ms (17/23); index lists not paired (always on) |
 
 Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
