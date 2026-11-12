@@ -45,6 +45,10 @@ namespace Ryujinx.Graphics.Shader.Translation
         internal ShaderStage Stage;
         internal AmpereMeshInfo Mesh;          // task/mesh block (AmpereMesh.cs), else null
         internal int EpilogueAddress = -1;     // task/mesh: every EXIT jumps here (the end-of-program block)
+        internal readonly Dictionary<int, SassInst> SinFrom = new();   // MUFU.SIN/COS address -> the FMUL.RZ x, 1/(2pi) it reads (AmpereFuse)
+        internal readonly HashSet<int> SinSources = new();
+        internal readonly HashSet<int> Speculated = new();   // predicated instructions emitted unconditionally (AmpereFuse.AnalyseSpeculation)               // addresses of those FMULs
+        internal readonly Dictionary<int, IntermediateRepresentation.Operand> SinArg = new();   // FMUL address -> copy of its x, while emitting
 
         /// Reasons this block cannot be translated (instruction forms the front end does not handle). Non-empty = failed.
         public List<string> Unsupported { get; } = new();
@@ -75,7 +79,11 @@ namespace Ryujinx.Graphics.Shader.Translation
         public static TranslatorContext CreateContext(IGpuAccessor gpuAccessor, TranslationOptions options, IReadOnlyList<SassInst> insts, out AmpereProgram program,
                                                       AmpereMeshInfo mesh = null)
         {
-            program = new AmpereProgram(insts.ToList(), gpuAccessor);
+            List<SassInst> list = insts.ToList();
+            // measurement only (G4): NXRT_HARNESS_MESH_EXP=empty: a mesh program is only its first EXIT (no work, no primitive)
+            if (((mesh != null && !mesh.IsTask && Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_EXP") == "empty") || (mesh == null && Environment.GetEnvironmentVariable("NXRT_HARNESS_EXP_EMPTY") == "1")) && list.FirstOrDefault(x => x.Opcode == "EXIT" && x.Pred == 7) is SassInst ex)
+                list = new List<SassInst> { ex with { Address = 0 } };
+            program = new AmpereProgram(list, gpuAccessor);
             bool compute = options.Flags.HasFlag(TranslationFlags.Compute);
             AmpereMesh.Begin(mesh);   // this thread's task/mesh state for the emitters and the back end (null: none)
             program.Mesh = mesh;
@@ -115,6 +123,8 @@ namespace Ryujinx.Graphics.Shader.Translation
             HashSet<int> reachable = new();
             SortedSet<int> leaders = new() { 0 };
             Walk(prog, 0, reachable, leaders, null);
+            AmpereFuse.Analyse(prog);
+            AmpereFuse.AnalyseSpeculation(prog);
 
             // Features and attribute usage, over everything that will be emitted (main code and inlined subroutines).
             AttributeUsage attributeUsage = new(gpuAccessor);
