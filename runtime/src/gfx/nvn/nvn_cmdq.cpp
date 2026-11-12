@@ -40,6 +40,8 @@
 #include "nvn_hazard.h"
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
+#include "nxrt/kernel.h"
+#include "nvn_cpu_pick.h"
 #include "nxrt/log.h"
 
 namespace nxrt::nvn::be::cmdq {
@@ -983,9 +985,36 @@ void apply_render_priority(bool on) {
     if (g_thread.joinable()) SetThreadPriority(g_thread.native_handle(), p);
 }
 // [nvn] render_cpus = "auto" (default) | "R,C" | "off" (cpuperf_ab_what render_pin): the render thread on logical processor R and the
-// recorder on C, two different physical cores (auto: the second and third of the fastest cores), so the recorder's work and spinning never
-// share the render thread's core (SMT siblings) and neither migrates. Off windows: both may run anywhere again. Village paired windows: with
-// hazard off replay -1.26 ms (27/34; GPU-bound, fps +0.2), with hazard on fps +6.8 / +7.1 (24/24 twice), replay -1.5 / -1.9 ms. Render thread.
+// recorder on C, two different physical cores, so the recorder's work and spinning never share the render thread's core (SMT siblings) and
+// neither migrates. auto: pick_render_cpus (nvn_cpu_pick.h) from the topology and the console core model: fast cores only, none the guest
+// threads prefer, the main guest thread's last-level cache first; no pinning when no such places exist. Off windows: both may run
+// anywhere again. Village paired windows: with hazard off replay -1.26 ms (27/34; GPU-bound, fps +0.2), with hazard on fps +6.8 / +7.1
+// (24/24 twice), replay -1.5 / -1.9 ms. Render thread.
+std::vector<CpuCore> machine_cores() {
+    std::vector<CpuCore> cores;
+    std::vector<uint64_t> l3;   // the last-level caches' processor masks
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationAll, nullptr, &len);
+    std::vector<uint8_t> buf(len);
+    if (!len || !GetLogicalProcessorInformationEx(RelationAll, reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data()), &len)) return cores;
+    for (DWORD off = 0; off < len;) {
+        const auto* e = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + off);
+        if (e->Relationship == RelationCache && e->Cache.Level == 3 && e->Cache.GroupMask.Group == 0) l3.push_back(e->Cache.GroupMask.Mask);
+        off += e->Size;
+    }
+    for (DWORD off = 0; off < len;) {
+        const auto* e = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + off);
+        if (e->Relationship == RelationProcessorCore && e->Processor.GroupCount >= 1 && e->Processor.GroupMask[0].Group == 0) {
+            CpuCore c;
+            c.mask = e->Processor.GroupMask[0].Mask;
+            c.eff = e->Processor.EfficiencyClass;
+            for (size_t i = 0; i < l3.size(); ++i) if (l3[i] & c.mask) { c.llc = static_cast<int>(i); break; }
+            cores.push_back(c);
+        }
+        off += e->Size;
+    }
+    return cores;
+}
 void apply_render_pin(bool on) {
     static const std::string cfg = config_get_str("nvn", "render_cpus", "auto");
     if (cfg.empty() || cfg == "off") return;
@@ -996,35 +1025,29 @@ void apply_render_pin(bool on) {
     static bool parsed = false;
     if (!parsed) {
         parsed = true;
-        if (cfg == "auto") {   // the first logical processor of the second and third of the fastest physical cores (the first takes most interrupts)
-            DWORD len = 0;
-            GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
-            std::vector<uint8_t> buf(len);
-            struct Core { int first; int eff; };
-            std::vector<Core> cores;
-            if (len && GetLogicalProcessorInformationEx(RelationProcessorCore, reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data()), &len)) {
-                for (DWORD off = 0; off < len;) {
-                    const auto* e = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + off);
-                    unsigned long bit = 0;
-                    if (e->Relationship == RelationProcessorCore && e->Processor.GroupCount >= 1 && e->Processor.GroupMask[0].Group == 0 &&
-                        _BitScanForward64(&bit, e->Processor.GroupMask[0].Mask))
-                        cores.push_back({static_cast<int>(bit), e->Processor.EfficiencyClass});   // hybrid CPUs: performance cores have the higher class
-                    off += e->Size;
-                }
-            }
-            int best = 0;
-            for (const Core& k : cores) best = std::max(best, k.eff);
-            std::vector<int> fast;
-            for (const Core& k : cores) if (k.eff == best) fast.push_back(k.first);
-            if (cores.size() >= 4 && fast.size() >= 3) { r = fast[1]; c = fast[2]; }   // else too few cores to give two away
+        const char* why = "explicit";
+        if (cfg == "auto") {
+            const std::vector<CpuCore> cores = machine_cores();
+            const ::nxrt::kernel::SchedInfo si = ::nxrt::kernel::sched_info();
+            CpuGuest g;
+            g.model = si.active && si.soft;
+            for (int i = 0; i < si.cores && i < 6; ++i) g.ideal |= si.host_masks[i];
+            g.main = si.host_masks[0];
+            g.pool = si.pool;
+            const CpuPick pk = pick_render_cpus(cores, g);
+            r = pk.render;
+            c = pk.recorder;
+            why = pk.why;
         } else if (std::sscanf(cfg.c_str(), "%d,%d", &r, &c) != 2) {
             r = c = -1;
+            why = "not R,C";
         }
-        NXLOG_I(kTag, "render_cpus %s: render thread on logical processor %d, recorder on %d%s", cfg.c_str(), r, c, r < 0 ? " (not pinned)" : "");
+        NXLOG_I(kTag, "render_cpus %s: render thread on logical processor %d, recorder on %d (%s)%s", cfg.c_str(), r, c, why, r < 0 || c < 0 ? ": not pinned" : "");
     }
-    if (r < 0 || c < 0 || r > 63 || c > 63) return;
+    if (r < 0 || c < 0 || r > 63 || c > 63 || r == c) return;
     DWORD_PTR proc = 0, sys = 0;
     GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys);
+    if (!(proc >> r & 1) || !(proc >> c & 1)) return;   // outside the process's affinity
     SetThreadAffinityMask(GetCurrentThread(), on ? (DWORD_PTR{1} << r) : proc);
     if (g_thread.joinable()) SetThreadAffinityMask(g_thread.native_handle(), on ? (DWORD_PTR{1} << c) : proc);
 }

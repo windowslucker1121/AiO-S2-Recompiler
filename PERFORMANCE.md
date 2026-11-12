@@ -70,9 +70,9 @@ per frame < 10 ms; the CPU chain cannot shorten it.
   - Critical path of the main thread's waits: frame trace events `q.sub`, `replay.s`, `sync.w`, `gpu.raw` (serial in the arg; raw GPU
     timestamps mapped onto the CPU clock through the waits' ends).
 - **Feature switches:** `AbFeat` in `nvn_replay.cpp` is a uint64 bit set. All 64 bits are used (59-62 R8: handle_big, chunk_async,
-  pds_q, fb_image; 63 pt_copy). Free bits by retiring dead experiments first. R3 took the bits of chunk_time, keep_writes, cmd_copies,
+  pds_q, fb_image; 63 pt_copy). Free bits by retiring dead experiments first. R3 took the bits of chunk_time, keep_writes, vi_upload,
   cs_gmem_flush, vrs, sig_tex and alloc_batch (those keys still work, just without paired windows) for `dset_recycle`, `render_pin`,
-  `occ_mark_late`, `copy_image_q`, `tex_keyed`, `submit_async` and `r3a`.
+  `occ_mark_late`, `copy_image_q`, `tex_keyed`, `submit_async` and `r3a`; the cmd_copies bit went to G3's `g3b`.
 - **Since R3 the render thread and the recorder are pinned (`render_cpus = auto`) and `hazard` is on by default.** A run that should
   compare against older numbers sets `nvn.render_cpus: "off"` and `nvn.hazard: "off"`.
 - **Real-clock GPU breakdowns:** these are measurement-only skip words in `[nvn] skip_fs_file`, and live edits take effect:
@@ -159,7 +159,7 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | R8 (shader side) | direct mesh outputs + real primitive count (`NXRT_HARNESS_MESH_DIRECT` / `MESH_EARLY_COUNT`) on by default; the shared cache's 785 mesh/task blocks re-translated (backup `work/shaders/mesh_backup_r8`). **The main checkout's harness must be rebuilt from the merged branch before any later re-translation**, or the mesh blocks revert | alternating private caches: 69.0 / 69.0 vs 66.7 / 66.6 fps, GPU -0.4..-0.5 ms; shared cache in game 69.2 fps, frames over 15 ms 45% -> 24% |
 | gpu-time | `indirect_from_held`: indirect arguments inside one held result read from its copy (no whole 6.5 MB copy-back per indirect dispatch) | culling submission 3.31 → 3.08 ms (stamped), main submission and mesh invocations unchanged |
 | gpu-time | `pt_copy` measured again without the frame trace, hazard off (the fps verdict) | **fps +2.7 median (25/25), 1% low +4.7 (24/25)** |
-| R3 | `render_cpus = auto`: render and recorder threads pinned to two physical cores (second and third of the fastest) | hazard on: **fps +6.8 / +7.1 (24/24 twice)**, replay -1.5 / -1.9 ms; hazard off: replay -1.26 ms (27/34) |
+| R3 | `render_cpus = auto`: render and recorder threads pinned to two physical cores. First form: second and third fastest core (here 2, 4 = guest ideal processors). Final form (`nvn_cpu_pick.h`, unit-tested on synthetic topologies): fast cores only, none a guest ideal core, main thread's L3 first, recorder on a second free core or core 0's second thread, else no pinning (here 14, 1) | first form, hazard on: **fps +6.8 / +7.1 (24/24 twice)**, replay -1.5 / -1.9 ms; hazard off: replay -1.26 ms (27/34). Final form (14,1) AB +8.2 fps (21/23); absolute runs 80.7 / 81.0 vs first form 81.7 / 82.7 fps (within the run-to-run spread) |
 | R3 | `hazard` on by default (B1's tracker on the recorder; its submission start now reaches the recorder through the ring instead of a drain) | under pinning: **fps +6.2 (24/24), 1% low +5.1**, median frame -1.25 ms; village no-AB run 82.6 fps, 1% low 60.3, 1.5% of frames over 15 ms |
 | R3 | `r3a`: texture-only resolves without copying `TexResolved` (~150 bytes, up to 6 copies per binding), chunk check fast path, gmem pointer table without a 4 KiB clear per op, 4 recent pools in `physical_buffer_address` | replay -0.45 ms (22/25), fps +1.6 |
 | R3 | `dset_recycle`: descriptor sets of a frame slot go back to per-layout lists when its submission completed (no `vkAllocateDescriptorSets` for ~800 sets per frame) | replay -0.34 ms (22/25), 1% low +1.45 |
