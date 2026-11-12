@@ -282,3 +282,22 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
   tile (`STS [R8], R12; STS [R8+0x90], R13`), which fits that order. TXD now takes `.F16.RN` the same way. `.F16.RZ` stays unsupported.
 - Affects only blocks from `main` (27 "runtime" compute blocks: the game's upscaler network variants); no bfsha/vsetb corpus block has it.
 
+
+## Peepholes and measurement switches (G4, 2026-11-12; all opt-in)
+
+`ampere/frontend/AmpereFuse.cs`. None of these is on by default: the empty-program test showed that the hot grass meshes' GPU time is not
+their code (PERFORMANCE.md, "GPU round 4"), and in game none moved the GPU time.
+- `NXRT_HARNESS_SIN_FUSE=1`: a MUFU.SIN/COS that reads the product of `FMUL[.FTZ].RZ Rd, x, 1/(2pi)` in the same straight-line run (no label
+  or control flow, Rd and the guard not rewritten, same guard) is emitted as sin(x) / cos(x) of a copy of x taken at the FMUL. The driver
+  compiles that into the console's own pair (FMUL.FTZ.RZ by 1/(2pi), MUFU.SIN), instead of the exact RZ emulation (~15 instructions) and
+  sin(2pi * (t - round(t))). The FMUL itself stays exact for any other reader. `hwcheck --sin-pairs` builds two-instruction cases for it
+  (their CUDA launch still fails, see PERFORMANCE.md).
+- `NXRT_HARNESS_SPECULATE=1`: a predicated pure ALU instruction runs unconditionally when, on every path on which its guard is false, each
+  register it writes is overwritten before anything may read it (forward search that knows the guard predicate until it is rewritten).
+- `NXRT_HARNESS_MESH_PROOF_SHIFT=1`: a mesh output address `x << s` with 2^s a multiple of the vertex group size counts as line 0 of its
+  vertex (no run-time form check).
+- Measurement only (wrong results): `NXRT_HARNESS_EXP_NOPRED=1` (predicated ALU instructions unconditional: the ceiling of the above),
+  `NXRT_HARNESS_EXP_NOFTZ=1` (no FTZ input flushes), `NXRT_HARNESS_MESH_EXP=zeroprims` (no primitive), `NXRT_HARNESS_MESH_EXP=empty` and
+  `NXRT_HARNESS_EXP_EMPTY=1` (the program is only its EXIT): translate one block into a private cache and compare skip windows of its draw.
+- `NXRT_HARNESS_FUSE_DEBUG=1` prints the fused pairs and the speculated count.
+- `pipestat` now turns robustness off as the runtime does (`PIPESTAT_ROBUST=1` keeps it on).
