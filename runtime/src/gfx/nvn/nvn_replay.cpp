@@ -6672,6 +6672,12 @@ bool dlss_pass_dispatch(const std::string& hash) {
 // Statistics: dispatches recorded right after another one with no barrier between them but the one after every dispatch (the game
 // ordered nothing between them; memory_barriers_here() after the last dispatch).
 uint64_t g_disp_end_mark = ~0ull;
+// [nvn] dispatch_trust (G3 experiment, default off; cpuperf_ab_what g3b): dispatches the game ordered nothing between run without our full
+// barrier between them (the game's own barriers, honoured as full barriers, order what it needs; NVN dispatches are unordered otherwise).
+bool dispatch_trust_on() {
+    const bool on = NX_CFG_BOOL("nvn", "dispatch_trust", false);
+    return on && ab_on(kAbG3b);
+}
 uint64_t g_disp_n = 0, g_disp_after = 0, g_disp_after_ind = 0;
 
 void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
@@ -6832,7 +6838,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     out_delta_block(false);
     shadows_after_dispatch();
     out_presnap_end();
-    memory_barrier(F->cb);
+    if (!(dispatch_trust_on() && cmdq::owe_barrier(F->cb))) memory_barrier(F->cb);   // [nvn] dispatch_trust: owed, paid by the next call that needs it
     g_disp_end_mark = memory_barriers_here();
     ++g_chunk_work;
     if (g_trace) {
@@ -8532,7 +8538,6 @@ void replay_begin_submit(Frame& f) {
             handle_cache_enable(ab_on(kAbHandleCache));
             handle_cache_big(ab_on(kAbHandleBig));
             overlap_pos_enable(ab_on(kAbOverlapPos));
-            out_split_held_enable(ab_on(kAbG3a));
         }
         if (static_cast<int>(on) != last_on) {
             last_on = on ? 1 : 0;
@@ -8619,6 +8624,10 @@ void replay_begin_submit(Frame& f) {
             {
                 NXLOG_I(kTag, "dispatches: %llu, %llu right after another with no barrier between but ours (%llu indirect)", (unsigned long long)g_disp_n,
                         (unsigned long long)g_disp_after, (unsigned long long)g_disp_after_ind);
+                uint64_t owed = 0, paid = 0;
+                cmdq::owe_stats(&owed, &paid);
+                if (owed) NXLOG_I(kTag, "dispatch_trust: %llu barriers after dispatches owed, %llu paid by a later call (the rest by a full barrier)",
+                                  (unsigned long long)owed, (unsigned long long)paid);
                 NXLOG_I(kTag, "full barriers by site:%s", memory_barrier_sites(16).c_str());
                 if (hazard::enabled()) NXLOG_I(kTag, "%s", hazard::stats_line().c_str());
             }

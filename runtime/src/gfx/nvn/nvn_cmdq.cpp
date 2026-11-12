@@ -154,7 +154,25 @@ inline void publish() {
     g_head.store(g_wr, std::memory_order_release);
     if (g_sleeping.load(std::memory_order_seq_cst)) WakeByAddressSingle(&g_head);
 }
+// [nvn] dispatch_trust (G3): the replay's full barrier after a dispatch is owed instead of recorded (owe_barrier) and paid by the first
+// later call that is not one of the calls a following plain dispatch makes (bind pipeline, descriptor sets, push constants / descriptors,
+// timestamps, the dispatch itself). A full barrier (memory_barrier) pays it on its own. Render thread only.
+VkCommandBuffer g_owe_cb = VK_NULL_HANDLE;
+ExecFn g_exempt[8] = {};
+int g_nexempt = 0;
+uint64_t g_owed = 0, g_owe_paid = 0;
+void pay_owed() {
+    const VkCommandBuffer cb = g_owe_cb;
+    g_owe_cb = VK_NULL_HANDLE;
+    ++g_owe_paid;
+    gpu::memory_barrier(cb);
+}
+inline void owe_check(ExecFn fn) {
+    for (int i = 0; i < g_nexempt; ++i) if (g_exempt[i] == fn) return;
+    pay_owed();
+}
 uint8_t* reserve(ExecFn fn, size_t payload) {
+    if (g_owe_cb) [[unlikely]] owe_check(fn);
     const size_t size = (sizeof(PacketHdr) + payload + 15) & ~size_t{15};
     for (;;) {
         size_t at = static_cast<size_t>(g_wr % kRingBytes);
@@ -208,7 +226,7 @@ struct Direct<Slot, R(VKAPI_PTR*)(A...)> {
     static inline R(VKAPI_PTR* orig)(A...) = nullptr;
     static inline uint64_t n = 0;
     static R VKAPI_PTR call(A... a) {
-        if (queue_here()) { drain_now(); ++g_direct; ++n; }
+        if (queue_here()) { if (g_owe_cb) pay_owed(); drain_now(); ++g_direct; ++n; }
         return orig(a...);
     }
     static void install(const char* name) {
@@ -766,6 +784,13 @@ void install_all() {
     NXQ_DIRECT(vkAllocateCommandBuffers); NXQ_DIRECT(vkFreeCommandBuffers); NXQ_DIRECT(vkTrimCommandPool); NXQ_DIRECT(vkDestroyCommandPool);
     NXQ_DIRECT(vkQueueSubmit); NXQ_DIRECT(vkQueueSubmit2); NXQ_DIRECT(vkQueueWaitIdle); NXQ_DIRECT(vkDeviceWaitIdle); NXQ_DIRECT(vkQueuePresentKHR);
     o_pb2_raw = o_pb2;
+    g_exempt[g_nexempt++] = &Queued<&vkCmdDispatch, PFN_vkCmdDispatch>::exec;
+    g_exempt[g_nexempt++] = &Queued<&vkCmdBindPipeline, PFN_vkCmdBindPipeline>::exec;
+    g_exempt[g_nexempt++] = &Queued<&vkCmdWriteTimestamp, PFN_vkCmdWriteTimestamp>::exec;
+    g_exempt[g_nexempt++] = &Queued<&vkCmdWriteTimestamp2, PFN_vkCmdWriteTimestamp2>::exec;
+    g_exempt[g_nexempt++] = &x_bds;
+    g_exempt[g_nexempt++] = &x_pc;
+    g_exempt[g_nexempt++] = &x_pds;
     // the packets the hazard look-ahead runs dry (their calls go through the tracker's hooks)
     mark_haz(&x_bds, reinterpret_cast<const void*>(o_bds)); mark_haz(&x_bvb2, reinterpret_cast<const void*>(o_bvb2));
     mark_haz(&x_cpb, reinterpret_cast<const void*>(o_cpb)); mark_haz(&x_upd, reinterpret_cast<const void*>(o_upd));
@@ -851,6 +876,15 @@ bool queue_chunk(VkCommandBuffer old, VkCommandBuffer next, VkQueue q, std::mute
     return true;
 }
 void set_desc(bool on) { g_desc_q.store(on, std::memory_order_relaxed); }
+bool owe_barrier(VkCommandBuffer cb) {
+    if (!queue_here() || !g_nexempt) return false;
+    if (g_owe_cb && g_owe_cb != cb) pay_owed();
+    g_owe_cb = cb;
+    ++g_owed;
+    return true;
+}
+void owe_clear() { if (g_owe_cb && queue_here()) g_owe_cb = VK_NULL_HANDLE; }
+void owe_stats(uint64_t* owed, uint64_t* paid) { *owed = g_owed; *paid = g_owe_paid; }
 void apply_render_priority(bool on) {
     static const std::string mode = config_get_str("nvn", "render_priority", "highest");
     int p = THREAD_PRIORITY_NORMAL;

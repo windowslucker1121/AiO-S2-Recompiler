@@ -96,7 +96,6 @@ void defer_destroy(std::function<void()> fn);
 // Descriptor pools that outlive submissions ([nvn] set_keep): made like the slots' pools; released once every submission so far has completed.
 VkDescriptorPool keep_dpool_new();
 void alloc_batch_enable(bool on);
-void out_split_held_enable(bool on);   // [nvn] out_split_held (G3 experiment)
 void overlap_pos_enable(bool on);   // [nvn] overlap_pos under cpuperf_ab (overlap_pos): out_overlaps_window keeps overlap answers per g_out_ver   // [nvn] alloc_batch under cpuperf_ab (alloc_batch): Frame::alloc_set allocates sets eight at a time
 void keep_dpool_release(VkDescriptorPool p);
 uint64_t completed_serial();      // cached timeline value; call poll_completed() for a fresh read
