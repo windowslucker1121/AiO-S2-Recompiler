@@ -3,7 +3,7 @@
 Living document for the frame-rate work. Detailed per-session notes, with every key, measurement and pitfall, stay in
 `AGENTS.md` ("Performance work" and the "Session 2026-11-xx" paragraphs). Config keys are in `runtime/docs/CONFIG.md`.
 This file is the overview: where we are, how we measure, what paid, what did not, and what is next.
-Last update: 2026-11-12, branch `perf/render-r4` (R4).
+Last update: 2026-11-12, branch `perf/render-r5` (R5).
 
 ## Goal and constraints (from the user)
 
@@ -16,6 +16,32 @@ Last update: 2026-11-12, branch `perf/render-r4` (R4).
   area-load frame work.
 
 ## Where we are (2026-11-12, RTX 4080, Ryzen 7 5800X3D, 1920x1080, uncapped)
+
+**2026-11-12 (R5, structural render-thread work, `perf/render-r5`): a front thread walks every submission ahead of the replay
+(`[nvn] front_plan`, default on).** Paired windows without the frame trace (village outside, 48 pairs): **fps +1.92 (47/48), render
+replay -0.65 ms per frame (47/48), 1% low +0.48**; with the frame trace replay -0.54 ms (40/41). The village is ~85-88 fps with it (start of
+R5: 85.5 fps, 1% low 59.1, replay median 11.1 ms); replay now ~10.4-10.6 ms per frame, render idle ~0.9 ms, so the frame is no longer
+purely render-thread bound (game GPU sync wait ~4 ms, GPU ~91% busy in cpuwatch). The 100 fps target (replay < ~8 ms) is not reached.
+- **What the plan is:** the game thread makes a plan per submission and hands it to the replay lambda and to the thread `nvn-front`, which
+  walks the lists as the replay will (every `CallCommands` followed, state carried across submissions) and writes a stream in replay
+  order: the lists each `CallCommands` calls (held by the plan; their last references are dropped on `nvn-front`, not on the render thread),
+  the physical addresses of uniform/storage bindings (checked against the pool-registry and virtual-map generations at every use), and per
+  draw/dispatch the program layout and `set_signature`'s raw-input hash of each set. The render thread reads the stream with one cursor while
+  it is still being written (a 0.2-0.3 ms walk per submission; waits for the walk ~1 per 20 s); a record that is not the next entry's
+  ends the plan for the rest of the submission; the forward scans (mesh/fill/pass look-aheads) find entries by record once the walk is done.
+- **Correctness:** handles are never reused and `drop_locked` sets `dropped` before it erases a handle (handle_lookup's cache relies on the
+  same flag), so "not dropped" is exactly what `handle_lookup` returns at that moment; a drop between the plan's check and a verify look-up
+  is counted as a race. `front_plan = verify`: 0 differences (calls, addresses, signatures) in 37 M calls / 68 M addresses; `set_reuse` and
+  `odb_incremental` verify 0; A18 on the nb3 capture 41 mesh draws, x sum 4,398 in every traced loop; village capture replay on vs off
+  pixel-identical; runtime tests 170/170.
+- **Ceilings measured first (1 kHz sampler, render thread busy samples, start of R5):** flat; the coherence-free share was ~20-25%
+  (handle look-ups 3.4%, set signatures 3.6%, texture resolution 3.9%, physical addresses 2.1%, pipeline key/look-up 3.4%, program layout
+  1.2%, mesh look-ahead 2.8%, list frees ~1-2%). The plan realized about the share it took over: a hash map keyed by record (first form)
+  cost as much as the look-ups it replaced (fp_phys 2.3%); the sequential stream and releasing lists elsewhere gave the gain.
+- **Found on the way:** texture handles cannot be planned: the game's material handles are read from storage buffers (GPU-written
+  material tables), 0 of the planned handle reads applied. Set-signature hashes are planned (48 M per 300 s) but added nothing measurable
+  over the calls/addresses part (-0.52 vs -0.53 ms). Unpaired back-to-back runs (front on/off) showed the 4-frame phase-locking swing of R4
+  again (85.6 vs 87.6 fps with replay 10.4 vs 11.0 ms): judge by paired windows.
 
 **2026-11-12 (R4, render thread and long frames, `perf/render-r4`): the render thread is now the only limit for 100 fps** (GPU busy
 ~8.5-8.9 ms after G4; render replay ~11.0-11.8 ms per frame, idle 0.05-0.2 ms). Alternating final runs, R3's exe vs R4's (same shared shader
@@ -191,6 +217,7 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | R4 | `tex_share_index`: images of pool textures indexed by storage and layout while they have owners; a new object over the same storage shares the image of one finalized (or dropped) before its release ran | removes the texture-churn windows (38-62 fps for minutes); paired fps +0.55 median (17/24), 1% low +3.6; steady images made 0.2-1.2 -> 0.00 per frame |
 | R4 | `keep_chain`: kept descriptor sets remember their successor per set index (~78% right), take it without the hash table and prefetch it | replay -0.08 / -0.11 ms (17/23, 22/23), fps +0.15 / +0.40 |
 | R4 | `hot_skip`: uniform blocks over hot pages resolve to the pool until the hold ends; their kept-set checks skip the page checks | replay -0.04 / -0.10 ms (14/23, 21/24), fps +0.05 / +0.37 |
+| R5 | `front_plan`: submissions walked ahead on `nvn-front` (called lists, physical addresses, per-draw layouts and set-signature hashes as a stream the replay reads with one cursor); list frees off the render thread; occlusion-flush and prepare_textures scratch kept across calls | **fps +1.92 (47/48)**, replay -0.65 ms, 1% low +0.48 (no frame trace) |
 | R3 | `occ_mark_late`: samples-passed reports' GPU writes noted at the flush; per-set binding index lists (`ProgLayout::set_idx`) | replay -0.10 ms (17/23); index lists not paired (always on) |
 
 Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
@@ -364,6 +391,9 @@ trace's `gpu.busy`), so a GPU change is judged by GPU busy *and* render-thread r
 - `hwcheck --sin-pairs` (two-instruction FMUL.RZ + MUFU.SIN/COS cases from the game corpus): the CUDA launch of the two-word kernel fails
   (CUDA_ERROR_INVALID_VALUE, single MUFU cases pass); not resolved, the fusion stays opt-in.
 
+- **R5 (2026-11-12):** `pool_seqlock` (texture/sampler pool entries read with sequence counts instead of the shared locks): replay -0.05 ms
+  (28/41), fps +0.1, 1% low -0.65: removed. A record-keyed hash map for the plan's look-ups (first form of `front_plan`): its look-ups cost
+  as much as `physical_buffer_address` did; replaced by the sequential stream.
 - **R4 (2026-11-12), village paired windows:**
   - `mirror_hot_window = 8` (pages rewritten every fourth frame faulting every cycle): faults per frame unchanged (6.8), fps +0.3: removed.
   - `memo_skip` (bypass the set memo for set indices with few hits): at < 2% it never skipped (set 0 hits ~2.1%); at < 10% it skipped 7 M
@@ -375,6 +405,15 @@ trace's `gpu.busy`), so a GPU change is judged by GPU busy *and* render-thread r
     (set 2 builds spend 0.57 of 0.69 ms resolving, the cache could save <= 0.1 ms).
 
 ## What is open, by expected gain
+
+**After R5:** replay ~10.5 ms with `front_plan`; render idle ~0.9 ms; game GPU sync ~4 ms. What is left on the render thread is the
+coherence-tied part (kept-set checks ~1 ms, set builds ~1.2 ms for ~1,000 first-sighting / written-storage sets per frame, held-result
+checks, texture preparation) and the per-command loop (~1 ms for ~35k commands). Moving more to the front thread was measured or judged
+small (texture handles: storage-held; set signatures: no gain; pipeline keys depend on attachment decisions). The remaining routes to
+-3 ms are the ones R4 named and R5 did not build: parallel recording of passes into secondary command buffers with per-thread replay
+state (a multi-day refactor of the replay's globals), dynamic uniform offsets for set 0 (estimated -0.8..-1.0 ms; changes every pipeline
+layout, so only together with the final shader preparation), and push-based validity for kept sets.
+
 
 **After R4:** the render thread (~11-11.8 ms replay, idle ~0.1 ms) is the only limit for 100 fps; the GPU is at ~8.5-8.9 ms. Per-draw work
 is ~3.2 us over ~2,100 draws plus ~3 ms of per-op and submission work, spread over dozens of items of 0.1-0.8 ms each. Ways to the ~2.5 ms
