@@ -2845,6 +2845,7 @@ void gmem_before_op(bool compute) {
     for (int st = 0; st < kStages; ++st)   // a pointer shader can reach any pool: every chunk imported, so the page table maps it
         if ((st == kCompute) == compute && S.stage[st] && S.stage[st]->refl.global_fallback) { import_pools_for_pointers(); break; }
     if (!gmem_coherence_on()) return;
+    if (!compute && g_coh_gmem) return;   // exp_coh_free (gate)
     bool any = false, writes = false;
     for (int st = 0; st < kStages; ++st) {
         if ((st == kCompute) != compute) continue;
@@ -3215,6 +3216,29 @@ uint64_t indirect_index_span(const P_DrawIndirect& p) {
 // submission's, and out_end_submit decides at its end.
 void out_before_op(const RecordReader& r) {
     if (!out_any()) return;
+    if (g_coh_odb) {   // exp_coh_free (gate): draws read held results from the copy, unchecked (indirect arguments are still settled)
+        const Op op = r.op();
+        if (op == Op::DrawArrays || op == Op::DrawElements) return;
+        if (op == Op::DrawIndirect) {
+            const auto& p = r.payload<P_DrawIndirect>();
+            const uint64_t cmd = p.type != 0xffffffffu ? 20 : 16;
+            const uint64_t stride = p.stride ? static_cast<uint64_t>(p.stride) : cmd;
+            const uint64_t n = p.multi && p.count_address ? std::max<uint64_t>(1, p.max_count) : 1;
+            out_draw_read(p.indirect_address, stride * (n - 1) + cmd, true, kOutIndirect);
+            if (p.multi && p.count_address) out_draw_read(p.count_address, 4, true, kOutIndirect);
+            return;
+        }
+        if (op == Op::DrawMeshTasks) {
+            const auto& p = r.payload<P_DrawMesh>();
+            if (p.kind >= 2) {
+                const uint64_t rec = p.kind == 3 ? 12 : 8, stride = p.stride ? static_cast<uint64_t>(p.stride) : rec;
+                const uint64_t n = p.multi ? std::max<uint64_t>(1, p.max_count) : 1;
+                out_draw_read(p.indirect, stride * (n - 1) + rec, true, kOutIndirect);
+                if (p.multi && p.count_address) out_draw_read(p.count_address, 4, true, kOutIndirect);
+            }
+            return;
+        }
+    }
     switch (r.op()) {
         case Op::Dispatch: case Op::DispatchIndirect: case Op::Barrier: case Op::CallCommands: case Op::PushDebugGroup: case Op::PopDebugGroup:
         case Op::ClearColor: case Op::ClearDepthStencil: case Op::ClearTexture: case Op::CopyTextureToTexture: case Op::Downsample:
@@ -3714,7 +3738,8 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_tabl
         // with held_mask only the slots whose binding may differ from the pool (cs_gmem_held_on)
         uint32_t all = ~0u;
         const bool exp_none = NX_CFG_BOOL("nvn", "exp_cs_gmem_none", false);   // measurement only: no slot checked (wrong reads of held results)
-        if (held_mask && exp_none) all = 0;
+        const bool cf_cs = g_coh_free && NX_CFG_BOOL("nvn", "exp_coh_free_cs", false);   // exp_coh_free (gate) for compute pointer shaders too
+        if (held_mask && (exp_none || cf_cs)) all = 0;
         else if (held_mask) {
             all = 0;
             for (int k = 0; k < 16 && k < c.c0_ssbos; ++k) {
@@ -3793,6 +3818,7 @@ uint64_t graphics_c0_build_raw(bool old_table) {
             const GState::Bind& b = S.ssbo[st][k];
             if (!b.addr) continue;
             pt_scan_binding(b.addr, b.size);   // [nvn] pt_copy
+            if (g_coh_mask0) continue;   // exp_coh_free (gate): no slot checked
             const PoolHit hit = pool_lookup(b.addr);
             if (!hit.pool || hit.pool->is_virtual || !hit.pool->base || out_overlaps(b.addr, b.size ? b.size : 1)) mask_of[st] |= 1u << k;
         }
@@ -4060,7 +4086,9 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             const VkDeviceSize ua = device().properties().limits.minUniformBufferOffsetAlignment;
                             out_draw_read(bind.addr, bind.size ? bind.size : 65536, ua && (bind.addr % ua) == 0, kOutDrawBuffer);   // resolve_read serves the copy
                         }
+                        g_coh_compute = d.nvn_stage == kCompute;   // exp_coh_free (gate): graphics only
                         BufRef br = resolve_read_dep(bind.addr, bind.size, kReadUniform, kd ? &kd->rd : nullptr);
+                        g_coh_compute = false;
                         if (kd) {
                             kd->kind = 1;
                             kd->addr = bind.addr;
@@ -4164,10 +4192,20 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             kd->note = bind.size ? bind.size : br.avail;
                             kd->pool = pool_lookup(bind.addr).pool;
                             kd->writes = writes;
+                            kd->rd.cf = g_coh_win;
                             if (g_shadowing) kbad("storage buffer of a shadowed dispatch");
                             if (!br.ok) kbad("storage buffer outside a pool");   // a pool registered later may cover it
                         }
-                        if (!g_shadowing && br.ok && out_lazy() && out_overlaps_window(bind.addr, bi.range)) {   // a draw over a held compute result: the copy
+                        if (g_coh_ssbo && !g_shadowing && br.ok && !writes && d.nvn_stage != kCompute) {   // exp_coh_free (gate): read-only storage from the copy
+                            ReadDep cd;
+                            const bool cf0 = g_coh_free;
+                            g_coh_free = true;   // the gate's copy decision for this one
+                            const BufRef cr = resolve_read_dep(bind.addr, bi.range, kReadUniform, &cd);
+                            g_coh_free = cf0;
+                            if (cr.ok && cr.buffer != br.buffer) { bi.buffer = cr.buffer; bi.offset = cr.offset; bi.range = std::min<VkDeviceSize>(bi.range, cr.avail); }
+                            break;
+                        }
+                        if (!g_shadowing && br.ok && out_lazy() && !g_coh_free && out_overlaps_window(bind.addr, bi.range)) {   // a draw over a held compute result: the copy
                             const BufRef hb = held_or_pool(bind.addr, bi.range, kOutStorageXfb, false);
                             kbad("storage buffer over a held result");
                             if (hb.buffer != br.buffer) {
@@ -4901,7 +4939,8 @@ __declspec(noinline) int keep_valid(KeepEntry& e) {   // noinline: its own line 
                 if (!read_dep_check(k.rd, kReadUniform)) return 2;
                 break;
             case 2:
-                if (ask_held && out_overlaps_window(k.addr, k.range)) return 3;
+                if (k.rd.cf != static_cast<uint8_t>(g_coh_win)) return 3;   // exp_coh_free (gate): bound otherwise in the other mode
+                if (!g_coh_free && ask_held && out_overlaps_window(k.addr, k.range)) return 3;
                 upd_note_read(k.addr, k.note);
                 break;
             case 3: {
@@ -9653,6 +9692,16 @@ void replay_begin_submit(Frame& f) {
         set_narrow_barriers(g_tracked);
         g_pending.clear();
         g_pass_unsafe = false;
+        {   // [nvn] exp_coh_free (P2 gate, measurement only): per submission
+            const int cfm = coh_free_mode();
+            g_coh_win = cfm == 1 || (cfm == 2 && cab > 0 && g_cpu_ab_on);
+            const int64_t parts = NX_CFG_INT("nvn", "exp_coh_free_parts", 7);
+            g_coh_free = g_coh_win && (parts & (1 | 32));   // 32: the bindings alone
+            g_coh_odb = g_coh_win && (parts & (1 | 8));     // 8: the draws' held-result checks alone
+            g_coh_gmem = g_coh_win && (parts & (1 | 16));   // 16: the graphics pointer-window flushes alone
+            g_coh_mask0 = g_coh_win && (parts & 2);
+            g_coh_ssbo = g_coh_win && (parts & 4);
+        }
         mirror_begin_submit(f, on);
     }
     if (archexp::gmem_window_on()) archexp::gmem_window_refresh(f);   // E3 (measurement only)

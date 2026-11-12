@@ -186,7 +186,19 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use);
 // 1: the copy; 2: the pool, but the copy could serve it once its pages are current. keep false: the decision depends on something the check
 // cannot see (no copy chunk yet): the set is not kept.
 struct Mirror;
-struct ReadDep { Mirror* m = nullptr; const void* pool = nullptr; uint64_t first = 0, last = 0; uint8_t state = 0; bool mirror_on = false; bool keep = true; uint32_t hot_till = 0; };
+struct ReadDep { Mirror* m = nullptr; const void* pool = nullptr; uint64_t first = 0, last = 0; uint8_t state = 0; bool mirror_on = false; bool keep = true; uint8_t cf = 0; uint32_t hot_till = 0; };
+// [nvn] exp_coh_free (P2 gate, measurement only; off | on | ab = the "on" windows of [nvn] cpuperf_ab): graphics draws bind every buffer the
+// pool copy has ever held from the copy without checks, skip the held-result checks (out_before_op for draws, gmem_before_op for draws) and
+// get pointer slot masks of 0 (every pointer stage on the inline fast path). The picture may be wrong (pages the CPU rewrote since their
+// copy). It measures what a coherence model where the copy is always the GPU's binding could save on the render thread and the GPU.
+// Set per submission by the replay (render thread).
+// [nvn] exp_coh_free_parts (bit set, default 7): 1 unchecked copy bindings and no held-result checks of draws (g_coh_free), 2 slot masks 0
+// (g_coh_mask0), 4 read-only graphics storage from the copy (g_coh_ssbo). g_coh_win: the gate's window is on.
+// Bits 8 / 16 / 32 switch the parts of bit 1 one at a time: the draws' held-result checks (g_coh_odb), the graphics pointer-window flushes
+// (g_coh_gmem), the bindings (g_coh_free).
+extern bool g_coh_free, g_coh_win, g_coh_mask0, g_coh_ssbo, g_coh_odb, g_coh_gmem;
+extern bool g_coh_compute;   // build_set resolves a compute binding: the gate does not apply (ReadDep::cf 2)
+int coh_free_mode();   // 0 off, 1 on, 2 ab
 BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* dep);
 // True when resolve_read would decide the same now (and then does what it would do besides: marks the pages used or wanted).
 bool read_dep_check(const ReadDep& dep, int use);
