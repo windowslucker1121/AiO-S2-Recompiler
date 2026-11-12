@@ -26,7 +26,12 @@ import tomllib
 from pathlib import Path
 
 SKIP_SAVE = re.compile(r'\.(work|journal)\.\d+$|\.commit$|\.taken\.')     # journal work folders, journals, commit markers (fs_volume.h)
-STEP_KINDS = ('route', 'wait_for', 'input', 'sleep', 'press_until', 'shot')
+STEP_KINDS = ('route', 'wait_for', 'input', 'sleep', 'press_until', 'shot', 'script')
+# A `script` step hands a test-tooling script (runtime/include/nxrt/tt_script.h) to the running game through live mode ([test] live): the
+# launch then starts with a holder script (one long @sleep, so frames keep coming while the game boots and loads; live mode would hold the
+# frame thread while it has no steps), the step appends the script plus a new holder to the live file and drops the old holder with
+# <live>.abort. Frame-counted input with `@rate 60` in the script is the same game time on every run, whatever the fps.
+HOLDER = '@sleep 86400000'
 # Environment of a bug bundle (env.txt) that belongs to that run only, not to the moment: not carried into load_state(bug=...).
 RUN_ONLY_ENV = re.compile(r'^NXRT_(TEST_|AI_|FS_SAVE_DIR$|BUG_DIR$|LOG$|INI$)')
 _SHA = {}
@@ -354,7 +359,17 @@ class StateTools:
         want = (st.get('build') or {}).get('sha256') or (st.get('build') or {}).get('exe_sha256')
         if want and self.exe.exists() and file_sha256(self.exe) != want:
             warn = f'the exe differs from the build this state was saved with (commit {(st.get("build") or {}).get("commit")})'
-        r = self.launch(args=a, settings=s, env=e, instance=inst)
+        steps = route if route is not None else st.get('reach') or []
+        script = None
+        if reach and self._has_script_step(steps):                   # live mode for the script steps (see HOLDER)
+            live = self._run_dir(inst) / 'live.nxs'
+            live.parent.mkdir(parents=True, exist_ok=True)
+            for p in (live, live.with_name('live.nxs.abort'), live.with_name('live.nxs.status')):
+                p.unlink(missing_ok=True)
+            live.write_bytes(b'')
+            s = {'test.live': str(live), 'test.wall_timeout_s': 0, 'test.trace': 'none', **s}
+            script = [HOLDER]
+        r = self.launch(args=a, settings=s, env=e, instance=inst, script=script)
         out = {'state': st['name'], 'instance': inst, 'pid': r['pid'], 'log': r['log'], 'save_dir': str(save), 'save_files': count_files(save)}
         if warn:
             out['warning'] = warn
@@ -363,7 +378,7 @@ class StateTools:
         if not reach:
             return out
         deadline = t0 + timeout_s
-        res = self._run_steps(route if route is not None else st.get('reach') or [], Path(st['dir']), deadline, inst)
+        res = self._run_steps(steps, Path(st['dir']), deadline, inst)
         if res['ok'] and st.get('ready'):
             w = self.wait_for(**self._wait_args(st['ready'], Path(st['dir']), deadline, inst))
             res['steps'].append({'step': 'ready', **w})
@@ -443,6 +458,8 @@ class StateTools:
                     else:
                         ok = self.wait_for(**self._wait_args({**until, 'timeout_s': every}, base, end, inst))['ok']
                 info.update(presses=presses, **({'line': line} if line else {}))
+            elif kind == 'script':
+                ok, info = self._script_step(st, base, deadline, inst)
             else:
                 raise ValueError(f'unknown step {st!r}: one of {", ".join(STEP_KINDS)}')
             entry = {'step': st.get(kind) if kind in ('route', 'sleep', 'shot') else kind, 'ok': ok, 's': round(time.time() - t, 1)}
@@ -451,6 +468,63 @@ class StateTools:
             if not ok and not st.get('optional'):
                 return {'ok': False, 'failed': st, 'steps': done}
         return {'ok': True, 'steps': done}
+
+    def _has_script_step(self, steps, depth=0):
+        routes = self._game_ai().get('route') or {}
+        for st in steps:
+            st = {'route': st} if isinstance(st, str) else st
+            if 'script' in st:
+                return True
+            if 'route' in st and st['route'] in routes and depth < 8 and self._has_script_step(routes[st['route']].get('steps', []), depth + 1):
+                return True
+        return False
+
+    def _script_file(self, name, base):
+        """A script step's file: absolute, else next to ai_states.toml (recomp/games/<id>/...), else in the state's folder."""
+        p = Path(name)
+        if p.is_absolute():
+            return p
+        toml = Path(os.environ.get('NXRT_AI_STATES_TOML') or self._root() / 'recomp' / 'games' / self.id / 'ai_states.toml')
+        for d in (toml.parent, base):
+            if (d / p).exists():
+                return d / p
+        raise ValueError(f'script {name!r} not found next to {toml} or in {base}')
+
+    def _script_step(self, st, base, deadline, inst):
+        """{script = "<file>", until = {wait_for arguments, default: the script's last `@log` line}, timeout_s}: appends the script and a
+        new holder to the run's live file, drops the holder that runs now (<live>.abort), then waits for `until` (a log condition counts
+        from this step's start)."""
+        from gamectl import _read_from
+        live = self._run_dir(inst) / 'live.nxs'
+        if not live.exists():
+            return False, {'why': 'the run was not started in live mode (load_state starts it so when its reach has a script step)'}
+        path = self._script_file(st['script'], base)
+        text = path.read_text(encoding='utf-8')
+        logs = [ln.strip()[5:].strip() for ln in text.splitlines() if ln.strip().lower().startswith('@log ')]
+        until = dict(st.get('until') or ({'until': 'log', 'pattern': re.escape(logs[-1])} if logs else {}))
+        tg = self._target(inst)
+        lp = self._log_path(tg)
+        pos = lp.stat().st_size if lp and lp.exists() else 0
+        with open(live, 'ab') as f:
+            f.write(text.replace('\r\n', '\n').rstrip('\n').encode('utf-8') + b'\n' + HOLDER.encode() + b'\n')
+        live.with_name('live.nxs.abort').write_bytes(b'')
+        info = {'path': str(path)}
+        if not until:
+            return True, info
+        end = min(deadline, time.time() + float(st.get('timeout_s', until.get('timeout_s', 600))))
+        if until.get('until') != 'log':
+            w = self.wait_for(**self._wait_args({**until, 'timeout_s': max(1.0, end - time.time())}, base, end, inst))
+            return w['ok'], info
+        rx = re.compile(until['pattern'])
+        while time.time() < end:
+            if not self._alive(tg):
+                return False, {**info, 'why': 'the game is not running'}
+            time.sleep(0.25)
+            if lp and lp.exists():
+                lines, pos = _read_from(lp, pos)
+                if line := next((ln for ln in lines if rx.search(ln)), None):
+                    return True, {**info, 'line': line}
+        return False, {**info, 'why': f'no log line {until["pattern"]!r} in time'}
 
     # ---- bug bundles ------------------------------------------------------------------------------------------------------------------------
     def _bug_dir(self, bug):

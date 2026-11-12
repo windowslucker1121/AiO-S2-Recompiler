@@ -1,0 +1,26 @@
+# Benchmark path "village walk" (tools/ai/README.md "Benchmark states"). Starts where balcony_far.nxs ends (the balcony view, game step
+# back to real time). The game step is fixed again (1/60 s per frame), so every run walks the same path in the same frames. The
+# measurement window is the walk: from the log line "bench: village_walk start" to "bench: village_walk end" (~660 frames).
+@rate 60
+@log bench: village_walk start
+# to the ladder and down it (forward on the stick climbs down here)
+stick left 0 1 for 240
+@shot walk_ladder
+# let go near the bottom (B)
+press B for 6
+60
+@shot walk_landed
+# run sideways: the camera follows round the tree, past the houses into the open village (keeps away from the girl on the path,
+# whose dialogue would stop the walk)
+stick left -1 0 for 120
+@shot walk_run1
+stick left -1 0 for 120
+@shot walk_run2
+stick left -1 0 for 120
+@shot walk_run3
+@log bench: village_walk end
+# still: compare these between runs (the path), the moving shots above are a frame or two apart between runs
+60
+@shot walk_end
+@rate 0
+@log bench: village_walk done
