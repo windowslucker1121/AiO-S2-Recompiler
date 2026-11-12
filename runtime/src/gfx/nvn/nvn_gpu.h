@@ -30,6 +30,9 @@ uint64_t last_serial();
 // Waits for `serial` to complete (timeout_ns: 0 poll, UINT64_MAX forever). True when it did.
 bool wait_serial(uint64_t serial, uint64_t timeout_ns);
 bool serial_done(uint64_t serial);
+// The game's nvnSyncWait on a queue fence: wait_serial, or with [nvn] sync_lead the frame throttle relaxed by one frame (nvn_gpu.cpp).
+bool wait_serial_game(uint64_t serial, uint64_t timeout_ns);
+void sync_lead_enable(bool on);   // [nvn] cpuperf_ab_what sync_lead: off in the off windows
 
 // Window: texture `index` of the window is shown (after the submissions already made). The call returns when the frame has
 // been handed to the swapchain; it honours the shell's frame limiter.

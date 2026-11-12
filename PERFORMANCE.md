@@ -3,7 +3,7 @@
 Living document for the frame-rate work. Detailed per-session notes, with every key, measurement and pitfall, stay in
 `AGENTS.md` ("Performance work" and the "Session 2026-11-xx" paragraphs). Config keys are in `runtime/docs/CONFIG.md`.
 This file is the overview: where we are, how we measure, what paid, what did not, and what is next.
-Last update: 2026-11-12, branch `perf/render-r6` (R6).
+Last update: 2026-11-12, branch `perf/p1-pipeline` (P1).
 
 ## Goal and constraints (from the user)
 
@@ -17,6 +17,37 @@ Last update: 2026-11-12, branch `perf/render-r6` (R6).
 
 ## Where we are (2026-11-12, RTX 4080, Ryzen 7 5800X3D, 1920x1080, uncapped)
 
+**2026-11-12 (P1, `perf/p1-pipeline`): pipeline and placement. No fps win; every new switch is off (or the old behaviour).**
+Village outside 1080 uncapped, paired `cpuperf_ab = 300` windows; three of the five runs had other agents' builds beside them
+(clang-cl x3-4, lld-link up to ~10 cores: game ~57-68 fps instead of ~85, render-thread bound), the last two were quiet (78 / 84 fps).
+- **W5 `[nvn] sync_lead` (dropped, 2 runs).** The game's fence wait for a presented frame's serial returns once the serial is submitted and
+  the frame before it is GPU-complete. Loaded run: fps +0.2 (18/32), 1% low +1.4 (21/32): render-bound, so the lead only waits for the render
+  thread's submit of #6 instead of the GPU. Quiet traced run (84 fps): the lead waits 0.04 ms per frame (returns one submission ahead of the
+  GPU every frame) and still fps -0.01 (14/29), 1% low -0.47 (14/29). The game's main thread waits elsewhere (present back pressure / render
+  thread). The trace shows why the law of the frame does not turn into a max rule here: the GPU is the limit at ~84 fps. Critical path of
+  the big submission (chain.py, median): queued -> replay 1.43 ms, replay 7.0 ms, GPU end 6.9 ms after the replay end (GPU span 9.1 ms),
+  L ~15.4 ms; the old wait was 3.2 ms per frame. W5 can only pay once the GPU per frame is well under the render thread's cycle.
+  Screenshots with the lead on: normal (foliage, fog, HUD); popping was not looked for over many frames.
+- **W7 recorder spin (dropped, 2 runs):** `[nvn] recorder_spin = 300` (was a fixed 4000 pauses before the idle recorder sleeps):
+  recorder CPU -1.3 / -1.8 ms per frame, but render-thread CPU +0.7 / +0.8 ms (it wakes the sleeping recorder at each publish) and fps
+  -2.0 (3/32, with helper pinning) / -1.1 (8/24). The spin is cheaper than the wake-ups.
+- **W7 helper pinning (dropped, 1 run, plus the render-CPU signal above):** `[nvn] helper_cpus = auto` put nvn-front / nvn-texlook on the
+  render and recorder cores' second hardware threads: render CPU up, fps -2.0. The render core's sibling must stay free; `rec` (the
+  recorder core's sibling only) is built but not measured.
+- **W7 20 us sleep polls (inconclusive, off):** `[sched] short_sleep = pause` (pause-instruction spin with a yield every ~25 us instead of a
+  SwitchToThread per round): one quiet run, process CPU -1.3 ms per frame, fps +0.5 (21/36), 1% low -0.5 (15/36). A second quiet run
+  is needed before it can be on by default.
+- **W7 walker merge (front.walk + tex.lookahead): not done** (the two walkers carry different simulated state; ~1 ms of helper CPU, not on
+  the critical path while the GPU limits).
+- **Trace distortion (kept, trace only):** HLE thunks are timed on every call only once one timed call took 20 us; others 1 in 32 per thread
+  (`[prof] trace_hle_all = 1` for the old way). With the game-side `hle_direct` merged, cached NVN calls skip dispatch_call and are no
+  longer timed at all. Not re-measured against an untraced run.
+- **W10 census tool (kept, off):** `[diag] frame_csv_threads` adds CPU per frame by thread group to `frame_csv`; `work/p1/census.py`
+  (git-ignored scratch) compared the slowest 1% with the middle frames. Loaded run (27 vs 14 ms frames): the excess is render-thread CPU
+  +9.8 ms at the same draw count, guest CPU +5.6 ms, write faults 10.4 vs 6.9 per frame; cycle counts include SMT-sibling slowdown, so under
+  outside load this is mostly contention. A quiet census was not run.
+- Tooling note: `lock.py` must read `tasklist` as bytes (German code page: text decoding returned None, acquire crashed when the lock
+  freed) and every batch must abort when acquire fails.
 **2026-11-12 (P2, `perf/p2-coherence`): the "coherence v2" gate (copy always the GPU's binding) measured; the full model was not built.**
 Measurement-only switch `[nvn] exp_coh_free` (`off | on | ab`; CONFIG.md, with `exp_coh_free_parts` and `exp_coh_free_cs`): graphics
 draws bind every buffer from the pool copy unchecked when the copy has held every page of the range at some point (`Mirror::ever`),
@@ -201,7 +232,7 @@ per frame < 10 ms; the CPU chain cannot shorten it.
 - **Feature switches:** `AbFeat` in `nvn_replay.cpp` is a uint64 bit set. All 64 bits are used (59-62 R8: handle_big, chunk_async,
   pds_q, fb_image; 63 pt_copy). Free bits by retiring dead experiments first. R3 took the bits of chunk_time, keep_writes, vi_upload,
   cs_gmem_flush, vrs, sig_tex and alloc_batch (those keys still work, just without paired windows) for `dset_recycle`, `render_pin`,
-  `occ_mark_late`, `copy_image_q`, `tex_keyed`, `submit_async` and `r3a`; the cmd_copies bit went to G3's `g3b`. R4: `tex_keyed` -> `tex_share`, `submit_async` -> `keep_chain`, `lookahead` -> `hot_skip`.
+  `occ_mark_late`, `copy_image_q`, `tex_keyed`, `submit_async` and `r3a`; the cmd_copies bit went to G3's `g3b`. R4: `tex_keyed` -> `tex_share`, `submit_async` -> `keep_chain`, `lookahead` -> `hot_skip`. P1: `r6b` (submit_async) -> `sync_lead`, `flat_maps` (flat set maps now always on) -> `p1` (with `[nvn] p1_what`).
 - **Since R3 the render thread and the recorder are pinned (`render_cpus = auto`) and `hazard` is on by default.** A run that should
   compare against older numbers sets `nvn.render_cpus: "off"` and `nvn.hazard: "off"`.
 - **Real-clock GPU breakdowns:** these are measurement-only skip words in `[nvn] skip_fs_file`, and live edits take effect:

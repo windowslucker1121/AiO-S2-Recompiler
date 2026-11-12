@@ -96,8 +96,13 @@ struct Thunk {
     std::atomic<uint64_t> calls{0};
     std::atomic<int> ft_zone{-1};   // frame trace zone ("hle:<name>"), registered on the first slow call
     std::atomic<bool> leaf{false};  // hle_mark_leaf: an import call runs fn directly (no count, trace or import bookkeeping)
+    std::atomic<bool> slow{false};  // frame trace: a timed call took 20 us or more (every later call is timed)
     std::atomic<bool> direct{false};   // hle_mark_direct: an indirect call site may cache fn (it needs no hle_current_name)
 };
+// Frame trace of HLE calls: timing every call (two clock reads, ~35k NVN calls per frame) made the traced game side ~15% slower than an
+// untraced run. A thunk is timed on every call only once one of its timed calls took 20 us; before that one call in 32 per thread is
+// timed. [prof] trace_hle_all = 1: every call timed (the old behaviour).
+thread_local uint32_t t_hle_sample = 0;
 std::mutex g_hle_lock;
 std::vector<std::unique_ptr<Thunk>> g_thunks;        // index = (addr - kHleBase) / 16
 std::atomic<size_t> g_thunk_count{0};                // published size (thunks are never removed outside hle_clear)
@@ -485,10 +490,12 @@ void dispatch_call(::Ctx* c, uint64_t addr) {
             for (int i = 0; i < 4; i++) targs[i] = reg(c, i);
         }
         if (t.fn) {
-            if (ft::on()) {
+            static const bool time_all = config_get_bool("prof", "trace_hle_all", false);
+            if (ft::on() && (time_all || t.slow.load(std::memory_order_relaxed) || (++t_hle_sample & 31) == 0)) {
                 const uint64_t t0 = ft::now_ns();
                 t.fn(c);
                 const uint64_t t1 = ft::now_ns();
+                if (t1 - t0 >= 20000 && !t.slow.load(std::memory_order_relaxed)) t.slow.store(true, std::memory_order_relaxed);
                 if (t1 - t0 >= 100000) {       // frame trace: HLE calls (services, NVN entry points) of at least 100 us
                     int z = t.ft_zone.load(std::memory_order_relaxed);
                     if (z < 0) { z = ft::zone_id(("hle:" + t.name).c_str()); t.ft_zone.store(z, std::memory_order_relaxed); }

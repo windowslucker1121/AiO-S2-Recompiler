@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <psapi.h>
 #include <tlhelp32.h>
+#include <intrin.h>
 
 #include <algorithm>
 #include <chrono>
@@ -14,6 +15,8 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <string>
+#include <vector>
 
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
@@ -47,7 +50,7 @@ double qpc_freq() {
 }
 
 // ---- hitch log -------------------------------------------------------------------------------------------------------------
-constexpr size_t kMaxSources = 32;
+constexpr size_t kMaxSources = 48;
 struct Source {
     const char* label = nullptr;
     uint64_t (*counter)() = nullptr;     // cumulative; shown as growth during the frame
@@ -98,6 +101,81 @@ std::vector<CsvRow> g_csv_rows;
 FILE* g_csv_f = nullptr;
 std::string g_csv_path;
 size_t g_csv_cols = 0;                            // sources when the header was written (later ones are left out)
+
+// [diag] frame_csv_threads (P1, W10 hitch census): CPU time per frame by thread group, from QueryThreadCycleTime of every registered thread
+// (the registry is re-read every second; cycles are converted with the TSC rate measured against QPC). Columns cpu_<group>_us, plus
+// cpu_guest_max_us (the busiest single guest thread) and cpu_guest_busy (guest threads with >= 50% of the frame). One sample per frame
+// (taken by the first group counter of the row).
+struct ThreadCpu {
+    std::vector<ThreadRecord> recs;      // duplicated handles (diag_threads_dup)
+    std::vector<int> group;
+    std::vector<uint64_t> last;
+    uint64_t refreshed = 0;              // QPC of the last registry read
+    double cyc_per_us = 0;
+    uint64_t cal_qpc = 0, cal_tsc = 0;
+    uint64_t sum[9] = {};                // cumulative us per group; [7] guest max of the latest frame, [8] busy guest threads of the latest frame
+    uint64_t frame_qpc = 0;
+};
+ThreadCpu g_tc;
+constexpr const char* kTcNames[] = {"cpu_main_us", "cpu_guest_us", "cpu_render_us", "cpu_recorder_us", "cpu_front_us", "cpu_texlook_us", "cpu_other_us",
+                                    "cpu_guest_max_us", "cpu_guest_busy"};
+int tc_group(const std::string& n) {
+    if (n == "main" || n.rfind("main", 0) == 0) return 0;
+    if (n.rfind("guest", 0) == 0) return 1;
+    if (n == "nvn-render") return 2;
+    if (n == "nvn-recorder") return 3;
+    if (n == "nvn-front") return 4;
+    if (n == "nvn-texlook") return 5;
+    return 6;
+}
+void tc_sample() {
+    ThreadCpu& T = g_tc;
+    const uint64_t now = qpc();
+    const uint64_t tsc = __rdtsc();
+    if (!T.cal_qpc) { T.cal_qpc = now; T.cal_tsc = tsc; }
+    else if (now - T.cal_qpc > (uint64_t)qpc_freq() / 2) T.cyc_per_us = (double)(tsc - T.cal_tsc) / ((double)(now - T.cal_qpc) * 1e6 / qpc_freq());
+    if (!T.refreshed || now - T.refreshed > (uint64_t)qpc_freq()) {   // re-read the registry: new threads start at their current count
+        std::vector<ThreadRecord> fresh = diag_threads_dup();
+        std::vector<uint64_t> last(fresh.size(), 0);
+        std::vector<int> grp(fresh.size(), 6);
+        for (size_t i = 0; i < fresh.size(); ++i) {
+            grp[i] = tc_group(fresh[i].name);
+            ULONG64 c = 0;
+            if (fresh[i].host_handle) QueryThreadCycleTime(fresh[i].host_handle, &c);
+            last[i] = c;
+            for (size_t j = 0; j < T.recs.size(); ++j)   // the same thread as before: keep its count, so this frame's cycles are not lost
+                if (T.recs[j].host_tid == fresh[i].host_tid) { last[i] = T.last[j]; break; }
+        }
+        diag_threads_release(T.recs);
+        T.recs.swap(fresh);
+        T.last.swap(last);
+        T.group.swap(grp);
+        T.refreshed = now;
+    }
+    const double frame_us = T.frame_qpc ? (double)(now - T.frame_qpc) * 1e6 / qpc_freq() : 0;
+    T.frame_qpc = now;
+    uint64_t gmax = 0, busy = 0;
+    for (size_t i = 0; i < T.recs.size(); ++i) {
+        ULONG64 c = 0;
+        if (!T.recs[i].host_handle || !QueryThreadCycleTime(T.recs[i].host_handle, &c)) continue;
+        const uint64_t d = c >= T.last[i] ? c - T.last[i] : 0;
+        T.last[i] = c;
+        if (T.cyc_per_us <= 0) continue;
+        const uint64_t us = (uint64_t)((double)d / T.cyc_per_us);
+        T.sum[T.group[i]] += us;
+        if (T.group[i] == 1 || T.group[i] == 0) {
+            gmax = std::max(gmax, us);
+            if (frame_us > 0 && us * 2 >= frame_us) ++busy;
+        }
+    }
+    T.sum[7] = gmax;
+    T.sum[8] = busy;
+}
+template <int G> uint64_t tc_counter() {
+    if (G == 0) tc_sample();   // the first column of the row samples
+    return g_tc.sum[G];
+}
+template <int G> int64_t tc_level() { return (int64_t)g_tc.sum[G]; }
 
 // Called for every presented frame at tick t (previous frame's tick prev_t, 0 for the first), frame number n.
 void hitch_on_frame(uint64_t t, uint64_t prev_t, uint64_t n) {
@@ -535,6 +613,25 @@ void hitch_start() {
                 return ((((uint64_t)k.dwHighDateTime << 32) | k.dwLowDateTime) + (((uint64_t)u.dwHighDateTime << 32) | u.dwLowDateTime)) / 10;
             }), true);
             (void)cpu_registered;
+            if (config_get_bool("diag", "frame_csv_threads", false)) {
+                static const bool tc_registered = [] {
+                    hitch_add_csv_counter(kTcNames[0], tc_counter<0>);
+                    hitch_add_csv_counter(kTcNames[1], tc_counter<1>);
+                    hitch_add_csv_counter(kTcNames[2], tc_counter<2>);
+                    hitch_add_csv_counter(kTcNames[3], tc_counter<3>);
+                    hitch_add_csv_counter(kTcNames[4], tc_counter<4>);
+                    hitch_add_csv_counter(kTcNames[5], tc_counter<5>);
+                    hitch_add_csv_counter(kTcNames[6], tc_counter<6>);
+                    const size_t i = g_nsrc.load();   // levels, csv only
+                    if (i + 2 <= kMaxSources) {
+                        g_src[i] = {kTcNames[7], nullptr, tc_level<7>, true};
+                        g_src[i + 1] = {kTcNames[8], nullptr, tc_level<8>, true};
+                        g_nsrc.store(i + 2, std::memory_order_release);
+                    }
+                    return true;
+                }();
+                (void)tc_registered;
+            }
         }
     }
     g_hitch_on.store(true);

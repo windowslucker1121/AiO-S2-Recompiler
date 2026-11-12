@@ -429,7 +429,13 @@ NVNsyncWaitResult nvnSyncWait(const NVNsync* sync, uint64_t timeout_ns) {
     if (serial == 0 || be::gpu::serial_done(serial)) { sync_wait_note(s, false, 0, 0); return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; }
     const uint64_t newest = be::gpu::last_serial();
     const auto t0 = std::chrono::steady_clock::now();
-    const bool ok = be::gpu::wait_serial(serial, timeout_ns);
+    bool fence = false;   // [nvn] sync_lead relaxes only waits on queue fences (nvn_gpu.cpp wait_serial_game)
+    {
+        std::lock_guard<std::mutex> lk(g_sync_kind_mu);
+        auto it = g_sync_kind.find(s);
+        fence = it != g_sync_kind.end() && it->second == kSyncFence;
+    }
+    const bool ok = fence ? be::gpu::wait_serial_game(serial, timeout_ns) : be::gpu::wait_serial(serial, timeout_ns);
     sync_wait_note(s, true, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()),
                    newest > serial ? newest - serial : 0);
     return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;

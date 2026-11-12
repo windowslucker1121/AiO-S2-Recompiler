@@ -89,8 +89,14 @@ inline bool is_haz(ExecFn f) {
     return false;
 }
 
+std::atomic<int> g_rec_spin{-1};   // [nvn] recorder_spin (P1); -1: not read yet
+int rec_spin_cfg() {
+    static const int v = static_cast<int>(std::clamp<int64_t>(config_get_int("nvn", "recorder_spin", 4000), 0, 1000000));
+    return v;
+}
 void recorder_loop() {
     tl_recorder = true;
+    if (g_rec_spin.load(std::memory_order_relaxed) < 0) g_rec_spin.store(rec_spin_cfg(), std::memory_order_relaxed);
     log_set_thread_name("nvn-recorder");
     diag_register_thread("nvn-recorder", nullptr);   // the sampler ([prof] sample_hz) and the freeze watchdog see its stack
     struct Unreg { ~Unreg() { diag_unregister_thread(); } } unreg;
@@ -98,7 +104,8 @@ void recorder_loop() {
     for (;;) {
         uint64_t head = g_head.load(std::memory_order_acquire);
         if (head == tail) {
-            for (int i = 0; i < 4000 && head == tail; ++i) {
+            const int spin = g_rec_spin.load(std::memory_order_relaxed);
+            for (int i = 0; i < spin && head == tail; ++i) {
                 _mm_pause();
                 head = g_head.load(std::memory_order_acquire);
             }
@@ -1015,6 +1022,34 @@ std::vector<CpuCore> machine_cores() {
     }
     return cores;
 }
+std::atomic<int> g_pin_r{-1}, g_pin_c{-1};   // the render thread's and the recorder's processors once picked (helper_cpus)
+void set_recorder_spin_ab(bool on) { g_rec_spin.store(on ? rec_spin_cfg() : 4000, std::memory_order_relaxed); }
+std::atomic<uint32_t> g_helper_gen{1};
+std::atomic<bool> g_helper_on{true};
+void helper_pin_ab(bool on) {
+    if (g_helper_on.exchange(on, std::memory_order_relaxed) != on) g_helper_gen.fetch_add(1, std::memory_order_relaxed);
+}
+void helper_pin_tick(uint32_t& seen) {
+    static const std::string cfg = config_get_str("nvn", "helper_cpus", "off");
+    if (cfg.empty() || cfg == "off") return;
+    const int r = g_pin_r.load(std::memory_order_relaxed), c = g_pin_c.load(std::memory_order_relaxed);
+    if (r < 0 || c < 0) return;   // not pinned (yet): nothing to place the helpers next to
+    const uint32_t gen = g_helper_gen.load(std::memory_order_relaxed);
+    if (gen == seen) return;
+    seen = gen;
+    static const uint64_t mask = [&] {
+        uint64_t m = 0;
+        for (const CpuCore& k : machine_cores())
+            if (((k.mask >> r & 1) && cfg != "rec") || (k.mask >> c & 1)) m |= k.mask;   // "rec": the recorder core's only
+        m &= ~((uint64_t{1} << r) | (uint64_t{1} << c));
+        NXLOG_I(kTag, "helper_cpus %s: list walkers on processors %llx (the render thread's and the recorder's cores' second hardware threads)", cfg.c_str(), (unsigned long long)m);
+        return m;
+    }();
+    DWORD_PTR proc = 0, sys = 0;
+    GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys);
+    const DWORD_PTR m = static_cast<DWORD_PTR>(mask) & proc;
+    SetThreadAffinityMask(GetCurrentThread(), g_helper_on.load(std::memory_order_relaxed) && m ? m : proc);
+}
 void apply_render_pin(bool on) {
     static const std::string cfg = config_get_str("nvn", "render_cpus", "auto");
     if (cfg.empty() || cfg == "off") return;
@@ -1043,6 +1078,7 @@ void apply_render_pin(bool on) {
             why = "not R,C";
         }
         NXLOG_I(kTag, "render_cpus %s: render thread on logical processor %d, recorder on %d (%s)%s", cfg.c_str(), r, c, why, r < 0 || c < 0 ? ": not pinned" : "");
+        if (r >= 0 && c >= 0 && r <= 63 && c <= 63 && r != c) { g_pin_r.store(r); g_pin_c.store(c); }
     }
     if (r < 0 || c < 0 || r > 63 || c > 63 || r == c) return;
     DWORD_PTR proc = 0, sys = 0;
