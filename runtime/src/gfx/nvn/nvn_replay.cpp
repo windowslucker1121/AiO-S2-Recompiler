@@ -40,6 +40,7 @@
 #include "nxrt/log.h"
 #include "nxrt/video_codec.h"
 #include "nvn_decoded.h"
+#include "nvn_cfg.h"
 #include "nvn_devcmd.h"
 #include "nvn_enums.h"
 #include "nvn_format.h"
@@ -242,8 +243,19 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
 enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbVrs = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbViUpload = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbSigTex = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
-uint64_t ab_mask() {
-    static const uint64_t m = [] {
+// computed once and kept in a constant-initialized atomic: ab_on() calls it in every "off" window (hundreds of thousands of times per frame),
+// and a guarded local static there made the off windows ~0.6 ms per frame slower than the on windows with nothing switched (nvn_cfg.h)
+std::atomic<uint64_t> g_ab_mask_v{~0ull};
+uint64_t ab_mask_compute();
+inline uint64_t ab_mask() {
+    const uint64_t v = g_ab_mask_v.load(std::memory_order_relaxed);
+    if (v != ~0ull) [[likely]] return v;
+    const uint64_t m = ab_mask_compute();
+    g_ab_mask_v.store(m, std::memory_order_relaxed);
+    return m;
+}
+uint64_t ab_mask_compute() {
+    const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
@@ -270,7 +282,7 @@ inline bool ab_on(AbFeat f) { return g_cpu_ab_on || !(ab_mask() & f); }
 bool memo_exact_on() { return ab_on(kAbMemoExact); }
 namespace {
 bool flat_set_maps_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "flat_set_maps", true);
+    const bool on = NX_CFG_BOOL("nvn", "flat_set_maps", true);
     return on && ab_on(kAbFlatMaps);
 }
 enum class SetReuse { Off, On, Verify };
@@ -344,7 +356,7 @@ std::unordered_map<uint64_t, UpdSnap> g_upd_snaps;  // this submission's snapsho
 uint64_t g_upd_fast = 0, g_upd_slow = 0, g_upd_snapped = 0, g_upd_snap_hits = 0, g_upd_direct = 0;   // statistics
 
 bool ubo_update_cpu_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "ubo_update_cpu", true);
+    const bool on = NX_CFG_BOOL("nvn", "ubo_update_cpu", true);
     return on;
 }
 
@@ -506,7 +518,7 @@ std::vector<OccReport> g_occ_pend;   // reports made in the open pass: written w
 uint64_t g_occ_fast = 0, g_occ_slow = 0, g_occ_split = 0;   // statistics
 
 bool occlusion_in_pass_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "occlusion_in_pass", true);
+    const bool on = NX_CFG_BOOL("nvn", "occlusion_in_pass", true);
     return on;
 }
 
@@ -546,11 +558,11 @@ uint64_t g_occ_batch_reports = 0, g_occ_batch_cmds = 0;
 // [nvn] exp_occ_off (measurement only; cpuperf_ab_what occ_off): the game's samples-passed counters run no query and report a count as if visible
 // (the game then culls nothing by occlusion): the GPU cost of the queries themselves
 bool occ_off_exp() {
-    static const bool on = nxrt::config_get_bool("nvn", "exp_occ_off", false);
+    const bool on = NX_CFG_BOOL("nvn", "exp_occ_off", false);
     return on && ab_on(kAbOccOff);
 }
 bool occ_batch_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "occ_batch", true);
+    const bool on = NX_CFG_BOOL("nvn", "occ_batch", true);
     return on && ab_on(kAbOccBatch);
 }
 void occ_flush_batched() {
@@ -741,6 +753,7 @@ std::string g_trigger_fs;
 std::vector<std::string> g_skip_fs;
 int g_draw_idx = 0;   // draws begun in this frame
 bool skip_fs_draw(const std::string& hash) {
+    if (!NX_ONCE(bool, !nxrt::config_get_str("nvn", "skip_fs_file", "").empty())) return false;   // the usual case: no guarded static per draw
     static const std::string file = nxrt::config_get_str("nvn", "skip_fs_file", "");
     if (file.empty()) return false;
     static std::chrono::steady_clock::time_point last{};
@@ -891,7 +904,7 @@ void gstamp(const char* label) {
 // serialize the draws, so each interval is that draw's whole time without overlap: they rank draws (their sum is about the pass time).
 void draw_stamp() {
     if (gstats::active()) gstats::draw_end(F->cb);   // [prof] gpu_stats
-    static const bool on = nxrt::config_get_bool("prof", "gpu_draws", false);
+    const bool on = NX_CFG_BOOL("prof", "gpu_draws", false);
     if (!on || !gpass_on()) return;
     const ShaderInfo* fs = S.stage[kFragment];
     const ShaderInfo* vs = S.stage[kVertex] ? S.stage[kVertex] : S.stage[kMesh];
@@ -1108,12 +1121,12 @@ float attach_targets(bool fix) {
 // commands that only add or re-arm held results (dispatches, draws writing over held results) need not move the resolve epoch.
 bool epoch_keep_on();
 bool held_version_epoch() {
-    static const bool on = nxrt::config_get_bool("nvn", "epoch_keep_dispatch", true);
+    const bool on = NX_CFG_BOOL("nvn", "epoch_keep_dispatch", true);
     return on && epoch_keep_on() && ab_on(kAbEpochDispatch);
 }
 
 bool memo_pass_keep() {
-    static const bool on = nxrt::config_get_bool("nvn", "memo_pass_keep", true);
+    const bool on = NX_CFG_BOOL("nvn", "memo_pass_keep", true);
     return on && ab_on(kAbMemoPass);
 }
 
@@ -1127,7 +1140,7 @@ std::vector<Ref<Texture>> g_prev_att;              // break-prone attachments of
 std::unordered_set<const void*> g_break_prone;     // images that ended an open pass for a layout change (keys only, never dereferenced)
 uint64_t g_pre_layout_n = 0;                       // statistics
 bool pre_layout_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "pass_pre_layout", true);
+    const bool on = NX_CFG_BOOL("nvn", "pass_pre_layout", true);
     return on && ab_on(kAbPreLayout);
 }
 bool attachment_layout(VkImageLayout l) { return l == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL || l == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; }
@@ -1140,7 +1153,7 @@ bool attachment_layout(VkImageLayout l) { return l == VK_IMAGE_LAYOUT_COLOR_ATTA
 // (transfer writes, storage writes of a draw in the open pass), or attachments of the open pass.
 uint64_t g_uil_retags = 0, g_uil_retag_kept_open = 0;   // statistics
 bool uil_retag_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "uil_retag", true);
+    const bool on = NX_CFG_BOOL("nvn", "uil_retag", true);
     return on && nxrt::gfx::g_unified_layouts && ab_on(kAbUilRetag);
 }
 bool uil_retag_ok(Texture* t) {
@@ -1478,7 +1491,7 @@ uint64_t g_resolve_gen = 1;
 struct ResolveSlot { const BindingDesc* d = nullptr; uint64_t gen = 0; TexResolved r; };
 ResolveSlot g_rslots[64];
 bool resolve_cache_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "resolve_cache", true);
+    const bool on = NX_CFG_BOOL("nvn", "resolve_cache", true);
     return on;
 }
 TexResolved resolve_texture_uncached(const BindingDesc& d);
@@ -1850,7 +1863,7 @@ struct PoolSetKey {
 std::map<PoolSetKey, PoolSet> g_pool_sets;
 
 bool pool_arrays_on() {
-    static const bool on = config_get_bool("nvn", "pool_arrays", true);
+    const bool on = NX_CFG_BOOL("nvn", "pool_arrays", true);
     return on;
 }
 
@@ -1894,7 +1907,7 @@ PoolSet* pool_set_create(const PoolBinding& pb, PoolSet& st) {
 // written view was found for is kept without asking for the view again. The sync runs again whenever an image is created (several times
 // per frame in village outside), and each run asked every live entry for its view: ~4% of the render thread.
 bool pool_sync_cache_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "pool_sync_cache", true);
+    const bool on = NX_CFG_BOOL("nvn", "pool_sync_cache", true);
     return on && ab_on(kAbPoolSync);
 }
 // What decides an entry's view: the texture object, its image's view stamp and the request (shaders sharing the set ask with their own bindings)
@@ -1914,7 +1927,7 @@ uint64_t g_psync_kept = 0, g_psync_asked = 0, g_psync_walks = 0, g_psync_walked 
 // pool's registration log) and whose texture has the same view generation, swizzle and depth mode is kept without building its view
 // request and signature again (the same binding asks; another binding or pool walks the usual way).
 bool pool_fast_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "pool_sync_fast", true);
+    const bool on = NX_CFG_BOOL("nvn", "pool_sync_fast", true);
     return on && ab_on(kAbPoolFast);
 }
 inline uint64_t pool_fast_key(const Texture* t, uint64_t stamp) {
@@ -1972,7 +1985,7 @@ PoolSet* pool_set_sync(const PoolBinding& pb) {
         // has tens of thousands of entries and the walk over all of them was a quarter of the sync
         // depth sets: only the ids that can hold a view (the game: a few hundred of ~32k registered ids; the walk over all of them was ~5% of the
         // render thread in village outside, the sync runs whenever an image is made)
-        static const bool depth_ids = nxrt::config_get_bool("nvn", "pool_sync_depth_ids", true);
+        const bool depth_ids = NX_CFG_BOOL("nvn", "pool_sync_depth_ids", true);
         const bool by_cand = cache && pb.depth && depth_ids && ab_on(kAbPoolDepthIds);
         if (by_cand) {
             TexturePool& tp = *S.tpool;
@@ -2377,18 +2390,18 @@ uint64_t g_sh_direct = 0, g_sh_direct_filled = 0, g_sh_bytes_fill = 0, g_sh_byte
 constexpr VkDeviceSize kShadowMax = 16ull << 20;
 
 bool compute_shadows_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "compute_shadows", true);
+    const bool on = NX_CFG_BOOL("nvn", "compute_shadows", true);
     return on;
 }
 // [nvn] compute_shadow_hold (default on): a shadow's result stays in the shadow (out_add) instead of being copied back after its dispatch.
 bool shadow_hold_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "compute_shadow_hold", true);
+    const bool on = NX_CFG_BOOL("nvn", "compute_shadow_hold", true);
     return on;
 }
 // [nvn] ssbo_readonly (default on): storage buffers a shader's SPIR-V never writes (DescriptorBinding::written) are not copied back after
 // a dispatch and do not invalidate the pool copy.
 bool ssbo_readonly_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "ssbo_readonly", true);
+    const bool on = NX_CFG_BOOL("nvn", "ssbo_readonly", true);
     return on;
 }
 // [nvn] gmem_ro_bindings (default on): a pointer shader (A17 "gmem") that does not store through pointers ("gmemw" absent) writes only the
@@ -2399,7 +2412,7 @@ bool gmem_ro_on();
 // [nvn] reflect_literals (default on): DescriptorBinding::written without the literal operands that matched a variable id (nvn_shaders.cpp);
 // off: the old answer (written_lit). Also a cpuperf_ab_what feature (reflect_lit).
 bool reflect_literals_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "reflect_literals", true);
+    const bool on = NX_CFG_BOOL("nvn", "reflect_literals", true);
     return on && ab_on(kAbReflectLit);
 }
 inline bool storage_binding_writes(const DescriptorBinding& b, const ShaderInfo* s) {
@@ -2408,28 +2421,28 @@ inline bool storage_binding_writes(const DescriptorBinding& b, const ShaderInfo*
     return s->refl.global_writes || !gmem_ro_on();
 }
 bool gmem_ro_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "gmem_ro_bindings", true);
+    const bool on = NX_CFG_BOOL("nvn", "gmem_ro_bindings", true);
     return on && ab_on(kAbGmemRo);
 }
 bool cs_gmem_held_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "cs_gmem_held", true);
+    const bool on = NX_CFG_BOOL("nvn", "cs_gmem_held", true);
     return on && ab_on(kAbCsGmemHeld);
 }
 // [nvn] refill_compute (cpuperf_ab_what name refill_compute): see mirror_fill's refill_written (nvn_gpu_pool.cpp).
 bool refill_compute_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "refill_compute", true);
+    const bool on = NX_CFG_BOOL("nvn", "refill_compute", true);
     return on && ab_on(kAbRefillCompute);
 }
 bool occ_defer_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "occ_defer", true);
+    const bool on = NX_CFG_BOOL("nvn", "occ_defer", true);
     return on && ab_on(kAbOccDefer);
 }
 bool cs_gmem_flush_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "cs_gmem_flush", false);
+    const bool on = NX_CFG_BOOL("nvn", "cs_gmem_flush", false);
     return on && ab_on(kAbCsGmemFlush);
 }
 bool compute_direct_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "compute_direct", true);
+    const bool on = NX_CFG_BOOL("nvn", "compute_direct", true);
     return on;
 }
 
@@ -2467,7 +2480,7 @@ bool compute_out_may_wait(Op op) {
 // missing pages are copied into the copy for this submission (mirror_fill) and the draw binds the copy, instead of every held result there
 // going back to the pool: the results are most of the range, the missing pages a few.
 bool draw_fill_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "draw_fill", true);
+    const bool on = NX_CFG_BOOL("nvn", "draw_fill", true);
     return on;
 }
 uint64_t g_draw_fills = 0, g_draw_fill_bytes = 0;
@@ -2552,7 +2565,7 @@ uint64_t g_csmask_why[4] = {};                 // ... why slots were marked: no 
 uint64_t g_gmask_stages = 0, g_gmask_marked = 0;   // graphics_c0: pointer stages, of them with a slot marked (no inline fast path)
 
 bool gmem_coherence_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "gmem_coherence", true);
+    const bool on = NX_CFG_BOOL("nvn", "gmem_coherence", true);
     return on;
 }
 
@@ -2668,14 +2681,14 @@ struct OdbHot { const GState::Bind* b; bool copy_ok; int why; };
 std::vector<OdbHot> g_odb_hot;
 uint64_t g_odb_full = 0, g_odb_inc = 0, g_odb_inc_checked = 0, g_odb_verify_bad = 0, g_odb_hot_n = 0, g_odb_full_grow = 0;   // statistics
 bool odb_incremental_on() {
-    static const bool on = [] { const std::string v = nxrt::config_get_str("nvn", "odb_incremental", "on"); return v != "off" && v != "0" && v != "false"; }();
+    const bool on = NX_ONCE(bool, [] { const std::string v = nxrt::config_get_str("nvn", "odb_incremental", "on"); return v != "off" && v != "0" && v != "false"; }());
     return on && ab_on(kAbOdbInc);
 }
 // [nvn] odb_program (default on; cpuperf_ab_what odb_prog): a new program makes the next draw check only the uniform and storage bindings of
 // the stages that were not active before (their bindings were not checked while inactive); the others' answers still hold (bindings, not
 // programs, overlap held results). Before, every program change made the next check a full one over all ~80 bindings: ~600 per frame.
 bool odb_program_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "odb_program", true);
+    const bool on = NX_CFG_BOOL("nvn", "odb_program", true);
     return on && ab_on(kAbOdbProg);
 }
 void odb_program_changed(uint32_t had) {
@@ -2720,7 +2733,7 @@ void out_draw_bindings() {
             for (uint32_t m = g_odb_dirty[kOdbSsbo][st]; m; m &= m - 1) check(S.ssbo[st][std::countr_zero(m)], true, kOutStorageXfb);
         }
         for (uint32_t m = g_odb_dirty[kOdbXfb][0]; m; m &= m - 1) check(S.xfb[std::countr_zero(m)], false, kOutStorageXfb);
-        static const bool verify = nxrt::config_get_str("nvn", "odb_incremental", "on") == "verify";
+        const bool verify = NX_ONCE(bool, nxrt::config_get_str("nvn", "odb_incremental", "on") == "verify");
         if (verify) {   // every binding not checked now must have no held result over it (a pure query; logged when it fails)
             auto skipped = [&](const GState::Bind& b) {
                 if (!b.addr) return;
@@ -2780,7 +2793,7 @@ int g_rd_depth = -1;
 uint64_t g_la_scans = 0, g_la_settled = 0;            // statistics
 
 bool pass_lookahead_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "pass_lookahead", false);   // off: no fps gain measured (2026-11-08), costs scan time
+    const bool on = NX_CFG_BOOL("nvn", "pass_lookahead", false);   // off: no fps gain measured (2026-11-08), costs scan time
     return on;
 }
 
@@ -3016,7 +3029,7 @@ void sh_barrier_once() {
 uint64_t g_fa_scans = 0, g_fa_dispatches = 0, g_fa_ranges = 0, g_fa_bytes = 0;   // statistics
 uint32_t g_fa_left = 0;   // dispatches of the current run already looked ahead for
 bool fill_ahead_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "fill_ahead", true);
+    const bool on = NX_CFG_BOOL("nvn", "fill_ahead", true);
     return on && ab_on(kAbFillAhead);
 }
 bool fa_run_op(Op op) {   // commands a run of dispatches may have between its dispatches (fa_scan)
@@ -3412,7 +3425,7 @@ bool fill_compute_c0(const ShaderControl& c, uint8_t* p, size_t n, bool old_tabl
         // compute: every bound storage descriptor before the page table (compute shadows and virtual pools are bound, not in the table), or
         // with held_mask only the slots whose binding may differ from the pool (cs_gmem_held_on)
         uint32_t all = ~0u;
-        static const bool exp_none = nxrt::config_get_bool("nvn", "exp_cs_gmem_none", false);   // measurement only: no slot checked (wrong reads of held results)
+        const bool exp_none = NX_CFG_BOOL("nvn", "exp_cs_gmem_none", false);   // measurement only: no slot checked (wrong reads of held results)
         if (held_mask && exp_none) all = 0;
         else if (held_mask) {
             all = 0;
@@ -3537,7 +3550,7 @@ struct C0Store {
 C0Store g_c0s;
 uint64_t g_c0_era = 0, g_c0_persist_hit = 0, g_c0_persist_new = 0, g_c0_collide = 0;   // statistics
 bool c0_persist_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "c0_persist", true);
+    const bool on = NX_CFG_BOOL("nvn", "c0_persist", true);
     return on && !g_c0s.failed && ab_on(kAbC0Persist);
 }
 // The persistent slot of the table in g_c0_scratch (hash h); false: none (store full or failed: use the upload ring).
@@ -3789,7 +3802,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             bi = {br.buffer, br.offset, std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536})};
                             // [nvn] exp_vi_upload = 3 (measurement only; run with set_reuse and set_keep off): uniform blocks up to 16 KiB are
                             // bound from a copy in the upload ring (device-local), the cost of reading them from host memory
-                            static const int64_t viu = nxrt::config_get_int("nvn", "exp_vi_upload", 0);
+                            const int64_t viu = NX_CFG_INT("nvn", "exp_vi_upload", 0);
                             if (viu >= 3 && d.nvn_stage != kCompute && bi.range <= (16u << 10) && ab_on(kAbViUpload)) {
                                 UploadAlloc u = F->upload(bi.range, std::max<VkDeviceSize>(align, 256));
                                 if (u) {
@@ -3846,7 +3859,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                         upd_note_read(bind.addr, bind.size ? bind.size : br.avail);
                         // The console's storage access is a raw load at the descriptor's address: nothing stops a shader at the bound size.
                         // [nvn] storage_min_range (bytes) widens small bindings to that much of the memory behind them (diagnosis switch).
-                        static const VkDeviceSize min_range = static_cast<VkDeviceSize>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "storage_min_range", 0)));
+                        const VkDeviceSize min_range = NX_ONCE(VkDeviceSize, static_cast<VkDeviceSize>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "storage_min_range", 0))));
                         bi = {br.buffer, br.offset, std::min<VkDeviceSize>(std::max<VkDeviceSize>(bind.size ? bind.size : br.avail, min_range), br.avail)};
                         if (kd) {
                             kd->kind = 2;
@@ -4422,14 +4435,14 @@ void set_bad_why(const ProgLayout& pl, uint32_t set) {
 uint64_t g_set_paths[4] = {};   // statistics: sets built outside the memo and the kept sets: compute, reuse off for the draw, a set that may not be reused, other
 
 bool set_keep_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "set_keep", true);
+    const bool on = NX_CFG_BOOL("nvn", "set_keep", true);
     return on && ab_on(kAbSetKeep) && out_lazy() && memo_pass_keep();
 }
 
 // [nvn] set_keep_writes (default off): sets with storage buffers the shader writes, or storage images, are kept too (cpuperf_ab_what keep_writes).
 // Off: no gain in the village (paired, replay -0.1 ms): most such sets bind per-frame storage addresses and never repeat.
 bool keep_writes_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "set_keep_writes", false);
+    const bool on = NX_CFG_BOOL("nvn", "set_keep_writes", false);
     return on && ab_on(kAbKeepWrites);
 }
 
@@ -4464,7 +4477,7 @@ VkDescriptorSet keep_alloc(VkDescriptorSetLayout layout) {
 
 // Once per submission: a new era when the pools are full, the sweep of old entries every few hundred presents.
 void keep_begin_submit() {
-    static const bool diag = nxrt::config_get_bool("nvn", "set_keep_diag", false);
+    const bool diag = NX_CFG_BOOL("nvn", "set_keep_diag", false);
     g_sig_var_on = diag;
     const uint64_t now = counters().presents.load(std::memory_order_relaxed);
     if (g_keep_full) {
@@ -4487,11 +4500,11 @@ void keep_begin_submit() {
 // frame's critical path, ran at NORMAL. "normal" keeps it as before.
 void render_priority_apply(bool on) { cmdq::apply_render_priority(on); }
 bool keep_memo_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "keep_memo", true);
+    const bool on = NX_CFG_BOOL("nvn", "keep_memo", true);
     return on && ab_on(kAbKeepMemo);
 }
 bool sig_tex_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "sig_tex", false);
+    const bool on = NX_CFG_BOOL("nvn", "sig_tex", false);
     return on && ab_on(kAbSigTex);
 }
 // g_keep_sig with sampled textures keyed by tex_key (set_signature keys them by handle: the memo stays as it was).
@@ -4713,7 +4726,7 @@ std::unordered_map<std::string, uint64_t> g_xs_writers;   // exp_static: written
 uint64_t g_xs_built[2][3] = {};   // exp_static: graphics sets built [dynamic, static list][written storage, first sighting, written storage seen in an earlier present]
 
 bool exp_static_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "exp_static", false);
+    const bool on = NX_CFG_BOOL("nvn", "exp_static", false);
     return on;
 }
 
@@ -4725,7 +4738,7 @@ VkDescriptorSet g_bs_ds[16] = {};
 uint64_t g_bs_skipped = 0, g_bs_bound = 0;   // statistics
 void bind_skip_reset() { g_bs_cb = VK_NULL_HANDLE; }
 void bind_graphics_set(const ProgLayout& pl, VkPipelineBindPoint bp, uint32_t set, VkDescriptorSet ds) {
-    static const bool on = nxrt::config_get_bool("nvn", "bind_skip", true);
+    const bool on = NX_CFG_BOOL("nvn", "bind_skip", true);
     if (bp == VK_PIPELINE_BIND_POINT_GRAPHICS && on && ab_on(kAbBindSkip) && set < 16) {
         if (g_bs_cb != F->cb || g_bs_layout != pl.layout) {
             g_bs_cb = F->cb;
@@ -4744,7 +4757,7 @@ void bind_graphics_set(const ProgLayout& pl, VkPipelineBindPoint bp, uint32_t se
 // 4.5 M bound to the pool where a fresh resolve took a held result's copy, once reflect_literals made these sets reusable: the memo's epoch
 // had not moved for that result. Off: as before.
 bool memo_storage_check_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "memo_storage_check", true);
+    const bool on = NX_CFG_BOOL("nvn", "memo_storage_check", true);
     return on;
 }
 uint64_t g_memo_storage_held = 0;   // statistics: memo hits and puts refused because a held result overlaps a storage range
@@ -5049,7 +5062,7 @@ void set_small_dynamic(VkCommandBuffer cb) {
         }
         // [nvn] exp_vrs_force = N (measurement only: the picture changes): draws with a several-rate palette run at the pipeline rate NxN
         // instead of 1x1, the ceiling of what converting the game's rate image could save (cpuperf_ab_what vrs)
-        static const int64_t vrs_force = nxrt::config_get_int("nvn", "exp_vrs_force", 0);
+        const int64_t vrs_force = NX_CFG_INT("nvn", "exp_vrs_force", 0);
         if (!exact && vrs_force > 1 && ab_on(kAbVrs)) {
             w = h = static_cast<uint32_t>(std::min<int64_t>(vrs_force, 4));
             fit_fragment_size(P.samples > 1 ? 0u : lim.fsr_sizes, w, h);
@@ -5091,7 +5104,7 @@ void set_dynamic_state(uint32_t dirty, VkPrimitiveTopology topo, bool indexed, i
         int func = S.ds.depth_func ? S.ds.depth_func : NVN_DEPTH_FUNC_LESS;
         // [nvn] debug_equal_as = 4 (LEQUAL) / 8 (ALWAYS): diagnostic, draws that test EQUAL against a depth prepass use this NVN function
         // instead, which shows colour-pass geometry the prepass does not match (A15: broken vertices, black hulls)
-        static const int equal_as = static_cast<int>(nxrt::config_get_int("nvn", "debug_equal_as", 0));
+        const int equal_as = NX_ONCE(int, static_cast<int>(nxrt::config_get_int("nvn", "debug_equal_as", 0)));
         if (equal_as && func == NVN_DEPTH_FUNC_EQUAL) func = equal_as;
         vkCmdSetDepthCompareOp(cb, vk_compare_op(func));
         vkCmdSetDepthBoundsTestEnable(cb, have_depth && S.depth_bounds && device().features().depth_bounds);
@@ -5345,7 +5358,7 @@ bool g_skip_gpt_raster = false;
 // Data a GPU command wrote and the CPU has not seen is read stale (the picture can show it); vertex ranges over 64 KiB are left alone.
 uint64_t g_viu_bytes = 0, g_viu_n = 0;
 void exp_vi_upload(BufRef& br, uint64_t addr, uint64_t size, int level) {
-    static const int64_t lv = nxrt::config_get_int("nvn", "exp_vi_upload", 0);
+    const int64_t lv = NX_CFG_INT("nvn", "exp_vi_upload", 0);
     if (lv == 3 || lv < level || !size || !ab_on(kAbViUpload) || (level == 2 && size > (64u << 10))) return;
     const PoolHit hit = pool_lookup(addr);
     if (!hit.pool || hit.pool->is_virtual || !hit.pool->base || hit.offset + size > hit.pool->size) return;
@@ -5376,7 +5389,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (S.stage[kFragment] && skip_fs_draw(S.stage[kFragment]->hash)) return false;
     // [nvn] skip_gpt (measurement only: the picture loses those draws): draws whose pre-raster stage walks the page table are left out; as a
     // cpuperf_ab_what feature it gives paired windows of their GPU cost
-    static const int64_t skip_gpt = nxrt::config_get_int("nvn", "skip_gpt", 0);   // 1: left out, 2: no fragments (pre-raster cost only)
+    const int64_t skip_gpt = NX_CFG_INT("nvn", "skip_gpt", 0);   // 1: left out, 2: no fragments (pre-raster cost only)
     if (skip_gpt && ab_on(kAbSkipGpt))
         for (int st : {static_cast<int>(kVertex), static_cast<int>(kTask), static_cast<int>(kMesh)})
             if (S.stage[st] && S.stage[st]->refl.global_pt) {
@@ -5385,7 +5398,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             }
     // [nvn] exp_draw_cut (measurement only, cpuperf_ab_what draw_cut): 1 = every draw runs without fragments (empty scissor: the cost of the
     // vertex / mesh stages and the per-draw state alone), 2 = every draw is left out (the frame without draw work)
-    static const int64_t draw_cut = nxrt::config_get_int("nvn", "exp_draw_cut", 0);
+    const int64_t draw_cut = NX_CFG_INT("nvn", "exp_draw_cut", 0);
     g_draw_dup = draw_cut == 3 && ab_on(kAbDrawCut);
     if (draw_cut && draw_cut != 3 && ab_on(kAbDrawCut)) {
         if (draw_cut == 2) return false;
@@ -5403,7 +5416,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     }
     { OcPhase ph(2); gmem_before_op(false); }   // A17: held results back, ranges its pointers name written
     upscaler_note_draw(S.stage[kFragment]);   // [nvn] upscaler_dst = fs:...: where the replaced upscaler writes
-    {   // [nvn] trace_fs_draws = PREFIX (NXRT_NVN_TRACE_FS_DRAWS): trace the draws with this fragment shader where they happen, in any frame, at
+    if (NX_ONCE(bool, !nxrt::config_get_str("nvn", "trace_fs_draws", "").empty())) {   // [nvn] trace_fs_draws = PREFIX (NXRT_NVN_TRACE_FS_DRAWS): trace the draws with this fragment shader where they happen, in any frame, at
         // most [nvn] trace_fs_draws_max (default 8): the bindings and uniform words of a draw that takes the GPU down in the frame it first appears in.
         static const std::string trace_fs = nxrt::config_get_str("nvn", "trace_fs_draws", "");
         static int64_t trace_fs_left = nxrt::config_get_int("nvn", "trace_fs_draws_max", 8);
@@ -5486,7 +5499,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         char a[96], b[96], c[96];
         std::string line;
         auto remember = [](Texture* t) {
-            static const bool dump = nxrt::config_get_bool("nvn", "trace_targets", true);   // false: no PNG of every target (frame ranges)
+            const bool dump = NX_CFG_BOOL("nvn", "trace_targets", true);   // false: no PNG of every target (frame ranges)
             if (!t || !dump) return;
             for (const Ref<Texture>& r : g_trace_targets) if (r.get() == t) return;
             g_trace_targets.push_back(Ref<Texture>::share(t));
@@ -5769,7 +5782,7 @@ void trace_snap_after_draw() {
     }
     // [nvn] trace_snap_ssbo = 1: the storage buffers bound to the vertex and fragment stages too, as the GPU holds them after the draw
     // (snapb_d<draw>_<stage>s<slot>_<address>.bin, at most [nvn] trace_snap_ssbo_max_kb each, default 1024): buffers that compute passes write never reach the CPU's view.
-    static const bool snap_ssbo = nxrt::config_get_bool("nvn", "trace_snap_ssbo", false);
+    const bool snap_ssbo = NX_CFG_BOOL("nvn", "trace_snap_ssbo", false);
     static const uint64_t snap_max = static_cast<uint64_t>(std::max<int64_t>(4, nxrt::config_get_int("nvn", "trace_snap_ssbo_max_kb", 1024))) * 1024;
     if (snap_ssbo)
         for (int st : {kVertex, kFragment})
@@ -6080,7 +6093,7 @@ uint64_t g_mesh_pre_until = 0;   // g_draw_ops of the last draw the look-ahead c
 uint64_t g_mesh_pre_n = 0, g_mesh_pre_used = 0;   // statistics
 void mesh_pre_clear() { g_mesh_pre.clear(); }
 bool mesh_copy_ahead_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "mesh_copy_ahead", true);
+    const bool on = NX_CFG_BOOL("nvn", "mesh_copy_ahead", true);
     return on && ab_on(kAbMeshAhead);
 }
 bool shader_writes_memory(const ShaderInfo* s) {
@@ -6656,7 +6669,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
         for (const std::string& p : g_skip_fs)
             if (p.size() > 2 && p.compare(0, 2, "c:") == 0 && cs->hash.compare(0, p.size() - 2, p, 2, std::string::npos) == 0) return;
     if (!cs) { if (!g_cs_missing.empty()) nxrt::gap("dispatch", "skipped: untranslated compute shader", g_cs_missing); return; }
-    static const bool debug_skip = config_get_bool("nvn", "debug_skip_compute", false);   // diagnosis: no dispatch runs
+    const bool debug_skip = NX_CFG_BOOL("nvn", "debug_skip_compute", false);   // diagnosis: no dispatch runs
     if (debug_skip) return;
     const ShaderInfo* stages[kStages] = {nullptr, nullptr, nullptr, nullptr, nullptr, cs, nullptr, nullptr};
     const ProgLayout* pl = prog_layout(stages);
@@ -6665,7 +6678,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     // holds the default vertex attributes) or index out of range. NVN2 compute programs find theirs through the program's c[0] table
     // (apply_nvn2_compute_table: header, push constants, uniform block and storage buffer descriptors); a descriptor outside it is a layout
     // not understood yet. [nvn] skip_unmapped_dispatch (default on) leaves such dispatches out as a fallback.
-    static const bool skip_unmapped = config_get_bool("nvn", "skip_unmapped_dispatch", true);
+    const bool skip_unmapped = NX_CFG_BOOL("nvn", "skip_unmapped_dispatch", true);
     if (skip_unmapped)
         for (const BindingDesc& d : pl->bindings)
             if (d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && d.shader->refl.bindings[d.index].nvn.source == NvnSource::Unknown) {
@@ -7286,7 +7299,7 @@ void do_evaluate_dlss(const P_EvaluateDlss& p) { evaluate_dlss_impl(p, true); }
 
 void do_write_memory(uint64_t gpu_addr, const void* data, uint32_t size) {
     // a GPU-ordered write of up to 64 KiB into pool memory (UpdateUniformBuffer, counters, events)
-    static const bool defer = nxrt::config_get_bool("nvn", "write_defer", true);
+    const bool defer = NX_CFG_BOOL("nvn", "write_defer", true);
     if (P.open && defer && ab_on(kAbWriteDefer) && size <= 4096) {   // at the end of the pass (flush_deferred_writes)
         BufRef b = resolve_buffer(gpu_addr, size);
         if (!b.ok) return;
@@ -7512,7 +7525,7 @@ void do_submit_device_commands(const P_SubmitDeviceCommands& p, int depth) {
 uint64_t g_bar_n = 0, g_bar_in_pass = 0, g_bar_kept = 0, g_bar_unsafe = 0;   // statistics
 uint32_t g_bar_bits_kept = 0, g_bar_bits_all = 0;
 void do_barrier(uint32_t bits) {
-    static const bool keep = nxrt::config_get_bool("nvn", "barrier_keep_pass", true);
+    const bool keep = NX_CFG_BOOL("nvn", "barrier_keep_pass", true);
     ++g_bar_n;
     g_bar_bits_all |= bits;
     if (P.open) {
@@ -7532,7 +7545,7 @@ void do_barrier(uint32_t bits) {
 // epoch), WaitEvent (a no-op here), SetRenderTargets (new attachments take effect through the next pass, which moves the epoch) and
 // ClearColor / ClearDepthStencil (vkCmdClearAttachments in the pass; feedback reads of attachments never reuse sets).
 bool epoch_keep_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "epoch_keep", true);
+    const bool on = NX_CFG_BOOL("nvn", "epoch_keep", true);
     return on && ab_on(kAbEpochKeep);
 }
 bool op_keeps_sets(Op op) {
@@ -7567,7 +7580,7 @@ OpCost g_oc_op[256];
 std::unordered_map<uint64_t, OpCost> g_oc_prog;
 std::unordered_map<uint64_t, std::string> g_oc_name;
 bool exp_op_cost_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "exp_op_cost", false);
+    const bool on = NX_CFG_BOOL("nvn", "exp_op_cost", false);
     return on;
 }
 void op_cost_log() {
@@ -8161,7 +8174,7 @@ struct TexLook {
 TexLook* g_tl = nullptr;
 
 bool tex_lookahead_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "tex_lookahead", true);
+    const bool on = NX_CFG_BOOL("nvn", "tex_lookahead", true);
     return on;
 }
 
@@ -8351,7 +8364,7 @@ bool ab_out_delta_on() { return ab_on(kAbOutDelta); }  // out_delta (nvn_gpu_poo
 // frame draws only a few quads, and the game's players advance one picture per presented frame: unpaced, the 5-minute intro ran at ~250
 // pictures/s for 20 s (and for 1.5 s after each stall) while its voice lines, started along the movie's timeline, piled up (A11).
 void note_frame_for_pacing() {
-    static const bool on = nxrt::config_get_bool("display", "unpaced_loading", true);
+    const bool on = NX_CFG_BOOL("display", "unpaced_loading", true);
     if (!on) return;
     using clk = std::chrono::steady_clock;
     static uint64_t last_p = 0, last_d = 0;
@@ -8452,12 +8465,12 @@ void replay_begin_submit(Frame& f) {
     if (g_trace) { g_trace_n = 0; NXLOG_I("nvn.trace", "---- frame %lld ----", static_cast<long long>(counters().presents.load())); }
     {   // S38: device-local pool copies and tracked barriers. [nvn] gpuperf_ab = N: both are off in even windows of N presents and on in odd
         // ones (the paired-window measurement of S29); without it they follow their own settings.
-        static const int64_t ab = config_get_int("nvn", "gpuperf_ab", 0);
+        const int64_t ab = NX_CFG_INT("nvn", "gpuperf_ab", 0);
         static const bool tracked = config_get_str("nvn", "pass_barriers", "tracked") != "full";
         static int last_on = -1;
         bool on = true;
         if (ab > 0) on = ((counters().presents.load() / static_cast<uint64_t>(ab)) & 1) != 0;
-        static const int64_t cab = config_get_int("nvn", "cpuperf_ab", 0);
+        const int64_t cab = NX_CFG_INT("nvn", "cpuperf_ab", 0);
         if (cab <= 0) render_priority_apply(true);
         if (cab > 0) {
             const bool con = ((counters().presents.load() / static_cast<uint64_t>(cab)) & 1) != 0;
@@ -8706,7 +8719,7 @@ void trace_dump_targets() {
     if (!g_trace_snaps.empty()) vkDeviceWaitIdle(device().device());
     // [nvn] trace_snap_per_frame = 1: each traced frame's snapshots go to their own folder snap_f<present>/ (a trace_frame range then keeps
     // every frame's files instead of overwriting them: frame-to-frame comparisons, A18)
-    static const bool per_frame = config_get_bool("nvn", "trace_snap_per_frame", false);
+    const bool per_frame = NX_CFG_BOOL("nvn", "trace_snap_per_frame", false);
     std::string prefix;
     if (per_frame && !g_trace_snaps.empty()) {
         prefix = "snap_f" + std::to_string(counters().presents.load()) + "/";

@@ -27,6 +27,7 @@
 #include "nxrt/gaps.h"
 #include "vk_gauges.h"
 #include "nvn_capture.h"
+#include "nvn_cfg.h"
 #include "nvn_hazard.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_cmdq.h"
@@ -380,7 +381,7 @@ std::atomic<bool> g_alloc_batch_ab{true};
 void alloc_batch_enable(bool on) { g_alloc_batch_ab.store(on, std::memory_order_relaxed); }
 VkDescriptorSet Frame::alloc_set(VkDescriptorSetLayout layout) {
     Slot& s = *static_cast<Slot*>(slot);
-    static const bool batch_cfg = config_get_bool("nvn", "alloc_batch", false);
+    const bool batch_cfg = NX_CFG_BOOL("nvn", "alloc_batch", false);
     if (batch_cfg && g_alloc_batch_ab.load(std::memory_order_relaxed)) {
         Slot::Spare& sp = s.spare[(reinterpret_cast<uintptr_t>(layout) >> 4) & 127];
         if (sp.layout == layout && sp.n) return sp.sets[--sp.n];
@@ -949,7 +950,7 @@ std::atomic<uint64_t> g_idle_serial{0};   // without a back end submissions stil
 // order. The serial is known at once (reserved in queue order), so sync objects and waits work as before: a wait for a serial the render
 // thread has not submitted yet waits on the timeline until it has (wait-before-signal).
 bool async_submit() {
-    static const bool on = nxrt::config_get_bool("nvn", "async_submit", true);
+    const bool on = NX_CFG_BOOL("nvn", "async_submit", true);
     return on;
 }
 

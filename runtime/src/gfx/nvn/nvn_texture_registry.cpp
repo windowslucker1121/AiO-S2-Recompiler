@@ -11,6 +11,9 @@
 #include "nxrt/gauge.h"
 #include "nvn_texdata.h"
 #include "nxrt/log.h"
+#include <unordered_map>
+#include <unordered_set>
+
 #include "nvn_format.h"
 #include "nvn_gpu.h"
 
@@ -19,6 +22,15 @@ namespace {
 std::mutex g_mu;
 std::multimap<uint64_t, Texture*> g_by_start;   // storage start -> texture
 std::vector<Texture*> g_virtual;                // sparse textures
+// g_virtual's positions (removal in O(1): the game makes and drops hundreds of render-target objects in virtual pools per second, and the
+// erase-remove walked the whole list under g_mu) and an index by (pool, offset) for texture_registry_find_alias (it walked the list too, at
+// the first attachment of every new object: ~2.5% of the render thread in the village scene, a third of it waiting for g_mu)
+std::unordered_map<Texture*, size_t> g_vpos;
+std::unordered_multimap<uint64_t, Texture*> g_vidx;
+// and by pool: a CPU write (textures_cpu_wrote, every flush and write fault) looks at each virtual pool's mappings once and at its
+// textures only when a mapping holds the written memory; it took every texture's pool lock and walked its mappings before, under g_mu
+std::unordered_map<const MemoryPool*, std::unordered_set<Texture*>> g_vby_pool;
+uint64_t vkey(const Texture* t) { return reinterpret_cast<uint64_t>(t->vpool.get()) * 0x9e3779b97f4a7c15ull ^ t->voffset; }
 }  // namespace
 
 void texture_registry_add(Texture* t) {
@@ -53,12 +65,26 @@ void tev(const Texture* t, const char* what, uint64_t a, uint64_t b) {
 void texture_registry_add_virtual(Texture* t) {
     if (!t || !t->vpool) return;
     std::lock_guard<std::mutex> lk(g_mu);
+    if (g_vpos.count(t)) return;
+    g_vpos[t] = g_virtual.size();
     g_virtual.push_back(t);
+    g_vidx.emplace(vkey(t), t);
+    g_vby_pool[t->vpool.get()].insert(t);
 }
 
 void texture_registry_remove_virtual(Texture* t) {
     std::lock_guard<std::mutex> lk(g_mu);
-    g_virtual.erase(std::remove(g_virtual.begin(), g_virtual.end(), t), g_virtual.end());
+    auto it = g_vpos.find(t);
+    if (it == g_vpos.end()) return;
+    const size_t i = it->second;
+    g_vpos.erase(it);
+    if (i + 1 != g_virtual.size()) { g_virtual[i] = g_virtual.back(); g_vpos[g_virtual[i]] = i; }
+    g_virtual.pop_back();
+    auto r = g_vidx.equal_range(vkey(t));
+    for (auto x = r.first; x != r.second; ++x)
+        if (x->second == t) { g_vidx.erase(x); break; }
+    auto bp = g_vby_pool.find(t->vpool.get());
+    if (bp != g_vby_pool.end()) { bp->second.erase(t); if (bp->second.empty()) g_vby_pool.erase(bp); }
 }
 
 namespace {
@@ -82,8 +108,10 @@ void virtual_textures_remapped(const MemoryPool* vpool, uint64_t voff, uint64_t 
     std::vector<Ref<Texture>> hit;
     {
         std::lock_guard<std::mutex> lk(g_mu);
-        for (Texture* t : g_virtual)
-            if (t->vpool.get() == vpool && t->voffset < voff + size && t->voffset + t->storage_size > voff) { t->ref(); hit.emplace_back(t); }
+        auto bp = g_vby_pool.find(vpool);
+        if (bp != g_vby_pool.end())
+            for (Texture* t : bp->second)
+                if (t->voffset < voff + size && t->voffset + t->storage_size > voff) { t->ref(); hit.emplace_back(t); }
     }
     mark_dirty_list(hit, voff, voff + size);
 }
@@ -199,29 +227,37 @@ void textures_cpu_wrote(const void* lo, uint64_t size) {
     std::vector<Ref<Texture>> hit;
     {
         std::lock_guard<std::mutex> lk(g_mu);
-        // sparse textures whose mapped tiles lie in the written physical memory
-        for (Texture* t : g_virtual) {
-            MemoryPool* vp = t->vpool.get();
-            if (!vp) continue;
-            std::lock_guard<std::mutex> vl(vp->vmu);
-            bool over = false;
-            for (const MemoryPool::VirtualMap& m : vp->vmaps) {
-                if (!m.phys || !m.phys->base) continue;
-                const uint64_t pa = reinterpret_cast<uint64_t>(m.phys->base) + static_cast<uint64_t>(m.poff), pb = pa + m.size;
-                if (pa >= b || pb <= a) continue;
-                if (m.voff < t->voffset + t->storage_size && m.voff + m.size > t->voffset) {
-                    over = true;
-                    // the written bytes as offsets in the texture's storage
+        // sparse textures whose mapped tiles lie in the written physical memory: per virtual pool, the mappings that hold written bytes
+        struct Piece { uint64_t mvoff, msize, va, vb; };
+        std::vector<Piece> pieces;
+        for (auto& [vpc, set] : g_vby_pool) {
+            MemoryPool* vp = const_cast<MemoryPool*>(vpc);
+            if (!vp || set.empty()) continue;
+            pieces.clear();
+            {
+                std::lock_guard<std::mutex> vl(vp->vmu);
+                for (const MemoryPool::VirtualMap& m : vp->vmaps) {
+                    if (!m.phys || !m.phys->base) continue;
+                    const uint64_t pa = reinterpret_cast<uint64_t>(m.phys->base) + static_cast<uint64_t>(m.poff), pb = pa + m.size;
+                    if (pa >= b || pb <= a) continue;
                     const uint64_t wa = std::max(a, pa), wb = std::min(b, pb);
-                    const uint64_t va = m.voff + (wa - pa), vb = m.voff + (wb - pa);
-                    const uint64_t lo = std::max(va, t->voffset), hi = std::min(vb, t->voffset + t->storage_size);
+                    pieces.push_back({m.voff, m.size, m.voff + (wa - pa), m.voff + (wb - pa)});
+                }
+            }
+            if (pieces.empty()) continue;
+            for (Texture* t : set) {
+                bool over = false;
+                for (const Piece& pc : pieces) {
+                    if (!(pc.mvoff < t->voffset + t->storage_size && pc.mvoff + pc.msize > t->voffset)) continue;
+                    over = true;
+                    const uint64_t lo = std::max(pc.va, t->voffset), hi = std::min(pc.vb, t->voffset + t->storage_size);
                     if (lo < hi) {
                         std::lock_guard<std::mutex> sl(t->sparse_mu);
                         t->sparse_dirty.emplace_back(lo - t->voffset, hi - t->voffset);
                     }
                 }
+                if (over) { t->ref(); hit.emplace_back(t); }
             }
-            if (over) { t->ref(); hit.emplace_back(t); }
         }
         // textures start at or before b; a texture can start before a and reach into the range, so scan back a bounded amount
         auto it = g_by_start.upper_bound(b - 1);
@@ -259,7 +295,9 @@ Ref<Texture> texture_registry_find_alias(const Texture* t) {
     if (t->vpool) {
         // A texture in a virtual pool has no host storage: the same storage is the same pool and offset. the game renders its depth into one
         // texture object and samples the same range through another (the water / terrain blend layer reads the scene depth so).
-        for (Texture* o : g_virtual) {
+        auto r = g_vidx.equal_range(vkey(t));
+        for (auto it = r.first; it != r.second; ++it) {
+            Texture* o = it->second;
             if (o->vpool.get() != t->vpool.get() || o->voffset != t->voffset || !same_layout(o)) continue;
             o->ref();
             return Ref<Texture>(o);

@@ -2,6 +2,7 @@
 // Pipeline layouts, shader modules and pipelines (see nvn_pipeline.h). Pipeline creation is synchronous on the render thread; a
 // VkPipelineCache persists between runs ([nvn] pipeline_cache, default "pipeline_cache.bin").
 #include "nvn_pipeline.h"
+#include "nvn_cfg.h"
 
 #include <algorithm>
 #include <atomic>
@@ -783,7 +784,7 @@ namespace {
 // [nvn] exp_pipeline_stats (architecture experiment E5, measurement only): pipelines are created with CAPTURE_STATISTICS and the driver's
 // statistics of each executable (registers, binary size ...) are logged with the shader hashes. The flag changes the pipeline cache key.
 bool exp_pipeline_stats() {
-    static const bool on = config_get_bool("nvn", "exp_pipeline_stats", false);
+    const bool on = NX_CFG_BOOL("nvn", "exp_pipeline_stats", false);
     return on;
 }
 void log_pipeline_stats(VkPipeline pipe, const std::string& what) {

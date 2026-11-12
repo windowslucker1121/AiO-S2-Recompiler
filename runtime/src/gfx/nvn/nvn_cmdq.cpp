@@ -13,6 +13,7 @@
 // before the recorder records a bind of that set, as Vulkan requires. Objects the queued calls name are only destroyed after the GPU has
 // finished with them (deferred destruction), so never before the recorder has recorded the call.
 #include "nvn_cmdq.h"
+#include "nvn_cfg.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -727,7 +728,7 @@ void install_all() {
     hook(vkCmdBeginRendering, o_br, &h_br);
     // [nvn] cmd_thread_copies (default off): image copies/clears and push descriptors queued too. Paired windows at 1080: village outside replay
     // -0.56 ms (8/8) but fps +0.1; first scene replay +0.8 / +0.5 ms and fps -1.5 / -0.4 (median, two runs): the recorder falls behind there
-    static const bool more = config_get_bool("nvn", "cmd_thread_copies", false);
+    const bool more = NX_CFG_BOOL("nvn", "cmd_thread_copies", false);
     if (more) {
         hook(vkCmdCopyBufferToImage, o_cbti, &h_cbti); hook(vkCmdCopyImageToBuffer, o_citb, &h_citb); hook(vkCmdCopyImage, o_ci, &h_ci);
         hook(vkCmdBlitImage, o_bi, &h_bi); hook(vkCmdResolveImage, o_ri, &h_ri); hook(vkCmdClearColorImage, o_cci, &h_cci);
@@ -755,7 +756,7 @@ void install_all() {
     NXQ_DIRECT(vkCmdSetVertexInputEXT);
     NXQ_DIRECT(vkCmdExecuteCommands);
     // descriptor set updates queued (cmd_thread_desc); freeing sets and resetting or destroying their pools wait for the queued updates
-    static const bool desc = config_get_bool("nvn", "cmd_thread_desc", true);
+    const bool desc = NX_CFG_BOOL("nvn", "cmd_thread_desc", true);
     if (desc) {
         hook(vkUpdateDescriptorSets, o_uds, &h_uds);
         NXQ_DIRECT(vkResetDescriptorPool); NXQ_DIRECT(vkFreeDescriptorSets); NXQ_DIRECT(vkDestroyDescriptorPool);
@@ -783,7 +784,7 @@ void install_all() {
 }  // namespace
 
 bool enabled() {
-    static const bool on = config_get_bool("nvn", "cmd_thread", true);
+    const bool on = NX_CFG_BOOL("nvn", "cmd_thread", true);
     return on;
 }
 
@@ -841,7 +842,7 @@ void x_chunk(const uint8_t* p) {
 std::atomic<bool> g_chunk_async{true};
 void set_chunk_async(bool on) { g_chunk_async.store(on, std::memory_order_relaxed); }
 bool queue_chunk(VkCommandBuffer old, VkCommandBuffer next, VkQueue q, std::mutex* mu) {
-    static const bool cfg = config_get_bool("nvn", "chunk_async", true);
+    const bool cfg = NX_CFG_BOOL("nvn", "chunk_async", true);
     if (!cfg || !g_chunk_async.load(std::memory_order_relaxed) || !queuing()) return false;
     if (g_ph) ph_set(1);   // a hazard placeholder still open in `old` becomes a barrier before the buffer ends
     new (reserve(&x_chunk, sizeof(ChunkArgs))) ChunkArgs{old, next, q, mu};
