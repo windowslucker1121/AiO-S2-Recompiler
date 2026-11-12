@@ -314,6 +314,10 @@ trace's `gpu.busy`), so a GPU change is judged by GPU busy *and* render-thread r
   capture replay SSIM 0.49282 (off 0.49288, G3's 0.49285). About 11 draws per frame still copy in their pass (the look-ahead ends at writing
   dispatches and other commands; statistics line `mesh_copy_ahead look-ahead ended by:`). With signal events allowed too (final form),
   2 more runs: fps +1.75 / +2.25 median (21/21 both), GPU busy -0.52 ms, replay +0.09 / +0.12 ms; A18 again 4,398 in every loop, SSIM 0.49288.
+  Then (look-ahead budget 4,096 -> 16,384 commands, and a draw takes the early copy of the same records also when they now resolve to another
+  buffer: a held result sent back at a submission chunk in between, same contents): in-pass copies ~4.8 -> ~1.2 per frame (left: draws past
+  where a look-ahead ended at a writing dispatch), 2 runs: fps +2.2 / +1.85 median (19/20, 19/19), GPU busy -0.54 ms, full barriers -39 per frame,
+  replay +0.13 / +0.18 ms. The statistics line `mesh_copy_ahead look-ahead ended by:` now also splits the in-pass copies by reason.
 - **Translator experiments, opt-in only (measured no GPU-time gain):** sin/cos fusion (`NXRT_HARNESS_SIN_FUSE=1`: MUFU.SIN/COS of an
   `FMUL.RZ x, 1/(2pi)` emitted as sin(x), which the driver compiles into the same FMUL.RZ + MUFU pair; f3054ac2 -7% host instructions),
   shifted mesh store addresses proven (`NXRT_HARNESS_MESH_PROOF_SHIFT=1`: shadow mesh 7477b2c8 40 stores, 1,590 -> 938 instructions),
