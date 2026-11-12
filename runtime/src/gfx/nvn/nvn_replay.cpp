@@ -242,7 +242,7 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbHotSkip = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbR3b = 4194304, kAbR3e = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbMeshAhead2 = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbR3c = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbFront = 1ull << 56, kAbReflectLit = 1ull << 58, kAbR6 = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbTexShare = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbR3f = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbKeepChain = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbHotSkip = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbR3b = 4194304, kAbR3e = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbMeshAhead2 = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbR3c = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbFront = 1ull << 56, kAbReflectLit = 1ull << 58, kAbR6 = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbTexShare = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbR6t = 1ull << 49, kAbR3f = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbKeepChain = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
 // computed once and kept in a constant-initialized atomic: ab_on() calls it in every "off" window (hundreds of thousands of times per frame),
 // and a guarded local static there made the off windows ~0.6 ms per frame slower than the on windows with nothing switched (nvn_cfg.h)
 std::atomic<uint64_t> g_ab_mask_v{~0ull};
@@ -260,7 +260,7 @@ uint64_t ab_mask_compute() {
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"hot_skip", kAbHotSkip}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"r6", kAbR6}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"r6", kAbR6}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"r6t", kAbR6t}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -741,7 +741,7 @@ uint64_t g_occ_batch_reports = 0, g_occ_batch_cmds = 0;
 // (the game then culls nothing by occlusion): the GPU cost of the queries themselves
 bool occ_off_exp() {
     const bool on = NX_CFG_BOOL("nvn", "exp_occ_off", false);
-    return on && ab_on(kAbOccOff);
+    return on;   // its paired-window bit went to r6t (R6)
 }
 bool occ_batch_on() {
     const bool on = NX_CFG_BOOL("nvn", "occ_batch", true);
@@ -5158,7 +5158,7 @@ bool set_has_textures(const ProgLayout& pl, uint32_t set) {
 }
 uint64_t g_sstat_tk[4][2] = {};   // r3_diag: first sightings by set, and how many an image-keyed signature had seen in an earlier present
 uint64_t g_sstat[4][5] = {};   // r3 statistics per graphics set index: memo hit, kept (valid or built), first sighting, keep refused, all binds
-struct R6Diag { uint64_t n = 0, src[4] = {}; std::string vs, fs; uint32_t set = 0; };
+struct R6Diag { uint64_t n = 0, src[4] = {}, content_hit = 0, image_hit = 0; std::string vs, fs; uint32_t set = 0; };
 std::unordered_map<uint64_t, R6Diag> g_r6diag;   // [nvn] r6_diag
 // ---- [nvn] ubo_dynamic (R6) -------------------------------------------------------------------------------------------------------
 // With ubo_dynamic_layouts() (nvn_pipeline.cpp) set 0's uniform blocks of graphics programs are dynamic uniform buffers. A draw's set 0 is
@@ -5295,6 +5295,87 @@ VkDescriptorSet dyn0_set(const ProgLayout& pl, uint32_t* offs) {
     return ds;
 }
 
+// ---- [nvn] tex_img_sets (R6) ------------------------------------------------------------------------------------------------------
+// The game makes new texture objects every frame for the same images (render targets, materials' textures written into a per-frame range
+// of the texture pool), so most texture sets (set 2) are new by handle and by texture object every frame and were built anew (~420 per
+// frame in the village outside, 1.6 us each). r6_diag found ~87% of those first sightings again in an earlier present when keyed by what
+// they resolve to at image level. A texture set whose bindings are all sampled textures is looked up by exactly what its descriptors hold:
+// per binding the image (TexGpu and its view stamp, unique per image and per clearing of its views), the view request build_set would make,
+// the texture's format, the sampled layout and the sampler info (and the sampler tuning); the set is made once from the persistent pools.
+// A destroyed image never returns its stamp, so a stale entry is never found. Not for sets with a colour feedback, texel buffers or storage
+// images. Checked like the others by set_reuse = verify. [nvn] tex_img_sets = false (or the off windows of cpuperf_ab_what r6t): as before.
+bool tex_img_sets_on() {
+    const bool on = NX_CFG_BOOL("nvn", "tex_img_sets", true);
+    return on && ab_on(kAbR6t);
+}
+FlatMap64<VkDescriptorSet> g_img_sets;
+FlatMap64<uint8_t> g_img_ok;   // per program layout and set: 1 every binding is a sampled texture, 2 not
+uint64_t g_img_era = ~0ull, g_img_stat[5] = {};   // looked up, found, built, refused (feedback / no image), verify differences
+std::unordered_map<VkDescriptorSet, uint64_t> g_img_content;   // verify: the content key of each set made here
+uint64_t img_set_key(const ProgLayout& pl, uint32_t set) {
+    const uint64_t lk = reinterpret_cast<uint64_t>(&pl) * 4 + set;
+    uint8_t* ok = g_img_ok.find(lk);
+    if (!ok) {
+        uint8_t v = 1;
+        for (const uint16_t bi : pl.set_idx[set]) {
+            const BindingDesc& d = pl.bindings[bi];
+            if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || !texture_source(d.shader->refl.bindings[d.index].nvn.source)) v = 2;
+        }
+        if (pl.set_idx[set].empty()) v = 2;
+        g_img_ok.put(lk, v);
+        ok = g_img_ok.find(lk);
+    }
+    if (*ok != 1) return 0;
+    uint64_t k = 0x9e3779b97f4a7c15ull ^ lk;
+    k = (k ^ smp_tune_now()) * 1099511628211ull;
+    for (const uint16_t bi : pl.set_idx[set]) {
+        const BindingDesc& d = pl.bindings[bi];
+        const DescriptorBinding& b = d.shader->refl.bindings[d.index];
+        const TexResolved& r = resolve_texture_ref(d);
+        uint64_t part = 0x6e756c6cull;   // no texture: the dummy view and sampler
+        if (r.tex) {
+            const uint64_t st = tex_view_stamp(r.tex);
+            if (!st || is_color_feedback(r.tex)) { ++g_img_stat[3]; return 0; }
+            const ViewRequest q = make_request(b, r);
+            part = (st * 0x9e3779b97f4a7c15ull) ^ bytes_hash(&q, sizeof q);
+            part = (part ^ reinterpret_cast<uint64_t>(r.tex->fmt)) * 1099511628211ull;
+            part = (part ^ static_cast<uint64_t>(tex_sampled_layout(r.tex))) * 1099511628211ull;
+            part = (part ^ (r.has_sampler ? bytes_hash(&r.smp, sizeof r.smp) : 0x51)) * 1099511628211ull;
+        }
+        k = ((k ^ d.binding) * 1099511628211ull ^ part) * 1099511628211ull;
+    }
+    return k ? k : 1;
+}
+VkDescriptorSet img_set(const ProgLayout& pl, uint32_t set, SetReuse mode) {
+    if (g_keep_eras != g_img_era) { g_img_sets.clear(); g_img_content.clear(); g_img_era = g_keep_eras; }   // the persistent pools were released
+    const uint64_t k = img_set_key(pl, set);
+    if (!k) return VK_NULL_HANDLE;
+    ++g_img_stat[0];
+    if (VkDescriptorSet* h = g_img_sets.find(k)) {
+        ++g_img_stat[1];
+        if (mode == SetReuse::Verify) {
+            const VkDescriptorSet fresh = build_set(pl, set);
+            const auto c = g_img_content.find(*h);
+            if (fresh && c != g_img_content.end() && c->second != g_last_set_key) {
+                if (++g_img_stat[4] < 20) NXLOG_W(kTag, "tex_img_sets verify: set %u of vs %s fs %s resolves differently from the one found", set,
+                                                  S.stage[kVertex] ? S.stage[kVertex]->hash.c_str() : "-", S.stage[kFragment] ? S.stage[kFragment]->hash.c_str() : "-");
+                return fresh;
+            }
+        }
+        return *h;
+    }
+    KeepRec rec;
+    g_krec = &rec;
+    build_set(pl, set);
+    g_krec = nullptr;
+    if (rec.bad || !rec.ds) { ++g_img_stat[3]; return VK_NULL_HANDLE; }
+    ++g_img_stat[2];
+    if (g_img_sets.size() > 200000) g_img_sets.clear();
+    g_img_sets.put(k, rec.ds);
+    if (mode == SetReuse::Verify) g_img_content[rec.ds] = rec.content;
+    return rec.ds;
+}
+
 // [nvn] exp_set0_free (measurement only, R6; cpuperf_ab_what r6): the ceiling of the set-0 work. A graphics set 0 the memo or set_keep may
 // reuse is bound from the last kept set 0 of the same program, unchecked (stale per-object uniform blocks: the picture is wrong).
 struct S0Free { VkDescriptorSet ds = VK_NULL_HANDLE; uint64_t era = 0; };
@@ -5410,12 +5491,37 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
             // memo, set_reuse = verify found a burst of stale memo hits right after the area load in the village)
             const uint64_t kf0 = g_keep_first;
             ds = keep_lookup_or_build(pl, set, sig_tex_on() ? keep_sig_tex(pl, set) : g_keep_sig, mode);
+            if (!ds && set == 2 && g_keep_first != kf0 && tex_img_sets_on()) ds = img_set(pl, set, mode);   // tex_img_sets: by image
             ++g_sstat[set][ds ? 1 : (g_keep_first != kf0 ? 2 : 3)];   // r3 statistics: kept / first sighting / other
             if (!ds && g_keep_first != kf0 && NX_CFG_BOOL("nvn", "r6_diag", false)) {   // [nvn] r6_diag: first sightings by program and set
                 const uint64_t k = (reinterpret_cast<uint64_t>(S.stage[kFragment]) * 31 + reinterpret_cast<uint64_t>(S.stage[kVertex])) * 8 + set;
                 R6Diag& g = g_r6diag[k];
                 if (!g.n) { g.vs = S.stage[kVertex] ? S.stage[kVertex]->hash : "-"; g.fs = S.stage[kFragment] ? S.stage[kFragment]->hash : "-"; g.set = set; }
                 ++g.n;
+                {   // would the set be found again keyed by what its texture bindings resolve to (texture object, id, view, sampler) instead of handles?
+                    uint64_t ck = 0x9e3779b97f4a7c15ull ^ reinterpret_cast<uint64_t>(&pl) ^ set;
+                    uint64_t ck2 = ck;   // the same with the image (TexGpu) instead of the texture object
+                    for (const uint16_t bi : pl.set_idx[set]) {
+                        const BindingDesc& bd = pl.bindings[bi];
+                        const DescriptorBinding& db = bd.shader->refl.bindings[bd.index];
+                        if (bd.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && texture_source(db.nvn.source)) {
+                            const TexResolved& r = resolve_texture_ref(bd);
+                            const uint64_t vh = r.has_view ? bytes_hash(&r.view, sizeof r.view) : 1, sh = r.has_sampler ? bytes_hash(&r.smp, sizeof r.smp) : 2;
+                            ck = (((ck ^ reinterpret_cast<uint64_t>(r.tex)) * 1099511628211ull ^ (r.tex ? r.tex->id : 0)) * 1099511628211ull ^ vh) * 1099511628211ull ^ sh;
+                            ck2 = (((ck2 ^ reinterpret_cast<uint64_t>(r.tex ? tex_gpu(r.tex) : nullptr)) * 1099511628211ull ^ tex_view_stamp(r.tex)) * 1099511628211ull ^ vh) * 1099511628211ull ^ sh;
+                        } else {
+                            ck = (ck ^ bi) * 1099511628211ull;
+                            ck2 = (ck2 ^ bi) * 1099511628211ull;
+                        }
+                    }
+                    static FlatMap64<uint32_t> seen_c, seen_c2;
+                    const uint32_t now = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
+                    if (uint32_t* s = seen_c.find(ck); s && *s != now) ++g.content_hit;
+                    if (uint32_t* s = seen_c2.find(ck2); s && *s != now) ++g.image_hit;
+                    if (seen_c.size() > 500000) { seen_c.clear(); seen_c2.clear(); }
+                    seen_c.put(ck, now);
+                    seen_c2.put(ck2, now);
+                }
                 for (const uint16_t bi : pl.set_idx[set]) {   // which kinds of texture bindings the set has
                     const BindingDesc& bd = pl.bindings[bi];
                     const NvnSource src = bd.shader->refl.bindings[bd.index].nvn.source;
@@ -9634,12 +9740,16 @@ void replay_begin_submit(Frame& f) {
                     std::string s;
                     for (size_t i = 0; i < v.size() && i < 16; ++i) {
                         char t[200];
-                        std::snprintf(t, sizeof t, " [set %u vs %.8s fs %.8s %llu: bound %llu uniform %llu expr %llu other %llu]", v[i]->set, v[i]->vs.c_str(), v[i]->fs.c_str(),
-                                      (unsigned long long)v[i]->n, (unsigned long long)v[i]->src[0], (unsigned long long)v[i]->src[1], (unsigned long long)v[i]->src[2], (unsigned long long)v[i]->src[3]);
+                        std::snprintf(t, sizeof t, " [set %u vs %.8s fs %.8s %llu: by content %llu, by image %llu; bound %llu uniform %llu expr %llu other %llu]", v[i]->set, v[i]->vs.c_str(), v[i]->fs.c_str(),
+                                      (unsigned long long)v[i]->n, (unsigned long long)v[i]->content_hit, (unsigned long long)v[i]->image_hit,
+                                      (unsigned long long)v[i]->src[0], (unsigned long long)v[i]->src[1], (unsigned long long)v[i]->src[2], (unsigned long long)v[i]->src[3]);
                         s += t;
                     }
                     NXLOG_I(kTag, "r6_diag first sightings by program:%s", s.c_str());
                 }
+                NXLOG_I(kTag, "tex_img_sets: %llu texture sets looked up by image, %llu found, %llu made, %llu refused (feedback, no image, not keepable), %llu verify differences",
+                        (unsigned long long)g_img_stat[0], (unsigned long long)g_img_stat[1], (unsigned long long)g_img_stat[2], (unsigned long long)g_img_stat[3],
+                        (unsigned long long)g_img_stat[4]);
                 if (ubo_dynamic_layouts())
                     NXLOG_I(kTag, "ubo_dynamic: %llu set-0 binds with dynamic offsets (last set %llu, by content %llu, built %llu; blocks resolved again %llu); "
                             "old path: update range %llu, unresolved %llu, unaligned %llu, not keepable %llu, render scale or eager results %llu; verify %llu of %llu differ (%llu more raced); exp_set0_free %llu",
