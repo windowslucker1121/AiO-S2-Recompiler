@@ -19,6 +19,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nxrt/memguard.h"
 #include "nvn_gpu_internal.h"
 
 namespace nxrt::nvn::be::texprep {
@@ -57,6 +58,7 @@ struct State {
     uint64_t seq = 0;
     uint64_t held_bytes = 0;
     uint64_t budget = 0;
+    uint64_t budget_normal = 0;              // [nvn] tex_prep_mb; memory pressure lowers `budget` to a quarter of it (shed_texprep)
     uint64_t min_bytes = 0;                  // smaller textures are prepared inline: the hand-over costs more than the work
     uint64_t stage_bytes = 0;                // results from this size are copied into an upload buffer by the job (0: never)
     std::atomic<bool> quiesced{false};       // the GPU layer is shutting down: no more upload buffers
@@ -114,6 +116,31 @@ void drop_result(Entry& e) {
     e.res.reset();
     if (e.stage) gpu::device().destroy_buffer(e.stage);
     e.stage = gfx::Buffer{};
+}
+
+// Memory pressure (nxrt/memguard.h): finished results not taken yet go (the textures are prepared again when they are next named) and the
+// budget drops to a quarter until the pressure ends.
+uint64_t shed_texprep(bool pressure) {
+    if (!g_state) return 0;
+    State& s = S();
+    std::lock_guard<std::mutex> lk(s.mu);
+    if (!pressure) {
+        s.budget = s.budget_normal;
+        return 0;
+    }
+    s.budget = std::max<uint64_t>(16ull << 20, s.budget_normal / 4);
+    const uint64_t before = s.held_bytes;
+    for (auto it = s.map.begin(); it != s.map.end();) {
+        if (it->second.st == Entry::Done) {
+            it->first->prep_sched.store(0, std::memory_order_relaxed);
+            drop_result(it->second);
+            it = s.map.erase(it);
+            s.st.evicted++;
+        } else {
+            ++it;
+        }
+    }
+    return before - std::min(before, s.held_bytes);
 }
 
 void log_summary_locked(bool force) {
@@ -387,6 +414,8 @@ void init_once() {
         }
         // 1024: an area load registers several hundred MB of big textures (prepared early) and a camera cut names ~300 more at once (tex_lookahead)
         s.budget = static_cast<uint64_t>(std::max<int64_t>(16, config_get_int("nvn", "tex_prep_mb", 1024))) << 20;
+        s.budget_normal = s.budget;
+        nxrt::memguard_add_shedder("background texture preparation", &shed_texprep);
         s.min_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "tex_prep_min_kb", 8))) << 10;
         s.early_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "tex_prep_early_kb", 1024))) << 10;
         s.stage_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "tex_prep_stage_kb", 1024))) << 10;

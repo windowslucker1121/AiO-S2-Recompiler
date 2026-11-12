@@ -534,8 +534,8 @@ the movie (as on the console at 30 fps), 1.00 in the 3D cutscene after it at 24-
 their own thread (Gamepad with press-to-rebind, Keyboard and mouse bindings, More graphics settings, Debug info, Log). Changes apply at once
 and are saved in `controls.ini`; "(next start)" entries are runtime keys in `controls.ini [config]` (`section.key = value`, applied at start
 unless the ini or `NXRT_*` set them; game-module defaults give way via `config_set_default`). The bar is hidden in fullscreen; there the ImGui
-window (F1, View + Menu) is the menu (`[gfx] overlay_menu`). Alt alone and F10 stay game keys. **An open drop-down holds the game's frame**
-(Windows' modal menu loop runs on the game thread that pumps the window; audio continues, the watchdog is fed); dialogs do not. Checked as
+window (F1, View + Menu) is the menu (`[gfx] overlay_menu`). Alt alone and F10 stay game keys. **Since 2026-11-12 the window has a thread of its own**
+(`[gfx] window_thread`, platform.cpp): Windows' modal loops (dragging/sizing the window, title-bar buttons, drop-downs, the system menu) run there and no longer stop the game or its sound streams (measured: 10 s window drag and 10 s system menu, frames and audio continuous; before, the game stopped for the whole loop). The bar's commands run on the window thread; what touches play state goes to the next frame (`at_frame` in play.cpp). Checked as
 named instances on the title screen (`work\run\nm1`..`nm3` of the menu branch): bar and client size 1280x720, fullscreen round trip, each dialog,
 a menu toggle saved, a 12 s drop-down without a freeze report, press-to-rebind with the virtual pad from the native dialog. Native UI is
 driven and captured without the mouse through ctypes (`PostMessage WM_COMMAND`, `SC_KEYMENU`, `PrintWindow`): boot screenshots and `@shot`
@@ -1624,6 +1624,11 @@ Rules for agents:
   (`--prepare-shaders` refuses `--instance`; the "Preparing shaders" window is off for instances: it writes the shared shader data), and
   anything meant to write the shared pipeline cache or the default run's saves.
 - A build beside a running game is fine if memory allows; still only one build in `work\build\oot` at a time.
+- **Memory guard (2026-11-12, `fix/memory-guard`):** a player's default run was stopped at 19.5 GB by the old fixed 16 GB limit. Cause:
+  every save of the 4.5 GB pipeline cache allocated a heap buffer of its size (+4.4 GB private commit per save, also every ~2 s at boot
+  while prewarm grew the cache); named instances never save, so test runs never saw it. Saves and loads now go through file mappings
+  (`nxrt/file_map.h`: no commit step, measured old vs new exe), and `[memory] limit_gb` defaults to `auto` (physical RAM) with a 10 s
+  grace and pressure shedding (runtime/docs/CONFIG.md). `memory.limit_gb: 24` in test runs is no longer needed.
 - Checked live on 2026-11-06 (RTX 4080): two instances to the title through the MCP server; Enter to one reached only that one, each wrote
   only its folder, the game folder's `controls.ini`, `pipeline_keys.bin`, `shader_order.txt`, the shared `pipeline_cache.bin`, `prepare.state`
   and the default save stayed untouched; a second start of a running instance and the memory guard both exit 7.

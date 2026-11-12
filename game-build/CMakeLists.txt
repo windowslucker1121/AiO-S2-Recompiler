@@ -41,6 +41,7 @@ set(GAME_PRODUCT "${GM_game_product}")
 set(GAME_RT_STEM "${GM_RT_STEM}")
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/game.manifest.in" "${GAME_GEN}/game.manifest" @ONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/game.rc" "${GAME_GEN}/game.rc" COPYONLY)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/game.ico" "${GAME_GEN}/game.ico" COPYONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/rt.def.in" "${GAME_GEN}/rt.def" @ONLY)
 
 # Release packages (GAME_RELEASE=ON): the exe is a Windows GUI program (double click opens the game window only, no console; errors show in
@@ -147,7 +148,7 @@ add_dependencies(game_exe game_build_id)
 set_target_properties(game_exe PROPERTIES OUTPUT_NAME "${GM_EXE_STEM}")
 set_source_files_properties(src/game_main.cpp PROPERTIES COMPILE_DEFINITIONS "GAME_RELEASE_VERSION=\"${GAME_VERSION}\"")
 set_source_files_properties("${GAME_GEN}/game.rc" PROPERTIES COMPILE_DEFINITIONS "GAME_VER_MAJOR=${GAME_VER_MAJOR};GAME_VER_MINOR=${GAME_VER_MINOR};GAME_VER_PATCH=${GAME_VER_PATCH};GAME_VER_TEXT=\"${GAME_VERSION}\""
-                            OBJECT_DEPENDS "${GAME_GEN}/game.manifest")
+                            OBJECT_DEPENDS "${GAME_GEN}/game.manifest;${GAME_GEN}/game.ico")
 target_include_directories(game_exe PRIVATE "${GAME_GEN}")
 target_compile_definitions(game_exe PRIVATE GAME_EXEFS_DEFAULT="${GAME_EXEFS_DEFAULT}")
 # Development builds know their checkout: started without --game they run game/<id>/updates/<newest> with work/shaders/<id> (game_main.cpp).

@@ -86,6 +86,28 @@ void busy_pump() {
     g_last_pump_ms.store(t, std::memory_order_relaxed);
     platform::pump_events();
 }
+
+// Work for the game's frame boundary from another thread (the window thread runs the menu bar's commands): run by update_hook, in order.
+// Without a window thread the caller is the frame's own thread and it runs at once.
+std::mutex g_frame_tasks_mu;
+std::vector<std::function<void()>> g_frame_tasks;
+void at_frame(std::function<void()> f) {
+    if (!platform::window_thread()) {
+        f();
+        return;
+    }
+    std::lock_guard<std::mutex> lk(g_frame_tasks_mu);
+    g_frame_tasks.push_back(std::move(f));
+}
+void run_frame_tasks() {
+    std::vector<std::function<void()>> todo;
+    {
+        std::lock_guard<std::mutex> lk(g_frame_tasks_mu);
+        if (g_frame_tasks.empty()) return;
+        todo.swap(g_frame_tasks);
+    }
+    for (auto& f : todo) f();
+}
 }  // namespace
 
 namespace {
@@ -1004,7 +1026,8 @@ int update_hook(::Ctx*, uint64_t, void*) {
         NXLOG_W(kTag, "the frame boundary runs on another thread than the one that started play mode: the window's events are pumped there at its next SVC");
     }
     if (!on_pump_thread) g_pump_wanted.store(true, std::memory_order_relaxed);
-    if (st.window && on_pump_thread) platform::pump_events();
+    if (st.window && on_pump_thread && !platform::window_thread()) platform::pump_events();   // a window thread pumps by itself
+    run_frame_tasks();                    // work the window thread handed to the game's frame (menu bar actions)
 
     // settings queued by the page
     {
@@ -1271,7 +1294,7 @@ public:
             // Late sample: the frame boundary pumped the events at the start of the frame update; the tick that reaches the input function is a little
             // later (the whole update body runs first). Pump again so the counts include whatever the mouse did in between. Main thread only, like the
             // pump in the frame-boundary hook; the key and button events it queues are handled at the next boundary.
-            if (st.late_sample && st.window && std::this_thread::get_id() == st.pump_thread) platform::pump_events();
+            if (st.late_sample && st.window && std::this_thread::get_id() == st.pump_thread && !platform::window_thread()) platform::pump_events();
             if (extras::LowLatency* ll = extras::lowlat()) ll->input_sample();
             const input::MouseDelta d = input::mouse_delta_take();
             *dx = d.dx;
@@ -1550,7 +1573,7 @@ void install_menu_bar() {
     G& st = g();
     WinMenuHooks h;
     if (st.bug_key) {
-        h.capture_bug = [] { bug_hotkey(); };
+        h.capture_bug = [] { at_frame([] { bug_hotkey(); }); };
         h.bug_key = SDL_GetScancodeName(static_cast<SDL_Scancode>(st.bug_key));
     }
     h.fps_key = input_name(st.settings.fps.key);
@@ -1589,7 +1612,11 @@ void install_menu_bar() {
     };
     if (const GamePlay* gp = game_play()) h.display_options = gp->display_options;
     h.upscaler_configured = nvn::upscaler_replace_configured();
-    h.menu_opened = [] { release_mouse_now("menu bar opened"); };
+    // The bar's commands run on the window thread (platform.h): what touches play mode's own state goes to the next frame.
+    h.menu_opened = [] {
+        if (platform::relative_mouse()) platform::set_relative_mouse(false);   // the pointer is free for the menu at once
+        at_frame([] { release_mouse_now("menu bar opened"); });
+    };
     if (library_exe_ok()) h.open_library = [](int tab) { return open_library(tab); };
     if (!win_menu_install(platform::native_hwnd(), platform::native_window(), &g_host, h)) NXLOG_W(kTag, "no menu bar on the game window");
 }
@@ -1713,7 +1740,8 @@ bool start(const StartOptions& opt) {
     kernel::sched_set_process_priority(st.window);     // a person is playing: keep the frame out of the background load
     st.pump_thread = std::this_thread::get_id();
     g_pump_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
-    if (st.window) svc_set_busy_hook(&busy_pump);       // the window keeps answering while the game boots or loads (no frame boundary for seconds)
+    // The window keeps answering while the game boots or loads (no frame boundary for seconds). Not needed when the window has a thread of its own.
+    if (st.window && !platform::window_thread()) svc_set_busy_hook(&busy_pump);
     st.engine = std::make_unique<Engine>(st.settings);
     st.engine->set_context(Ctx::Menu, now_ns());
     st.source_owner = std::make_unique<PlaySource>(st.engine.get());
