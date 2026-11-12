@@ -519,8 +519,11 @@ u32 at this+0x2c8, the scale a float in main's data (main+0x4d41fc8); retail kee
 it back into +0x2c8 after every frame), so it advanced 1/60 s per presented frame and ran at fps/60 speed. The runtime's timestep module
 (entry hook on the same function, before the calc) now writes scale = measured frame time * 60 and the nearest whole rate into +0x2c8
 (`timestep::Sites::apply_step`, the game side `oot_core.cpp`). Movies: the movie player shows one decoded picture per frame, so while the game
-reads nn::codec pictures the step stays 1/60 (`Sites::fixed_step_during_movies`: the event timeline that starts the voice lines stays with the
-pictures, A11), and `fps_limit = auto` caps at `[display] auto_fps` (100) since 2026-11-11 (display rate 2026-11-09 .. 11-10; `Sites::cap_at_display_rate = true`; movies stay at 60 through the movie cap; uncapped measured at 1080: the house scene 64 fps, 1% low 48-53, first scene 50-62, village ~36). `oot` default `[time] min_rate = 10`: steps up
+reads nn::codec pictures the step is 1/60 per picture taken (`Sites::fixed_step_during_movies`, `[time] movie_follow_pictures`, 2026-11-12: the
+event timeline that starts the voice lines follows the frame step, not the pictures (proven with a frozen movie: the lines kept coming), so with
+1/60 per *frame* a late decoder put the intro's voice lines 2.4-3.8 s ahead of their pictures; now game time stays within one frame of movie time
+at cap 60 / 100 / uncapped, lines within 0.02 s; `[time] av_trace` logs every sound start with the movie picture; `[media] video_decode_ahead` = 8
+decodes on the decoder's own thread: frames without a new picture 578 -> 171 at cap 60, most in the movie's first 10 s), and `fps_limit = auto` caps at `[display] auto_fps` (100) since 2026-11-11 (display rate 2026-11-09 .. 11-10; `Sites::cap_at_display_rate = true`; movies stay at 60 through the movie cap; uncapped measured at 1080: the house scene 64 fps, 1% low 48-53, first scene 50-62, village ~36). `oot` default `[time] min_rate = 10`: steps up
 to 1/10 s, slower frames slow the game down; hitches over 100 ms are clamped (in a 40 s walk with pipeline builds game time was 84% of real
 time, in steady play 100%). `game_main` reads `[time]` again after the game's config defaults. `[time] mode = off` restores the retail step;
 `[time] csv = <file>` logs per frame host time, step, game time and movie pictures. **Measured (RTX 4080):** W held 2 s from
