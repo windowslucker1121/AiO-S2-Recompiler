@@ -232,7 +232,25 @@ struct Queued<Slot, void(VKAPI_PTR*)(A...)> {
     static void install() { if (*Slot && !orig) { orig = *Slot; *Slot = &call; mark_haz(&exec, reinterpret_cast<const void*>(orig)); } }
 };
 
+// [nvn] cmd_nodrain_begin (default off; with submit_async, switched by cpuperf_ab_what submit_async): calls on a command buffer or pool that has no queued packets (a slot's
+// pool reset and the first vkBeginCommandBuffer of a submission: that slot's last submission has completed on the GPU, so the recorder
+// finished it long ago) are made at once, without waiting for the recorder to empty the ring.
+std::atomic<bool> g_nodrain{false};
+template <auto* Slot, typename T> struct NoDrain;
+template <auto* Slot, typename R, typename... A>
+struct NoDrain<Slot, R(VKAPI_PTR*)(A...)> {
+    static inline R(VKAPI_PTR* orig)(A...) = nullptr;
+    static inline uint64_t n = 0;
+    static R VKAPI_PTR call(A... a) {
+        if (queue_here() && !g_nodrain.load(std::memory_order_relaxed)) { drain_now(); ++g_direct; ++n; }
+        return orig(a...);
+    }
+    static void install(const char* name) {
+        if (*Slot && !orig) { orig = *Slot; *Slot = &call; if (g_ndirect < 64) g_direct_names[g_ndirect++] = {name, &n}; }
+    }
+};
 #define NXQ_DIRECT(name) Direct<&name, PFN_##name>::install(#name)
+#define NXQ_NODRAIN(name) NoDrain<&name, PFN_##name>::install(#name)
 #define NXQ_QUEUED(name) Queued<&name, PFN_##name>::install()
 
 // ---- queued calls with arrays (the hot ones): the arrays are copied after the arguments ----------------------------------------------
@@ -523,8 +541,17 @@ void VKAPI_PTR h_citb(VkCommandBuffer cb, VkImage i, VkImageLayout l, VkBuffer b
 PFN_vkCmdCopyImage o_ci = nullptr;
 struct CiArgs { VkCommandBuffer cb; VkImage s; VkImageLayout sl; VkImage d; VkImageLayout dl; uint32_t n; const VkImageCopy* r; };
 void x_ci(const uint8_t* p) { const CiArgs& a = *reinterpret_cast<const CiArgs*>(p); o_ci(a.cb, a.s, a.sl, a.d, a.dl, a.n, a.r); }
+// [nvn] cmd_thread_copy_image (default on; cpuperf_ab_what copy_image_q): vkCmdCopyImage alone is queued even without cmd_thread_copies
+// (the feedback and render-target copies: ~6 per frame in the village scene, each a drain of the ring before)
+std::atomic<bool> g_ci_q{true};
+bool g_copies_more = false;   // cmd_thread_copies: every copy is hooked, g_copies_q switches them
+inline bool q_ci() {
+    if (!queue_here()) return false;
+    if (!g_ci_q.load(std::memory_order_relaxed) || (g_copies_more && !g_copies_q.load(std::memory_order_relaxed))) { drain_now(); ++g_direct; return false; }
+    return true;
+}
 void VKAPI_PTR h_ci(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageCopy* r) {
-    if (!q_copy()) return o_ci(cb, s, sl, d, dl, n, r);
+    if (!q_ci()) return o_ci(cb, s, sl, d, dl, n, r);
     uint8_t* p = reserve(&x_ci, sizeof(CiArgs) + room<VkImageCopy>(n));
     CiArgs* a = reinterpret_cast<CiArgs*>(p);
     Wr w{p + sizeof(CiArgs)};
@@ -557,7 +584,7 @@ PFN_vkCmdClearColorImage o_cci = nullptr;
 struct CciArgs { VkCommandBuffer cb; VkImage i; VkImageLayout l; VkClearColorValue c; uint32_t n; const VkImageSubresourceRange* r; };
 void x_cci(const uint8_t* p) { const CciArgs& a = *reinterpret_cast<const CciArgs*>(p); o_cci(a.cb, a.i, a.l, &a.c, a.n, a.r); }
 void VKAPI_PTR h_cci(VkCommandBuffer cb, VkImage i, VkImageLayout l, const VkClearColorValue* c, uint32_t n, const VkImageSubresourceRange* r) {
-    if (!q_copy()) return o_cci(cb, i, l, c, n, r);
+    if (!q_ci()) return o_cci(cb, i, l, c, n, r);
     uint8_t* p = reserve(&x_cci, sizeof(CciArgs) + room<VkImageSubresourceRange>(n));
     CciArgs* a = reinterpret_cast<CciArgs*>(p);
     Wr w{p + sizeof(CciArgs)};
@@ -568,7 +595,7 @@ PFN_vkCmdClearDepthStencilImage o_cdsi = nullptr;
 struct CdsiArgs { VkCommandBuffer cb; VkImage i; VkImageLayout l; VkClearDepthStencilValue c; uint32_t n; const VkImageSubresourceRange* r; };
 void x_cdsi(const uint8_t* p) { const CdsiArgs& a = *reinterpret_cast<const CdsiArgs*>(p); o_cdsi(a.cb, a.i, a.l, &a.c, a.n, a.r); }
 void VKAPI_PTR h_cdsi(VkCommandBuffer cb, VkImage i, VkImageLayout l, const VkClearDepthStencilValue* c, uint32_t n, const VkImageSubresourceRange* r) {
-    if (!q_copy()) return o_cdsi(cb, i, l, c, n, r);
+    if (!q_ci()) return o_cdsi(cb, i, l, c, n, r);
     uint8_t* p = reserve(&x_cdsi, sizeof(CdsiArgs) + room<VkImageSubresourceRange>(n));
     CdsiArgs* a = reinterpret_cast<CdsiArgs*>(p);
     Wr w{p + sizeof(CdsiArgs)};
@@ -729,6 +756,7 @@ void install_all() {
     // [nvn] cmd_thread_copies (default off): image copies/clears and push descriptors queued too. Paired windows at 1080: village outside replay
     // -0.56 ms (8/8) but fps +0.1; first scene replay +0.8 / +0.5 ms and fps -1.5 / -0.4 (median, two runs): the recorder falls behind there
     const bool more = NX_CFG_BOOL("nvn", "cmd_thread_copies", false);
+    g_copies_more = more;
     if (more) {
         hook(vkCmdCopyBufferToImage, o_cbti, &h_cbti); hook(vkCmdCopyImageToBuffer, o_citb, &h_citb); hook(vkCmdCopyImage, o_ci, &h_ci);
         hook(vkCmdBlitImage, o_bi, &h_bi); hook(vkCmdResolveImage, o_ri, &h_ri); hook(vkCmdClearColorImage, o_cci, &h_cci);
@@ -740,8 +768,12 @@ void install_all() {
         NXQ_QUEUED(vkCmdSetPolygonModeEXT); NXQ_QUEUED(vkCmdSetDepthClampEnableEXT); NXQ_QUEUED(vkCmdSetLogicOpEnableEXT);
         NXQ_QUEUED(vkCmdSetAlphaToCoverageEnableEXT); NXQ_QUEUED(vkCmdSetRasterizationSamplesEXT); NXQ_QUEUED(vkCmdSetDepthClipEnableEXT);
     } else {
-        NXQ_DIRECT(vkCmdCopyImageToBuffer); NXQ_DIRECT(vkCmdCopyBufferToImage); NXQ_DIRECT(vkCmdCopyImage); NXQ_DIRECT(vkCmdBlitImage);
-        NXQ_DIRECT(vkCmdResolveImage); NXQ_DIRECT(vkCmdClearColorImage); NXQ_DIRECT(vkCmdClearDepthStencilImage); NXQ_DIRECT(vkCmdBindVertexBuffers);
+        NXQ_DIRECT(vkCmdCopyImageToBuffer); NXQ_DIRECT(vkCmdCopyBufferToImage); NXQ_DIRECT(vkCmdBlitImage);
+        if (config_get_bool("nvn", "cmd_thread_copy_image", true)) { hook(vkCmdCopyImage, o_ci, &h_ci); mark_haz(&x_ci, reinterpret_cast<const void*>(o_ci));
+            hook(vkCmdClearColorImage, o_cci, &h_cci); mark_haz(&x_cci, reinterpret_cast<const void*>(o_cci));
+            hook(vkCmdClearDepthStencilImage, o_cdsi, &h_cdsi); mark_haz(&x_cdsi, reinterpret_cast<const void*>(o_cdsi)); }
+        else { NXQ_DIRECT(vkCmdCopyImage); NXQ_DIRECT(vkCmdClearColorImage); NXQ_DIRECT(vkCmdClearDepthStencilImage); }
+        NXQ_DIRECT(vkCmdResolveImage); NXQ_DIRECT(vkCmdBindVertexBuffers);
         NXQ_DIRECT(vkCmdSetSampleMaskEXT); NXQ_DIRECT(vkCmdSetColorBlendEnableEXT); NXQ_DIRECT(vkCmdSetColorBlendEquationEXT);
         NXQ_DIRECT(vkCmdSetColorWriteMaskEXT); NXQ_DIRECT(vkCmdSetPolygonModeEXT); NXQ_DIRECT(vkCmdSetDepthClampEnableEXT);
         NXQ_DIRECT(vkCmdSetLogicOpEnableEXT); NXQ_DIRECT(vkCmdSetAlphaToCoverageEnableEXT); NXQ_DIRECT(vkCmdSetRasterizationSamplesEXT);
@@ -762,7 +794,7 @@ void install_all() {
         NXQ_DIRECT(vkResetDescriptorPool); NXQ_DIRECT(vkFreeDescriptorSets); NXQ_DIRECT(vkDestroyDescriptorPool);
     }
     // the command buffers, their pools and the queues as a whole
-    NXQ_DIRECT(vkBeginCommandBuffer); NXQ_DIRECT(vkEndCommandBuffer); NXQ_DIRECT(vkResetCommandBuffer); NXQ_DIRECT(vkResetCommandPool);
+    NXQ_NODRAIN(vkBeginCommandBuffer); NXQ_DIRECT(vkEndCommandBuffer); NXQ_DIRECT(vkResetCommandBuffer); NXQ_NODRAIN(vkResetCommandPool);
     NXQ_DIRECT(vkAllocateCommandBuffers); NXQ_DIRECT(vkFreeCommandBuffers); NXQ_DIRECT(vkTrimCommandPool); NXQ_DIRECT(vkDestroyCommandPool);
     NXQ_DIRECT(vkQueueSubmit); NXQ_DIRECT(vkQueueSubmit2); NXQ_DIRECT(vkQueueWaitIdle); NXQ_DIRECT(vkDeviceWaitIdle); NXQ_DIRECT(vkQueuePresentKHR);
     o_pb2_raw = o_pb2;
@@ -806,11 +838,14 @@ void begin_submission(bool on) {
         g_thread = std::thread(recorder_loop);
         SetThreadDescription(g_thread.native_handle(), L"nvn-recorder");
     }
-    drain_now();       // switching only with nothing queued
+    // switching only with nothing queued; staying on needs no wait (r3: a drain at each of the ~6 submissions per frame waited for the
+    // recorder to finish the previous submission's packets: [nvn] cmd_nodrain_begin / cpuperf_ab_what submit_async)
+    if (on != g_active.load(std::memory_order_relaxed) || !g_nodrain.load(std::memory_order_relaxed)) drain_now();
     g_active.store(on, std::memory_order_relaxed);
 }
 
 void set_copies(bool on) { g_copies_q.store(on, std::memory_order_relaxed); }
+void set_copy_image(bool on) { g_ci_q.store(on, std::memory_order_relaxed); }
 void set_pds(bool on) { g_pds_q.store(on, std::memory_order_relaxed); }
 
 // [nvn] chunk_async (default on; cpuperf_ab_what chunk_async): a submission chunk (frame_chunk: end the command buffer, submit it without a
@@ -850,6 +885,56 @@ bool queue_chunk(VkCommandBuffer old, VkCommandBuffer next, VkQueue q, std::mute
     publish();
     return true;
 }
+// [nvn] submit_async (default off; cpuperf_ab_what submit_async; village paired: replay -0.31 ms 22/24 and 22/23, but fps +0.4 / +0.0 and 1% low -0.8 / -2.5: off): the end of a submission (end the command buffer, submit it with the
+// timeline signal of its serial) is one packet the recorder runs in order, like a chunk: the render thread no longer waits for the recorder to
+// empty the ring at each of the ~6 submissions per frame. Waits for the serial go through the timeline semaphore (a wait may begin before the
+// signal is submitted); presents and everything else that needs the queue drain first.
+namespace {
+struct EndArgs { VkCommandBuffer cb; VkQueue q; std::mutex* mu; VkSemaphore sem; uint64_t value; VkDevice dev; };
+std::atomic<uint64_t> g_end_fail{0};
+void x_end(const uint8_t* p) {
+    const EndArgs& a = *reinterpret_cast<const EndArgs*>(p);
+    vkEndCommandBuffer(a.cb);
+    VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    cbi.commandBuffer = a.cb;
+    VkSemaphoreSubmitInfo sig = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+    sig.semaphore = a.sem;
+    sig.value = a.value;
+    sig.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    si.commandBufferInfoCount = 1;
+    si.pCommandBufferInfos = &cbi;
+    si.signalSemaphoreInfoCount = 1;
+    si.pSignalSemaphoreInfos = &sig;
+    VkResult r;
+    {
+        std::lock_guard<std::mutex> lk(*a.mu);
+        r = vkQueueSubmit2(a.q, 1, &si, VK_NULL_HANDLE);
+    }
+    if (r != VK_SUCCESS) {
+        if (g_end_fail.fetch_add(1) < 4) NXLOG_E(kTag, "submission end (recorder): vkQueueSubmit2 failed (%d)", static_cast<int>(r));
+        VkSemaphoreSignalInfo ssi = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};   // keep the timeline moving so waiters do not hang
+        ssi.semaphore = a.sem;
+        ssi.value = a.value;
+        vkSignalSemaphore(a.dev, &ssi);
+    }
+}
+}  // namespace
+std::atomic<bool> g_submit_async{true};
+void set_submit_async(bool on) {
+    g_submit_async.store(on, std::memory_order_relaxed);
+    static const bool nodrain = config_get_bool("nvn", "cmd_nodrain_begin", false);
+    g_nodrain.store(on && nodrain, std::memory_order_relaxed);
+}
+bool queue_submit_end(VkDevice dev, VkCommandBuffer cb, VkQueue q, std::mutex* mu, VkSemaphore sem, uint64_t value) {
+    const bool cfg = NX_CFG_BOOL("nvn", "submit_async", false);
+    if (!cfg || !g_submit_async.load(std::memory_order_relaxed) || !queuing()) return false;
+    if (g_ph) ph_set(1);   // a hazard placeholder still open becomes a barrier before the buffer ends
+    new (reserve(&x_end, sizeof(EndArgs))) EndArgs{cb, q, mu, sem, value, dev};
+    commit();
+    publish();
+    return true;
+}
 void set_desc(bool on) { g_desc_q.store(on, std::memory_order_relaxed); }
 void apply_render_priority(bool on) {
     static const std::string mode = config_get_str("nvn", "render_priority", "highest");
@@ -860,6 +945,22 @@ void apply_render_priority(bool on) {
     last = p;
     SetThreadPriority(GetCurrentThread(), p);
     if (g_thread.joinable()) SetThreadPriority(g_thread.native_handle(), p);
+}
+// [nvn] render_cpus = "R,C" (default empty = off; cpuperf_ab_what render_pin): the render thread on logical processor R and the recorder on
+// C, e.g. two different physical cores, so the recorder's work (and its spinning) never shares the render thread's core (SMT siblings). Off
+// windows: both may run anywhere again. Render thread.
+void apply_render_pin(bool on) {
+    static const std::string cfg = config_get_str("nvn", "render_cpus", "");
+    if (cfg.empty()) return;
+    static int last = -1;
+    if (static_cast<int>(on) == last) return;
+    last = on ? 1 : 0;
+    int r = -1, c = -1;
+    if (std::sscanf(cfg.c_str(), "%d,%d", &r, &c) != 2 || r < 0 || c < 0 || r > 63 || c > 63) return;
+    DWORD_PTR proc = 0, sys = 0;
+    GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys);
+    SetThreadAffinityMask(GetCurrentThread(), on ? (DWORD_PTR{1} << r) : proc);
+    if (g_thread.joinable()) SetThreadAffinityMask(g_thread.native_handle(), on ? (DWORD_PTR{1} << c) : proc);
 }
 void set_publish_batch(bool on) { g_pub_batch = on ? g_pub_batch_cfg : 1; }
 void desc_stats(uint64_t* queued, uint64_t* direct) { *queued = g_uds_queued; *direct = g_uds_direct; }
