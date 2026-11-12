@@ -96,6 +96,7 @@ struct Thunk {
     std::atomic<uint64_t> calls{0};
     std::atomic<int> ft_zone{-1};   // frame trace zone ("hle:<name>"), registered on the first slow call
     std::atomic<bool> leaf{false};  // hle_mark_leaf: an import call runs fn directly (no count, trace or import bookkeeping)
+    std::atomic<bool> direct{false};   // hle_mark_direct: an indirect call site may cache fn (it needs no hle_current_name)
 };
 std::mutex g_hle_lock;
 std::vector<std::unique_ptr<Thunk>> g_thunks;        // index = (addr - kHleBase) / 16
@@ -313,7 +314,15 @@ uint64_t hle_register(const char* name, HleFn fn) {
         g_thunk_by_name.emplace(name, i);
         g_thunk_count.store(g_thunks.size(), std::memory_order_release);
     }
-    g_thunks[i]->fn = fn;
+    Thunk& th = *g_thunks[i];
+    if (th.fn != fn && (th.direct.load(std::memory_order_relaxed) || th.leaf.load(std::memory_order_relaxed))) {
+        // inline caches may hold the old handler: the new one must be marked again before a site caches it
+        th.direct.store(false, std::memory_order_relaxed);
+        th.fn = fn;
+        ic_invalidate_all();
+        return mem::kHleBase + i * 16;
+    }
+    th.fn = fn;
     return mem::kHleBase + i * 16;
 }
 
@@ -342,6 +351,46 @@ HleFn hle_leaf_fn(uint64_t addr) {
     if (!hle_is_thunk(addr)) return nullptr;
     const Thunk& t = *g_thunks[thunk_index(addr)];
     return t.leaf.load(std::memory_order_acquire) ? t.fn : nullptr;
+}
+
+namespace {
+std::atomic<bool> g_hle_direct_on{true};
+int hle_direct_mode() {
+    static const int mode = [] {
+        const std::string m = config_get_str("cpu", "hle_direct", "on");
+        const int md = m == "off" || m == "0" ? 0 : m == "ab" ? 2 : 1;
+        if (md == 0) g_hle_direct_on.store(false);
+        if (md != 1) NXLOG_I("dispatch", "direct HLE calls from inline caches: %s", md == 0 ? "off" : "ab");
+        if (md == 2) {
+            const int64_t ms = std::max<int64_t>(100, config_get_int("cpu", "hle_direct_ab_ms", 5000));
+            std::thread([ms] {
+                for (bool on = true;; on = !on) {
+                    g_hle_direct_on.store(on, std::memory_order_relaxed);
+                    if (!on) ic_invalidate_all();
+                    ft::mark(on ? "hd.on" : "hd.off");
+                    Sleep(static_cast<DWORD>(ms));
+                }
+            }).detach();
+        }
+        return md;
+    }();
+    return mode;
+}
+}  // namespace
+
+void hle_mark_direct(const char* name) {
+    std::lock_guard<std::mutex> lk(g_hle_lock);
+    auto it = g_thunk_by_name.find(name);
+    if (it != g_thunk_by_name.end() && g_thunks[it->second]->fn) g_thunks[it->second]->direct.store(true, std::memory_order_release);
+}
+
+HleFn hle_direct_fn(uint64_t addr) {
+    if (!hle_is_thunk(addr)) return nullptr;
+    (void)hle_direct_mode();
+    if (!g_hle_direct_on.load(std::memory_order_relaxed)) return nullptr;
+    if (!hle_trace().prefix.empty()) return nullptr;      // [hle] trace wants every call through dispatch_call
+    const Thunk& t = *g_thunks[thunk_index(addr)];
+    return t.direct.load(std::memory_order_acquire) || t.leaf.load(std::memory_order_acquire) ? t.fn : nullptr;
 }
 
 bool hle_is_thunk(uint64_t addr) {

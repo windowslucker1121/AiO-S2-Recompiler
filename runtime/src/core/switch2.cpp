@@ -9,11 +9,13 @@
 #include <cstring>
 
 #include "nxrt/abi.h"
+#include "nxrt/config.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/extras.h"
 #include "nxrt/game.h"
 #include "nxrt/log.h"
 #include "nxrt/module.h"
+#include "nxrt/services.h"
 #include "nxrt/services_api.h"
 #include "nxrt/video_codec.h"
 
@@ -80,8 +82,15 @@ void movie_initialize_unavailable(::Ctx* c) {
 // nn::nifm::HandleNetworkRequestErrorResult shows the network connection applet (library applet 0x0F) so the user can fix a failed
 // network request. Library applets do not exist here and the SDK aborts when creating one fails, so the call answers as if the user
 // backed out of the applet: a non-zero nn::Result (nifm, module 110), and the game carries on offline (title C: Time Trials).
+// With [applet] net_connect = prompt (the default) the player also gets a notice once per run, with a button to the Windows network
+// settings; the game does not wait for it. cancel / auto: only the log line.
 void nifm_handle_network_request_error(::Ctx* c) {
     NXLOG_I("switch2", "nn::nifm::HandleNetworkRequestErrorResult -> not resolved (no network applet): the game stays offline");
+    if (nxrt::config_get_str("applet", "net_connect", "prompt") == "prompt")
+        nxrt::services::appletui::notice("net_connect", nxrt::services::profile().name,
+                                         "The game asked for an internet connection. Online services are not available in this version, "
+                                         "so it continues offline.",
+                                         -1.0, "ms-settings:network-status");
     c->x[0] = (3400u << 9) | 110u;   // stand-in nifm error result
 }
 

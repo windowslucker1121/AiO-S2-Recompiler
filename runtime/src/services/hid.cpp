@@ -808,7 +808,21 @@ void setup_hid(ipc::Service& svc) {
         rsp.out_copy.push_back(h);
         return 0;
     });
-    ignore_cmd(svc, 107, "DisconnectNpad");
+    // DisconnectNpad(u32 npad id): player 1 (the keyboard and the pads it shares) stays; a pad the controller applet gave to player 2.. is
+    // taken back (it drives player 1 again), as the console's pad drops off. A game that wants fewer players disconnects the others.
+    svc.add_cmd(107, "DisconnectNpad", [](ipc::Request& req, ipc::Response&) -> uint32_t {
+        const uint32_t id = req.arg<uint32_t>(0);
+        if (id >= 1 && id < hid::kNpadPlayers) {
+            std::vector<uint32_t> pads = hid::player_pads();
+            if (id - 1 < pads.size() && pads[id - 1] != 0) {
+                pads[id - 1] = 0;
+                while (!pads.empty() && pads.back() == 0) pads.pop_back();
+                hid::set_player_pads(pads);
+                NXLOG_I("hid", "DisconnectNpad(%u): the pad of player %u goes back to player 1", id, id + 1);
+            }
+        }
+        return 0;
+    });
     svc.add_cmd(108, "GetPlayerLedPattern", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
         // Player LED patterns as Ryujinx's table (players 1..8); handheld and other have none.
         static constexpr uint64_t kLed[8] = {0b0001, 0b0011, 0b0111, 0b1111, 0b1001, 0b0101, 0b1101, 0b0110};

@@ -138,7 +138,7 @@ void instance_apply_config() {
     output("test", "out", "testout");
     output("prof", "sample_out", "prof_samples.folded");
     // Outputs that are off unless a path is given.
-    static const char* const kOff[][2] = {{"test", "shot_dir"}, {"test", "record"}, {"diag", "soak_csv"}, {"diag", "frame_csv"}, {"prof", "trace"}, {"time", "csv"},
+    static const char* const kOff[][2] = {{"test", "shot_dir"}, {"test", "record"}, {"diag", "soak_csv"}, {"diag", "frame_csv"}, {"prof", "trace"}, {"prof", "sample_raw"}, {"time", "csv"},
                                           {"audio", "wav_dump"}, {"nvn", "dump_missing"}, {"nvn", "dump_astc"}};
     for (const auto& k : kOff) output(k[0], k[1], nullptr);
     // Read and written back: the instance's own copies.
