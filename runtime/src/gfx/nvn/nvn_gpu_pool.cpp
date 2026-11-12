@@ -1044,6 +1044,7 @@ std::atomic<int64_t> g_st_hot_fill{0};   // hot pages copied into the copy for o
 std::atomic<int64_t> g_st_dev_binds{0}, g_st_host_binds{0}, g_st_copied{0}, g_st_hot{0}, g_st_live_bytes{0};
 // statistics for the summary line (render thread): binds by use (to the copy / to the pool / not eligible), pages made stale by GPU writes by use
 int64_t g_use_dev[3] = {}, g_use_host[3] = {}, g_use_skip[3] = {};
+uint64_t g_hot_skips = 0;   // hot_skip statistics (below)
 int64_t g_skip_why[5] = {};          // binds not eligible: outside a pool (or past its end), over 64 MiB, pool without a copy, two chunks, no chunk
 int64_t g_wr_pages[6] = {}, g_wr_calls[6] = {};
 int64_t g_fill_fail[3] = {};         // mirror_fill refused: banned pages, arming over budget or refused, not servable after the fill
@@ -1389,10 +1390,10 @@ void log_summary(uint32_t now) {
             (long long)g_use_dev[2], (long long)g_use_host[2], (long long)g_use_skip[2], (long long)g_wr_calls[0], (long long)g_wr_pages[0], (long long)g_wr_calls[1],
             (long long)g_wr_pages[1], (long long)g_wr_calls[2], (long long)g_wr_pages[2], (long long)g_wr_calls[3], (long long)g_wr_pages[3], (long long)g_wr_calls[4],
             (long long)g_wr_pages[4], (long long)g_wr_calls[5], (long long)g_wr_pages[5]);
-    NXLOG_I(kTag, "pool mirror binds not eligible: outside a pool %lld, over 64 MiB %lld, pool without a copy %lld, across two chunks %lld, no chunk %lld; "
+    NXLOG_I(kTag, "pool mirror binds not eligible: outside a pool %lld, over 64 MiB %lld, pool without a copy %lld, across two chunks %lld, no chunk %lld; kept-set page checks skipped for hot pages (hot_skip) %lld; "
             "fills refused: banned %lld, arming %lld (deferred arms %llu), not servable after %lld; "
             "pages newer in the copy but written by the CPU copied in %llu, current in the copy (this submission's results) %llu",
-            (long long)g_skip_why[0], (long long)g_skip_why[1], (long long)g_skip_why[2], (long long)g_skip_why[3], (long long)g_skip_why[4],
+            (long long)g_skip_why[0], (long long)g_skip_why[1], (long long)g_skip_why[2], (long long)g_skip_why[3], (long long)g_skip_why[4], (long long)g_hot_skips,
             (long long)g_fill_fail[0], (long long)g_fill_fail[1], (unsigned long long)g_st_arm_deferred.load(), (long long)g_fill_fail[2],
             (unsigned long long)g_st_refill_written.load(), (unsigned long long)g_st_pending_written.load());
     std::vector<const Mirror*> top(g_mirrors.begin(), g_mirrors.end());
@@ -1704,10 +1705,16 @@ void read_dep_prefetch(const ReadDep& d) {
     mem::ww::prefetch_valid(d.m->ww, d.first);
     if (static_cast<size_t>(d.first >> 6) < d.m->used.size()) _mm_prefetch(reinterpret_cast<const char*>(d.m->used.data() + (d.first >> 6)), _MM_HINT_T0);
 }
+bool hot_skip_on();   // below
 bool read_dep_check(const ReadDep& d, int use) {
     if (d.mirror_on != g_mirror_on) return false;
     if (d.state == 0) { g_use_skip[use % 3]++; return true; }
     Mirror& m = *d.m;
+    if (d.state == 2 && d.hot_till && !m.any_fresh && presents_now() < d.hot_till && hot_skip_on()) {   // hot_skip: still in the pool
+        ++g_hot_skips;
+        g_use_host[use % 3]++;
+        return true;
+    }
     const bool serve = range_valid(m, d.first, d.last - d.first + 1) || (out_lazy() && new_servable(m, d.first, d.last));
     if (serve != (d.state == 1)) return false;
     if (serve) {
@@ -1723,6 +1730,14 @@ bool read_dep_check(const ReadDep& d, int use) {
     return true;
 }
 
+// [nvn] hot_skip (default on; cpuperf_ab_what hot_skip): a range of hot pages (the CPU rewrites them every few frames: not copied, not armed,
+// never valid in the copy until their hold ends) resolves to the pool whatever else happens, except through pages mirror_fill copied in for
+// the current submission (fresh). A uniform block there records the end of the hold; its kept-set checks answer "pool" without the page
+// checks until then. ~70% of the village's uniform binds (per-object constants the game rewrites) went to the pool.
+bool hot_skip_on() {
+    const bool on = NX_CFG_BOOL("nvn", "hot_skip", true);
+    return on && ab_hot_skip_on();
+}
 BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* dep) {
     MemoryPool* mp = nullptr;
     PoolGpu* pg = nullptr;
@@ -1761,6 +1776,12 @@ BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* d
         return out;
     }
     d.state = 2;
+    if (hot_skip_on()) {   // the end of the hold of every page of the range (0: some page is not hot)
+        const uint32_t now = presents_now();
+        uint32_t till = UINT32_MAX;
+        for (uint64_t p = first; p <= last && till; ++p) till = m->hot_until[static_cast<size_t>(p)] > now ? std::min(till, m->hot_until[static_cast<size_t>(p)]) : 0;
+        d.hot_till = till == UINT32_MAX ? 0 : till;
+    }
     g_use_host[use % 3]++;
     bits_put(m->want, first, last, true);
     m->any_want = true;

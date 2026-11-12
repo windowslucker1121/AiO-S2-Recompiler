@@ -185,7 +185,7 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use);
 // 1: the copy; 2: the pool, but the copy could serve it once its pages are current. keep false: the decision depends on something the check
 // cannot see (no copy chunk yet): the set is not kept.
 struct Mirror;
-struct ReadDep { Mirror* m = nullptr; const void* pool = nullptr; uint64_t first = 0, last = 0; uint8_t state = 0; bool mirror_on = false; bool keep = true; };
+struct ReadDep { Mirror* m = nullptr; const void* pool = nullptr; uint64_t first = 0, last = 0; uint8_t state = 0; bool mirror_on = false; bool keep = true; uint32_t hot_till = 0; };
 BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* dep);
 // True when resolve_read would decide the same now (and then does what it would do besides: marks the pages used or wanted).
 bool read_dep_check(const ReadDep& dep, int use);
@@ -237,6 +237,7 @@ bool out_overlaps(uint64_t addr, uint64_t size);
 uint64_t out_version();
 void servable_cache_enable(bool on);   // cpuperf_ab (servable_cache)
 uint64_t out_grow_version();   // moves only when held results may cover more pages ([nvn] overlap_grow)
+bool ab_hot_skip_on();    // false in an off window of [nvn] cpuperf_ab with hot_skip
 bool ab_tex_share_on();  // false in an off window of [nvn] cpuperf_ab with tex_share
 bool ab_tex_park_on();   // false in an off window of [nvn] cpuperf_ab with tex_park
 bool ab_overlap_grow_on();   // false in an off window of [nvn] cpuperf_ab with overlap_grow
