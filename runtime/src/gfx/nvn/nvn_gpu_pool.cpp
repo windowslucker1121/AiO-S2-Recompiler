@@ -295,6 +295,22 @@ void unmap(uint64_t guest, uint64_t size, uint64_t dev) {
         }
     }
 }
+
+// Back end shutdown: the table's buffers belong to the device that is about to go. Without this the next back end in the same process
+// (the tests bring it up and down) kept g_buf.buffer / g_buf.mapped of a destroyed device, so its first pool import wrote the table through a
+// dangling mapping and a later destroy_chunk read through it (access violation on the importer or render thread, memory corruption otherwise).
+void reset() {
+    if (g_buf.buffer) device().destroy_buffer(g_buf);
+    for (gfx::Buffer& b : g_retired) if (b.buffer) device().destroy_buffer(b);
+    g_buf = gfx::Buffer();
+    g_retired.clear();
+    g_saved.clear();
+    g_bytes = g_used = g_dev = g_split = 0;
+    g_failed = false;
+    g_dev_pub.store(0, std::memory_order_release);
+    g_pages.store(0);
+    g_spans.store(0);
+}
 }  // namespace pt
 
 void address_table_add(uint64_t guest, uint64_t size, uint64_t dev) {
@@ -874,6 +890,12 @@ void pool_shutdown() {
         left.assign(g_live.begin(), g_live.end());
     }
     for (PoolGpu* p : left) pool_gpu_destroy(p);
+    {
+        std::lock_guard<std::mutex> lk(g_addr_mu);
+        g_addr_by_dev.clear();
+        pt::reset();
+        g_addr_gen.fetch_add(1);
+    }
     if (g_dummy_buf.buffer) buffer_views_forget(g_dummy_buf.buffer);
     if (g_dummy_buf.buffer) device().destroy_buffer(g_dummy_buf);
     g_dummy = VK_NULL_HANDLE;

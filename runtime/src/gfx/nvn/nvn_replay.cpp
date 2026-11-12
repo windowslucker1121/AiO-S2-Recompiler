@@ -2706,6 +2706,7 @@ void gmem_before_op(bool compute) {
                 if (!hit.pool || hit.pool->is_virtual || !hit.pool->base) continue;
                 if (out_overlaps(b.addr, b.size)) { compute_out_guard(b.addr, b.size, kOutGlobal); ++g_gmem_flushes; }
                 g_gw_site = 1; gpu_wrote(b.addr, b.size, kWriteStorage); g_gw_site = 0;
+                TRACE("    pointer write binding %llx/%llu W", static_cast<unsigned long long>(b.addr), static_cast<unsigned long long>(b.size));
             }
         }
         for (int k = 0; k < 16 && !full; ++k) {
@@ -2741,6 +2742,7 @@ void gmem_before_op(bool compute) {
                     if (out_overlaps(page, end - page)) { compute_out_guard(page, end - page, kOutGlobal); ++g_gmem_flushes; }
                     g_gw_site = 2; gpu_wrote(page, end - page, kWriteStorage); g_gw_site = 0;
                     ++g_gmem_windows;
+                    TRACE("    pointer write window %llx/%llu W", static_cast<unsigned long long>(page), static_cast<unsigned long long>(end - page));
                 }
             }
         }
@@ -5681,6 +5683,14 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             }
             TRACE("    %s ubo%u %llx/%llu%s +%u:%s", stg == kVertex ? "vs" : stg == kTask ? "ts" : stg == kMesh ? "ms" : "fs", slot, static_cast<unsigned long long>(ub.addr), static_cast<unsigned long long>(ub.size), ur.ok ? "" : " (outside every pool)", first, words.c_str());
         }
+        auto stage_writes = [](int stg) {   // G3 trace: whether a stage stores to any storage buffer (its storage slots then count as written)
+            const ShaderInfo* s = S.stage[stg];
+            if (!s) return false;
+            if (s->refl.global_writes) return true;
+            for (const DescriptorBinding& b : s->refl.bindings)
+                if (b.type == DescriptorType::StorageBuffer && storage_binding_writes(b, s)) return true;
+            return false;
+        };
         for (int stg : mesh ? std::initializer_list<int>{kTask, kMesh, kFragment} : std::initializer_list<int>{kVertex, kFragment})
         for (uint32_t slot = 0; slot < 16; ++slot) {    // the storage buffers bound to the vertex and the fragment stage, and their first words
             const GState::Bind& sb = S.ssbo[stg][slot];
@@ -5691,7 +5701,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
                 const uint32_t* w = reinterpret_cast<const uint32_t*>(sb.addr);
                 for (uint32_t i = 0; i < 64 && i * 4 < sb.size; ++i) { char t[16]; std::snprintf(t, sizeof t, " %08x", w[i]); words += t; }
             }
-            TRACE("    %s ssbo%u %llx/%llu%s:%s", stg == kVertex ? "vs" : stg == kTask ? "ts" : stg == kMesh ? "ms" : "fs", slot, static_cast<unsigned long long>(sb.addr), static_cast<unsigned long long>(sb.size), sr.ok ? "" : " (outside every pool)", words.c_str());
+            TRACE("    %s ssbo%u %llx/%llu%s%s:%s", stg == kVertex ? "vs" : stg == kTask ? "ts" : stg == kMesh ? "ms" : "fs", slot, static_cast<unsigned long long>(sb.addr), static_cast<unsigned long long>(sb.size), sr.ok ? "" : " (outside every pool)", stage_writes(stg) ? " W" : "", words.c_str());
         }
         TRACE("    viewport %u: %g %g %g %g depth %g..%g scissor %u: %d %d %d %d", S.nvp, S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0][0], S.dr[0][1], S.nsc,
               S.sc[0][0], S.sc[0][1], S.sc[0][2], S.sc[0][3]);
@@ -6790,6 +6800,8 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     const ShaderInfo* cs = S.stage[kCompute];
     TRACE("dispatch %u %u %u indirect %llx cs %s%s%s", x, y, z, static_cast<unsigned long long>(indirect), cs ? cs->hash.c_str() : "-",
           !cs && !g_cs_missing.empty() ? " missing " : "", !cs ? g_cs_missing.c_str() : "");
+    if (g_trace && cs && cs->refl.global_fallback)
+        TRACE("    cs pointers: %s", cs->refl.global_writes ? "reads and writes through pointers" : "reads through pointers");
     if (g_trace) {   // what the game bound for compute, by NVN slot (independent of how the shader finds it in c[0]): textures, images, storage
         char a[96];
         for (int k = 0; k < 64; ++k)
@@ -6858,8 +6870,9 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
                     const uint32_t* w = reinterpret_cast<const uint32_t*>(host_ptr(bd->addr));
                     for (uint32_t i = 0; i < 128 && i * 4 < bd->size; ++i) { char t[16]; std::snprintf(t, sizeof t, " %08x", w[i]); words += t; }
                 }
-                TRACE("    cs b%u %s src %d slot %d c0 %d addr %llx/%llu:%s", d.binding, b.name.c_str(), static_cast<int>(b.nvn.source), slot, b.nvn.c0_offset,
-                      bd ? static_cast<unsigned long long>(bd->addr) : 0ull, bd ? static_cast<unsigned long long>(bd->size) : 0ull, words.c_str());
+                TRACE("    cs b%u %s src %d slot %d c0 %d addr %llx/%llu%s:%s", d.binding, b.name.c_str(), static_cast<int>(b.nvn.source), slot, b.nvn.c0_offset,
+                      bd ? static_cast<unsigned long long>(bd->addr) : 0ull, bd ? static_cast<unsigned long long>(bd->size) : 0ull,
+                      ssbo && storage_binding_writes(b, cs) ? " W" : "", words.c_str());
             } else {
                 const bool img = d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE || d.type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
                 const TexResolved r = img ? resolve_image(d) : resolve_texture(d);
