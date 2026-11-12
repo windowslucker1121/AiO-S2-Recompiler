@@ -21,6 +21,7 @@
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 #include "nvn_cmd.h"
+#include "nvn_cfg.h"
 
 namespace nxrt::nvn::be {
 namespace {
@@ -135,7 +136,7 @@ Ref<CmdList> handle_lookup_table(uint64_t handle);
 // The render thread and the texture look-ahead look up thousands of handles per frame, each under g_mu shared (contended by the game
 // thread's registrations): a direct-mapped cache per thread. A cached list is the handle's list for as long as it is not dropped.
 Ref<CmdList> handle_lookup(uint64_t handle) {
-    static const bool cfg = config_get_bool("nvn", "handle_cache", true);
+    const bool cfg = NX_CFG_BOOL("nvn", "handle_cache", true);
     if (!cfg || !g_cache_on.load(std::memory_order_relaxed)) return handle_lookup_table(handle);
     struct Slot { uint64_t h = 0; Ref<CmdList> l; };
     // 16k slots: handles are issued 8 apart, and the lists a frame calls span tens of thousands of handles (1024 slots thrashed: the

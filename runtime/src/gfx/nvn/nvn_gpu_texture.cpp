@@ -36,6 +36,7 @@
 #include "nxrt/write_watch.h"
 #include "vk_gauges.h"
 #include "nvn_enums.h"
+#include "nvn_cfg.h"
 #include "nvn_format.h"
 #include "nvn_gpu_internal.h"
 #include "extras/hdr_nvn.h"
@@ -698,7 +699,7 @@ size_t park_max() {
     return n;
 }
 bool tex_park_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "tex_park", true);
+    const bool on = NX_CFG_BOOL("nvn", "tex_park", true);
     return on && ab_tex_park_on();
 }
 // Destroys parked images older than park_presents() (or the oldest over park_max()). Lock held.
@@ -787,7 +788,6 @@ bool tex_release_shared(TexGpu* g) {
     --g->refs;
     return true;
 }
-
 void parked_cpu_wrote(uint64_t lo, uint64_t hi) {
     std::lock_guard<std::mutex> lk(g_park_mu);
     for (Parked& p : g_parked)
@@ -834,7 +834,7 @@ __declspec(noinline) TexGpu* tex_or_null_make(Texture* t, float want_scale) {
     TexGpu* g = create_texture_gpu(t, want_scale);
     if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderTexCreate, nxrt::hitch_ticks() - tc0);
     {   // [nvn] tex_create_log = P (diagnosis): from present P on, one line per new image (at most 400): which textures make images in steady play
-        static const int64_t from = nxrt::config_get_int("nvn", "tex_create_log", 0);
+        const int64_t from = NX_CFG_INT("nvn", "tex_create_log", 0);
         static int logged = 0;
         if (from > 0 && static_cast<int64_t>(counters().presents.load(std::memory_order_relaxed)) >= from && logged < 400) {
             ++logged;
@@ -1449,7 +1449,7 @@ const bool g_arm_hitch_registered =
      nxrt::hitch_add_counter("tex_rewritten_before_arm", []() -> uint64_t { return g_arm_async_rewritten.load(std::memory_order_relaxed); }), true);
 
 bool tex_ww_async_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "tex_ww_async", true);
+    const bool on = NX_CFG_BOOL("nvn", "tex_ww_async", true);
     return on;
 }
 
@@ -1763,7 +1763,7 @@ bool gpu_untile(Texture* t, TexGpu& g, Frame& f) {
 }
 
 bool gpu_untile_impl(Texture* t, TexGpu& g, Frame& f, const char** why) {
-    static const bool on = nxrt::config_get_bool("nvn", "gpu_untile", true);
+    const bool on = NX_CFG_BOOL("nvn", "gpu_untile", true);
     if (!on) return *why = "off", false;
     if (!t->mem || t->vpool || t->levels != 1 || t->layers != 1 || t->storage_size < (64u << 10)) return *why = "storage, levels or layers", false;
     if (g.levels != 1 || g.layers != 1 || g.transcoded || !g.fmt || g.format != g.fmt->vk || !(g.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
@@ -1846,7 +1846,7 @@ void tex_ensure_current(Texture* t, Frame& f) {
     // armed again, and read from the pool once per present at its first use (a compute untile; the bytes the CPU wrote that frame, as a
     // console GPU sampling the memory would see them). [nvn] tex_stream = false: off.
     constexpr uint32_t kStreamGap = 4, kStreamAfter = 8;   // gap 4: title A rewrites its three in turn (every third present each)
-    static const bool stream_on = nxrt::config_get_bool("nvn", "tex_stream", true);
+    const bool stream_on = NX_CFG_BOOL("nvn", "tex_stream", true);
     const uint32_t now = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
     if (g->streamed) {
         if (g->streamed_at == now && g->uploaded) return;
@@ -1956,7 +1956,7 @@ void tex_ensure_current(Texture* t, Frame& f) {
     }
     be::tx_mark("tx.use", t);
     {
-        static const bool log_uploads = nxrt::config_get_bool("nvn", "tex_prep_log", false);      // [nvn] tex_prep_log = 1: one line per upload with where the data came from
+        const bool log_uploads = NX_CFG_BOOL("nvn", "tex_prep_log", false);      // [nvn] tex_prep_log = 1: one line per upload with where the data came from
         if (log_uploads)
             NXLOG_I(kTag, "upload t%u %s %ux%ux%u L%u storage %llu KB%s sched 0x%x gen %u: %s %.2f ms", t->id, t->fmt ? t->fmt->name : "?", t->b.width, t->b.height, t->b.depth, t->levels,
                     static_cast<unsigned long long>(t->storage_size >> 10), t->vpool ? " sparse" : "", static_cast<unsigned>(t->prep_sched.load()), static_cast<unsigned>(t->prep_gen.load()),
@@ -2266,7 +2266,7 @@ void tex_destroy(TexGpu* g) {
     if (!g) return;
     if (--g->refs > 0) return;   // another texture object over the same storage still uses the image
     {   // [nvn] tex_create_log (diagnosis): the images destroyed too
-        static const int64_t from = nxrt::config_get_int("nvn", "tex_create_log", 0);
+        const int64_t from = NX_CFG_INT("nvn", "tex_create_log", 0);
         static int logged = 0;
         if (from > 0 && static_cast<int64_t>(counters().presents.load(std::memory_order_relaxed)) >= from && logged < 400) {
             ++logged;
@@ -2316,6 +2316,10 @@ void tex_shutdown() {
     // must not keep a pointer to the image object that is about to be freed: texture_registry_find_alias would hand it to the next texture
     // made over the same memory, and that texture would use freed memory (a barrier on VK_NULL_HANDLE, or a crash).
     texture_registry_detach_gpu();
+    {   // parked and pending images are in the live set: destroyed below, not parked again (a later back end must not find them)
+        std::lock_guard<std::mutex> lk(g_park_mu);
+        g_parked.clear();
+    }
     for (TexGpu* g : left) { g->refs = 1; tex_destroy(g); }
     for (auto& kv : g_sh.samplers)
         for (auto& e : kv.second) { vkDestroySampler(vkdev(), e.second, nullptr); vk_gauge_samplers().sub(1); }

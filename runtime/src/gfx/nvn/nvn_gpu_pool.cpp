@@ -40,6 +40,7 @@
 #include "nxrt/write_watch.h"
 #include "vk_gauges.h"
 #include "nvn_gpu_internal.h"
+#include "nvn_cfg.h"
 #include "nvn_mirror_cap.h"
 #include "nvn_arch_exp.h"
 #include "nvn_capture.h"
@@ -447,7 +448,7 @@ PoolGpu* import_pool(MemoryPool* p) {
     }
     g->base = reinterpret_cast<uint8_t*>(start);
     g->size = size;
-    static const bool use_view = config_get_bool("nvn", "pool_view", true);      // [nvn] pool_view = 0: import the pool's own address (slow)
+    const bool use_view = NX_CFG_BOOL("nvn", "pool_view", true);      // [nvn] pool_view = 0: import the pool's own address (slow)
     g->viewed = use_view && mem::heap_exists() && start >= mem::kHeapBase && start + size <= mem::kHeapBase + mem::heap_reserved();
     if (chunked) {
         g->stride = stride;
@@ -535,7 +536,7 @@ bool g_pf_stop = false;
 std::atomic<uint64_t> g_pf_chunks_done{0}, g_pf_chunk_bytes{0};   // statistics: chunks the importer imported
 
 bool prefetch_chunks_on() {
-    static const bool on = config_get_bool("nvn", "pool_prefetch_chunks", true);
+    const bool on = NX_CFG_BOOL("nvn", "pool_prefetch_chunks", true);
     return on;
 }
 
@@ -628,7 +629,7 @@ void make_dummy() {
 }  // namespace
 
 void prefetch_pool(MemoryPool* p) {
-    static const bool enabled = config_get_bool("nvn", "pool_prefetch", true);   // [nvn] pool_prefetch = false: import on first use only
+    const bool enabled = NX_CFG_BOOL("nvn", "pool_prefetch", true);   // [nvn] pool_prefetch = false: import on first use only
     if (!enabled || !p || p->is_virtual || !p->base || !p->size || !active()) return;
     // a pool larger than one chunk is imported chunk by chunk: by the importer in its idle time ([nvn] pool_prefetch_chunks), or as the
     // render thread touches it (pool_chunk), never whole
@@ -975,7 +976,7 @@ constexpr uint32_t kHotWindow = 4;                                   // a write 
 // and a VirtualProtect, tens of microseconds) and a copy; hot, the page stays writable and draws read it from the pool, like data the console
 // streams, while geometry the game writes once stays in the device-local copy. It is tried again after the hold, like any hot page.
 bool hot_used_on() {
-    static const bool on = config_get_bool("nvn", "mirror_hot_used", true);
+    const bool on = NX_CFG_BOOL("nvn", "mirror_hot_used", true);
     return on;
 }
 
@@ -994,7 +995,7 @@ std::atomic<uint64_t> g_st_arm_deferred{0};
 std::atomic<uint64_t> g_st_chunk_bytes_made{0};   // video memory of the copy chunks made, ever (the hitch line: new chunks during a slow frame)
 
 int64_t arm_budget_ns() {
-    static const int64_t ns = std::max<int64_t>(0, config_get_int("nvn", "mirror_arm_ms", 3)) * 1000000;
+    const int64_t ns = NX_ONCE(int64_t, std::max<int64_t>(0, config_get_int("nvn", "mirror_arm_ms", 3)) * 1000000);
     return ns;
 }
 
@@ -1444,7 +1445,7 @@ int g_fc_on = -1;                                 // cpuperf_ab can switch it pe
 
 bool fc_mode() {
     // a capture replay rewrites the captured memory every loop without flushes: no flush copies there
-    static const bool on = config_get_bool("nvn", "flush_copy", !capture::replaying());
+    const bool on = NX_ONCE(bool, config_get_bool("nvn", "flush_copy", !capture::replaying()));
     return on;
 }
 bool fc_active() { return fc_mode() && g_fc_on != 0; }
@@ -1749,7 +1750,7 @@ bool out_pending_on_page(const Mirror* m, uint64_t page);   // below
 // readers fell from ~800 to ~150 MiB/s, but the results then stayed held longer, the CPU's reads of their first page waited for the GPU
 // (write-fault stalls 6 -> 20 per 160 s) and fps fell from ~34 to ~27.
 bool refill_written_on() {
-    static const bool on = config_get_bool("nvn", "mirror_refill_written", false);
+    const bool on = NX_CFG_BOOL("nvn", "mirror_refill_written", false);
     return on;
 }
 
@@ -2045,8 +2046,8 @@ std::atomic<uint64_t> g_out_lo{UINT64_MAX}, g_out_hi{0};   // address bounds of 
 std::condition_variable g_out_cv;       // an entry stopped fetching
 std::atomic<uint64_t> g_fetch_busy_waits{0}, g_fetch_overtaken{0};   // fetches that waited for another one; entries written again meanwhile
 bool fetch_unlocked_on() {
-    static const bool on = config_get_bool("nvn", "out_fetch_unlocked", true);
-    static const int64_t ab = config_get_int("nvn", "out_fetch_ab", 0);
+    const bool on = NX_CFG_BOOL("nvn", "out_fetch_unlocked", true);
+    const int64_t ab = NX_CFG_INT("nvn", "out_fetch_ab", 0);
     if (!on) return false;
     if (ab <= 0) return true;
     return ((counters().presents.load(std::memory_order_relaxed) / static_cast<uint64_t>(ab)) & 1) != 0;
@@ -2096,8 +2097,8 @@ bool spans_any(const Spans& v, uint64_t lo, uint64_t hi) {
     return it != v.end() && it->first < hi;
 }
 bool out_index_on() {
-    static const bool on = config_get_bool("nvn", "out_index", true);
-    static const int64_t ab = config_get_int("nvn", "out_index_ab", 0);
+    const bool on = NX_CFG_BOOL("nvn", "out_index", true);
+    const int64_t ab = NX_CFG_INT("nvn", "out_index_ab", 0);
     if (!on) return false;
     if (ab <= 0) return true;
     static int last = -1;
@@ -2254,7 +2255,7 @@ bool use_index() { return on_render_thread() && out_index_on(); }
 // instead of making the next query rebuild it from every entry (each dispatch adds results, and the next dispatch's storage checks rebuilt
 // the index: ~100 rebuilds per frame in village outside).
 bool index_inc_on() {
-    static const bool on = config_get_bool("nvn", "out_index_inc", true);
+    const bool on = NX_CFG_BOOL("nvn", "out_index_inc", true);
     return on && ab_index_inc_on();
 }
 void add_span(Spans& v, uint64_t lo, uint64_t hi) {   // merged like the rebuild: touching spans become one
@@ -2390,7 +2391,7 @@ struct PreSnap { uint64_t addr, size; };
 std::vector<PreSnap> g_presnap;                 // snapshots recorded for the dispatch being set up (g_out_mu held), taken by out_add
 
 bool delta_on() {
-    static const bool on = config_get_bool("nvn", "out_delta", true);
+    const bool on = NX_CFG_BOOL("nvn", "out_delta", true);
     return on && ab_out_delta_on();
 }
 uint64_t delta_cap() {
@@ -2626,7 +2627,7 @@ bool out_presnap(uint64_t addr, uint64_t size, VkBuffer mbuf, VkDeviceSize moff,
 }
 
 bool out_lazy() {
-    static const bool on = config_get_bool("nvn", "compute_out_lazy", true);
+    const bool on = NX_CFG_BOOL("nvn", "compute_out_lazy", true);
     return on;
 }
 
@@ -2738,7 +2739,7 @@ bool out_overlaps(uint64_t addr, uint64_t size) {
 // [nvn] overlap_grow (default on): the answers are kept per g_out_grow instead, which moves only when live results may cover more pages
 // (g_out_ver moves on every copy-back, split and fetch too: ~140 times per frame in village outside, and every move emptied the table).
 bool overlap_grow_on() {
-    static const bool on = config_get_bool("nvn", "overlap_grow", true);
+    const bool on = NX_CFG_BOOL("nvn", "overlap_grow", true);
     return on && ab_overlap_grow_on();
 }
 uint64_t g_win_hits = 0, g_win_asks = 0;   // render thread
@@ -2746,7 +2747,7 @@ uint64_t g_win_hits = 0, g_win_asks = 0;   // render thread
 std::atomic<bool> g_overlap_pos_ab{true};
 void overlap_pos_enable(bool on) { g_overlap_pos_ab.store(on, std::memory_order_relaxed); }
 bool overlap_pos_on() {
-    static const bool on = config_get_bool("nvn", "overlap_pos", true);
+    const bool on = NX_CFG_BOOL("nvn", "overlap_pos", true);
     return on && g_overlap_pos_ab.load(std::memory_order_relaxed);
 }
 bool out_overlaps_window(uint64_t page, uint64_t size) {
@@ -2779,7 +2780,7 @@ void srv_note_mirror_gone() { ++g_srv_mirror_gone; }
 uint64_t g_srv_hits = 0, g_srv_bad = 0, g_srv_raced = 0;
 bool out_servable_uncached(uint64_t addr, uint64_t size);
 int servable_cache_mode() {
-    static const int m = [] { const std::string v = config_get_str("nvn", "servable_cache", "on"); return v == "verify" ? 2 : (v == "off" || v == "0" || v == "false") ? 0 : 1; }();
+    const int m = NX_ONCE(int, [] { const std::string v = config_get_str("nvn", "servable_cache", "on"); return v == "verify" ? 2 : (v == "off" || v == "0" || v == "false") ? 0 : 1; }());
     return m;
 }
 void srv_log() {
@@ -2889,7 +2890,7 @@ uint64_t out_flush(VkCommandBuffer cb, uint64_t addr, uint64_t size, int why) {
 // never tracked) used to go back whole at the end of every submission. the game's big compute buffers (up to 16 MB) have such pages, and ~50 MB
 // per frame went back over PCIe. Now only those pages go back; the entry stays held and guarded for the others (OutEntry::partial).
 bool out_split_on() {
-    static const bool on = config_get_bool("nvn", "compute_out_split", true);
+    const bool on = NX_CFG_BOOL("nvn", "compute_out_split", true);
     return on;
 }
 
@@ -3050,7 +3051,7 @@ void out_retire() {
     out_ab_tick();
     // [nvn] out_cpu_read_reset_s = N (diagnostic, default 0: off): every N s the CPU-read marks are cleared, so the next CPU touch of each held
     // result faults again and shows up in the fetch lines (who reads, read or write, how long it waits). Costs fps while on.
-    static const int64_t reset_s = config_get_int("nvn", "out_cpu_read_reset_s", 0);
+    const int64_t reset_s = NX_CFG_INT("nvn", "out_cpu_read_reset_s", 0);
     if (reset_s > 0) {
         static auto last = std::chrono::steady_clock::now();
         const auto now = std::chrono::steady_clock::now();
@@ -3085,7 +3086,7 @@ void out_retire() {
 // the game invalidates four 4.4 MB GPU culling buffers whole every other frame (generic buffer code, lr main+0x3433cc) and reads little of them:
 // that alone sent ~350 MB/s back over PCIe. "guard": nothing; the guard faults of the pages the CPU touches do the work.
 bool out_invalidate_by_guard() {
-    static const bool on = config_get_str("nvn", "compute_out_invalidate", "guard") != "fetch";
+    const bool on = NX_ONCE(bool, config_get_str("nvn", "compute_out_invalidate", "guard") != "fetch");
     return on;
 }
 
