@@ -3018,7 +3018,8 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
             bool hold = out_lazy() && e.m && e.m->ww;
             // A result still held from an earlier submission is not split again (it goes back whole when the CPU has read some of it). Splitting
             // it too (2026-11-08: the game's eight GPU culling buffers, the CPU reads and clears only their first page) cut the end-of-submission
-            // copies from ~850 to ~150 MiB/s but took the first scene from ~31 to ~22 fps.
+            // copies from ~850 to ~150 MiB/s but took the first scene from ~31 to ~22 fps. Again 2026-11-12 (G3, village 1080, paired windows):
+            // main-submission GPU busy +0.49 ms, fps -2.4 (0 of 19 pairs better).
             if (hold && !e.guarded && e.last > e.first && out_split_on() && e.size >= out_split_min()) {
                 const int sp = out_split(i, serial, part_copies, part_bufs, rearm);
                 if (sp == 1) { g_on_deferred.fetch_add(1, std::memory_order_relaxed); continue; }   // held for its guarded pages

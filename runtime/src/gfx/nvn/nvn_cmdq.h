@@ -27,7 +27,11 @@ void apply_render_pin(bool on);       // [nvn] render_cpus under cpuperf_ab (ren
 void set_copy_image(bool on);       // [nvn] cmd_thread_copy_image under cpuperf_ab (copy_image_q): vkCmdCopyImage queued or drained
 void apply_render_priority(bool on);   // [nvn] render_priority: the calling (render) thread and the recorder; on false: NORMAL
 void set_publish_batch(bool on);       // [nvn] cmd_publish_batch under cpuperf_ab (cmd_batch)
-void set_desc(bool on);               // [nvn] cmd_thread_desc under cpuperf_ab (cmd_desc): descriptor set updates queued or made at once
+void set_desc(bool on);
+// [nvn] dispatch_trust (G3): the barrier after a dispatch owed, paid before the next call that a plain dispatch does not make
+bool owe_barrier(VkCommandBuffer cb);
+void owe_clear();   // memory_barrier: a full barrier pays it
+void owe_stats(uint64_t* owed, uint64_t* paid);               // [nvn] cmd_thread_desc under cpuperf_ab (cmd_desc): descriptor set updates queued or made at once
 void desc_stats(uint64_t* queued, uint64_t* direct);
 void drain();                        // render thread: waits until every queued call has been made
 void stats(uint64_t* packets, uint64_t* drains, uint64_t* direct, uint64_t* spins);

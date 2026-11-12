@@ -51,6 +51,11 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         public int AttrWords => Math.Max(1, (MaxVertices + 31) / 32 * Math.Max(1, Lines.Count) * 32);
         public int MapWords => 2 + (3 * MaxPrimitives + 3) / 4;
+        /// NXRT_HARNESS_MESH_MAP_BYTES=1 (G3, being measured; default off): the index map holds one u32 per byte, so the program's 8-bit index writes are
+        /// plain stores. Packed, each was an atomic read-modify-write of a shared word; in a mesh shader the driver keeps shared memory in
+        /// the stage's output buffer, which has no atomics, and made every index byte a MATCH.ANY loop.
+        public static readonly bool MapBytes = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_MAP_BYTES") == "1";
+        public int MapEntries => MapBytes ? MapWords * 4 : MapWords;
 
         /// From a block's code (SPH at 0) and NVN2 control section; null with `error` when the block uses something not handled.
         public static AmpereMeshInfo FromNvn2(byte[] code, byte[] ctrl, int nvnStage, out string error)
@@ -143,7 +148,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         internal static int AttrId(ResourceManager rm) => _cur.AttrId >= 0 ? _cur.AttrId
             : _cur.AttrId = rm.Properties.AddSharedMemory(new MemoryDefinition(AttrName, AggregateType.Array | AggregateType.U32, _cur.Info.AttrWords));
         internal static int MapId(ResourceManager rm) => _cur.MapId >= 0 ? _cur.MapId
-            : _cur.MapId = rm.Properties.AddSharedMemory(new MemoryDefinition(MapName, AggregateType.Array | AggregateType.U32, _cur.Info.MapWords));
+            : _cur.MapId = rm.Properties.AddSharedMemory(new MemoryDefinition(MapName, AggregateType.Array | AggregateType.U32, _cur.Info.MapEntries));
 
         /// Direct outputs: the dummy shared memory whose stores the back end turns into writes of output line k (index: the ISBE byte
         /// address of line 0 of the vertex), or into a decode at run time (OutDynId, index: the byte address).
@@ -261,6 +266,9 @@ namespace Ryujinx.Graphics.Shader.Translation
             ResourceManager rm = ctx.ResourceManager;
             if (s.SmoId < 0) s.SmoId = rm.Properties.AddSharedMemory(new MemoryDefinition(SmoName, AggregateType.Array | AggregateType.U32, 1));
             var count = ctx.Load(StorageKind.SharedMemory, MapId(rm), OperandHelper.Const(0));
+            if (AmpereMeshInfo.MapBytes)   // the word from its four byte entries
+                for (int k = 1; k < 4; k++)
+                    count = ctx.BitwiseOr(count, ctx.ShiftLeft(ctx.Load(StorageKind.SharedMemory, MapId(rm), OperandHelper.Const(k)), OperandHelper.Const(8 * k)));
             ctx.Store(StorageKind.SharedMemory, s.SmoId, OperandHelper.Const(0), count);
             s.EarlyOk = true;
         }
@@ -529,6 +537,9 @@ namespace Ryujinx.Graphics.Shader.Translation
             SpvInstruction attr = s.AttrId >= 0 && ctx.SharedMemories.TryGetValue(s.AttrId, out SpvInstruction a) ? a : null;            SpvInstruction map = s.MapId >= 0 && ctx.SharedMemories.TryGetValue(s.MapId, out SpvInstruction mp) ? mp : null;
             SpvInstruction boolT = ctx.TypeBool();
             SpvInstruction count = map == null ? C(0) : ctx.Load(u32, ctx.AccessChain(ptrWg, map, C(0)));
+            if (map != null && AmpereMeshInfo.MapBytes)
+                for (int k = 1; k < 4; k++)
+                    count = ctx.BitwiseOr(u32, count, ctx.ShiftLeftLogical(u32, ctx.Load(u32, ctx.AccessChain(ptrWg, map, C(k))), C(8 * k)));
             count = ctx.Select(u32, ctx.ULessThan(boolT, count, C(m.MaxPrimitives)), count, C(m.MaxPrimitives));
             // measurement only (F2): NXRT_HARNESS_MESH_EXP=noprims: every mesh work group runs as before but outputs no primitive (a count
             // the compiler cannot fold: 0 unless the program wrote 0xdeadbeef), so the time left is the shader's own
@@ -578,9 +589,14 @@ namespace Ryujinx.Graphics.Shader.Translation
                 SpvInstruction Byte(SpvInstruction b)
                 {
                     if (map == null) return C(0);
-                    SpvInstruction word = ctx.Load(u32, ctx.AccessChain(ptrWg, map, ctx.ShiftRightLogical(u32, b, C(2))));
-                    SpvInstruction sh = ctx.ShiftLeftLogical(u32, ctx.BitwiseAnd(u32, b, C(3)), C(3));
-                    SpvInstruction idx = ctx.BitwiseAnd(u32, ctx.ShiftRightLogical(u32, word, sh), C(0xff));
+                    SpvInstruction idx;
+                    if (AmpereMeshInfo.MapBytes) idx = ctx.Load(u32, ctx.AccessChain(ptrWg, map, b));
+                    else
+                    {
+                        SpvInstruction word = ctx.Load(u32, ctx.AccessChain(ptrWg, map, ctx.ShiftRightLogical(u32, b, C(2))));
+                        SpvInstruction sh = ctx.ShiftLeftLogical(u32, ctx.BitwiseAnd(u32, b, C(3)), C(3));
+                        idx = ctx.BitwiseAnd(u32, ctx.ShiftRightLogical(u32, word, sh), C(0xff));
+                    }
                     // an index past the vertices would be undefined: clamp
                     SpvInstruction keep = ctx.ULessThan(boolT, idx, C(m.MaxVertices));
                     // direct outputs: the primitives past the real count are degenerate (0, 0, 0): no area, nothing rasterized

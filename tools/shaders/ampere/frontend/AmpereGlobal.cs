@@ -41,6 +41,14 @@ namespace Ryujinx.Graphics.Shader.Translation
         [ThreadStatic] static BasicBlock _mainEntry;
         [ThreadStatic] static int _cacheId;
         [ThreadStatic] static bool _compute;
+        // Task and mesh blocks are translated as compute work groups (Program.cs: their stage is Compute), so _compute is true for them
+        // too. They keep compute's page-cache form (CacheAloneDecides, EmitSpanClip), but their slot mask is the graphics stage's word (the
+        // runtime's graphics_c0 writes task 6 / mesh 7; word 0 of a graphics c[0] is a driver constant) and they keep F1's vector loads
+        // (C1's compute-only switch had turned them off for every mesh block: 66 LDG.128 of the fern mesh became 264 32-bit loads).
+        [ThreadStatic] static bool _meshLike;
+        /// NXRT_HARNESS_GMEM_MESH_FIX=0: task/mesh blocks as before 2026-11-12 (compute's mask word 0, per-word loads).
+        static readonly bool MeshFix = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_MESH_FIX") != "0";
+        static bool TrueCompute => _compute && !(_meshLike && MeshFix);
 
         // Which bound storage descriptors the access checks before the page table (c[0] SlotMaskC0 + 4 * index, written by the runtime per
         // draw or dispatch: nvn_replay.cpp gmem_slot_masks): bit k = candidate k. The runtime sets the slots whose binding is not the pool
@@ -49,15 +57,16 @@ namespace Ryujinx.Graphics.Shader.Translation
         // cost more than the walk (the game's fern mesh draw: 2.4 ms with the search for every word). Index: compute 0, a graphics stage its
         // descriptors' c[0] base >> 8 (vertex 1 ... fragment 5, task 6, mesh 7).
         public const int SlotMaskC0 = 0xfc0;
-        static int SlotMaskWord(int[] w) => (SlotMaskC0 + 4 * (_compute ? 0 : ((w[0] * 4) >> 8) & 7)) / 4;
+        static int SlotMaskWord(int[] w) => (SlotMaskC0 + 4 * (TrueCompute ? 0 : ((w[0] * 4) >> 8) & 7)) / 4;
 
         /// c[0] word offsets of the storage descriptors to check (null or empty: the access is dropped as before). Resets the flags.
         public static void Begin(int[] candidateWords) => Begin(candidateWords, false);
 
-        public static void Begin(int[] candidateWords, bool compute)
+        public static void Begin(int[] candidateWords, bool compute, bool meshLike = false)
         {
             _candidates = candidateWords;
             _compute = compute;
+            _meshLike = meshLike;
             _used = false;
             _usedDeviceAddress = false;
             _usedWrite = false;
@@ -459,7 +468,11 @@ namespace Ryujinx.Graphics.Shader.Translation
         /// NXRT_HARNESS_GMEM_SELECT=1 (experiment, F2): the load sits outside control flow. Only the helper call is conditional (a miss);
         /// after it the address is selected (the cached span, the span the walk returned, else the page table's own address as a harmless
         /// stand-in, extra fast arguments 2/3) and the value too (the loaded word, else what the helper returned).
-        internal static readonly bool SelectLoads = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_SELECT") == "1";
+        /// NXRT_HARNESS_GMEM_UMISS=1 (experiment, G3; implies SELECT's form): the miss branch is taken by the whole subgroup when any lane
+        /// missed (OpGroupNonUniformAny), so it is uniform: lanes that hit call the helper too and keep their own span. In the driver's code
+        /// every divergent miss diamond cost a reconvergence pair, a WARPSYNC and a VOTE around its call, on the hit path as well.
+        internal static readonly bool UniformMiss = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_UMISS") is "1" or "2";
+        internal static readonly bool SelectLoads = Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_SELECT") == "1" || UniformMiss;
         public static readonly int FastArguments = SelectLoads ? 4 : 2;   // after SelectLoads (static initializers run in text order)
         [ThreadStatic] static bool _lastFallback;
         [ThreadStatic] static int _helperInArgs;
@@ -617,7 +630,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             SpvInstruction slots = ctx.Get(AggregateType.U32, operation.GetSource(3));
             int tag = operation.SourcesCount > 4 ? ConstantOf(operation.GetSource(4)) : 0;
             int vGroup = tag / 64, vCount = tag / 8 % 8, vWord = tag % 8;
-            if (ctx.Definitions.Stage == ShaderStage.Compute && !ComputeVector) vGroup = 0;   // compute: per-word loads unless enabled (C1)
+            if (ctx.Definitions.Stage == ShaderStage.Compute && TrueCompute && !ComputeVector) vGroup = 0;   // compute: per-word loads unless enabled (C1); task/mesh keep vectors
             // the scalar fast path: the page cache test, the load through it, else the helper (vector: word 0 loads them all)
             (SpvInstruction, SpvInstruction) Regular(bool vectorHead)
             {
@@ -712,12 +725,15 @@ namespace Ryujinx.Graphics.Shader.Translation
                 SpvInstruction[] w = new SpvInstruction[CacheWords];
                 for (int i = 0; i < CacheWords; i++) w[i] = ctx.Load(u32, ctx.AccessChain(pw, cacheVar, C((uint)i)));
                 SpvInstruction hit = ctx.LogicalAnd(bt, ctx.LogicalAnd(bt, ctx.IEqual(bt, ctx.BitwiseAnd(u32, aLo, ctx.Not(u32, w[2])), w[0]), ctx.IEqual(bt, aHi, w[1])),
-                                                    ctx.IEqual(bt, slots, C(0)));
+                                                    CacheAloneDecides(ctx) ? ctx.ConstantTrue(bt) : ctx.IEqual(bt, slots, C(0)));
                 SpvInstruction lEntry = ctx.Label(), lSlow = ctx.Label(), lMerge = ctx.Label();
                 ctx.Branch(lEntry);
                 ctx.AddLabel(lEntry);
                 ctx.SelectionMerge(lMerge, SelectionControlMask.MaskNone);
-                ctx.BranchConditional(hit, lMerge, lSlow);
+                if (UniformMiss)   // the whole subgroup takes the miss path when any lane missed: a branch the driver need not reconverge
+                    ctx.BranchConditional(AnyLane(ctx, ctx.LogicalNot(bt, hit)), lSlow, lMerge);
+                else
+                    ctx.BranchConditional(hit, lMerge, lSlow);
                 ctx.AddLabel(lSlow);
                 SpvInstruction r = ctx.FunctionCall(HelperReturnType(ctx, function), spvFunc, vals);
                 SpvInstruction slowValue = ctx.CompositeExtract(retType, r, (Spv.Generator.LiteralInteger)0);
@@ -726,6 +742,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 {
                     SpvInstruction word = ctx.CompositeExtract(ctx.GetType(function.OutArguments[i]), r, (Spv.Generator.LiteralInteger)(1 + i));
                     s[i] = ctx.BitcastIfNeeded(AggregateType.U32, function.OutArguments[i], word);
+                    if (UniformMiss && Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_UMISS_KEEP") != "0") s[i] = ctx.Select(u32, hit, w[i], s[i]);   // lanes that hit keep their span
                     ctx.Store(ctx.AccessChain(pw, cacheVar, C((uint)i)), s[i]);
                 }
                 ctx.Branch(lMerge);
@@ -762,7 +779,8 @@ namespace Ryujinx.Graphics.Shader.Translation
                 ctx.Branch(lEntry);
                 ctx.AddLabel(lEntry);
                 ctx.SelectionMerge(lEnd, SelectionControlMask.MaskNone);
-                ctx.BranchConditional(sdone.Hit, lEnd, lReg);
+                if (UniformMiss && Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_UMISS_WORDS") != "0") ctx.BranchConditional(AnyLane(ctx, ctx.LogicalNot(ctx.TypeBool(), sdone.Hit)), lReg, lEnd);
+                else ctx.BranchConditional(sdone.Hit, lEnd, lReg);
                 ctx.AddLabel(lReg);
                 SpvInstruction rc = ctx.FunctionCall(HelperReturnType(ctx, function), spvFunc, vals);
                 SpvInstruction regValue = ctx.CompositeExtract(retType, rc, (Spv.Generator.LiteralInteger)0);
@@ -799,6 +817,16 @@ namespace Ryujinx.Graphics.Shader.Translation
             (result, _) = Regular(vGroup != 0 && vWord == 0 && vCount is 2 or 4);
             return true;
         }
+        /// Whether any lane of the subgroup has `p` (UniformMiss): OpGroupNonUniformAny crashed the 610.88 compiler in this position, so a
+        /// ballot (NXRT_HARNESS_GMEM_UMISS=2: OpGroupNonUniformAny).
+        static SpvInstruction AnyLane(CodeGenContext ctx, SpvInstruction p)
+        {
+            SpvInstruction bt = ctx.TypeBool(), u32 = ctx.TypeU32();
+            if (Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_UMISS") == "2") return ctx.GroupNonUniformAny(bt, ctx.Constant(u32, 3u), p);
+            SpvInstruction b = ctx.GroupNonUniformBallot(ctx.TypeVector(u32, 4), ctx.Constant(u32, 3u), p);
+            SpvInstruction any = ctx.BitwiseOr(u32, ctx.CompositeExtract(u32, b, (Spv.Generator.LiteralInteger)0), ctx.CompositeExtract(u32, b, (Spv.Generator.LiteralInteger)1));
+            return ctx.INotEqual(bt, any, ctx.Constant(u32, 0u));
+        }
         /// The constant an AST source holds: a constant, or a local whose single assignment is one (call arguments stay locals,
         /// spirv-call-args.patch); 0 otherwise.
         static int ConstantOf(IAstNode node)
@@ -819,7 +847,11 @@ namespace Ryujinx.Graphics.Shader.Translation
         internal static FunctionControlMask FunctionControl(StructuredFunction function) =>
             Environment.GetEnvironmentVariable("NXRT_HARNESS_GMEM_FORCEINLINE") == "1" ? FunctionControlMask.Inline :
             NoInline && function.Name != null && (function.Name.EndsWith(HelperSuffix, StringComparison.Ordinal) || function.Name.EndsWith(FastSuffix, StringComparison.Ordinal))
-                ? FunctionControlMask.DontInline : FunctionControlMask.MaskNone;
+                ? FunctionControlMask.DontInline : InlineSmallHelpers ? FunctionControlMask.Inline : FunctionControlMask.MaskNone;
+        /// NXRT_HARNESS_INLINE_HELPERS=1 (experiment): the translator's other helper functions (shuffles, shared-memory byte stores, ...) are
+        /// marked Inline. The driver left Ryujinx's Shuffle helper out of line (a call per SHFL, with its convergence code), so the constant
+        /// segment masks of the call sites were never folded.
+        static readonly bool InlineSmallHelpers = Environment.GetEnvironmentVariable("NXRT_HARNESS_INLINE_HELPERS") == "1";
 
         // ---- SPIR-V back end -------------------------------------------------------------------------------------------------------------
 

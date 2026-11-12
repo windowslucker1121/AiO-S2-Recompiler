@@ -85,6 +85,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
             // The map: the primitive count (a 32-bit write at byte 3, i.e. word 0) and the triangles' 8-bit vertex indices from byte 4.
             int map = AmpereMesh.MapId(rm);
+            if (AmpereMeshInfo.MapBytes)
+            {
+                // one u32 entry per byte: plain stores of the bytes
+                int last = prog.Mesh.MapWords * 4 - 1;
+                if (w32)
+                {
+                    IrOperand w4 = ctx.ShiftLeft(WordIndex(ctx, mem, prog.Mesh.MapWords), Const(2));
+                    for (int k = 0; k < 4; k++)
+                        ctx.Store(StorageKind.SharedMemory, map, ctx.IAdd(w4, Const(k)), ctx.BitwiseAnd(ctx.ShiftRightU32(value, Const(8 * k)), Const(0xff)));
+                    return;
+                }
+                IrOperand at = MemAddress(ctx, mem);
+                for (int k = 0; k < (w16 ? 2 : 1); k++)
+                    ctx.Store(StorageKind.SharedMemory, map, ctx.IMinimumU32(k == 0 ? at : ctx.IAdd(at, Const(k)), Const(last)),
+                              ctx.BitwiseAnd(k == 0 ? value : ctx.ShiftRightU32(value, Const(8 * k)), Const(0xff)));
+                return;
+            }
             if (w32) { ctx.Store(StorageKind.SharedMemory, map, WordIndex(ctx, mem, prog.Mesh.MapWords), value); return; }
             IrOperand b = ctx.IMinimumU32(MemAddress(ctx, mem), Const(prog.Mesh.MapWords * 4 - 1));
             ctx.Store(w16 ? StorageKind.SharedMemory16 : StorageKind.SharedMemory8, map, b, value);
