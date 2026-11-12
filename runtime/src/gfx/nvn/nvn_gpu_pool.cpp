@@ -2534,6 +2534,16 @@ bool delta_on() {
     const bool on = NX_CFG_BOOL("nvn", "out_delta", true);
     return on && ab_out_delta_on();
 }
+// [nvn] out_delta_redispatch = partial (default) | whole | keep: a held result that another dispatch writes again while it is still held keeps the
+// snapshot of its first dispatch. Between the two, parts of the pool can change under it (a partial copy-back, the CPU's writes that a refill
+// put into the copy), and units the later dispatch sets back to their snapshot value were then never written to the pool: the pool kept what
+// it held in between. In the intro that showed as single frames without the volumetric fog (A19), every few frames while the presenting
+// thread was slow (flash watch, run flash11 vs flash13: 36 flashes in 6 windows -> 0). partial: a result re-dispatched after a partial copy-back
+// goes back whole; whole: every result re-dispatched while held; keep: the old behaviour.
+bool delta_redispatch_unsnap(bool partial) {
+    static const std::string v = config_get_str("nvn", "out_delta_redispatch", "partial");
+    return v == "partial" ? partial : v != "keep";
+}
 uint64_t delta_cap() {
     static const uint64_t b = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "out_delta_mb", 512))) << 20;
     return b;
@@ -2794,6 +2804,7 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
             const bool was_live = live(e), was_pending = e.pending;
             const bool snap = presnap_take(addr, size);
             if (!live(e)) e.snapped = snap;         // sent back already: the copy was the pool again when the new snapshot was taken
+            else if (delta_redispatch_unsnap(e.partial)) e.snapped = false;   // see delta_redispatch_unsnap
             if (!e.pending) out_changed();          // live and pending again
             if (e.flushed && !e.pending) g_out_grow.fetch_add(1, std::memory_order_acq_rel);   // was not live: its pages are live again
             ++e.gen;                                // a newer result than one a fetch may be copying back

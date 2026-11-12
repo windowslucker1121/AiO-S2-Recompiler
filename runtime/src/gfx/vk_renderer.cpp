@@ -824,6 +824,14 @@ void Renderer::end_frame() {
             if (!s.cap_path.empty()) g_png_writes.fetch_sub(1);
         }
     }
+    {   // [gfx] exp_present_delay_us (measurement only, default 0): the presenting thread spins this long per frame (reproduces timing
+        // that only shows when the present path is slow)
+        static const int64_t delay_us = config_get_int("gfx", "exp_present_delay_us", 0);
+        if (delay_us > 0) {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_us);
+            while (std::chrono::steady_clock::now() < until) {}
+        }
+    }
     // [gfx] flash_watch: take the slot's previous picture (its fence was waited in begin_frame), then copy this one
     static const double flash_th = config_get_double("gfx", "flash_watch", 0.0);
     bool flash_copy = false;
