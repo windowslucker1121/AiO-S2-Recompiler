@@ -11,7 +11,7 @@ struct InitOptions {
     const char* log_path = nullptr;     // nullptr: [log] path / NXRT_LOG, else "nxrt.log"
     bool crash_handler = true;          // install the HOST EXCEPTION reporter
     bool watchdog = true;               // start the freeze watchdog ([diag] watchdog_seconds, default 10, < 0 disables)
-    bool memguard = true;               // start the memory guard ([memory] limit_gb, default 16 / 8, auto = the physical memory; nxrt/memguard.h)
+    bool memguard = true;               // start the memory guard ([memory] limit_gb, default auto = the physical memory; nxrt/memguard.h)
     bool memory_init = true;            // reserve the stack and kernel regions
     bool load_symbols = true;           // load the linker map next to the exe
     bool services = true;               // register the Horizon system services (services.h) in the ipc registry

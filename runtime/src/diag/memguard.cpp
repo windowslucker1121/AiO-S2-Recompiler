@@ -333,8 +333,7 @@ void memguard_start(const MemGuardOptions& opt) {
     if (opt.limit_bytes) {
         s.limit = opt.limit_bytes;
     } else {
-        // WIP: the old fixed default stays until the auto limit is verified in game; limit_gb = auto opts in.
-        const double gb = memguard_limit_gb(config_get_str("memory", "limit_gb", game::info().platform == game::Platform::Switch2 ? "16" : "8").c_str());
+        const double gb = memguard_limit_gb(config_get_str("memory", "limit_gb", "auto").c_str());
         if (gb > 0.0) {
             s.limit = gb_to_bytes(gb);
         } else {
@@ -349,9 +348,8 @@ void memguard_start(const MemGuardOptions& opt) {
     if (opt.grace_ms >= 0) {
         s.grace_ms = static_cast<uint32_t>(opt.grace_ms);
     } else {
-        // WIP: 0 (stop at once, the old behaviour) until the grace time is verified in game
-        const double g = config_get_double("memory", "grace_s", 0.0);
-        s.grace_ms = static_cast<uint32_t>(std::clamp(std::isfinite(g) ? g : 0.0, 0.0, 3600.0) * 1000.0);
+        const double g = config_get_double("memory", "grace_s", 10.0);
+        s.grace_ms = static_cast<uint32_t>(std::clamp(std::isfinite(g) ? g : 10.0, 0.0, 3600.0) * 1000.0);
     }
     s.on_exceed = opt.on_exceed;
     s.user = opt.user;
