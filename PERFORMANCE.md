@@ -3,7 +3,7 @@
 Living document for the frame-rate work. Detailed per-session notes, with every key, measurement and pitfall, stay in
 `AGENTS.md` ("Performance work" and the "Session 2026-11-xx" paragraphs). Config keys are in `runtime/docs/CONFIG.md`.
 This file is the overview: where we are, how we measure, what paid, what did not, and what is next.
-Last update: 2026-11-12, branch `perf/render-thread` (R8).
+Last update: 2026-11-12, branch `perf/render-r3` (R3).
 
 ## Goal and constraints (from the user)
 
@@ -16,6 +16,15 @@ Last update: 2026-11-12, branch `perf/render-thread` (R8).
   area-load frame work.
 
 ## Where we are (2026-11-12, RTX 4080, Ryzen 7 5800X3D, 1920x1080, uncapped)
+
+**2026-11-12 (R3, render thread): village ~74 -> ~82.6 fps, 1% low ~55 -> ~60, frames over 15 ms 5.9% -> 1.5% (no frame trace, no
+sampler; `perf/render-r3`).** The big step was not a cut but a placement: the render thread and the recorder thread pinned to two separate
+physical cores (`[nvn] render_cpus = auto`). Unpinned, Windows let them share a core (SMT siblings) or migrate; the hazard tracker's
+recorder work then slowed the render thread (that was its whole "render-thread cost": the sampler showed no extra render-thread self time).
+Pinned, the hazard tracker (`[nvn] hazard`, now on by default) gives its GPU gain: hazard on vs off under pinning fps +6.2 (24/24), 1% low
++5.1, median frame -1.25 ms; pinning with hazard on +6.8 / +7.1 fps (24/24 twice). Smaller render-thread cuts on the way (paired, replay ms
+per frame): r3a -0.45, dset_recycle -0.34, copy/clear queue -0.34, occ_mark_late -0.10. With pinning and no hazard the render thread has
+~1-2.7 ms idle per frame: the village is GPU-bound again (~12 ms of GPU per frame).
 
 **2026-11-12 (R8, render thread): village 56 -> ~68 fps, 1% low ~34 -> ~47-49, render replay ~17.4 -> ~13 ms per frame (no PGO), frames
 over 20 ms < 1%. The village frame is now GPU-bound** (GPU submissions cover 98.6% of wall time, GPU span sum ~14.5 ms per frame = the
@@ -61,7 +70,11 @@ per frame < 10 ms; the CPU chain cannot shorten it.
   - Critical path of the main thread's waits: frame trace events `q.sub`, `replay.s`, `sync.w`, `gpu.raw` (serial in the arg; raw GPU
     timestamps mapped onto the CPU clock through the waits' ends).
 - **Feature switches:** `AbFeat` in `nvn_replay.cpp` is a uint64 bit set. All 64 bits are used (59-62 R8: handle_big, chunk_async,
-  pds_q, fb_image; 63 pt_copy). Free bits by retiring dead experiments first.
+  pds_q, fb_image; 63 pt_copy). Free bits by retiring dead experiments first. R3 took the bits of chunk_time, keep_writes, cmd_copies,
+  cs_gmem_flush, vrs, sig_tex and alloc_batch (those keys still work, just without paired windows) for `dset_recycle`, `render_pin`,
+  `occ_mark_late`, `copy_image_q`, `tex_keyed`, `submit_async` and `r3a`.
+- **Since R3 the render thread and the recorder are pinned (`render_cpus = auto`) and `hazard` is on by default.** A run that should
+  compare against older numbers sets `nvn.render_cpus: "off"` and `nvn.hazard: "off"`.
 - **Real-clock GPU breakdowns:** these are measurement-only skip words in `[nvn] skip_fs_file`, and live edits take effect:
   - `c:<prefix>` leaves out dispatches of that compute shader;
   - `bar` / `bar:<line>` drops full barriers;
@@ -146,6 +159,12 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | R8 (shader side) | direct mesh outputs + real primitive count (`NXRT_HARNESS_MESH_DIRECT` / `MESH_EARLY_COUNT`) on by default; the shared cache's 785 mesh/task blocks re-translated (backup `work/shaders/mesh_backup_r8`). **The main checkout's harness must be rebuilt from the merged branch before any later re-translation**, or the mesh blocks revert | alternating private caches: 69.0 / 69.0 vs 66.7 / 66.6 fps, GPU -0.4..-0.5 ms; shared cache in game 69.2 fps, frames over 15 ms 45% -> 24% |
 | gpu-time | `indirect_from_held`: indirect arguments inside one held result read from its copy (no whole 6.5 MB copy-back per indirect dispatch) | culling submission 3.31 → 3.08 ms (stamped), main submission and mesh invocations unchanged |
 | gpu-time | `pt_copy` measured again without the frame trace, hazard off (the fps verdict) | **fps +2.7 median (25/25), 1% low +4.7 (24/25)** |
+| R3 | `render_cpus = auto`: render and recorder threads pinned to two physical cores (second and third of the fastest) | hazard on: **fps +6.8 / +7.1 (24/24 twice)**, replay -1.5 / -1.9 ms; hazard off: replay -1.26 ms (27/34) |
+| R3 | `hazard` on by default (B1's tracker on the recorder; its submission start now reaches the recorder through the ring instead of a drain) | under pinning: **fps +6.2 (24/24), 1% low +5.1**, median frame -1.25 ms; village no-AB run 82.6 fps, 1% low 60.3, 1.5% of frames over 15 ms |
+| R3 | `r3a`: texture-only resolves without copying `TexResolved` (~150 bytes, up to 6 copies per binding), chunk check fast path, gmem pointer table without a 4 KiB clear per op, 4 recent pools in `physical_buffer_address` | replay -0.45 ms (22/25), fps +1.6 |
+| R3 | `dset_recycle`: descriptor sets of a frame slot go back to per-layout lists when its submission completed (no `vkAllocateDescriptorSets` for ~800 sets per frame) | replay -0.34 ms (22/25), 1% low +1.45 |
+| R3 | `cmd_thread_copy_image`: `vkCmdCopyImage` and image clears queued for the recorder (~11 drains per frame fewer) | replay -0.34 ms (17/22), fps +0.5 |
+| R3 | `occ_mark_late`: samples-passed reports' GPU writes noted at the flush; per-set binding index lists (`ProgLayout::set_idx`) | replay -0.10 ms (17/23); index lists not paired (always on) |
 
 Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
 - F1's set: 3,419 gpt corpus blocks plus 12 runtime blocks; backup `gpt_backup_v9`.
@@ -224,7 +243,24 @@ Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
   - `gmem_scan_memo` (skip pointer-shader uniform scans when nothing changed): neutral (8/26), removed.
   - pt_copy that split 2 MiB leaves into page leaves: HiZ a17259b2 0.24 → 0.48 ms (a walk per 4 KiB page); now spans stay whole.
 
+- **R3 (2026-11-12), village paired windows, no frame trace:**
+  - `submit_async` (the end of each submission queued for the recorder) + `cmd_nodrain_begin`: replay -0.31 ms (22/24, 22/23) but fps
+    +0.4 / +0.0 and 1% low -0.8 / -2.5: built, off.
+  - `cmd_prefetch` (software prefetch of the command records): replay +0.10 ms (9/23), removed.
+  - `keep_tex_keyed` (first-sighting texture sets looked up by image): replay +0.45 ms (4/27); only 10% found although `r3_diag` saw 96%
+    of them by image in an earlier present (most such sets are not keepable: feedback / scaled-scene bindings). Built, off.
+  - Profile notes: the render thread is flat (run_list's own loop ~11%, begin_draw ~5.6%, keep machinery ~8%, texture resolution ~7%,
+    no function over ~3% else). Set statistics per frame (`graphics sets by index`): set 0 (uniform blocks) ~1,750 kept-set checks and
+    almost no memo hits (per-object constant addresses repeat across frames, not within one); set 2 (textures) ~370 first sightings.
+
 ## What is open, by expected gain
+
+**After R3:** the village at ~82 fps is GPU-bound with hazard and pinning (render thread idle ~0.8 ms per frame with hazard on). For 100 fps
+the GPU must lose ~2 ms per frame (G3's work) and the render thread ~1.5 ms (replay ~11.3 ms with hazard on). Render-thread leads left:
+the per-object uniform sets (set 0: ~1,750 kept-set checks per frame, mostly cache misses on the kept-set table and its dependencies),
+first-sighting texture sets (~370 per frame), compute sets (~250 built per frame, never reused), the per-op loop for ~35k commands per frame.
+Pinning the game's main thread (G ~10 ms) has not been tried.
+
 
 **After R8:** the village is GPU-bound (~14.5 ms of GPU per frame); the render thread (~13 ms, ~11-12 with PGO) has ~2 ms of slack.
 Render-thread items left by the profile: bind_sets ~23% (build_set ~10, kept-set checks ~7), run_list's own loop ~8%, write-watch

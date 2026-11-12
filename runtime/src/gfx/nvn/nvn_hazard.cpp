@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// [nvn] hazard (default off: on the recorder thread it cuts GPU busy ~1.1 ms but costs the render thread ~0.5 ms; PERFORMANCE.md): range-based hazard tracking for the render thread's command buffers.
+// [nvn] hazard (default on since R3: with the render thread and the recorder on their own cores, render_cpus, its render-thread cost is gone and the village gains ~6 fps; PERFORMANCE.md): range-based hazard tracking for the render thread's command buffers.
 //
 // The replay used to put a full memory barrier (all commands, all memory) after every dispatch, around every copy, fill and memory write,
 // at the end of passes that wrote storage, and for every game barrier: ~900 per frame in the village at 1920x1080, ~3.85 ms of GPU time
@@ -58,7 +58,7 @@ inline uint64_t H(const void* p) { return reinterpret_cast<uint64_t>(p); }
 
 int mode() {   // 0 off, 1 on, 2 verify
     static const int m = [] {
-        const std::string v = config_get_str("nvn", "hazard", "off");
+        const std::string v = config_get_str("nvn", "hazard", "on");
         return v == "off" || v == "0" || v == "false" ? 0 : v == "verify" ? 2 : 1;
     }();
     return m;

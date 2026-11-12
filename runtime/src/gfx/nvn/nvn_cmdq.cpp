@@ -31,6 +31,8 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <vector>
+#include <cstdio>
 
 #include <volk.h>
 
@@ -946,17 +948,47 @@ void apply_render_priority(bool on) {
     SetThreadPriority(GetCurrentThread(), p);
     if (g_thread.joinable()) SetThreadPriority(g_thread.native_handle(), p);
 }
-// [nvn] render_cpus = "R,C" (default empty = off; cpuperf_ab_what render_pin): the render thread on logical processor R and the recorder on
-// C, e.g. two different physical cores, so the recorder's work (and its spinning) never shares the render thread's core (SMT siblings). Off
-// windows: both may run anywhere again. Render thread.
+// [nvn] render_cpus = "auto" (default) | "R,C" | "off" (cpuperf_ab_what render_pin): the render thread on logical processor R and the
+// recorder on C, two different physical cores (auto: the second and third of the fastest cores), so the recorder's work and spinning never
+// share the render thread's core (SMT siblings) and neither migrates. Off windows: both may run anywhere again. Village paired windows: with
+// hazard off replay -1.26 ms (27/34; GPU-bound, fps +0.2), with hazard on fps +6.8 / +7.1 (24/24 twice), replay -1.5 / -1.9 ms. Render thread.
 void apply_render_pin(bool on) {
-    static const std::string cfg = config_get_str("nvn", "render_cpus", "");
-    if (cfg.empty()) return;
+    static const std::string cfg = config_get_str("nvn", "render_cpus", "auto");
+    if (cfg.empty() || cfg == "off") return;
     static int last = -1;
     if (static_cast<int>(on) == last) return;
     last = on ? 1 : 0;
-    int r = -1, c = -1;
-    if (std::sscanf(cfg.c_str(), "%d,%d", &r, &c) != 2 || r < 0 || c < 0 || r > 63 || c > 63) return;
+    static int r = -1, c = -1;
+    static bool parsed = false;
+    if (!parsed) {
+        parsed = true;
+        if (cfg == "auto") {   // the first logical processor of the second and third of the fastest physical cores (the first takes most interrupts)
+            DWORD len = 0;
+            GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+            std::vector<uint8_t> buf(len);
+            struct Core { int first; int eff; };
+            std::vector<Core> cores;
+            if (len && GetLogicalProcessorInformationEx(RelationProcessorCore, reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data()), &len)) {
+                for (DWORD off = 0; off < len;) {
+                    const auto* e = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + off);
+                    unsigned long bit = 0;
+                    if (e->Relationship == RelationProcessorCore && e->Processor.GroupCount >= 1 && e->Processor.GroupMask[0].Group == 0 &&
+                        _BitScanForward64(&bit, e->Processor.GroupMask[0].Mask))
+                        cores.push_back({static_cast<int>(bit), e->Processor.EfficiencyClass});   // hybrid CPUs: performance cores have the higher class
+                    off += e->Size;
+                }
+            }
+            int best = 0;
+            for (const Core& k : cores) best = std::max(best, k.eff);
+            std::vector<int> fast;
+            for (const Core& k : cores) if (k.eff == best) fast.push_back(k.first);
+            if (cores.size() >= 4 && fast.size() >= 3) { r = fast[1]; c = fast[2]; }   // else too few cores to give two away
+        } else if (std::sscanf(cfg.c_str(), "%d,%d", &r, &c) != 2) {
+            r = c = -1;
+        }
+        NXLOG_I(kTag, "render_cpus %s: render thread on logical processor %d, recorder on %d%s", cfg.c_str(), r, c, r < 0 ? " (not pinned)" : "");
+    }
+    if (r < 0 || c < 0 || r > 63 || c > 63) return;
     DWORD_PTR proc = 0, sys = 0;
     GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys);
     SetThreadAffinityMask(GetCurrentThread(), on ? (DWORD_PTR{1} << r) : proc);
