@@ -109,9 +109,10 @@ namespace Ryujinx.Graphics.Shader.Translation
             public bool AttrBeforeCount() => CountWrites != 1;
         }
 
-        /// Mesh output attributes (ISBEWR.O.ATTR) are written straight into the mesh outputs (default; NXRT_HARNESS_MESH_DIRECT=0: staged in
-        /// a shared-memory copy of the ISBE and copied out at the end of the program, the form before 2026-11-10).
-        public static readonly bool Direct = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_DIRECT") == "1";
+        /// Mesh output attributes (ISBEWR.O.ATTR) are written straight into the mesh outputs (default since 2026-11-12, R8: with the real
+        /// primitive count below, the village scene's GPU-bound frame got +2.3 fps; NXRT_HARNESS_MESH_DIRECT=0: staged in a shared-memory copy
+        /// of the ISBE and copied out at the end of the program, the form before).
+        public static readonly bool Direct = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_DIRECT") != "0";
         public const string OutName = "isbe_out", OutDynName = "isbe_outd";
         /// NXRT_HARNESS_MESH_SLOW=call: an attribute address of another form goes through an out-of-line store function (default: decoded
         /// inline; a call costs the whole program registers: NVIDIA saves live values around it).
@@ -238,12 +239,12 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         static bool DirectMesh => Active && !_cur.Info.IsTask && Direct;
 
-        // ---- direct outputs: the real primitive count where the program writes it (experiment, F2) ----------------------------------
-        /// NXRT_HARNESS_MESH_EARLY_COUNT=1 (with MESH_DIRECT): when the program writes its primitive count (ISBEWR.O.32 [3]) once and before
+        // ---- direct outputs: the real primitive count where the program writes it (F2; default since 2026-11-12) -----------------------
+        /// NXRT_HARNESS_MESH_EARLY_COUNT (default on with MESH_DIRECT; =0 off): when the program writes its primitive count (ISBEWR.O.32 [3]) once and before
         /// any output attribute, SetMeshOutputsEXT(max vertices, the count) goes right after that instruction (after its predicate: the
         /// count is lane 0's, and the instruction takes the first invocation's arguments) instead of the maximum at the start; the
         /// epilogue then writes only the real primitives (no degenerate ones up to the maximum).
-        static readonly bool EarlyCount = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_EARLY_COUNT") == "1";
+        static readonly bool EarlyCount = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_EARLY_COUNT") != "0";
         public const string SmoName = "isbe_smo";
 
         /// Front end, after each instruction (outside its predicate): notes attribute writes and the count write; after the count write the
