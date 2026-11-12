@@ -71,6 +71,7 @@ struct Frame {
     VkCommandBuffer cb = VK_NULL_HANDLE;
     uint64_t serial = 0;          // the timeline value this submission signals when the GPU has run it
     void* slot = nullptr;         // nvn_gpu.cpp: the submission slot (command pool, descriptor pools, upload memory)
+    bool q2 = false;              // [nvn] exp_async_cull: recorded for the second queue's family (no chunks or splits)
     // Host-visible memory valid until the submission has completed: small per-draw data (support buffer, driver constants,
     // inline uniform data). align is a power of two.
     UploadAlloc upload(VkDeviceSize size, VkDeviceSize align);
@@ -398,7 +399,10 @@ std::shared_ptr<FrontPlan> front_submit(const std::vector<Ref<CmdList>>& lists);
 void front_replay_begin(const std::shared_ptr<FrontPlan>& p);
 void front_replay_end(const std::shared_ptr<FrontPlan>& p);
 void replay_end_submit(Frame& f);
-void replay_request_trace();      // trace the next whole presented frame (any thread)
+// [nvn] exp_async_cull: true when the lists (called ones included) hold only compute-queue work; counts their dispatches (any thread)
+bool submission_compute_only(const std::vector<Ref<CmdList>>& lists, uint32_t* dispatches, int* bad_op);
+bool ab_window_on();   // [nvn] cpuperf_ab: true in "on" windows (and without windows)
+void replay_request_trace();     // trace the next whole presented frame (any thread)
 void replay_shutdown();           // destroys pipelines and layouts (render thread, device idle)
 // Frame capture (nvn_capture.cpp): the replay's persistent GPU state at the start of a captured frame. snapshot copies it (render thread,
 // between submissions); image splits a snapshot into raw bytes and the objects it references (any thread); restore makes it the replay's
