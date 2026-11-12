@@ -87,6 +87,8 @@ struct TexGpu {
     bool streamed = false;                              // rewritten by the CPU frame after frame: not write-watched, read again once per present
     uint32_t streamed_at = 0;                           // present count of the last read in that mode
     bool untiled = false;                               // the last upload went through gpu_untile (cheap enough to repeat every frame)
+    bool in_share = false;                              // [nvn] tex_share_index: in the index of images by storage and layout
+    uint64_t share_hash = 0;
 };
 
 // A virtual-pool texture too big to back fully (title C's terrain virtual texture caches: 8192x8192 arrays of 68 layers, 1.4 to
@@ -682,6 +684,60 @@ uint64_t park_sample(const Texture& t) {
 struct Parked { ParkKey key; TexGpu* g; uint64_t at; uint64_t sample; bool dirty; };
 std::mutex g_park_mu;
 std::vector<Parked> g_parked;
+
+// ---- the images by storage and layout ([nvn] tex_share_index) ----------------------------------------------------------------------
+// texture_registry_find_alias finds only live (not finalized) objects, and a finalized object's image is parked only when the render
+// thread runs its release (queued by the game thread that finalized it). The game makes some targets as a new texture object over the same
+// storage every few frames (the village: a 960x540 R11G11B10F target every fourth frame) and finalizes the old object(s) around the same
+// time: when the new object's first use came after the finalize but before the release ran, neither found the image, a new one was made
+// (3-4 ms on the render thread under memory pressure) and the old one was destroyed a frame later. Which order the threads took varied from
+// run to run and for minutes within a run (windows of 45-60 fps with ~1 image made and destroyed per frame). Every image of a pool
+// texture at scale 1 is indexed here while it has owners; a texture that finds no live alias and nothing parked shares the indexed image
+// (the same storage and layout: as an alias would have, and as the old object's release followed by the unpark would have). The image's
+// reference count keeps it alive (a destroy already queued for its last old owner only drops that owner's reference). Lock: g_park_mu.
+struct ShareEnt { ParkKey key; TexGpu* g; };
+std::unordered_multimap<uint64_t, ShareEnt> g_share;
+std::atomic<uint64_t> g_share_hits{0};   // statistics: images taken over through the index
+uint64_t park_key_hash(const ParkKey& k) {
+    uint64_t h = 0x9e3779b97f4a7c15ull;
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(&k);
+    for (size_t i = 0; i + 8 <= sizeof k; i += 8) { uint64_t w; std::memcpy(&w, b + i, 8); h = (h ^ w) * 0x100000001b3ull; h ^= h >> 29; }
+    return h;
+}
+bool tex_share_index_on() {
+    const bool on = NX_CFG_BOOL("nvn", "tex_share_index", true);
+    return on && ab_tex_share_on();
+}
+bool share_indexable(const Texture& t, const TexGpu* g) {
+    return (t.mem || t.vpool) && !t.is_display && g && !g->failed && g->scale == 1.0f && !g->sparse && !g->streamed;
+}
+void share_remove_locked(TexGpu* g) {
+    if (!g->in_share) return;
+    auto r = g_share.equal_range(g->share_hash);
+    for (auto it = r.first; it != r.second; ++it)
+        if (it->second.g == g) { g_share.erase(it); break; }
+    g->in_share = false;
+}
+void share_add_locked(const Texture& t, TexGpu* g) {
+    if (g->in_share || !share_indexable(t, g)) return;
+    const ParkKey k = park_key(t);
+    g->share_hash = park_key_hash(k);
+    g_share.emplace(g->share_hash, ShareEnt{k, g});
+    g->in_share = true;
+}
+TexGpu* share_find(const Texture& t) {
+    if ((!t.mem && !t.vpool) || t.is_display || !tex_share_index_on()) return nullptr;
+    const ParkKey k = park_key(t);
+    std::lock_guard<std::mutex> lk(g_park_mu);
+    auto r = g_share.equal_range(park_key_hash(k));
+    for (auto it = r.first; it != r.second; ++it) {
+        TexGpu* g = it->second.g;
+        // images the GPU rendered only (as tex_park): one the CPU's data was uploaded into is made again from the storage, which the CPU may
+        // have rewritten since the old object's last upload
+        if (it->second.key == k && !g->failed && g->gpu_written && g->scale == 1.0f && !g->sparse && !g->streamed && g->refs > 0) return g;
+    }
+    return nullptr;
+}
 std::atomic<uint64_t> g_park_n{0}, g_park_taken{0}, g_park_stale{0}, g_park_expired{0};   // statistics
 std::atomic<uint64_t> g_park_miss{0}, g_park_miss_expired{0}, g_park_miss_big{0};   // new images of pool textures: none parked (of them: its key expired lately; >= 1 MiB)
 ParkKey g_expired_keys[64];                       // the keys of the latest expired images (miss diagnostics)
@@ -727,6 +783,7 @@ TexGpu* tex_unpark(Texture* t) {
         Parked p = g_parked[i];
         g_parked.erase(g_parked.begin() + static_cast<std::ptrdiff_t>(i));
         t->gpu = p.g;
+        share_add_locked(*t, p.g);
         g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
         if (!p.dirty && park_sample(*t) == p.sample) t->cpu_dirty.store(false);   // the image holds what the GPU wrote there last, as the memory would on the console
         else { p.g->gpu_written = false; g_park_stale.fetch_add(1, std::memory_order_relaxed); }
@@ -765,6 +822,7 @@ bool tex_park(const Texture& t, TexGpu* g) {
     }
     Parked p{park_key(t), g, counters().presents.load(std::memory_order_relaxed), park_sample(t), false};
     std::lock_guard<std::mutex> lk(g_park_mu);
+    share_remove_locked(g);   // a parked image has no owner: found by tex_unpark, not by the share index
     for (Parked& o : g_parked)
         if (o.key == p.key) {          // an older image of the same storage: the newer one wins
             destroy_texture_gpu(o.g);
@@ -797,6 +855,7 @@ void parked_cpu_wrote(uint64_t lo, uint64_t hi) {
 void park_stats(uint64_t* parked, uint64_t* taken, uint64_t* stale, uint64_t* expired) {
     *parked = g_park_n.load(); *taken = g_park_taken.load(); *stale = g_park_stale.load(); *expired = g_park_expired.load();
 }
+uint64_t share_hits() { return g_share_hits.load(); }
 void park_miss_stats(uint64_t* miss, uint64_t* miss_expired, uint64_t* miss_big) {
     *miss = g_park_miss.load(); *miss_expired = g_park_miss_expired.load(); *miss_big = g_park_miss_big.load();
 }
@@ -828,10 +887,21 @@ __declspec(noinline) TexGpu* tex_or_null_make(Texture* t, float want_scale) {
             return ag;
         }
     }
-    if (want_scale == 1.0f) if (TexGpu* pg = tex_unpark(t)) return pg;   // a parked image of the same storage and layout
+    if (want_scale == 1.0f) {
+        if (TexGpu* sg = share_find(*t)) {   // an image of an object finalized (or dropped) before its release ran ([nvn] tex_share_index)
+            t->gpu = sg;
+            g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
+            ++sg->refs;
+            if (sg->uploaded || sg->gpu_written) t->cpu_dirty.store(false);
+            g_share_hits.fetch_add(1, std::memory_order_relaxed);
+            return sg;
+        }
+        if (TexGpu* pg = tex_unpark(t)) return pg;   // a parked image of the same storage and layout
+    }
     NXFT_MIN("tex.create", 30000);
     const uint64_t tc0 = nxrt::hitch_ticks();
     TexGpu* g = create_texture_gpu(t, want_scale);
+    if (g && !g->failed && tex_share_index_on()) { std::lock_guard<std::mutex> lk(g_park_mu); share_add_locked(*t, g); }
     if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderTexCreate, nxrt::hitch_ticks() - tc0);
     {   // [nvn] tex_create_log = P (diagnosis): from present P on, one line per new image (at most 400): which textures make images in steady play
         const int64_t from = NX_CFG_INT("nvn", "tex_create_log", 0);
@@ -2265,6 +2335,7 @@ VkSampler sampler_for(const SamplerInfo& game_sampler) {
 void tex_destroy(TexGpu* g) {
     if (!g) return;
     if (--g->refs > 0) return;   // another texture object over the same storage still uses the image
+    if (g->in_share) { std::lock_guard<std::mutex> lk(g_park_mu); share_remove_locked(g); }
     {   // [nvn] tex_create_log (diagnosis): the images destroyed too
         const int64_t from = NX_CFG_INT("nvn", "tex_create_log", 0);
         static int logged = 0;
@@ -2319,6 +2390,8 @@ void tex_shutdown() {
     {   // parked and pending images are in the live set: destroyed below, not parked again (a later back end must not find them)
         std::lock_guard<std::mutex> lk(g_park_mu);
         g_parked.clear();
+        for (auto& kv : g_share) kv.second.g->in_share = false;
+        g_share.clear();
     }
     for (TexGpu* g : left) { g->refs = 1; tex_destroy(g); }
     for (auto& kv : g_sh.samplers)
