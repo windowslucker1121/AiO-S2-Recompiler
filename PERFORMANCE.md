@@ -46,6 +46,26 @@ pairs). Paired windows (`cpuperf_ab_what = r6`, the old path on the same dynamic
   variants did not pay. **The GPU is now close:** with the frame trace GPU busy ~10.9 ms and exec ~12.0 ms per frame (88-90% load at
   2.8 GHz without it), and the render thread idles more in the faster windows (+0.35..0.42 ms): further replay cuts convert into fps at
   less than half their size.
+- **Texture sets by image (`[nvn] tex_img_sets` + `tex_img_early`, default on).** `[nvn] r6_diag` showed the ~420 texture-set first
+  sightings per frame are new by handle *and* by texture object (0 found by texture object in an earlier present) but ~87% are the same
+  images: the game makes new texture objects every frame for the same images. A texture set whose bindings are all sampled textures is
+  looked up by what its descriptors hold (per binding the image's view stamp, which is unique per image and per clearing of its views,
+  the binding, the texture's swizzle and depth/stencil mode, view info, format and sampler info, plus the sampler tuning), first, before
+  the kept-set table. Made once from the persistent pools; a destroyed image never returns its stamp. Paired against the kept-set path
+  (`cpuperf_ab_what = r6t`, final form): replay -0.64 ms (44/45), fps +1.2 (39/45); verify 6.7 M look-ups, 0 differences; A18 4,398 every
+  loop, capture replay pixel-identical. Before/after the early placement alone: replay -0.13 ms (39/45), 1% low +0.65.
+- **Final R6 run** (same settings as the baseline run, 60-200 s, quiet machine): 88.8 fps, 1% low 61.1, frames over 10 ms 62.4% (baseline
+  97.8%), over 15 ms 1.31%, render replay median 9.41 ms (baseline 10.88), render idle 1.52 ms (baseline 0.38). Mean fps barely moved
+  against the first ubo_dynamic run (90.0) because the 4-frame cycle locked into 12.8 / 13.0 / 9.3 / 10.0 ms: the two heavy frames are
+  no longer the render thread's.
+- **Dropped:** `submit_async` again (now `cpuperf_ab_what = r6b`): replay -0.21 ms in two runs, fps +0.35 (29/45) / +0.05 (24/45): off.
+- **Where the frame is now** (village, no trace, ~88-90 fps): render replay median ~9.7-10.0 ms, render idle ~1.0-1.5 ms, GPU 91-95% busy
+  (cpuwatch GPU load) and the game's own CPU frame alternating: by draw-count rank in the 4-frame cycle 12.9 / 13.1 / 9.4 / 10.0 ms with render
+  idle 2.1-2.5 ms in the two heavy frames (the game's main thread waits longer on its workers there). The game's GPU sync waits on the big
+  submission of the previous frame (`chain.py`: queued -> replay start 1.6 ms, replay 9.2 ms, the GPU ends ~4.6 ms after the replay with
+  the trace): GPU and game CPU frame are now co-limits with the render thread. Stamped GPU per frame (gpu_passes + gpu_draws, inflated):
+  culling submission 3.0 ms (end-of-submission copy-backs 0.39, culling root 0.38, HiZ 0.19), main 10.0 ms (draws 7.2, gaps 1.8 = waiting
+  for the render thread, pass ends 0.27).
 
 **2026-11-12 (R5, structural render-thread work, `perf/render-r5`): a front thread walks every submission ahead of the replay
 (`[nvn] front_plan`, default on).** Paired windows without the frame trace (village outside, 48 pairs): **fps +1.92 (47/48), render
@@ -249,6 +269,7 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | R4 | `hot_skip`: uniform blocks over hot pages resolve to the pool until the hold ends; their kept-set checks skip the page checks | replay -0.04 / -0.10 ms (14/23, 21/24), fps +0.05 / +0.37 |
 | R5 | `front_plan`: submissions walked ahead on `nvn-front` (called lists, physical addresses, per-draw layouts and set-signature hashes as a stream the replay reads with one cursor); list frees off the render thread; occlusion-flush and prepare_textures scratch kept across calls | **fps +1.92 (47/48)**, replay -0.65 ms, 1% low +0.48 (no frame trace) |
 | R6 | `ubo_dynamic`: set 0's uniform blocks as dynamic uniform buffers, sets by buffers, per-address copy-or-pool memo; the hazard tracker applies dynamic offsets | replay -0.60 ms (45/45), fps +1.4 (45/45); village 87.5 -> ~90 fps |
+| R6 | `tex_img_sets` + `tex_img_early`: texture sets looked up by image (the game makes new texture objects every frame for the same images) | replay -0.64 ms (44/45), fps +1.2 (39/45) |
 | R3 | `occ_mark_late`: samples-passed reports' GPU writes noted at the flush; per-set binding index lists (`ProgLayout::set_idx`) | replay -0.10 ms (17/23); index lists not paired (always on) |
 
 Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
@@ -436,6 +457,36 @@ trace's `gpu.busy`), so a GPU change is judged by GPU busy *and* render-thread r
     (set 2 builds spend 0.57 of 0.69 ms resolving, the cache could save <= 0.1 ms).
 
 ## What is open, by expected gain
+
+**After R6:** replay ~9.7-10 ms; ~88-90 fps. The render thread, the GPU (~93% busy) and the game's CPU frame are co-limits; a replay cut now
+converts into fps at less than half its size. Render-thread items left (exp_op_cost per present): set 0 dynamic path 0.73 ms, texture
+preparation 0.70, out_before_op 0.50, set 1 0.41, pipeline key/look-up 0.37, vertex buffers 0.27, dynamic state 0.27, the per-command loop
+(~11% of the render thread's samples), recorder drains at each chunk submit (~7 per frame). GPU: the culling submission's tail copy-backs
+(0.39 ms) and the main submission's draws. Game side: the heavy frames of the 4-frame cycle (G).
+
+Parallel pass recording (R6 design note, not built)
+
+Ceiling: the big submission is ~9.2 of ~10.2 ms of replay per frame; ~2,200 draws in ~55 passes. Split across two threads the
+draw work of the long passes (the main colour, depth prepass and shadow passes hold most draws) could save up to ~3-4 ms of
+replay. But since R6 the frame is co-limited by the GPU (cpuwatch GPU load 91-95% at ~89 fps) and by the game's own CPU frame
+(main thread G p50 8.7 ms with the frame trace, 4-frame cycle with render idle 2+ ms in the heavy frames): a replay cut converts
+into fps at less than half its size (R6 pairs: replay -0.64 ms -> median frame -0.10 ms). The parallel replay's fps ceiling at
+the current GPU load is therefore ~+3-5 fps, not +30.
+
+State a draw touches, by kind (from the replay code):
+- per-command state (GState S, programs, bindings): reproducible per worker from the front plan's walk (nvn-front already
+  carries it across submissions);
+- descriptor caches (memo, kept sets, dyn0/img caches, per-frame descriptor pools): per worker or sharded;
+- coherence state with commutative per-draw effects inside one unbroken pass: read_dep_check's used/want page bits
+  (plain |= on shared vectors today: would need atomics);
+- coherence state with ordered effects: held results (out_draw_read / out_before_op may copy back and end the pass), storage
+  writes of draws (gpu_wrote, g_pass_unsafe), texture layout transitions (prepare_textures ends the pass), occlusion report
+  bookkeeping, mesh-indirect record copies, hazard tracking (recorder side, one command buffer). A worker would run a chunk
+  speculatively and abort to the sequential path on the first draw that needs any of these.
+- recording: today every vkCmd goes through one recorder ring; workers would record secondary command buffers directly
+  (VK_KHR_dynamic_rendering inheritance) and the hazard tracker would need per-buffer state.
+Effort: several days, most of it making ~100 replay globals per-thread. Not started; the GPU and the game's CPU frame are the
+nearer limits now.
 
 **After R5:** replay ~10.5 ms with `front_plan`; render idle ~0.9 ms; game GPU sync ~4 ms. What is left on the render thread is the
 coherence-tied part (kept-set checks ~1 ms, set builds ~1.2 ms for ~1,000 first-sighting / written-storage sets per frame, held-result
