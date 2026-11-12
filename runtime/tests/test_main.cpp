@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "nxrt/diag.h"
 #include "test_framework.h"
 #include "project_root.h"
 
@@ -39,6 +40,12 @@ void skip(const char* why) {
 int main(int argc, char** argv) {
     using namespace nxtest;
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    // NXRT_TEST_CRASH_REPORT=<file>: a fault in a case writes the runtime's crash report there (host stack, threads) before the process ends.
+    if (const char* cr = std::getenv("NXRT_TEST_CRASH_REPORT")) {
+        static nxrt::CrashOptions co;
+        co.report_path = cr;
+        nxrt::crash_install(co);
+    }
 #ifdef NXRT_TEST_GAME_REGISTER
     NXRT_TEST_GAME_REGISTER();
 #endif

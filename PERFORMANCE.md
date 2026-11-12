@@ -286,9 +286,12 @@ Start: ~76 fps no trace, 1% low ~60; main busy ~10.2 ms + culling submission #3 
   compiler crashes (access violation) on it, with OpGroupNonUniformAny and with a ballot. `NXRT_HARNESS_INLINE_HELPERS`: no change (the
   calls in the code are the driver's own WARPSYNC/SHFL subroutines).
 - **Second-queue overlap of #3:** #3(N+1) is replayed ~1.8 ms before #6(N) ends on the GPU and then waits behind it, so that is the
-  overlap ceiling. A two-frame trace (`[nvn] trace_frame` now marks every submission) shows #3 binds the frame-globals buffer that every
-  draw of #6 reads (0x...2f600, 16 KiB) as storage, so with ranges alone #3(N+1) conflicts with the last draw of #6(N); proving it
-  read-only needs per-binding write information in the trace. Not built.
+  overlap ceiling. A two-frame trace with written storage bindings marked (`[nvn] trace_frame`: submissions, ` W` on written storage
+  bindings, pointer write windows) shows real write-after-read conflicts: #3(N+1) writes (1) the 720 KB material table at fragment storage
+  slot 3 (one address in both frames) that every material fragment shader of #6(N) reads, up to its last colour pass, and (2) the
+  16 KiB frame-globals buffers (compute storage slot 8; two of them, both written each frame) that #6's draws bind as uniform block 0
+  (snapshotted at record time) and fragment storage slot 10. Overlap would need the runtime to double-buffer those game buffers (copy
+  for #6's readers before #3 runs), plus a second timeline per queue. Not built; ceiling ~1.8 ms, realistic less (both share the SMs).
 
 ## What is open, by expected gain
 
