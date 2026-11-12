@@ -242,7 +242,7 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbR3b = 4194304, kAbR3e = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbMeshAhead2 = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbR3c = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbTexShare = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbR3f = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbKeepChain = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbHotSkip = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbR3b = 4194304, kAbR3e = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbMeshAhead2 = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbR3c = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbTexShare = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbR3f = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbKeepChain = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
 // computed once and kept in a constant-initialized atomic: ab_on() calls it in every "off" window (hundreds of thousands of times per frame),
 // and a guarded local static there made the off windows ~0.6 ms per frame slower than the on windows with nothing switched (nvn_cfg.h)
 std::atomic<uint64_t> g_ab_mask_v{~0ull};
@@ -258,7 +258,7 @@ uint64_t ab_mask_compute() {
     const uint64_t m = [] {
         const std::string v = nxrt::config_get_str("nvn", "cpuperf_ab_what", "chunks,set_reuse,odb,lookahead");
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
-                                                                 {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
+                                                                 {"hot_skip", kAbHotSkip}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
                                                                  {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
         uint64_t r = 0;
@@ -1236,6 +1236,7 @@ extern uint64_t g_oc_ph[10];
 // exp_op_cost: bind_sets ticks per graphics set index and step (0 signature + memo look-up, 1 kept-set look-up and check, 2 build, 3 bind),
 // and counts of each (R4 diagnostics)
 extern uint64_t g_oc_bs[4][4], g_oc_bsn[4][4];
+extern uint64_t g_oc_bt[4][3];   // exp_op_cost: build_set ticks per set index: resolving, the content-cache look-up and the allocation + update, sets
 bool exp_op_cost_on();
 struct OcPhase { int i; uint64_t t0; explicit OcPhase(int k) : i(k), t0(exp_op_cost_on() ? __rdtsc() : 0) {} ~OcPhase() { if (t0) g_oc_ph[i] += __rdtsc() - t0; } };
 void pass_lookahead();   // below: settles the reads of the coming draws before the pass begins
@@ -2987,7 +2988,7 @@ bool la_scan(RecordReader rd, int depth, LookSim& sim, std::unordered_set<uint64
 
 // ensure_pass, before the pass begins (no pass open).
 void pass_lookahead() {
-    if (!pass_lookahead_on() || g_rd_depth < 0 || !g_rd_cur[g_rd_depth] || !out_lazy() || !out_any() || !ab_on(kAbLookahead)) return;
+    if (!pass_lookahead_on() || g_rd_depth < 0 || !g_rd_cur[g_rd_depth] || !out_lazy() || !out_any()) return;   // (its cpuperf_ab bit went to hot_skip, R4)
     static LookSim sim;
     std::memcpy(sim.vtx, S.vtx, sizeof sim.vtx);
     std::memcpy(sim.ubo, S.ubo, sizeof sim.ubo);
@@ -3814,6 +3815,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
     static std::vector<VkDescriptorImageInfo> iinfo;
     static std::vector<VkBufferView> tinfo;
     writes.clear(); binfo.clear(); iinfo.clear(); tinfo.clear();
+    const uint64_t bt0 = exp_op_cost_on() && set < 4 ? __rdtsc() : 0;
     const size_t nb = pl.bindings.size();
     writes.reserve(nb);
     binfo.reserve(nb);
@@ -4206,6 +4208,9 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
     }
     ++g_sets_built;
     g_last_set_key = key;
+    const uint64_t bt1 = bt0 ? __rdtsc() : 0;
+    if (bt0) { g_oc_bt[set][0] += bt1 - bt0; ++g_oc_bt[set][2]; }
+    struct BtTail { uint64_t t, s; ~BtTail() { if (t) g_oc_bt[s][1] += __rdtsc() - t; } } bt_tail{bt1, set};
     if (g_krec && !g_krec->bad) {   // a set to keep: from the persistent pools, never one of the submission's
         g_krec->content = key;
         VkDescriptorSet ds = keep_alloc(pl.sets[set]);
@@ -7840,6 +7845,7 @@ bool op_keeps_sets(Op op) {
 // shader, vertex or mesh shader); logged every 10 s as ms per present.
 struct OpCost { uint64_t ticks = 0, n = 0, ph[10] = {}; };
 uint64_t g_oc_bs[4][4] = {}, g_oc_bsn[4][4] = {};
+uint64_t g_oc_bt[4][3] = {};
 uint64_t g_oc_ph[10] = {};   // ticks of phases of the current op: prepare_textures, bind_sets, gmem_before_op, ensure_pass, out_before_op, set_dynamic_state,
                              // program layout, pipeline key and look-up, vertex buffers, after begin_draw (index buffer, the draw)
 OpCost g_oc_op[256];
@@ -7901,6 +7907,14 @@ void op_cost_log() {
             c += t;
         }
         NXLOG_I(kTag, "exp_op_cost bind_sets per present:%s", c.c_str());
+        c.clear();
+        for (int s = 0; s < 4; ++s) {
+            char t[160];
+            std::snprintf(t, sizeof t, " set %d: resolve %.3f ms, cache/alloc/update %.3f ms, %.0f builds;", s, g_oc_bt[s][0] / tpms / fr, g_oc_bt[s][1] / tpms / fr, g_oc_bt[s][2] / fr);
+            c += t;
+        }
+        NXLOG_I(kTag, "exp_op_cost build_set per present:%s", c.c_str());
+        std::memset(g_oc_bt, 0, sizeof g_oc_bt);
         std::memset(g_oc_bs, 0, sizeof g_oc_bs);
         std::memset(g_oc_bsn, 0, sizeof g_oc_bsn);
     }
@@ -8633,7 +8647,8 @@ void texlook_submit(const std::vector<Ref<CmdList>>& lists, uint64_t serial) {
 }
 
 bool ab_tex_park_on() { return ab_on(kAbTexPark); }
-bool ab_tex_share_on() { return ab_on(kAbTexShare); }   // [nvn] cpuperf_ab_what tex_share (nvn_gpu_texture.cpp)   // [nvn] cpuperf_ab_what tex_park (nvn_gpu_texture.cpp)
+bool ab_tex_share_on() { return ab_on(kAbTexShare); }
+bool ab_hot_skip_on() { return ab_on(kAbHotSkip); }   // [nvn] cpuperf_ab_what hot_skip (nvn_gpu_pool.cpp)   // [nvn] cpuperf_ab_what tex_share (nvn_gpu_texture.cpp)   // [nvn] cpuperf_ab_what tex_park (nvn_gpu_texture.cpp)
 bool ab_overlap_grow_on() { return ab_on(kAbOverlapGrow); }
 bool ab_index_inc_on() { return ab_on(kAbIndexInc); }   // [nvn] cpuperf_ab_what index_inc (nvn_gpu_pool.cpp)   // [nvn] cpuperf_ab_what overlap_grow (nvn_gpu_pool.cpp)
 bool ab_out_delta_on() { return ab_on(kAbOutDelta); }  // out_delta (nvn_gpu_pool.cpp delta copy-backs)
