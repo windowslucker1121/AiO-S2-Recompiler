@@ -581,8 +581,10 @@ static const ProgLayout* prog_layout_locked(const LayoutKey& key) {
             }
         }
     }
+    for (size_t i = 0; i < pl.bindings.size(); ++i)
+        if (pl.bindings[i].set < 4) pl.set_idx[pl.bindings[i].set].push_back(static_cast<uint16_t>(i));
     std::vector<VkDescriptorSetLayoutBinding> lbs[4];
-    std::string sig;                                   // the descriptors of the program, as bytes: the key of the shared layout
+    std::string sig;                                 // the descriptors of the program, as bytes: the key of the shared layout
     for (int set = 0; set < 4; ++set) {
         for (const BindingDesc& d : pl.bindings) {
             if (d.set != static_cast<uint32_t>(set)) continue;

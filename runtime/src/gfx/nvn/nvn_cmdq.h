@@ -19,6 +19,12 @@ void set_pds(bool on);                // [nvn] cmd_thread_pds under cpuperf_ab (
 bool queue_chunk(VkCommandBuffer old, VkCommandBuffer next, VkQueue q, std::mutex* mu);
 void set_chunk_async(bool on);
 void set_copies(bool on);             // [nvn] cmd_thread_copies under cpuperf_ab (cmd_copies): image copies and clears queued or drained
+// [nvn] submit_async: the end of a submission (vkEndCommandBuffer + vkQueueSubmit2 with the timeline signal) queued for the recorder. False:
+// not queued (off, or not on the render thread): the caller ends and submits itself.
+bool queue_submit_end(VkDevice dev, VkCommandBuffer cb, VkQueue q, std::mutex* mu, VkSemaphore sem, uint64_t value);
+void set_submit_async(bool on);       // under cpuperf_ab (submit_async): with it, cmd_nodrain_begin
+void apply_render_pin(bool on);       // [nvn] render_cpus under cpuperf_ab (render_pin)
+void set_copy_image(bool on);       // [nvn] cmd_thread_copy_image under cpuperf_ab (copy_image_q): vkCmdCopyImage queued or drained
 void apply_render_priority(bool on);   // [nvn] render_priority: the calling (render) thread and the recorder; on false: NORMAL
 void set_publish_batch(bool on);       // [nvn] cmd_publish_batch under cpuperf_ab (cmd_batch)
 void set_desc(bool on);

@@ -58,6 +58,7 @@ struct ProgLayout {
     VkPipelineLayout layout = VK_NULL_HANDLE;
     std::vector<BindingDesc> bindings;          // every used descriptor of every stage, sorted by (set, binding)
     std::vector<PoolBinding> pool;              // pool arrays (A7), not in `bindings`
+    std::vector<uint16_t> set_idx[4];           // indices into `bindings` of each set's descriptors (the per-set loops of the replay)
     bool has_set[4] = {};
     VkShaderStageFlags push_stages = 0;         // push constant range [0, push_bytes) of generated stages (ShaderInfo::push_bytes); 0 = none
     uint32_t push_bytes = 0;

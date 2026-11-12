@@ -1381,9 +1381,27 @@ void install_cmd_hooks() {
             piggyback_on() ? "on" : "off");
 }
 
+// The tracker's own state belongs to the recorder thread: the start of a submission reaches it in order with the queued commands (the
+// render thread no longer waits for the recorder to empty the ring at each submission, nvn_cmdq.cpp begin_submission). The render thread
+// keeps what takes() needs (g_on_rt, g_rt_cb) itself.
+bool g_on_rt = false;
+void begin_rec(const uint64_t* w, uint32_t);
 void begin_submission(VkCommandBuffer cb, bool on, bool piggyback) {
     g_piggy_ab = piggyback;
     const bool want = on && enabled() && n_pb2 && cmdq::queuing();
+    g_on_rt = want;
+    g_rt_cb = want ? cb : VK_NULL_HANDLE;
+    const uint64_t w[2] = {reinterpret_cast<uint64_t>(cb), want ? 1u : 0u};
+    static bool last_want = false;   // what the render thread last told the recorder
+    const bool was = last_want;
+    last_want = want;
+    if (!was && !want) return;   // off and staying off: nothing to tell the recorder
+    if (on_rt() && cmdq::post_words(&begin_rec, w, 2)) return;
+    begin_rec(w, 2);
+}
+void begin_rec(const uint64_t* w, uint32_t) {
+    const VkCommandBuffer cb = reinterpret_cast<VkCommandBuffer>(w[0]);
+    const bool want = w[1] != 0;
     if (!want) {
         if (g_on && cb && (!D.empty() || !R.empty())) {   // switching off: the old barriers order only what follows them
             record_barrier(cb, true);
@@ -1392,13 +1410,11 @@ void begin_submission(VkCommandBuffer cb, bool on, bool piggyback) {
         }
         g_on = false;
         g_cb.store(VK_NULL_HANDLE, std::memory_order_relaxed);
-        g_rt_cb = VK_NULL_HANDLE;
         D.clear(); R.clear(); Dp.clear(); Rp.clear();
         return;
     }
     if (!g_on) { D.clear(); R.clear(); D.all = true; }   // switching on: nothing is known about what came before
     g_on = true;
-    g_rt_cb = cb;
     begin_cb(cb);
 }
 
@@ -1408,19 +1424,19 @@ void switch_rec(const uint64_t* w, uint32_t) {   // the recorder, after the queu
 }
 void switch_cb(VkCommandBuffer from, VkCommandBuffer to) {
     if (on_rt() && from && from == g_rt_cb) g_rt_cb = to;
-    if (!g_on || !from) return;
+    if (!(on_rt() ? g_on_rt : g_on) || !from) return;
     const uint64_t w[2] = {reinterpret_cast<uint64_t>(from), reinterpret_cast<uint64_t>(to)};
     if (on_rt() && cmdq::post_words(&switch_rec, w, 2)) return;   // the tracking runs on the recorder: in order with the queued commands
     switch_rec(w, 2);
 }
 
 void external(VkCommandBuffer cb) {
-    if (!(tracking(cb) && on_rt())) return;
+    if (!(on_rt() && g_on_rt && cb && cb == g_rt_cb)) return;   // the render thread's view (the recorder's g_on / g_cb may lag behind)
     // in order with the queued commands: the recorder makes it (the tracking runs there)
     cmdq::post(+[](VkCommandBuffer c) { if (tracking(c) && !g_in_pass) unknown(c); }, cb);
 }
 
-bool takes(VkCommandBuffer cb) { return mode() == 1 && g_on && cb && cb == g_rt_cb && on_rt(); }
+bool takes(VkCommandBuffer cb) { return mode() == 1 && g_on_rt && cb && cb == g_rt_cb && on_rt(); }
 
 void request(uint32_t) {
     ++g_st.requests;

@@ -734,9 +734,12 @@ uint64_t physical_buffer_address(uint64_t gpu_address, uint64_t size) {
     thread_local Memo memo[256];
     // and the last ordinary (not virtual) pool the thread found: per-frame uniform ring addresses are new every frame but lie in a few pools
     struct Last { uint64_t lo = 0, hi = 0, gen = ~0ull; };
-    thread_local Last last;
+    thread_local Last lasts[4];   // the last four (uniform and storage rings lie in a few pools: one entry missed for every other binding)
+    thread_local uint32_t last_next = 0;
     const uint64_t pgen = pool_registry_generation();
-    if (last.gen == pgen && gpu_address >= last.lo && gpu_address < last.hi) return gpu_address;
+    for (const Last& l : lasts)
+        if (l.gen == pgen && gpu_address >= l.lo && gpu_address < l.hi) return gpu_address;
+    Last& last = lasts[last_next++ & 3];
     const uint64_t gen = pgen * 0x9e3779b97f4a7c15ull ^ g_vmap_gen.load(std::memory_order_acquire);
     Memo& mm = memo[(gpu_address >> 8 ^ gpu_address >> 17 ^ size) & 255];
     if (mm.gen == gen && mm.addr == gpu_address && mm.size == size) return mm.phys;
