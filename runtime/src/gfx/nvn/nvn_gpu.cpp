@@ -732,6 +732,7 @@ std::atomic<int> g_exp_bar_drop{0};
 std::atomic<int> g_exp_bar_more[3] = {};   // further "bar:<line>" words
 
 void memory_barrier(VkCommandBuffer cb, std::source_location loc) {
+    cmdq::owe_clear();   // [nvn] dispatch_trust: a full barrier pays an owed one
     ++t_barriers;
     bar_site_count(loc);
     if (const int drop = g_exp_bar_drop.load(std::memory_order_relaxed); drop) {

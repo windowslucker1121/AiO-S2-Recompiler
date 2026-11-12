@@ -320,6 +320,13 @@ bool run(Ctx& c, const std::string& arg, Module* frag) {
         st[i].pName = all[i]->entry.c_str();
     }
     VkPipeline p = VK_NULL_HANDLE;
+    // PIPESTAT_CACHE=<file>: the pipeline is made in a fresh pipeline cache whose data is written to the file afterwards
+    VkPipelineCache pc = VK_NULL_HANDLE;
+    const char* cache_out = std::getenv("PIPESTAT_CACHE");
+    if (cache_out) {
+        VkPipelineCacheCreateInfo pci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+        CK(vkCreatePipelineCache(c.dev, &pci, nullptr, &pc));
+    }
     std::fprintf(stderr, "%s: creating the pipeline\n", arg.c_str());
     auto t0 = std::chrono::steady_clock::now();
     if (ms[0].stage == VK_SHADER_STAGE_COMPUTE_BIT) {
@@ -327,7 +334,7 @@ bool run(Ctx& c, const std::string& arg, Module* frag) {
         ci.flags = capture_flags();
         ci.stage = st[0];
         ci.layout = layout;
-        CK(vkCreateComputePipelines(c.dev, VK_NULL_HANDLE, 1, &ci, nullptr, &p));
+        CK(vkCreateComputePipelines(c.dev, pc, 1, &ci, nullptr, &p));
     } else {
         bool meshp = false;
         for (auto* m : all) meshp |= m->stage == VK_SHADER_STAGE_MESH_BIT_EXT;
@@ -365,10 +372,19 @@ bool run(Ctx& c, const std::string& arg, Module* frag) {
         ci.pColorBlendState = &cb;
         ci.pDynamicState = &dy;
         ci.layout = layout;
-        CK(vkCreateGraphicsPipelines(c.dev, VK_NULL_HANDLE, 1, &ci, nullptr, &p));
+        CK(vkCreateGraphicsPipelines(c.dev, pc, 1, &ci, nullptr, &p));
     }
     double took = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     print_stats(c, p, arg, took);
+    if (pc) {
+        size_t n = 0;
+        vkGetPipelineCacheData(c.dev, pc, &n, nullptr);
+        std::vector<char> d(n);
+        vkGetPipelineCacheData(c.dev, pc, &n, d.data());
+        if (FILE* f = std::fopen(cache_out, "wb")) { std::fwrite(d.data(), 1, n, f); std::fclose(f); }
+        std::printf("  pipeline cache data: %zu bytes -> %s\n", n, cache_out);
+        vkDestroyPipelineCache(c.dev, pc, nullptr);
+    }
     vkDestroyPipeline(c.dev, p, nullptr);
     for (auto m : mods) vkDestroyShaderModule(c.dev, m, nullptr);
     vkDestroyPipelineLayout(c.dev, layout, nullptr);
