@@ -74,7 +74,19 @@ struct Slot {
     // [nvn] alloc_batch: sets allocated ahead per layout (direct-mapped by the layout handle; a collision leaves the spare ones unused)
     struct Spare { VkDescriptorSetLayout layout = VK_NULL_HANDLE; uint32_t n = 0; VkDescriptorSet sets[7] = {}; };
     Spare spare[128];
+    // [nvn] dset_recycle: the sets this slot's submission allocated (by layout), and the ones from its earlier use, handed out again
+    std::vector<std::pair<VkDescriptorSetLayout, VkDescriptorSet>> used;
+    std::unordered_map<VkDescriptorSetLayout, std::vector<VkDescriptorSet>> free_sets;
+    uint32_t recycles = 0;
 };
+
+// [nvn] dset_recycle (default on; cpuperf_ab_what dset_recycle): see the slot reset in the frame code.
+std::atomic<bool> g_dset_recycle_ab{true};
+uint64_t g_dset_recycled = 0;   // statistics: sets handed out again (render thread)
+bool dset_recycle_now() {
+    const bool on = NX_CFG_BOOL("nvn", "dset_recycle", true);
+    return on && g_dset_recycle_ab.load(std::memory_order_relaxed);
+}
 
 struct Deferred {
     uint64_t serial;
@@ -307,11 +319,22 @@ Slot& acquire_slot() {
     retire();
     vkResetCommandPool(g->dev->device(), s.pool, 0);
     s.split_used = 0;
-    for (VkDescriptorPool p : s.dpools) vkResetDescriptorPool(g->dev->device(), p, 0);
-    for (Slot::Spare& sp : s.spare) sp.n = 0;   // freed with their pools
-    vk_gauge_descriptor_sets().sub(static_cast<int64_t>(s.sets_live));   // the reset freed them
-    s.sets_live = 0;
-    s.dpool_cur = 0;
+    // [nvn] dset_recycle: the slot's submission has completed, so its sets are free: they go back to the slot's lists by layout and the next
+    // submission in this slot takes them instead of allocating (the driver's vkAllocateDescriptorSets was ~0.5 us per set, ~800 sets per frame
+    // in the village scene). A full reset now and then (and whenever recycling is off) returns sets of layouts no longer used.
+    if (dset_recycle_now() && ++s.recycles % 512 != 0) {
+        for (const auto& [l, d] : s.used) s.free_sets[l].push_back(d);
+        s.used.clear();
+    } else {
+        for (VkDescriptorPool p : s.dpools) vkResetDescriptorPool(g->dev->device(), p, 0);
+        for (Slot::Spare& sp : s.spare) sp.n = 0;   // freed with their pools
+        vk_gauge_descriptor_sets().sub(static_cast<int64_t>(s.sets_live));   // the reset freed them
+        s.sets_live = 0;
+        s.dpool_cur = 0;
+        s.used.clear();
+        s.free_sets.clear();
+        s.recycles = 0;
+    }
     s.upload_off = 0;
     for (auto& b : s.extra) g->dev->destroy_buffer(b);
     s.extra.clear();
@@ -385,8 +408,25 @@ void keep_dpool_release(VkDescriptorPool p) {
 // windows: render replay +0.30 ms per frame, 3 of 19 pairs better): the driver's cost is per set, and spare sets of a layout went unused.
 std::atomic<bool> g_alloc_batch_ab{true};
 void alloc_batch_enable(bool on) { g_alloc_batch_ab.store(on, std::memory_order_relaxed); }
+void dset_recycle_enable(bool on) { g_dset_recycle_ab.store(on, std::memory_order_relaxed); }
+uint64_t dset_recycled() { return g_dset_recycled; }
+VkDescriptorSet alloc_set_new(Slot& s, VkDescriptorSetLayout layout);
 VkDescriptorSet Frame::alloc_set(VkDescriptorSetLayout layout) {
     Slot& s = *static_cast<Slot*>(slot);
+    if (!dset_recycle_now()) return alloc_set_new(s, layout);
+    auto it = s.free_sets.find(layout);
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    if (it != s.free_sets.end() && !it->second.empty()) {
+        ds = it->second.back();
+        it->second.pop_back();
+        ++g_dset_recycled;
+    } else {
+        ds = alloc_set_new(s, layout);
+    }
+    if (ds) s.used.emplace_back(layout, ds);
+    return ds;
+}
+VkDescriptorSet alloc_set_new(Slot& s, VkDescriptorSetLayout layout) {
     const bool batch_cfg = NX_CFG_BOOL("nvn", "alloc_batch", false);
     if (batch_cfg && g_alloc_batch_ab.load(std::memory_order_relaxed)) {
         Slot::Spare& sp = s.spare[(reinterpret_cast<uintptr_t>(layout) >> 4) & 127];
@@ -764,6 +804,16 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
     if (g->gpool) gpass_stamp(f, "tail", 0);
     // f.cb, not s.cb: frame_split / frame_chunk may have moved the recording on to another command buffer of the slot
     if (g->qpool) vkCmdWriteTimestamp(f.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->qpool, qi + 1);
+    if (!unsignalled && cmdq::queue_submit_end(g->dev->device(), f.cb, g->dev->queue(), &g->dev->queue_mutex(), g->timeline, serial)) {
+        // [nvn] submit_async: the recorder ends and submits it in order (it signals the serial; a failed submit signals from the host)
+        s.serial = serial;
+        g->submitted = serial;
+        g->last_submitted.store(serial);
+        g->recording = 0;
+        g->ctr.submits.fetch_add(1);
+        g->ctr.submit_replay_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()));
+        return serial;
+    }
     vkEndCommandBuffer(f.cb);
     VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
     cbi.commandBuffer = f.cb;
