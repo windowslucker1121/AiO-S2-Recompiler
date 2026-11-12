@@ -241,6 +241,13 @@ Start: ~76 fps no trace, 1% low ~60; main busy ~10.2 ms + culling submission #3 
   compute work groups, so C1's compute-only switch had turned F1's vector loads off for every mesh block (fbb731e2: 264 32-bit loads
   instead of 66 LDG.128) and they read compute's slot-mask word (word 0 of a graphics c[0], a driver constant) instead of their own.
   187 gpt mesh/task blocks change. 4 alternating pairs: main busy 10.23 → 10.07 ms (4/4).
+- **Kept: mesh index map one u32 per byte** (`NXRT_HARNESS_MESH_MAP_BYTES`, default on): the 8-bit index writes were atomic
+  read-modify-write loops (the driver keeps a mesh shader's shared memory in its output buffer and turns the atomics into MATCH.ANY
+  loops); driver code −5..−10% on meshes; on top of the fix above 4 more pairs: main busy −0.22 ms (3/4). Both together ~10.2 → ~9.8 ms.
+  **Shared cache updated** (all 785 mesh/task corpus blocks, 778 changed; backup `work/shaders/mesh_backup_g3`), byte-identical to the
+  private cache that passed the checks: A18 on the nb3 capture (25 mesh draws, x sum 4,398 in every traced loop), village capture replay
+  SSIM against its reference the same as the old cache (0.49285), in-game village screenshots normal (foliage, crowns, fog, no stripes).
+  The main checkout's harness must be rebuilt from the merged branch before any later re-translation, or the mesh blocks revert.
 - **Measured, opt-in:** `NXRT_HARNESS_MESH_MAP_BYTES=1` (the index map one u32 per byte: the 8-bit index writes were atomic
   read-modify-write loops, which the driver turns into MATCH.ANY loops over the stage's output buffer): driver code −5..−10% on meshes.
   `NXRT_HARNESS_FTZ_FOLD=1` (flushes that cannot change a compare against a nonzero immediate or a truncation): −1.5% instructions,
