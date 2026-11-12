@@ -4,6 +4,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace nxrt::services {
 
@@ -44,6 +45,43 @@ bool prompt_enabled();
 // Shows the prompt and waits for the player (the calling thread runs the window). True with *text set on OK, false on cancel.
 bool win32_prompt(const Request& r, std::string* text);
 }  // namespace swkbdui
+
+// ---- the other system dialogs a game can ask for (am.cpp, applet_ui.cpp, core/switch2.cpp) -------------------------------------------
+// Every library applet has a policy, `[applet] <key> = auto | cancel | prompt` (keys and defaults: docs/IPC_ANSWERS.md, CONFIG.md):
+// auto answers without a window, cancel ends it as if the player backed out, prompt asks the player in a native window where the applet
+// has one (otherwise as auto). Windows are only shown while the play layer enables them (there is a game window); tests never see one.
+namespace appletui {
+void enable_windows(bool on);
+bool windows_enabled();
+
+// The open pads, in the order the play layer numbers them (it registers the lister: the services library does not link the input
+// layer). No lister: no pads (player 1 is still the keyboard).
+struct Pad {
+    uint32_t id = 0;          // SDL instance id (nxrt::input::GamepadInfo::id)
+    std::string name;
+};
+using PadLister = std::vector<Pad> (*)();
+void set_pad_lister(PadLister fn);
+std::vector<Pad> pads();
+
+// The controller applet (ShowControllerSupport) with fewer pads connected than the game asks for.
+struct ControllerRequest {
+    std::string title;        // the game's name
+    int min_players = 1, max_players = 4;
+    bool single_mode = false;
+};
+enum class ControllerChoice { Enough, Fewer, Cancel };
+// Shows the dialog on the calling thread until enough pads are connected (Enough, *players = connected players, at most max), the player
+// goes on with fewer (Fewer) or cancels. The list refreshes while the window is open.
+ControllerChoice win32_controller(const ControllerRequest& r, int* players);
+
+// A non-modal notice (own thread, topmost, OK only). `key` rate-limits it: the same key is shown at most once per `min_gap_s` seconds and
+// never twice at once. `settings_uri`, when given, adds a button that opens it (e.g. ms-settings:network-status).
+void notice(const std::string& key, const std::string& title, const std::string& text, double min_gap_s = 60.0,
+            const std::string& settings_uri = {});
+// Asks whether to open `url` (http / https only) in the default browser; opens it on yes. Blocks the calling thread.
+bool win32_open_url(const std::string& title, const std::string& url);
+}  // namespace appletui
 
 // ---- vi (vi_nv.cpp)----------------------------------------------------------------------------------------------------------------
 namespace viapi {

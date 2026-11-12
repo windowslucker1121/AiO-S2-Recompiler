@@ -9,6 +9,7 @@
 // layout (AppletAE/Storage/StorageHelper.cs MakeLaunchParams) and the GamePlay recording command id.
 // Adapted from SuperMarioWonderRecomp runtime/src/svc_am.cpp (MIT): the window controller's applet resource user id.
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -18,6 +19,8 @@
 #include <vector>
 
 #include "nxrt/config.h"
+#include "nxrt/gaps.h"
+#include "nxrt/input_source.h"
 #include "nxrt/kernel.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
@@ -531,7 +534,9 @@ ServicePtr make_window_controller() {
 // docs/IPC_ANSWERS.md. The software keyboard (LibraryAppletId 0x11) in its normal, full-screen form answers a text, the player select
 // (0x10) answers the one user or, for its network-account modes, that the player backed out; the error applet (0x0E) logs the error it
 // was given; the shop, friends, data management, network connection and GameShare matchmaking applets end as cancelled by the player
-// (offline: nothing to buy, invite, free or connect to). An applet id nothing here knows ends at once with no output. Command ids
+// (offline: nothing to buy, invite, free or connect to); the controller applet answers the players connected (a native dialog when the
+// game asks for more); web pages end cancelled (after asking whether to open the URL in the browser). Each applet's answer can be
+// changed with `[applet] <key>` (the table further down). An applet id nothing here knows ends at once with no output. Command ids
 // follow the Switchbrew "Applet Manager services" page (IAppletAccessor / ILibraryAppletAccessor). The keyboard storages follow Ryujinx
 // src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard (MIT: SoftwareKeyboardConfig, the 0x7D8-byte output) and Eden / yuzu
 // applet_software_keyboard_types.h (GPL-3.0-or-later); the accessor's channel model follows the user's Afterpulse runtime (am.cpp, same
@@ -676,6 +681,7 @@ struct AppletState {
     uint32_t mode = 0;
     bool started = false;
     bool completed = false;
+    bool canceled = false;                                 // GetResult answers LibraryAppletCanceled (the player backed out)
     std::deque<std::shared_ptr<Bytes>> in_data;            // PushInData, oldest first
     std::deque<std::shared_ptr<Bytes>> interactive_in;     // PushInteractiveInData
     std::deque<std::shared_ptr<Bytes>> out_data;           // PopOutData
@@ -683,6 +689,7 @@ struct AppletState {
     ServiceEvent state_event{false};                       // signalled once the applet has ended
     ServiceEvent out_event{false};                         // signalled while out_data is not empty
     ServiceEvent interactive_out_event{false};             // signalled while interactive_out is not empty
+    ServiceEvent extra_event{false};                       // platform 2 accessor command 170: never signalled
     bool utf8 = false;                                     // software keyboard: the config's use_utf8
     bool text_check = false;                               // software keyboard: the config's use_text_check
     std::u16string text;                                   // software keyboard: the text answered
@@ -761,7 +768,7 @@ void swkbd_prompt_async(const std::shared_ptr<AppletState>& ap) {
 
 // Start of the normal keyboard: in data 0 is CommonArguments, 1 the keyboard config, 2 the work buffer (initial text, dictionary).
 // The caller holds mu().
-void swkbd_start(const std::shared_ptr<AppletState>& ap) {
+void swkbd_start(const std::shared_ptr<AppletState>& ap, bool may_ask) {
     AppletState& a = *ap;
     std::shared_ptr<Bytes> common = a.in_data.size() > 0 ? a.in_data[0] : nullptr;
     std::shared_ptr<Bytes> cfg = a.in_data.size() > 1 ? a.in_data[1] : nullptr;
@@ -793,7 +800,7 @@ void swkbd_start(const std::shared_ptr<AppletState>& ap) {
             r.header.c_str(), r.guide.c_str(), r.initial.c_str());
     if (nxrt::config_has("applet", "swkbd_text")) {
         a.text = utf8_to_utf16(nxrt::config_get_str("applet", "swkbd_text", ""));
-    } else if (prompt_flag().load()) {
+    } else if (may_ask && prompt_flag().load()) {
         swkbd_prompt_async(ap);
         return;
     } else {
@@ -830,11 +837,15 @@ void swkbd_interactive(const std::shared_ptr<AppletState>& ap) {
 
 // The player select (output: u64 result, then the Uid; 0x18 bytes). The user selector picks the one user at once; the other modes
 // (network account and licence screens) answer that the player backed out, with no user.
-void player_select_start(AppletState& a) {
+void player_select_start(AppletState& a, bool cancel) {
     std::shared_ptr<Bytes> ui = a.in_data.size() > 1 ? a.in_data[1] : nullptr;
     const uint32_t mode = ui ? read_at<uint32_t>(*ui, 0, kPselModeUserSelector) : kPselModeUserSelector;
     auto out = std::make_shared<Bytes>(0x18, uint8_t{0});
-    if (mode == kPselModeUserSelector) {
+    if (cancel) {
+        const uint64_t r = kAccountCancelledByUser;
+        std::memcpy(out->data(), &r, 8);
+        NXLOG_I("am", "player select applet 0x%x (mode %u): [applet] player_select = cancel, answering 0x27C", a.full_id, mode);
+    } else if (mode == kPselModeUserSelector) {
         uint64_t hi = 0, lo = 0;
         accapi::user_uid(&hi, &lo);
         std::memcpy(out->data() + 8, &hi, 8);
@@ -850,23 +861,241 @@ void player_select_start(AppletState& a) {
     applet_finish(a);
 }
 
-// The applets that end as cancelled by the player (GetResult LibraryAppletCanceled, exit reason 1), with what the log says about them.
-const char* cancelled_applet(uint32_t id) {
-    switch (id) {
-    case kAppletIdShop: return "shop: no eShop here";
-    case kAppletIdMyPage: return "friends (friend invitation): offline, no invitation sent";
-    case kAppletIdDataErase: return "data management (save data does not fit): nothing freed";
-    case kAppletIdNetConnect: return "network connection: offline, not resolved";
-    case kAppletIdMatchmake: return "GameShare matchmaking: no guests here";
-    default: return nullptr;
+// ---- the applet table and its policies ----------------------------------------------------------------------------------------------
+// Every library applet a game can create has a row: its [applet] key, its default policy and, for the applets whose normal answer is
+// "the player backed out", what the log says. `[applet] <key> = auto | cancel | prompt` overrides the policy (docs/IPC_ANSWERS.md):
+// auto answers without a window, cancel ends the applet as cancelled by the player (GetResult LibraryAppletCanceled, exit reason 1),
+// prompt asks in a native window where the applet has one (appletui; only while the play layer enables windows) and is auto otherwise.
+// Ids are the AppletId values of the Switchbrew "Applet Manager services" page.
+enum class Policy { Auto, Cancel, Prompt };
+
+constexpr uint32_t kAppletIdCabinet = 0x0B;      // amiibo settings (nn::nfp::StartNicknameAndOwnerSettings, StartRestorer, ...)
+constexpr uint32_t kAppletIdController = 0x0C;   // nn::hid::ShowControllerSupport, strap guide, firmware update, key remapping
+constexpr uint32_t kAppletIdWeb = 0x13;          // nn::web::ShowWebPage
+constexpr uint32_t kAppletIdOfflineWeb = 0x17;   // nn::web::ShowOfflineHtmlPage
+constexpr uint32_t kAppletIdLoginShare = 0x18;
+constexpr uint32_t kAppletIdWifiWebAuth = 0x19;
+
+struct AppletKind {
+    uint32_t id;
+    const char* key;        // the [applet] key
+    const char* name;       // for the log
+    Policy def;
+    const char* cancel_why; // non-null: the applet's own answer is "cancelled", this says why
+};
+
+constexpr AppletKind kApplets[] = {
+    {0x0A, "parental_auth", "parental controls PIN", Policy::Auto, nullptr},
+    {kAppletIdCabinet, "cabinet", "amiibo settings", Policy::Auto, "amiibo settings: no NFC reader here"},
+    {kAppletIdController, "controller", "controller support", Policy::Prompt, nullptr},
+    {kAppletIdDataErase, "data_erase", "data management", Policy::Auto, "data management (save data does not fit): nothing freed"},
+    {kAppletIdError, "error", "error", Policy::Prompt, nullptr},
+    {kAppletIdNetConnect, "net_connect", "network connection", Policy::Prompt, "network connection: offline, not resolved"},
+    {kAppletIdPlayerSelect, "player_select", "player select", Policy::Auto, nullptr},
+    {kAppletIdSwkbd, "swkbd", "software keyboard", Policy::Prompt, nullptr},
+    {0x12, "mii_edit", "Mii editor", Policy::Auto, nullptr},
+    {kAppletIdWeb, "web", "web page", Policy::Prompt, "web page: no browser applet here"},
+    {kAppletIdShop, "shop", "shop", Policy::Auto, "shop: no eShop here"},
+    {0x15, "album", "photo viewer", Policy::Auto, nullptr},
+    {kAppletIdOfflineWeb, "web", "offline web page", Policy::Prompt, "offline web page: no browser applet here"},
+    {kAppletIdLoginShare, "web", "login share", Policy::Prompt, "login share: offline"},
+    {kAppletIdWifiWebAuth, "web", "Wi-Fi web authentication", Policy::Prompt, "Wi-Fi web authentication: offline"},
+    {kAppletIdMyPage, "mypage", "friends", Policy::Auto, "friends (friend invitation): offline, no invitation sent"},
+    {kAppletIdMatchmake, "matchmake", "GameShare matchmaking", Policy::Auto, "GameShare matchmaking: no guests here"},
+};
+
+const AppletKind* applet_kind(uint32_t id) {
+    for (const AppletKind& k : kApplets)
+        if (k.id == id) return &k;
+    return nullptr;
+}
+
+Policy parse_policy(const std::string& v, Policy def) {
+    if (v == "auto") return Policy::Auto;
+    if (v == "cancel") return Policy::Cancel;
+    if (v == "prompt") return Policy::Prompt;
+    return def;
+}
+
+// The policy in force for an applet: [applet] <key>, else the row's default; unknown applets answer as `other` (auto).
+Policy applet_policy(const AppletKind* k) {
+    const char* key = k ? k->key : "other";
+    const std::string v = nxrt::config_get_str("applet", key, "");
+    Policy p = parse_policy(v, k ? k->def : Policy::Auto);
+    if (!v.empty() && v != "auto" && v != "cancel" && v != "prompt")
+        NXLOG_W("am", "[applet] %s = \"%s\": not auto, cancel or prompt; the default is used", key, v.c_str());
+    return p;
+}
+
+// Prompt asks only while the play layer allows windows; otherwise it answers as auto.
+bool may_prompt(Policy p) { return p == Policy::Prompt && appletui::windows_enabled(); }
+
+// ---- controller support (0x0C) ------------------------------------------------------------------------------------------------------
+// nn::hid::detail::ShowControllerSupportCore (sdk 0x75007386a0 of the game) pushes the private argument (0x14 bytes: u32 its size, u32
+// the argument's size, u8 flag, u8 flag, u8 mode at +10, u8 caller, u32 style set, u32 hold type) and the argument (0x430 bytes here:
+// s8 player count min at 0, s8 max at 1, u8 take over connection, u8 left justify, u8 permit dual, u8 single mode at 5, ...), and pops
+// a 0xC-byte ResultInfo {s8 player count, 3 bytes, u32 selected npad id, u32 result}: result 0 = success, 2 = 0x183CCA, anything else
+// = 0x183ACA (cancelled). An empty out channel reads as zeros = success, no players, player 1 (the old answer of this runtime). Modes
+// 1.. (strap guide, firmware update, key remapping) end at once with success. Layouts: Switchbrew "Controller Applet", Ryujinx
+// HOS/Applets/Controller (MIT).
+constexpr size_t kCtrlPrivateSize = 0x14;
+constexpr size_t kCtrlPrivateMode = 10;
+constexpr size_t kCtrlArgMin = 0, kCtrlArgMax = 1, kCtrlArgSingle = 5;
+constexpr uint32_t kCtrlResultOk = 0, kCtrlResultCancel = 1;
+
+// Pads the controller dialog was closed with (Cancel or "Continue anyway"): until the number of open pads changes, a new request answers
+// with the players there are instead of asking again (a game that asks again at once after a cancel would show the dialog in a loop).
+std::atomic<int> g_ctrl_declined_pads{-1};
+
+// Connected players: player 1 is the keyboard and mouse together with the first pad; every further open pad is one more player.
+int controller_players(std::vector<uint32_t>* ids) {
+    const std::vector<appletui::Pad> p = appletui::pads();
+    if (ids) {
+        ids->clear();
+        for (const appletui::Pad& x : p) ids->push_back(x.id);
     }
+    return p.size() > 1 ? static_cast<int>(p.size()) : 1;
+}
+
+// Answers `players` players (1..max) and gives pads 2.. to players 2.. (hid::set_player_pads), or the cancel result. The caller holds mu().
+void controller_answer(AppletState& a, int players, int max_players, uint32_t result) {
+    auto out = std::make_shared<Bytes>(0xC, uint8_t{0});
+    if (result == kCtrlResultOk) {
+        std::vector<uint32_t> pads;
+        const int have = controller_players(&pads);
+        if (players > have) players = have;
+        if (players > max_players) players = max_players;
+        if (players < 1) players = 1;
+        std::vector<uint32_t> extra;
+        for (int p = 1; p < players && static_cast<size_t>(p) < pads.size(); ++p) extra.push_back(pads[static_cast<size_t>(p)]);
+        hid::set_player_pads(extra);
+        hid::set_player1_unplugged(false);   // the test aid's "unplugged" player 1 is connected again
+        (*out)[0] = static_cast<uint8_t>(players);
+        const uint32_t id = 0;   // npad id of player 1 (No1): the play layer reports it as a full controller
+        std::memcpy(out->data() + 4, &id, 4);
+        NXLOG_I("am", "controller applet: %d player(s), player 1 selected%s", players, extra.empty() ? "" : "; pads 2.. play as players 2..");
+    } else {
+        NXLOG_W("am", "controller applet: answering cancelled (a game may ask again at once)");
+    }
+    std::memcpy(out->data() + 8, &result, 4);
+    push_out(a, out);
+    applet_finish(a);
+}
+
+void controller_start(const std::shared_ptr<AppletState>& ap, Policy pol) {
+    AppletState& a = *ap;
+    std::shared_ptr<Bytes> priv, arg;
+    for (size_t i = 0; i < a.in_data.size(); ++i) {
+        const Bytes& b = *a.in_data[i];
+        if (!priv && b.size() == kCtrlPrivateSize && read_at<uint32_t>(b, 0, 0) == kCtrlPrivateSize) {
+            priv = a.in_data[i];
+            if (i + 1 < a.in_data.size()) arg = a.in_data[i + 1];
+        }
+    }
+    const uint8_t mode = priv ? read_at<uint8_t>(*priv, kCtrlPrivateMode, 0) : 0;
+    if (mode != 0) {
+        NXLOG_I("am", "controller applet 0x%x mode %u (strap guide / firmware update / key remapping): nothing to show, done", a.full_id, mode);
+        auto out = std::make_shared<Bytes>(0xC, uint8_t{0});
+        push_out(a, out);
+        applet_finish(a);
+        return;
+    }
+    int min_p = arg ? read_at<int8_t>(*arg, kCtrlArgMin, 1) : 1;
+    int max_p = arg ? read_at<int8_t>(*arg, kCtrlArgMax, 4) : 4;
+    const bool single = arg ? read_at<uint8_t>(*arg, kCtrlArgSingle, 0) != 0 : false;
+    if (max_p <= 0 || max_p > 8) max_p = 8;
+    if (min_p < 0) min_p = 0;
+    if (min_p > max_p) min_p = max_p;
+    // The dialog's request: the minimum may be raised by the test aid below; max_p stays the game's.
+    if (single) { min_p = 1; max_p = 1; }
+    // Test aid: [test] controller_min_players raises the minimum the dialog asks for, to reach it with a one-player game. The answer still
+    // never exceeds the game's own maximum (more players than it allows make a game ask again at once, in a loop).
+    if (const int t = static_cast<int>(nxrt::config_get_int("test", "controller_min_players", 0)); t > min_p && t <= 8) {
+        NXLOG_I("am", "controller applet: [test] controller_min_players = %d (the game asked for %d..%d)", t, min_p, max_p);
+        min_p = t;
+    }
+    const int have = controller_players(nullptr);
+    NXLOG_I("am", "controller applet 0x%x: players %d..%d%s, %d connected (policy %s)", a.full_id, min_p, max_p, single ? " (single mode)" : "",
+            have, pol == Policy::Cancel ? "cancel" : pol == Policy::Prompt ? "prompt" : "auto");
+    if (pol == Policy::Cancel) {
+        controller_answer(a, 0, max_p, kCtrlResultCancel);
+        return;
+    }
+    const int pads_now = static_cast<int>(appletui::pads().size());
+    if (have >= min_p || !may_prompt(pol) || g_ctrl_declined_pads.load() == pads_now) {
+        if (have < min_p) NXLOG_W("am", "controller applet: %d player(s) connected, the game asked for %d: answering with fewer", have, min_p);
+        controller_answer(a, have, max_p, kCtrlResultOk);
+        return;
+    }
+    appletui::ControllerRequest r;
+    r.title = profile().name;
+    r.min_players = min_p;
+    r.max_players = max_p;
+    r.single_mode = single;
+    std::thread([ap, r] {
+        int players = 1;
+        const appletui::ControllerChoice c = appletui::win32_controller(r, &players);
+        std::lock_guard<std::mutex> lk(mu());
+        if (ap->completed) return;
+        if (c != appletui::ControllerChoice::Enough) g_ctrl_declined_pads.store(static_cast<int>(appletui::pads().size()));
+        else g_ctrl_declined_pads.store(-1);
+        if (c == appletui::ControllerChoice::Cancel) {
+            // The game asks again at once after a cancel (the game: main 0x7103b25b20), so the answer is the players there are, as with
+            // "Continue anyway"; only [applet] controller = cancel answers cancelled.
+            NXLOG_I("am", "controller applet: the player closed the dialog; answering the %d player(s) connected", players);
+        }
+        controller_answer(*ap, players, r.max_players, kCtrlResultOk);
+    }).detach();
+}
+
+std::string read_c_text(const Bytes& b, size_t off, size_t cap);   // below, with the error applet
+
+// ---- web pages (0x13, 0x17, 0x18, 0x19) -----------------------------------------------------------------------------------------------
+// The web argument (in data 1): WebArgHeader {u16 count, u16 padding, u32 shim kind}, then count TLVs {u16 type, u16 size, u32 padding,
+// data}; type 1 is the initial URL (Ryujinx HOS/Applets/Browser, MIT). Every web applet ends cancelled (nn::web::ShowWebPage then returns
+// 0x2D2, which the callers read as "closed"; a success without its 0x2000-byte return value would abort the SDK). With prompt, the player
+// is asked first whether to open an http(s) URL in the default browser.
+std::string web_initial_url(const AppletState& a) {
+    for (size_t i = 1; i < a.in_data.size(); ++i) {
+        const Bytes& b = *a.in_data[i];
+        const uint16_t count = read_at<uint16_t>(b, 0, 0);
+        size_t off = 8;
+        for (uint16_t t = 0; t < count && off + 8 <= b.size(); ++t) {
+            const uint16_t type = read_at<uint16_t>(b, off, 0);
+            const uint16_t size = read_at<uint16_t>(b, off + 2, 0);
+            if (off + 8 + size > b.size()) break;
+            if (type == 1) return read_c_text(b, off + 8, size);
+            off += 8 + size;
+        }
+    }
+    return {};
+}
+
+void web_start(const std::shared_ptr<AppletState>& ap, const AppletKind* k, Policy pol) {
+    AppletState& a = *ap;
+    const std::string url = web_initial_url(a);
+    NXLOG_I("am", "library applet 0x%x (%s) started%s%s: it ends as cancelled by the player", a.full_id, k ? k->name : "web",
+            url.empty() ? "" : ", URL ", url.c_str());
+    a.canceled = true;
+    if (!url.empty() && may_prompt(pol)) {
+        const std::string title = profile().name;
+        std::thread([ap, title, url] {
+            const bool opened = appletui::win32_open_url(title, url);
+            NXLOG_I("am", "web applet: %s", opened ? "opened in the default browser" : "not opened");
+            std::lock_guard<std::mutex> lk(mu());
+            if (!ap->completed) applet_finish(*ap);
+        }).detach();
+        return;
+    }
+    applet_finish(a);
 }
 
 // The error applet: in data 0 is CommonArguments, 1 the error argument; the first byte of that is its type (sdk nn::err, title A's sdk
 // module: ShowError 0x38e580, ShowApplicationError 0x38ead0, ApplicationErrorArg 0x38fb9c..0x38fe60). Type 0 (ShowError(Result), 0x20
 // bytes): the Result at 0x10. Type 4 (a pctl Result, 12 bytes): the Result at 8. Type 2 (ApplicationErrorArg, 0x1014 bytes): u32
 // error code number at 8, language code char[8] at 0xC, dialog message char[0x800] at 0x14, full-screen message char[0x800] at 0x814.
-// Nothing is shown: the error is logged and the applet ends as if the player closed it (no output, GetResult success).
+// The error is logged; with [applet] error = prompt (the default) a non-modal notice shows it too (the same error at most once a
+// minute), and the applet ends as if the player closed it at once (no output, GetResult success): the game does not wait for the notice.
 std::string read_c_text(const Bytes& b, size_t off, size_t cap) {
     std::string t;
     for (size_t i = 0; i < cap && off + i < b.size(); ++i) {
@@ -877,8 +1106,9 @@ std::string read_c_text(const Bytes& b, size_t off, size_t cap) {
     return t;
 }
 
-void error_applet_start(AppletState& a) {
+void error_applet_start(AppletState& a, Policy pol) {
     std::shared_ptr<Bytes> arg = a.in_data.size() > 1 ? a.in_data[1] : nullptr;
+    std::string key, text;
     if (!arg || arg->empty()) {
         NXLOG_I("am", "error applet: no error argument among the %zu storages pushed", a.in_data.size());
     } else {
@@ -887,6 +1117,12 @@ void error_applet_start(AppletState& a) {
             const uint32_t r = read_at<uint32_t>(*arg, type == 0 ? 0x10 : 8, 0);
             NXLOG_I("am", "error applet: the game shows error %04u-%04u (result 0x%x, argument type %u, %zu bytes)", 2000 + (r & 0x1FF),
                     (r >> 9) & 0x1FFF, r, type, arg->size());
+            char code[32];
+            std::snprintf(code, sizeof code, "%04u-%04u", 2000 + (r & 0x1FF), (r >> 9) & 0x1FFF);
+            key = std::string("error:") + code;
+            text = std::string("The game reported error ") + code + ".";
+            const uint32_t module = r & 0x1FF;   // nifm 110, account 124, the online service modules: an offline answer of this runtime
+            if (module == 110 || module == 124) text += "\n\nOnline services are not available here: the game continues offline.";
         } else if (type == 2) {
             const uint32_t code = read_at<uint32_t>(*arg, 8, 0);
             const std::string lang = read_c_text(*arg, 0xC, 8);
@@ -894,10 +1130,13 @@ void error_applet_start(AppletState& a) {
             const std::string full = read_c_text(*arg, 0x814, 0x800);
             NXLOG_I("am", "error applet: the game shows application error %u (language \"%s\"): dialog \"%s\", full screen \"%s\"", code,
                     lang.c_str(), dialog.c_str(), full.c_str());
+            key = "error:app:" + std::to_string(code);
+            text = !dialog.empty() ? dialog : !full.empty() ? full : "The game reported error " + std::to_string(code) + ".";
         } else {
             NXLOG_I("am", "error applet: argument type %u (%zu bytes), not decoded", type, arg->size());
         }
     }
+    if (!key.empty() && may_prompt(pol)) appletui::notice(key, profile().name, text, 60.0);
     applet_finish(a);
 }
 
@@ -944,17 +1183,37 @@ ServicePtr make_library_applet_accessor(uint32_t full_id, uint32_t mode) {
             std::lock_guard<std::mutex> lk(mu());
             if (a->started) return 0;
             a->started = true;
+            const AppletKind* k = applet_kind(a->id);
+            const Policy pol = applet_policy(k);
             if (a->id == kAppletIdSwkbd) {
-                swkbd_start(a);
+                if (pol == Policy::Cancel) {
+                    NXLOG_I("am", "swkbd: [applet] swkbd = cancel");
+                    swkbd_submit(*a, kSwkbdResultCancel);
+                } else {
+                    swkbd_start(a, pol == Policy::Prompt);
+                }
             } else if (a->id == kAppletIdPlayerSelect) {
-                player_select_start(*a);
+                player_select_start(*a, pol == Policy::Cancel);
+            } else if (a->id == kAppletIdController) {
+                controller_start(a, pol);
+            } else if (a->id == kAppletIdWeb || a->id == kAppletIdOfflineWeb || a->id == kAppletIdLoginShare || a->id == kAppletIdWifiWebAuth) {
+                web_start(a, k, pol);
+            } else if (pol == Policy::Cancel || (k && k->cancel_why)) {
+                NXLOG_I("am", "library applet 0x%x started (%s): it ends as cancelled by the player", a->full_id,
+                        k && k->cancel_why ? k->cancel_why : "[applet] policy cancel");
+                a->canceled = true;
+                applet_finish(*a);
             } else if (a->id == kAppletIdError) {
-                error_applet_start(*a);
-            } else if (const char* why = cancelled_applet(a->id)) {
-                NXLOG_I("am", "library applet 0x%x started (%s): it ends as cancelled by the player", a->full_id, why);
+                error_applet_start(*a, pol);
+            } else if (k) {
+                NXLOG_I("am", "library applet 0x%x (%s) started: nothing to show here, it ends at once with no output", a->full_id, k->name);
+                nxrt::gap("applet", "ends at once with no output", k->name);
                 applet_finish(*a);
             } else {
+                char id[16];
+                std::snprintf(id, sizeof id, "0x%x", a->full_id);
                 NXLOG_W("am", "library applet 0x%x started (no tested title was seen to launch it): it ends at once with no output", a->full_id);
+                nxrt::gap("applet", "unknown library applet ends at once", id);
                 applet_finish(*a);
             }
             return 0;
@@ -974,7 +1233,8 @@ ServicePtr make_library_applet_accessor(uint32_t full_id, uint32_t mode) {
         // in nn::la::StartLibraryApplet), so nn::ec::detail::ShowShopPage does not read the 0x1010-byte return value it aborts without
         // and the others return their own "cancelled" result. Every other applet: success.
         s.add_cmd(30, "GetResult", [a](Request&, Response&) -> uint32_t {
-            return cancelled_applet(a->id) ? kAppletCanceled : 0;
+            std::lock_guard<std::mutex> lk(mu());
+            return a->canceled ? kAppletCanceled : 0;
         });
         s.add_cmd(50, "SetOutOfFocusApplicationSuspendingEnabled", ignored("SetOutOfFocusApplicationSuspendingEnabled"));
         s.add_cmd(60, "PresetLibraryAppletGpuTimeSliceZero", ignored("PresetLibraryAppletGpuTimeSliceZero"));
@@ -1019,6 +1279,14 @@ ServicePtr make_library_applet_accessor(uint32_t full_id, uint32_t mode) {
         s.add_cmd(150, "RequestForAppletToGetForeground", ignored("RequestForAppletToGetForeground"));
         // platform 2: one input bool, no output (sdk proxy at 0x75001bd560). Name and meaning unknown; accepted.
         s.add_cmd(90, "Cmd90", ignored("ILibraryAppletAccessor Cmd90"));
+        // platform 2: a second event handle. The SDK's applet creation (the game's sdk 0x75001e37f0, right after CreateLibraryApplet, for
+        // every applet) attaches it as a system event next to GetAppletStateChangedEvent's and aborts when the command fails: the
+        // controller applet crashed the game there before this answer (proxy vtable 0x7500e5afa0 area, thunk 0x75001d03dc, the same reply
+        // shape as GetPopOutDataEvent). Name and meaning unknown; an event that never fires (nothing on the host side to report).
+        s.add_cmd(170, "Cmd170Event", [a](Request&, Response& rsp) -> uint32_t {
+            rsp.out_copy.push_back(a->extra_event.new_handle());
+            return 0;
+        });
     });
 }
 

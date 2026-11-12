@@ -476,11 +476,168 @@ def localize_scratch(text, env=None, entry=None):
     return text.replace('  NxFlags nf; nxf_load(nf, c);', '  ' + decl + 'NxFlags nf; nxf_load(nf, c);', 1)
 
 
+# ---- function-local callee-saved registers and SP (GameConfig.callee_locals) ----
+# x19..x29 and SP are preserved by a callee under the procedure call standard. A lifted function keeps the ones it uses in locals
+# (x19_ .. x29_, sp_): loaded at its entry and wherever the flags are loaded back (after sites and SVCs, which may change any
+# register), written to the context before every call (BL / BLR: the callee saves and uses them; only the ones this function
+# writes), at every exit marker (tail branches, fall-through, sites, SVCs) and before every return. After a call the locals are
+# kept: the callee left the registers as they were. Before, every guest store could alias the context in clang's view, so each
+# use after a store reloaded the register from memory (the stack pointer after every spill) and every write was stored at once.
+# Landing pads re-enter the function through its head (u_ functions with rp), where the locals are loaded again from the context
+# the unwinder restored. Functions in scratch_optout (code that does not follow the call standard) keep them in the context.
+# x0..x8 (arguments, results, the indirect result register) are locals the same way, except that a call changes them: the ones
+# the function uses are loaded again right after every call (a load the code overwrites before reading it is dropped by clang).
+_CS_ARG = tuple(range(0, 9))
+_CS_REGS = _CS_ARG + tuple(range(19, 30)) + (31,)
+_CS_REF = re.compile(r'c->x\[([0-8]|19|2[0-9]|31)\]')
+_CS_WRITE = re.compile(r'c->x\[([0-8]|19|2[0-9]|31)\]\s*(?:=(?!=)|\+=|-=)')
+_CS_CALL = re.compile(r'(c->x\[30\] = 0x[0-9a-f]+ULL; )')
+_CS_CALLEE = re.compile(r'(\bf_[0-9a-f]+\(c\);|\bh_\w+\(c\);|\bcall_indirect\(c, [^;]*\);)')
+_CS_RETURN = re.compile(r'\breturn;')
+_CS_TAIL_BEFORE = re.compile(r'(?:\bf_[0-9a-f]+\(c\);|\bh_\w+\(c\);|\bcall_indirect\(c, [^;]*\);)\s*$')
+
+
+def callee_locals_on(env):
+    v = os.environ.get('NX_CALLEE_LOCALS', '')
+    if v == '0':
+        return False
+    return (v == '1' or bool(getattr(env.cfg, 'callee_locals', False))) and local_flags_on(env)
+
+
+def _cs_name(r):
+    return 'sp_' if r == 31 else 'x%d_' % r
+
+
+# Which registers become locals (the pass is off by default, GameConfig.callee_locals). Measured (village, alternating exes): all
+# of x0..x8, x19..x29 and SP made the game's frame ~6% slower: clang loaded every one at entry and spilled most of them to the
+# host stack again (more live values than host registers), and the write-backs before each call came on top. Fewer registers
+# (SP alone, SP + x19..x29) were not measured. NX_CALLEE_LOCALS_REGS = a comma list of register numbers (31 = SP).
+_CS_ALL = '0,1,2,3,4,5,6,7,8,19,20,21,22,23,24,25,26,27,28,29,31'
+
+
+def _cs_selected():
+    v = os.environ.get('NX_CALLEE_LOCALS_REGS', _CS_ALL)
+    return frozenset(int(x) for x in v.split(',') if x.strip())
+
+
+def localize_callee_saved(text, env=None, entry=None):
+    if env is not None and getattr(env, 'scratch_known', False) and entry in env.scratch_optout:
+        return text
+    mark = 'NxFlags nf; nxf_load(nf, c);'
+    p = text.find(mark)
+    if p < 0:
+        return text
+    head, body = text[:p], text[p:]
+    sel = _cs_selected()
+    used = sorted({int(m) for m in _CS_REF.findall(body)} & sel)
+    if not used:
+        return text
+    if any(int(m) in sel for m in _CS_REF.findall(head)):   # a register used before the locals exist: leave the function as it is
+        return text
+    written = sorted({int(m) for m in _CS_WRITE.findall(body)} & sel)
+    load = ''.join(' %s = c->x[%d];' % (_cs_name(r), r) for r in used)
+    reload = ''.join(' %s = c->x[%d];' % (_cs_name(r), r) for r in used if r in _CS_ARG)
+    lines = body.split('\n')
+    dirty = _cs_dirty(lines, sel) if written else None
+    out = []
+    for i, line in enumerate(lines):
+        if i == 0:                                # the head statement: the first loads
+            line = line.replace('nxf_load(nf, c);', 'nxf_load(nf, c);@@CSLOAD@@', 1)
+        else:
+            line = line.replace('nxf_load(nf, c);', 'nxf_load(nf, c);@@CSLOAD@@')
+        if written:
+            # what this statement must write back where code outside the function may read the registers: everything written
+            # since the context was last in step (entry, a call, a reload), or every written register where that is not known
+            regs = written if dirty is None or i >= len(dirty) or dirty[i] is None else sorted(dirty[i] | (set(int(m) for m in _CS_WRITE.findall(line)) & sel))
+            if regs:
+                st = ''.join('c->x[%d] = %s; ' % (r, _cs_name(r)) for r in regs)
+                line = line.replace('nxf_store(nf, c); ', 'nxf_store(nf, c); ' + st)
+                line = _CS_CALL.sub(lambda m: m.group(1) + st, line)
+                # not after a tail call: the callee's registers are the function's result there (x0..x8 must not be overwritten)
+                line = _CS_RETURN.sub(lambda m: m.group(0) if _CS_TAIL_BEFORE.search(line, 0, m.start()) else '{ ' + st + 'return; }', line)
+        if reload and 'c->x[30] = 0x' in line:
+            line = _CS_CALLEE.sub(lambda m: m.group(1) + '@@CSRELOAD@@', line)
+        out.append(line)
+    body = '\n'.join(out)
+    body = _cs_rewrite(body, sel)                 # the loads are still a placeholder: only the original references change
+    body = body.replace('@@CSLOAD@@', load).replace('@@CSRELOAD@@', reload)
+    decl = 'uint64_t ' + ', '.join(_cs_name(r) for r in used) + '; '
+    return head + decl + body
+
+
+_CS_STORE_STMT = re.compile(r'c->x\[([0-8]|19|2[0-9]|31)\] = ((?:x(?:[0-8]|19|2[0-9])|sp)_); ')
+
+
+def _cs_rewrite(body, sel):
+    """c->x[N] -> the local, except in the write-backs this pass inserted (c->x[N] = local;)."""
+    keep = []
+
+    def hold(m):
+        keep.append(m.group(0))
+        return '@@CSK%d@@' % (len(keep) - 1)
+    body = _CS_STORE_STMT.sub(hold, body)
+    body = _CS_REF.sub(lambda m: _cs_name(int(m.group(1))) if int(m.group(1)) in sel else m.group(0), body)
+    return re.sub(r'@@CSK(\d+)@@', lambda m: keep[int(m.group(1))], body)
+
+
+def _cs_dirty(lines, sel):
+    """Forward analysis over the statements (one per line) of a function body: for each statement, the callee-saved registers that
+    may have been written since the context last held the locals' values (function entry, a call, a reload after a site or SVC).
+    None when the control flow is not known (an in-function dispatch of unresolved branches)."""
+    body = '\n'.join(lines)
+    if 'L_dispatch' in body:
+        return None
+    lab = {}
+    stm = []
+    for i, l in enumerate(lines):
+        s = l.strip()
+        m = _SL_LABEL.match(s)
+        if m:
+            lab[m.group(1)] = i
+            s = s[m.end():]
+        stm.append(s)
+    n = len(stm)
+    succ, wr, sync = [], [], []
+    for i, s in enumerate(stm):
+        tg = [lab[t] for t in _SL_GOTO.findall(s) if t in lab]
+        if _SL_GOTO.findall(s) and len(tg) != len(_SL_GOTO.findall(s)):
+            return None                                  # a goto to a label outside what we parsed
+        cond = s.startswith('if (') or s.startswith('case ')
+        # the resume switch's `default:` line ends the `if (rp)` block: the normal entry (rp == 0) continues after it, so it is no
+        # stop (an extra edge only makes the may-be-changed sets larger)
+        stop = not cond and (s.startswith('goto ') or s.startswith('switch (') or s == 'return;' or s.startswith('guest_trap(') or
+                             s == '}' or bool(_SL_TAIL.match(s.replace('nxf_store(nf, c); ', ''))))
+        succ.append(tg + ([] if stop or i + 1 >= n else [i + 1]))
+        wr.append(set(int(m) for m in _CS_WRITE.findall(s)) & sel)
+        sync.append(not cond and (bool(_CS_CALL.search(s)) or 'nxf_load(nf, c);' in s))
+    din = [None] * n
+    din[0] = set()
+    work = [0]
+    while work:
+        i = work.pop()
+        out = set(wr[i]) if sync[i] else din[i] | wr[i]
+        for j in succ[i]:
+            if din[j] is None:
+                din[j] = set(out)
+                work.append(j)
+            elif not out <= din[j]:
+                din[j] |= out
+                work.append(j)
+    # a statement the walk did not reach that leads somewhere means the model of the control flow is incomplete (statements it
+    # leads to may miss what changed on that path): nothing it computed can be trusted. Unreached statements that lead nowhere
+    # (the lifter's closing `return;` after a final RET) store every written register themselves and change nothing else.
+    if any(din[i] is None and succ[i] for i in range(n)):
+        return None
+    return din
+
+
 def lift_function(env, entry):
     """-> (text, instruction count, [(pc, word, reason)], [(pad, entry)])."""
     text, n, bad, pads = _lift_function(env, entry)
     if scratch_locals_on(env):
         text = localize_scratch(text, env, entry)
+    if callee_locals_on(env):
+        text = localize_callee_saved(text, env, entry)
     if inline_caches_on(env):                    # ctx.h NX_ICALL / NX_IIMPORT: a cache of its own per call site and import stub
         text = text.replace('call_indirect(c, ', 'NX_ICALL(c, ').replace('host_import(c, ', 'NX_IIMPORT(c, ')
     return text, n, bad, pads

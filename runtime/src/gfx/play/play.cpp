@@ -132,7 +132,7 @@ public:
             t = touch_;
         }
         hid::NpadInput& n = out.npad[0];
-        n.connected = true;
+        n.connected = !hid::player1_unplugged();
         n.style = hid::NpadStyle::FullKey;
         n.buttons = pf.buttons | kb.buttons;
         n.left = combine(pf.left, kb.lx, kb.ly);
@@ -151,6 +151,18 @@ public:
         right_y_f_.store(static_cast<float>(n.right.y) / 32767.f, std::memory_order_relaxed);
         gyro_pitch_.store(std::fabs(pf.six.gyro[0]), std::memory_order_relaxed);
         n.six_axis.gyro[0] *= look_scale_.load(std::memory_order_relaxed);      // the game integrates the pitch rate per call: see play_lookrate.h
+        {   // players 2.. (hid::player_pads, after a game asked for more players through the controller applet): one pad each
+            std::lock_guard<std::mutex> lk(mu_);
+            for (uint32_t i = 0; i + 1 < hid::kNpadPlayers; ++i) {
+                hid::NpadInput& p = out.npad[i + 1];
+                if (i >= extra_count_) continue;   // never assigned: left as the hid service has it (disconnected)
+                p.connected = extra_on_[i];
+                p.style = hid::NpadStyle::FullKey;
+                p.buttons = extra_on_[i] ? extra_[i].buttons : 0;
+                p.left = extra_on_[i] ? extra_[i].left : hid::StickValue{};
+                p.right = extra_on_[i] ? extra_[i].right : hid::StickValue{};
+            }
+        }
         out.touch.count = 0;
         if (t.down) {
             out.touch.count = 1;
@@ -164,6 +176,21 @@ public:
     void set_pad(const PadFrame& p) {
         std::lock_guard<std::mutex> lk(mu_);
         pad_ = p;
+    }
+    // Players 2..count+1: frames[i] and whether its pad is open (on[i]).
+    void set_extra_players(const PadFrame* frames, const bool* on, uint32_t count) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (count > hid::kNpadPlayers - 1) count = hid::kNpadPlayers - 1;
+        // once players were assigned, a later empty list still disconnects them (extra_count_ keeps the high-water mark at 0 otherwise)
+        if (count == 0 && extra_count_ > 0) {
+            for (uint32_t i = 0; i < extra_count_; ++i) extra_on_[i] = false;
+            return;
+        }
+        extra_count_ = count;
+        for (uint32_t i = 0; i < count; ++i) {
+            extra_[i] = frames[i];
+            extra_on_[i] = on[i];
+        }
     }
     // Is a pad looking up or down right now (the right stick's vertical axis off centre, or the gyro turning about the pad's pitch axis)? Read by the aim
     // on the main thread; the values are the ones the game gets.
@@ -201,6 +228,9 @@ private:
     std::mutex mu_;
     PadFrame pad_;
     Touch touch_;
+    PadFrame extra_[hid::kNpadPlayers - 1];
+    bool extra_on_[hid::kNpadPlayers - 1] = {};
+    uint32_t extra_count_ = 0;
 };
 
 // ---- the state ------------------------------------------------------------------------------------------------------------------------
@@ -735,6 +765,29 @@ void handle_event(const input::Event& e, uint64_t now) {
 // Reads every open pad, merges them (buttons OR, the stick with the larger deflection wins) and publishes the result to the source.
 void poll_pads(uint64_t now) {
     G& st = g();
+    {   // [test] unplug_player1_at_s: seconds after play mode starts, player 1 reads as disconnected until the controller applet answers
+        static const double unplug_at = config_get_double("test", "unplug_player1_at_s", 0.0);
+        static const uint64_t start_ns = now;
+        static bool done = false;
+        if (unplug_at > 0 && !done && static_cast<double>(now - start_ns) / 1e9 >= unplug_at) {
+            done = true;
+            hid::set_player1_unplugged(true);
+            NXLOG_I(kTag, "test: player 1 unplugged (until the controller applet answers)");
+        }
+        // [test] applet_windows_at_s: opens the error and network notices and the web page question once, as the applets would (oot
+        // reaches none of them offline), to check the windows while the game runs.
+        static const double demo_at = config_get_double("test", "applet_windows_at_s", 0.0);
+        static bool demo_done = false;
+        if (demo_at > 0 && !demo_done && static_cast<double>(now - start_ns) / 1e9 >= demo_at) {
+            demo_done = true;
+            NXLOG_I(kTag, "test: opening the applet windows");
+            services::appletui::notice("error:test", "Test: error applet", "The game reported error 2110-3400.\n\nOnline services are not "
+                                       "available here: the game continues offline.", 60.0);
+            services::appletui::notice("net_connect:test", "Test: network connection", "The game asked for an internet connection. Online "
+                                       "services are not available in this version, so it continues offline.", -1.0, "ms-settings:network-status");
+            std::thread([] { services::appletui::win32_open_url("Test: web page", "https://example.com/"); }).detach();
+        }
+    }
     PadFrame pf;
     input::GamepadInfo infos[8];
     const size_t n = input::gamepad_list(infos, 8);
@@ -762,6 +815,9 @@ void poll_pads(uint64_t now) {
     const bool look_ctx = cx == Ctx::Play || cx == Ctx::Alt || cx == Ctx::Inspect;      // the right stick is a look only in play
     const bool rumble_changed = lo != st.rumble_lo || hi != st.rumble_hi;
     const bool rumble_refresh = (lo || hi) && now - st.last_rumble_ns > 100 * kMs;
+    const std::vector<uint32_t> assigned = hid::player_pads();
+    PadFrame extra[hid::kNpadPlayers - 1];
+    bool extra_on[hid::kNpadPlayers - 1] = {};
     for (size_t i = 0; i < n; ++i) {
         platform::GamepadRaw raw;
         if (!platform::gamepad_poll(infos[i].id, &raw)) continue;
@@ -801,6 +857,18 @@ void poll_pads(uint64_t now) {
             }
         }
         if (look_ctx) tmp.right = adjust_look_stick(tmp.right, st.settings.pad);
+        {   // a pad the controller applet gave to player 2.. drives that player alone
+            size_t k = 0;
+            while (k < assigned.size() && assigned[k] != infos[i].id) ++k;
+            if (k < assigned.size()) {
+                extra[k].buttons = tmp.buttons;
+                extra[k].left = tmp.left;
+                extra[k].right = tmp.right;
+                extra_on[k] = true;
+                if (rumble_changed || rumble_refresh) platform::gamepad_rumble(infos[i].id, lo, hi, 250);
+                continue;
+            }
+        }
         pf.buttons |= tmp.buttons;
         auto big = [](hid::StickValue a, hid::StickValue b) {
             return static_cast<int64_t>(a.x) * a.x + static_cast<int64_t>(a.y) * a.y >= static_cast<int64_t>(b.x) * b.x + static_cast<int64_t>(b.y) * b.y ? a : b;
@@ -830,8 +898,10 @@ void poll_pads(uint64_t now) {
         pf.buttons = 0;
         pf.left = hid::StickValue{};
         pf.right = hid::StickValue{};
+        for (PadFrame& e : extra) e = PadFrame{};
     }
     st.source_owner->set_pad(pf);
+    st.source_owner->set_extra_players(extra, extra_on, static_cast<uint32_t>(assigned.size()));
 }
 
 // ---- the mouse capture's hints and the settings file ----------------------------------------------------------------------------------
@@ -1671,6 +1741,15 @@ bool start(const StartOptions& opt) {
 
     // The software keyboard asks the player in a small native window while there is a game window ([applet] swkbd_prompt = false: never).
     services::swkbdui::enable_prompt(st.window && config_get_bool("applet", "swkbd_prompt", true));
+    // The other system dialogs (controller, error and network notices, web pages) may show native windows too ([applet] <key> = prompt).
+    services::appletui::enable_windows(st.window);
+    services::appletui::set_pad_lister([]() -> std::vector<services::appletui::Pad> {
+        input::GamepadInfo infos[8];
+        const size_t n = input::gamepad_list(infos, 8);
+        std::vector<services::appletui::Pad> out;
+        for (size_t i = 0; i < n; ++i) out.push_back({infos[i].id, infos[i].name});
+        return out;
+    });
     if (st.renderer) {
         st.limiter.set_pre_frame_hook(&pre_frame, nullptr);
         if (!st.renderer->headless()) st.renderer->set_present_mode(present_mode_for(st.settings.display));
@@ -1737,6 +1816,8 @@ void stop() {
     if (st.hook_update) hook_remove(st.hook_update);
     st.hook_update = 0;
     hid::set_vibration_sink(nullptr, nullptr);
+    services::appletui::enable_windows(false);
+    services::appletui::set_pad_lister(nullptr);
     if (hid::input_source() == st.source) hid::set_input_source(nullptr);
     if (st.dirty) {
         std::string err;

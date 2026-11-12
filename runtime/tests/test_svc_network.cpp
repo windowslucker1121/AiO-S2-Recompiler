@@ -221,6 +221,9 @@ NXTEST(pctl_no_restriction) {
     CHECK_EQ(s.call(1031).get<uint8_t>(0), 0);                // IsRestrictionEnabled: false
     CHECK_EQ(s.call(1018).get<uint8_t>(0), 1);                // IsFreeCommunicationAvailable: true
     CHECK_EQ(s.call(1065).get<uint8_t>(0), 1);                // IsStereoVisionPermitted: true
+    nxsvc::Reply agc = s.call(1101, nxsvc::Args().u64(2).u64(1));   // CheckAgcPermissionUnderMinimumAge(Uid): permitted
+    CHECK_EQ(agc.result, 0u);
+    CHECK_EQ(agc.get<uint8_t>(0), 1);
     CHECK_EQ(s.call(1039).get<int32_t>(0), 0);                // GetFreeCommunicationApplicationListCount: 0
     CHECK_EQ(s.call(1001).result, 0u);                        // CheckFreeCommunicationPermission: allowed
 }

@@ -928,6 +928,9 @@ std::shared_ptr<ipc::Service> make_pctl_service() {
             {1063, "SetStereoVisionRestriction", K::Ok},
             {1064, "ResetConfirmedStereoVisionPermission", K::Ok},
             {1065, "IsStereoVisionPermitted", K::U8, 1},
+            // platform 2: nn::pctl::CheckAgcPermissionUnderMinimumAge(Uid) (the game's sdk 0x75005a2270, proxy vtable slot +432 ->
+            // thunk 0x750059f060, command 0x44D): in a Uid, out a bool; the SDK aborts when the command fails. No restriction: permitted.
+            {1101, "CheckAgcPermissionUnderMinimumAge", K::U8, 1},
             {1201, "UnlockRestrictionTemporarily", K::Ok},
             {1202, "UnlockSystemSettingsRestriction", K::Ok},
             {1203, "SetPinCode", K::Ok},

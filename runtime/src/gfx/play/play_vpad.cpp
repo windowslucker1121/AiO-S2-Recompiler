@@ -223,9 +223,58 @@ const ButtonId* vpad_find_button(const std::string& name) {
     return nullptr;
 }
 
+// A second virtual pad for two-player tests ("vpad attach2 xbox", "vpad button2 south 1", "vpad detach2"): buttons only, no rumble or
+// sensors. Only the thread that runs the test steps touches it.
+SDL_JoystickID g_id2 = 0;
+SDL_Joystick* g_joy2 = nullptr;
+
+void vpad_detach2() {
+    if (g_joy2) SDL_CloseJoystick(g_joy2);
+    if (g_id2) SDL_DetachVirtualJoystick(g_id2);
+    if (g_joy2 || g_id2) {
+        SDL_UpdateJoysticks();
+        NXLOG_I(kTag, "vpad 2 detached");
+    }
+    g_joy2 = nullptr;
+    g_id2 = 0;
+}
+
+bool vpad_attach2(const KindId& k) {
+    vpad_detach2();
+    SDL_VirtualJoystickDesc d;
+    SDL_INIT_INTERFACE(&d);
+    d.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+    d.naxes = SDL_GAMEPAD_AXIS_COUNT;
+    d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    d.vendor_id = k.vendor;
+    d.product_id = k.product;
+    d.name = "nxrt virtual pad 2";
+    g_id2 = SDL_AttachVirtualJoystick(&d);
+    if (!g_id2) return false;
+    g_joy2 = SDL_OpenJoystick(g_id2);
+    SDL_UpdateJoysticks();
+    NXLOG_I(kTag, "vpad 2 attached %s id=%u", k.name, static_cast<unsigned>(g_id2));
+    return g_joy2 != nullptr;
+}
+
 bool vpad_run(const std::vector<std::string>& t) {
     if (t.empty()) return false;
     const std::string& cmd = t[0];
+
+    if (cmd == "attach2") {
+        const KindId* k = vpad_find_kind(t.size() == 2 ? t[1] : std::string("xbox"));
+        return k && t.size() <= 2 && vpad_attach2(*k);
+    }
+    if (cmd == "detach2") {
+        vpad_detach2();
+        return true;
+    }
+    if (cmd == "button2") {
+        if (t.size() != 3 || !g_joy2) return false;
+        const ButtonId* b = vpad_find_button(t[1]);
+        if (!b || (t[2] != "0" && t[2] != "1")) return false;
+        return SDL_SetJoystickVirtualButton(g_joy2, static_cast<int>(b->button), t[2] == "1");
+    }
 
     if (cmd == "attach") {
         if (t.size() > 2) return false;
@@ -285,7 +334,10 @@ bool vpad_command(const char* args) {
     return ok;
 }
 
-void vpad_shutdown() { vpad_detach(); }
+void vpad_shutdown() {
+    vpad_detach();
+    vpad_detach2();
+}
 
 VpadRumble vpad_last_rumble() {
     std::lock_guard<std::mutex> g(vpad_state().mu);

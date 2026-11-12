@@ -6,7 +6,11 @@
 #include <windows.h>
 #include <cstring>
 
+#include <vector>
+
 #include "nxrt/config.h"
+#include "nxrt/gaps.h"
+#include "nxrt/input_source.h"
 #include "nxrt/kernel.h"
 #include "nxrt/services_api.h"
 #include "svc_test_util.h"
@@ -347,6 +351,172 @@ NXTEST(am_error_and_shop_applets_close) {
     CHECK_EQ(shop.call(10).result, 0u);
     CHECK_EQ(shop.call(1).get<uint8_t>(0), 1u);
     CHECK_EQ(shop.call(30).result, 0x2C80u);
+}
+
+namespace {
+
+// A storage with `bytes` in it, handed to the applet with PushInData (the handle moves to the service).
+void push_in(nxsvc::Session& creator, nxsvc::Session& applet, const std::vector<uint8_t>& bytes) {
+    nxsvc::Session storage = creator.sub(creator.call(10, nxsvc::Args().i64(static_cast<int64_t>(bytes.size()))));
+    REQUIRE(storage.valid());
+    {
+        nxsvc::Session acc = storage.sub(storage.call(0));
+        REQUIRE(acc.valid());
+        CHECK_EQ(acc.call(10, nxsvc::Args().i64(0).buf_a(bytes.data(), bytes.size())).result, 0u);
+    }
+    CHECK_EQ(applet.call(100, nxsvc::Args().hmove(storage.release())).result, 0u);
+}
+
+// PopOutData's bytes (empty when the applet pushed nothing).
+std::vector<uint8_t> pop_out(nxsvc::Session& applet) {
+    nxsvc::Reply r = applet.call(101);
+    if (!r.ok() || r.move.empty()) return {};
+    nxsvc::Session storage = applet.sub(r);
+    nxsvc::Session acc = storage.sub(storage.call(0));
+    const int64_t size = acc.call(0).get<int64_t>(0);
+    std::vector<uint8_t> out(static_cast<size_t>(size));
+    if (size > 0) acc.call(11, nxsvc::Args().i64(0).buf_b(out.data(), out.size()));
+    return out;
+}
+
+// The controller applet's two storages: the private argument (0x14 bytes, mode at +10) and the 0x430-byte argument (min, max, single).
+nxsvc::Session start_controller(nxsvc::Session& creator, uint8_t mode, int8_t min_p, int8_t max_p, bool single = false) {
+    nxsvc::Session ctrl = creator.sub(creator.call(0, nxsvc::Args().u32(0x100000C).u32(0)));
+    if (!ctrl.valid()) return ctrl;
+    // The SDK asks for the platform 2 second event (command 170) right after creating any applet and aborts when it fails.
+    nxsvc::Reply ev = ctrl.call(170);
+    CHECK_EQ(ev.result, 0u);
+    CHECK_EQ(ev.copy.size(), 1u);
+    for (uint32_t h : ev.copy) nxrt::kernel::handle_close(h);
+    std::vector<uint8_t> priv(0x14, 0);
+    priv[0] = 0x14;
+    priv[4] = 0x30;
+    priv[5] = 0x04;
+    priv[10] = mode;
+    std::vector<uint8_t> arg(0x430, 0);
+    arg[0] = static_cast<uint8_t>(min_p);
+    arg[1] = static_cast<uint8_t>(max_p);
+    arg[5] = single ? 1 : 0;
+    push_in(creator, ctrl, priv);
+    push_in(creator, ctrl, arg);
+    CHECK_EQ(ctrl.call(10).result, 0u);
+    return ctrl;
+}
+
+uint32_t u32_at(const std::vector<uint8_t>& b, size_t off) {
+    uint32_t v = 0;
+    if (off + 4 <= b.size()) std::memcpy(&v, b.data() + off, 4);
+    return v;
+}
+
+}  // namespace
+
+NXTEST(am_controller_applet_answers_the_connected_players) {
+    nxsvc::Env env;
+    clear_config();
+    nxsvc::Session proxy = open_proxy();
+    REQUIRE(proxy.valid());
+    nxsvc::Session creator = proxy.sub(proxy.call(11));
+    REQUIRE(creator.valid());
+    // One player wanted, one there (the keyboard is player 1): ResultInfo {count 1, id 0 = player 1, result 0}, GetResult success.
+    nxsvc::Session one = start_controller(creator, 0, 1, 4);
+    REQUIRE(one.valid());
+    CHECK_EQ(one.call(1).get<uint8_t>(0), 1u);
+    std::vector<uint8_t> out = pop_out(one);
+    REQUIRE(out.size() == 0xCu);
+    CHECK_EQ(out[0], 1u);
+    CHECK_EQ(u32_at(out, 4), 0u);
+    CHECK_EQ(u32_at(out, 8), 0u);
+    CHECK_EQ(one.call(30).result, 0u);
+    // Two wanted, one there, no window (tests): answered with the one player (the game decides; no dialog, no cancel loop).
+    nxsvc::Session two = start_controller(creator, 0, 2, 4);
+    REQUIRE(two.valid());
+    out = pop_out(two);
+    REQUIRE(out.size() == 0xCu);
+    CHECK_EQ(out[0], 1u);
+    CHECK_EQ(u32_at(out, 8), 0u);
+    CHECK(nxrt::hid::player_pads().empty());
+    // Strap guide (mode 1): done at once with success.
+    nxsvc::Session guide = start_controller(creator, 1, 0, 0);
+    REQUIRE(guide.valid());
+    CHECK_EQ(guide.call(1).get<uint8_t>(0), 1u);
+    CHECK_EQ(u32_at(pop_out(guide), 8), 0u);
+    // Two pads open (the play layer's lister) and a game that wants 2..4 players: 2 players, pad 2 drives player 2. A one-player game
+    // (1..1) gets 1 player and the assignment is cleared.
+    services::appletui::set_pad_lister([]() -> std::vector<services::appletui::Pad> { return {{11, "pad a"}, {12, "pad b"}}; });
+    nxsvc::Session duo = start_controller(creator, 0, 2, 4);
+    REQUIRE(duo.valid());
+    out = pop_out(duo);
+    REQUIRE(out.size() == 0xCu);
+    CHECK_EQ(out[0], 2u);
+    CHECK_EQ(u32_at(out, 8), 0u);
+    REQUIRE(nxrt::hid::player_pads().size() == 1u);
+    CHECK_EQ(nxrt::hid::player_pads()[0], 12u);
+    nxsvc::Session solo = start_controller(creator, 0, 1, 1);
+    REQUIRE(solo.valid());
+    CHECK_EQ(pop_out(solo)[0], 1u);
+    CHECK(nxrt::hid::player_pads().empty());
+    // The test aid raises the minimum, never the answer past the game's maximum.
+    config_set("test", "controller_min_players", "3");
+    nxsvc::Session raised = start_controller(creator, 0, 1, 1);
+    REQUIRE(raised.valid());
+    CHECK_EQ(pop_out(raised)[0], 1u);
+    CHECK(nxrt::hid::player_pads().empty());
+    clear_config();
+    services::appletui::set_pad_lister(nullptr);
+    // [applet] controller = cancel: the cancel result word (the SDK returns 0x183ACA).
+    config_set("applet", "controller", "cancel");
+    nxsvc::Session cancel = start_controller(creator, 0, 1, 4);
+    REQUIRE(cancel.valid());
+    CHECK_EQ(u32_at(pop_out(cancel), 8), 1u);
+    clear_config();
+}
+
+NXTEST(am_web_cabinet_and_unknown_applets) {
+    nxsvc::Env env;
+    clear_config();
+    nxsvc::Session proxy = open_proxy();
+    REQUIRE(proxy.valid());
+    nxsvc::Session creator = proxy.sub(proxy.call(11));
+    REQUIRE(creator.valid());
+    // A web page with an initial URL TLV (type 1): ends cancelled with no output, so nn::web::ShowWebPage returns "closed" instead of
+    // aborting for a missing 0x2000-byte return value.
+    nxsvc::Session web = creator.sub(creator.call(0, nxsvc::Args().u32(0x1000013).u32(0)));
+    REQUIRE(web.valid());
+    std::vector<uint8_t> common(0x20, 0);
+    std::vector<uint8_t> warg(0x1000, 0);
+    warg[0] = 1;                                       // one TLV
+    warg[8] = 1;                                       // type 1: initial URL
+    warg[10] = 0x00; warg[11] = 0x0C;                  // size 0xC00
+    const char url[] = "https://example.com/page";
+    std::memcpy(warg.data() + 16, url, sizeof url);
+    push_in(creator, web, common);
+    push_in(creator, web, warg);
+    CHECK_EQ(web.call(10).result, 0u);
+    CHECK_EQ(web.call(1).get<uint8_t>(0), 1u);
+    CHECK(pop_out(web).empty());
+    CHECK_EQ(web.call(30).result, 0x2C80u);
+    // amiibo settings (0x100000B): cancelled.
+    nxsvc::Session cab = creator.sub(creator.call(0, nxsvc::Args().u32(0x100000B).u32(0)));
+    REQUIRE(cab.valid());
+    CHECK_EQ(cab.call(10).result, 0u);
+    CHECK_EQ(cab.call(30).result, 0x2C80u);
+    // An unknown applet ends at once with success and is counted as a gap.
+    nxsvc::Session odd = creator.sub(creator.call(0, nxsvc::Args().u32(0x10000AA).u32(0)));
+    REQUIRE(odd.valid());
+    CHECK_EQ(odd.call(10).result, 0u);
+    CHECK_EQ(odd.call(30).result, 0u);
+    bool gap_seen = false;
+    for (const nxrt::GapRecord& g : nxrt::gaps_snapshot())
+        if (g.area == "applet" && g.detail == "0x10000aa") gap_seen = true;
+    CHECK(gap_seen);
+    // [applet] error = cancel: the error applet ends cancelled.
+    config_set("applet", "error", "cancel");
+    nxsvc::Session err = creator.sub(creator.call(0, nxsvc::Args().u32(0x100000E).u32(0)));
+    REQUIRE(err.valid());
+    CHECK_EQ(err.call(10).result, 0u);
+    CHECK_EQ(err.call(30).result, 0x2C80u);
+    clear_config();
 }
 
 NXTEST(am_desired_language) {

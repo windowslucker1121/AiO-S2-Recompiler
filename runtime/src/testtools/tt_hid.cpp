@@ -36,7 +36,7 @@ public:
         }
         if (!ov) return;
         hid::NpadInput& n = out.npad[0];
-        n.connected = true;
+        n.connected = !hid::player1_unplugged();   // [test] unplug_player1_at_s holds player 1 off until the controller applet answers
         n.style = hid::NpadStyle::FullKey;
         if (merge) {
             // script with key steps: the live pad (the play layer's output for the keys) stays, the script adds its buttons; a stick the
