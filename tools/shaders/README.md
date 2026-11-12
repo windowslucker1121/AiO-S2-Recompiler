@@ -260,6 +260,17 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
   console's own SASS reads them with LDC as well); pointer tables bound as storage buffers (a load through them still needs a bounds check
   and a fallback, the same shape as the page-cache test).
 
+## Direct mesh outputs on by default (R8, 2026-11-12)
+
+- Once the village frame was GPU-bound (render thread with slack after R8), F2's `NXRT_HARNESS_MESH_DIRECT` + `NXRT_HARNESS_MESH_EARLY_COUNT`
+  were measured again: alternating runs of two private caches whose mesh/task blocks differ only by these switches (both translated by
+  the same harness), two runs each after a warm-up: **69.0 / 69.0 vs 66.7 / 66.6 fps**, GPU exec -0.4..-0.5 ms per frame, frames over
+  15 ms 34-36% vs 44-52%. Capture replays of both village captures: SSIM 1.0 / 0.999999 against the shared cache. Both are on by default
+  now (`=0` turns them off); the shared cache's 785 mesh/task blocks were translated again.
+- `NXRT_HARNESS_PROPAGATE=near:16` on top (mesh blocks and ~55 hot fragment/vertex blocks; the hot meshes 6ec65625 / fbb731e2 go from 255
+  registers with spills to 169 / 178 without): 69.5 / 69.6 vs 69.2 / 68.7 fps, frames over 15 ms 22-23% vs 25-37%. A small gain; not made
+  default (it would apply to every stage; a per-stage default is the next step if it is wanted).
+
 ## TLD / TLD4 / TXD .F16 (the game upscaler network, A22)
 
 - TEX, TLD, TLD4 and TXD all carry `.F16.RN` / `.F16.RZ` in bits 79..80 (nvdisasm 13.3 probe: `TLD4.SCR.R.F16.RN.PTP`,
