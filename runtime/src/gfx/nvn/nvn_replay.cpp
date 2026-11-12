@@ -242,7 +242,7 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbAllocBatch = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbVrs = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbViUpload = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbSigTex = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbChunkTime = 4194304, kAbKeepWrites = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbCmdCopies = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbCsGmemFlush = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbVrs = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbViUpload = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbSigTex = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
 // computed once and kept in a constant-initialized atomic: ab_on() calls it in every "off" window (hundreds of thousands of times per frame),
 // and a guarded local static there made the off windows ~0.6 ms per frame slower than the on windows with nothing switched (nvn_cfg.h)
 std::atomic<uint64_t> g_ab_mask_v{~0ull};
@@ -260,7 +260,7 @@ uint64_t ab_mask_compute() {
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"alloc_batch", kAbAllocBatch}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"vrs", kAbVrs}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"vi_upload", kAbViUpload}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"sig_tex", kAbSigTex}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"chunk_time", kAbChunkTime}, {"keep_writes", kAbKeepWrites}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"cmd_copies", kAbCmdCopies}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"cs_gmem_flush", kAbCsGmemFlush}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"vrs", kAbVrs}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"vi_upload", kAbViUpload}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"sig_tex", kAbSigTex}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -1043,7 +1043,15 @@ void chunk_now() {
 
 // Between two commands of a list.
 void chunk_at_op() {
+    // r3: nothing can be due while fewer draws than the smaller threshold were recorded (and no time limit is set): the common case,
+    // decided without the config statics (this runs before every command, ~35k per frame)
+    static uint32_t min_work = 0;   // 0: not known yet
+    if (min_work && g_chunk_work < min_work && ab_on(kAbR3a)) return;
     const ChunkCfg& c = chunk_cfg();
+    if (!min_work) {
+        const uint32_t a = c.draws ? c.draws : UINT32_MAX, b = c.pass_draws ? c.pass_draws : UINT32_MAX;
+        min_work = c.ns ? 1u : std::max<uint32_t>(1u, std::min(a, b));
+    }
     if (!P.open) {
         if (chunk_due(c.draws)) chunk_now();
     } else if (chunk_due(c.pass_draws, kAbPassChunks)) {
@@ -1513,6 +1521,30 @@ TexResolved resolve_texture(const BindingDesc& d) {
     s.gen = g_resolve_gen;
     return s.r;
 }
+// [nvn] cpuperf_ab_what r3_tex: the texture object alone, from the same per-command cache without copying the whole TexResolved (view and
+// sampler: ~150 bytes, copied up to six times per binding and draw by the callers that only look at the texture).
+Texture* resolved_tex(const BindingDesc& d) {
+    if (!ab_on(kAbR3a) || !resolve_cache_on() || !ab_on(kAbResolveCache)) return resolve_texture(d).tex;
+    ResolveSlot& s = g_rslots[(reinterpret_cast<uintptr_t>(&d) >> 4) & 63];
+    if (s.d != &d || s.gen != g_resolve_gen) {
+        s.r = resolve_texture_uncached(d);
+        s.d = &d;
+        s.gen = g_resolve_gen;
+    }
+    return s.r.tex;
+}
+// The same as resolve_texture without the copy: the reference holds until the next resolve of a binding (callers use it at once).
+const TexResolved& resolve_texture_ref(const BindingDesc& d) {
+    static thread_local TexResolved tmp;
+    if (!ab_on(kAbR3a) || !resolve_cache_on() || !ab_on(kAbResolveCache)) { tmp = resolve_texture_uncached(d); return tmp; }
+    ResolveSlot& s = g_rslots[(reinterpret_cast<uintptr_t>(&d) >> 4) & 63];
+    if (s.d != &d || s.gen != g_resolve_gen) {
+        s.r = resolve_texture_uncached(d);
+        s.d = &d;
+        s.gen = g_resolve_gen;
+    }
+    return s.r;
+}
 
 TexResolved resolve_texture_uncached(const BindingDesc& d) {
     TexResolved r;
@@ -1640,7 +1672,7 @@ bool samples_depth_target(const ProgLayout& pl) {
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
         if (!texture_source(b.nvn.source)) continue;
-        if (shares_image(resolve_texture(d).tex, S.depth_tex.get())) return true;
+        if (shares_image(resolved_tex(d), S.depth_tex.get())) return true;
     }
     return false;
 }
@@ -1701,8 +1733,9 @@ void feedback_prepare(const ProgLayout& pl) {
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
         if (!texture_source(b.nvn.source)) continue;
+        Texture* const rt = resolved_tex(d);
+        if (!rt || !tex_gpu(rt) || !is_color_feedback(rt) || rt->b.samples > 1 || g_fb_use.count(rt)) continue;
         const TexResolved r = resolve_texture(d);
-        if (!r.tex || !tex_gpu(r.tex) || !is_color_feedback(r.tex) || r.tex->b.samples > 1 || g_fb_use.count(r.tex)) continue;
         any = true;
         Texture* c = feedback_clone(r.tex);
         if (!c) continue;
@@ -1763,6 +1796,7 @@ void vol3d_prepare(const ProgLayout& pl) {
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
         if (!texture_source(b.nvn.source)) continue;
+        if (ab_on(kAbR3a) && view_type_for(b) != VK_IMAGE_VIEW_TYPE_3D) continue;   // wants_vol3d's first test, before the resolve
         const TexResolved r = resolve_texture(d);
         if (!wants_vol3d(b, r) || g_vol3d_use.count(r.tex) || !tex_gpu(r.tex)) continue;
         const uint32_t layer = r.has_view && r.view.has_layers ? static_cast<uint32_t>(r.view.min_layer) : 0;
@@ -2198,14 +2232,14 @@ void prepare_textures(const ProgLayout& pl) {
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
         if (!texture_source(b.nvn.source)) continue;
-        TexResolved r = resolve_texture(d);
-        if (!r.tex) continue;
-        if (!tex_gpu(r.tex)) continue;
+        Texture* const rt = resolved_tex(d);
+        if (!rt) continue;
+        if (!tex_gpu(rt)) continue;
         // owned by the pass; a compute dispatch runs outside every pass, so the graphics attachments do not own what it samples
-        if (shares_image(r.tex, S.depth_tex.get()) || (d.nvn_stage != kCompute && is_color_feedback(r.tex))) continue;
-        if (r.tex->cpu_dirty.load() || tex_layout(r.tex) != tex_sampled_layout(r.tex)) {
-            need.push_back(r.tex);
-            if (r.tex->cpu_dirty.load() && ft::on()) ft::mark(b.nvn.source == NvnSource::SamplerBinding ? "tx.dirty_bind" : "tx.dirty_uniform", r.tex->id);
+        if (shares_image(rt, S.depth_tex.get()) || (d.nvn_stage != kCompute && is_color_feedback(rt))) continue;
+        if (rt->cpu_dirty.load() || tex_layout(rt) != tex_sampled_layout(rt)) {
+            need.push_back(rt);
+            if (rt->cpu_dirty.load() && ft::on()) ft::mark(b.nvn.source == NvnSource::SamplerBinding ? "tx.dirty_bind" : "tx.dirty_uniform", rt->id);
         }
     }
     for (const PoolBinding& pb : pl.pool) {   // A7: what a pool array may read is in the sampled layout too (the pass's own targets excepted)
@@ -2617,12 +2651,15 @@ void gmem_before_op(bool compute) {
     int n = 0;
     bool full = false;
     // every page a reader asked about in this op, matched or not (open addressing; a full table only stops remembering)
-    uint64_t asked[512];
-    std::memset(asked, 0, sizeof asked);
+    // (r3: entries tagged with a per-op generation instead of a 4 KiB clear per op; render thread only)
+    static uint64_t asked[512];
+    static uint32_t asked_gen[512];
+    static uint32_t gen = 0;
+    if (++gen == 0) { std::memset(asked_gen, 0, sizeof asked_gen); gen = 1; }
     auto asked_before = [&](uint64_t page) {
         for (uint32_t h = static_cast<uint32_t>((page >> 12) * 0x9E3779B1u) >> 23, k = 0; k < 16; ++k, h = (h + 1) & 511) {
+            if (asked_gen[h] != gen) { asked_gen[h] = gen; asked[h] = page; return false; }
             if (asked[h] == page) return true;
-            if (!asked[h]) { asked[h] = page; return false; }
         }
         return false;
     };
@@ -4612,7 +4649,7 @@ __declspec(noinline) int keep_valid(KeepEntry& e) {   // noinline: its own line 
                 upd_note_read(k.addr, k.note);
                 break;
             case 3: {
-                const TexResolved r = resolve_texture(*k.d);
+                const TexResolved& r = resolve_texture_ref(*k.d);
                 if (k.rq && !k.texel && sig_tex_on()) {   // keyed by the image, not the texture object (sig_tex)
                     if (tex_key(k.d->shader->refl.bindings[k.d->index], r) != k.rq) return 4;
                     if (is_color_feedback(r.tex)) return 4;
@@ -8530,7 +8567,7 @@ void replay_begin_submit(Frame& f) {
             servable_cache_enable(ab_on(kAbSrvCache));
             handle_cache_enable(ab_on(kAbHandleCache));
             handle_cache_big(ab_on(kAbHandleBig));
-            alloc_batch_enable(ab_on(kAbAllocBatch));
+            alloc_batch_enable(true);   // (its cpuperf_ab bit is r3a now; alloc_batch stays a plain key)
             overlap_pos_enable(ab_on(kAbOverlapPos));
         }
         if (static_cast<int>(on) != last_on) {
