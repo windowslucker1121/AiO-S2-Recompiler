@@ -3,7 +3,7 @@
 Living document for the frame-rate work. Detailed per-session notes, with every key, measurement and pitfall, stay in
 `AGENTS.md` ("Performance work" and the "Session 2026-11-xx" paragraphs). Config keys are in `runtime/docs/CONFIG.md`.
 This file is the overview: where we are, how we measure, what paid, what did not, and what is next.
-Last update: 2026-11-11, branch `perf/fps100`.
+Last update: 2026-11-12, branch `perf/render-thread` (R8).
 
 ## Goal and constraints (from the user)
 
@@ -15,7 +15,14 @@ Last update: 2026-11-11, branch `perf/fps100`.
 - The full shader preparation (~3 h) runs only at the very end. So do the release build (`oot.exe`, `recomp_library.exe`) and the
   area-load frame work.
 
-## Where we are (2026-11-11, RTX 4080, Ryzen 7 5800X3D, 1920x1080, uncapped)
+## Where we are (2026-11-12, RTX 4080, Ryzen 7 5800X3D, 1920x1080, uncapped)
+
+**2026-11-12 (R8, render thread): village 56 -> ~68 fps, 1% low ~34 -> ~47-49, render replay ~17.4 -> ~13 ms per frame (no PGO), frames
+over 20 ms < 1%. The village frame is now GPU-bound** (GPU submissions cover 98.6% of wall time, GPU span sum ~14.5 ms per frame = the
+frame; starve 0.13 ms). The game's main thread waits ~6.8 ms per frame on the previous frame's big submission (#6, not #3): queued ->
+replayed in 11.4 ms -> its GPU work starts 3 ms before the replay ends (the GPU is still busy with earlier work) -> 11.3 ms of GPU -> the
+wait ends at the GPU end. The render thread finishes ~8 ms before the GPU and idles ~1.5-2.5 ms per frame. Frame < 10 ms needs GPU time
+per frame < 10 ms; the CPU chain cannot shorten it.
 
 | Scene | Start of plan D (854x480) | First 1080 runs (W7) | 2026-11-09 evening | 2026-11-10 (G1) | Now (fps100) |
 |---|---|---|---|---|---|
@@ -46,8 +53,15 @@ Last update: 2026-11-11, branch `perf/fps100`.
   - Compare each "on" window with its two "off" neighbours.
   - The `ab window` lines give fps, 1% low, median frame, render replay ms, GPU exec/busy ms and full barriers per frame.
   - Absolute fps between separate runs varies by ±2-4.
-- **Feature switches:** `AbFeat` in `nvn_replay.cpp` is a uint64 bit set. Used bits: 0-36, 37-39 (G1), 40-42 (P5), 48-49 (G1), 50-56,
-  58. Free: 43-47, 57, 59-63.
+  - **Bias before 2026-11-12 (R8):** `ab_on()` called `ab_mask()`, a guarded function-local static, only in "off" windows, hundreds of
+    thousands of times per frame. With nothing switched (`cpuperf_ab_what = none`) the off windows showed 0.6-1.1 ms more render replay
+    (13/13 pairs). Paired *render replay* gains measured before d6af625 are inflated by about that much (GPU-bound fps and GPU times
+    are not). Fixed: ab_mask is a constant-initialized atomic; `none` now gives -0.08 ms (7/13). Run a `none` run first when in doubt.
+  - Build-level changes (compiler flags, PGO) cannot be paired: alternate two exes back to back (`NXRT_AI_EXE`), two runs each.
+  - Critical path of the main thread's waits: frame trace events `q.sub`, `replay.s`, `sync.w`, `gpu.raw` (serial in the arg; raw GPU
+    timestamps mapped onto the CPU clock through the waits' ends).
+- **Feature switches:** `AbFeat` in `nvn_replay.cpp` is a uint64 bit set. All 64 bits are used (59-62 R8: handle_big, chunk_async,
+  pds_q, fb_image; 63 pt_copy). Free bits by retiring dead experiments first.
 - **Real-clock GPU breakdowns:** these are measurement-only skip words in `[nvn] skip_fs_file`, and live edits take effect:
   - `c:<prefix>` leaves out dispatches of that compute shader;
   - `bar` / `bar:<line>` drops full barriers;
@@ -122,6 +136,11 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | fps100 | `flush_copy`: device-local copies of the ~300 CPU_CACHED pools outside the heap's primary view (vertex/index data), kept current by the game's flushes | village GPU busy 18.8 → 14.8 ms, +2.75 fps (16/17), 1% low +2.9 |
 | fps100 | `cmd_publish_batch` (recorder ring published every 32 packets); `render_priority = highest` for the render and recorder threads | replay −0.44 ms; +0.4 fps (13/17) |
 | fps100 | `servable_cache` (out_servable answers keyed by change counters, verify clean); `keep_memo` (kept sets enter the epoch memo) | replay −0.84 ms (16/16), +2 fps; replay −0.11 ms, +0.4 fps |
+| R8 | runtime release build `-march=x86-64-v3` + ThinLTO (`NXRT_FAST_CPU`, default on; no FMA contraction) | back-to-back exes: 64.8 / 65.1 vs 58.8 / 54.7 fps, replay ~15.1 vs ~17.3 ms |
+| R8 | feedback copies keyed by the attachment image (`fb_image`): two 8 MiB images were made and destroyed every frame; 16k command-handle cache (`handle_big`); submission chunks and push descriptors on the recorder thread (`chunk_async`, `cmd_thread_pds`) | together, bias-free pairs: replay -1.29 ms (11/12), fps +2.05 |
+| R8 | handle expressions once per command; virtual-texture registry indexed and grouped by pool (find_alias and CPU-write checks no longer walk every texture under the registry lock) | alternating exes: replay 12.9 / 13.4 vs 14.6 / 13.95 ms |
+| R8 | unbiased cpuperf_ab; hot config switches read without guarded statics (`nvn_cfg.h`) | measurement; neutral |
+| R8 | runtime PGO, opt-in (`NXRT_PGO = generate | <profdata>`; the profile is not in the repository) | replay ~12.3 vs ~14.8 ms; no fps while GPU-bound |
 
 Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
 - F1's set: 3,419 gpt corpus blocks plus 12 runtime blocks; backup `gpt_backup_v9`.
@@ -180,7 +199,14 @@ Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
   removed); `compute_out_lazy = 0` with the GPU headroom flush_copy gave (GPU +6 ms, 47 fps); mesh shaders with direct outputs and the
   early primitive count (`NXRT_HARNESS_MESH_DIRECT` + `MESH_EARLY_COUNT`, private cache): GPU busy −0.14 ms only.
 
+- **R8 (2026-11-12):** `park_shared` (the last reference of a shared image parks it): replay +0.14 ms, 1% low -2.3 (4/12), removed.
+  The earlier paired gains of `handle_big` / `chunk_async` / `fb_image` alone were biased (see How to measure); re-measured together.
+
 ## What is open, by expected gain
+
+**After R8:** the village is GPU-bound (~14.5 ms of GPU per frame); the render thread (~13 ms, ~11-12 with PGO) has ~2 ms of slack.
+Render-thread items left by the profile: bind_sets ~23% (build_set ~10, kept-set checks ~7), run_list's own loop ~8%, write-watch
+arming (VirtualProtect) ~3.6% (out_end_submit re-arms written spans), texture resolution ~5%, held-result checks ~6%.
 
 **fps100's design for the next step (render thread 17.4 -> ~9 ms; not built):**
 1. Draw-level translation cache keyed by program + raw bindings + targets, valid while one coherence epoch holds: skips bind_sets,
