@@ -252,6 +252,7 @@ Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
   - Profile notes: the render thread is flat (run_list's own loop ~11%, begin_draw ~5.6%, keep machinery ~8%, texture resolution ~7%,
     no function over ~3% else). Set statistics per frame (`graphics sets by index`): set 0 (uniform blocks) ~1,750 kept-set checks and
     almost no memo hits (per-object constant addresses repeat across frames, not within one); set 2 (textures) ~370 first sightings.
+
 ## GPU round 3 (G3, 2026-11-12, branch `perf/gpu-r3`)
 
 Village 1080 uncapped, real clocks (skip-word windows of the frame trace; main = the big submission, busy = without starve).
@@ -276,9 +277,7 @@ Start: ~76 fps no trace, 1% low ~60; main busy ~10.2 ms + culling submission #3 
   private cache that passed the checks: A18 on the nb3 capture (25 mesh draws, x sum 4,398 in every traced loop), village capture replay
   SSIM against its reference the same as the old cache (0.49285), in-game village screenshots normal (foliage, crowns, fog, no stripes).
   The main checkout's harness must be rebuilt from the merged branch before any later re-translation, or the mesh blocks revert.
-- **Measured, opt-in:** `NXRT_HARNESS_MESH_MAP_BYTES=1` (the index map one u32 per byte: the 8-bit index writes were atomic
-  read-modify-write loops, which the driver turns into MATCH.ANY loops over the stage's output buffer): driver code −5..−10% on meshes.
-  `NXRT_HARNESS_FTZ_FOLD=1` (flushes that cannot change a compare against a nonzero immediate or a truncation): −1.5% instructions,
+- **Measured, opt-in:** `NXRT_HARNESS_FTZ_FOLD=1` (flushes that cannot change a compare against a nonzero immediate or a truncation): −1.5% instructions,
   too small to re-translate every block for.
 - **Dropped:** `out_split_held` (split results held from an earlier submission, the culling tail): main busy +0.49 ms, fps −2.4 (0/19);
   `[nvn] dispatch_trust` (the barrier after a dispatch owed and paid by the next call a plain dispatch does not make; the game's own
@@ -287,9 +286,12 @@ Start: ~76 fps no trace, 1% low ~60; main busy ~10.2 ms + culling submission #3 
   compiler crashes (access violation) on it, with OpGroupNonUniformAny and with a ballot. `NXRT_HARNESS_INLINE_HELPERS`: no change (the
   calls in the code are the driver's own WARPSYNC/SHFL subroutines).
 - **Second-queue overlap of #3:** #3(N+1) is replayed ~1.8 ms before #6(N) ends on the GPU and then waits behind it, so that is the
-  overlap ceiling. A two-frame trace (`[nvn] trace_frame` now marks every submission) shows #3 binds the frame-globals buffer that every
-  draw of #6 reads (0x...2f600, 16 KiB) as storage, so with ranges alone #3(N+1) conflicts with the last draw of #6(N); proving it
-  read-only needs per-binding write information in the trace. Not built.
+  overlap ceiling. A two-frame trace with written storage bindings marked (`[nvn] trace_frame`: submissions, ` W` on written storage
+  bindings, pointer write windows) shows real write-after-read conflicts: #3(N+1) writes (1) the 720 KB material table at fragment storage
+  slot 3 (one address in both frames) that every material fragment shader of #6(N) reads, up to its last colour pass, and (2) the
+  16 KiB frame-globals buffers (compute storage slot 8; two of them, both written each frame) that #6's draws bind as uniform block 0
+  (snapshotted at record time) and fragment storage slot 10. Overlap would need the runtime to double-buffer those game buffers (copy
+  for #6's readers before #3 runs), plus a second timeline per queue. Not built; ceiling ~1.8 ms, realistic less (both share the SMs).
 
 ## What is open, by expected gain
 
