@@ -221,7 +221,7 @@ LRESULT CALLBACK subclass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
             if (!HIWORD(lp)) refresh_checks();
             break;
         case WM_ENTERMENULOOP:
-            // A drop-down is open: Windows runs its modal loop on this thread, so the game's frame waits. The timer's messages are handled inside
+            // A drop-down is open: Windows runs its modal loop on this thread (with [gfx] window_thread off, the game's: its frame waits). The timer's messages are handled inside
             // that loop and tell the freeze watchdog that the process is alive.
             SetTimer(h, kMenuLoopTimer, 250, nullptr);
             diag_progress();
@@ -1091,6 +1091,11 @@ void post_ui(MenuAction a) {
 }  // namespace
 
 bool win_menu_install(void* hwnd, void* sdl_window, UiHost* host, const WinMenuHooks& hooks) {
+    if (!platform::on_window_thread()) {   // the subclass and the bar belong to the thread that owns the window
+        bool ok = false;
+        platform::run_on_window_thread([&] { ok = win_menu_install(hwnd, sdl_window, host, hooks); });
+        return ok;
+    }
     State& st = S();
     if (st.installed) return true;
     if (!hwnd || !sdl_window || !host) return false;
@@ -1132,7 +1137,19 @@ void win_menu_frame() {
     State& st = S();
     if (!st.installed) return;
     const bool want = platform::fullscreen_mode() == platform::FullscreenMode::Windowed;
-    if (want != st.attached.load()) attach(want);
+    if (want == st.attached.load()) return;
+    if (platform::on_window_thread()) {
+        attach(want);
+        return;
+    }
+    static std::atomic<bool> queued{false};   // one change on its way to the window thread at a time
+    if (queued.exchange(true)) return;
+    platform::post_to_window_thread([] {
+        State& s = S();
+        const bool w = platform::fullscreen_mode() == platform::FullscreenMode::Windowed;
+        if (w != s.attached.load()) attach(w);
+        queued.store(false);
+    });
 }
 
 bool win_menu_installed() { return S().installed; }

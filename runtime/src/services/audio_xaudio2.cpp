@@ -9,6 +9,8 @@
 #include <windows.h>
 #include <objbase.h>
 #include <mmreg.h>
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
 #include <xaudio2.h>
 
 #include <algorithm>
@@ -22,6 +24,8 @@
 
 #include "nxrt/audio_sink.h"
 #include "nxrt/config.h"
+#include "nxrt/game.h"
+#include "nxrt/instance.h"
 #include "nxrt/log.h"
 
 #pragma comment(lib, "xaudio2.lib")
@@ -75,6 +79,79 @@ std::wstring pick_device(const std::vector<OutputDevice>& devices, const std::st
     }
     NXLOG_W("audio", "xaudio2: [audio] device = %s matches no active output device; using the default device", want.c_str());
     return {};
+}
+
+// The Windows volume mixer lists this process' audio session. Without a name it shows the exe's file description and a generic icon, so
+// the session gets the game window's title and the exe's own icon. XAudio2 plays through the process' default session (GUID_NULL) of the
+// endpoint it opened: the one chosen by [audio] device, or the default render endpoint (console and multimedia roles, usually the same).
+// Called after the mastering voice exists, on the thread that opened the sink (COM is initialised there). Failures only log.
+// The name the mixer shows: [audio] session_name, else the game window's title (with " [instance]" for a named instance, as the window).
+std::string session_display_name() {
+    std::string s = config_get_str("audio", "session_name", "");
+    if (!s.empty()) return s;
+    s = nxrt::game::window_title();
+    if (nxrt::instance_active()) s += " [" + nxrt::instance_name() + "]";
+    return s;
+}
+
+template <class T>
+void release_com(T*& p) {
+    if (p) p->Release();
+    p = nullptr;
+}
+
+void name_session_on(IMMDevice* dev, const std::wstring& name, const std::wstring& icon) {
+    IAudioSessionManager2* mgr = nullptr;
+    IAudioSessionControl* ctl = nullptr;
+    HRESULT hr = dev->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&mgr));
+    if (SUCCEEDED(hr)) hr = mgr->GetAudioSessionControl(nullptr, 0, &ctl);
+    if (SUCCEEDED(hr)) hr = ctl->SetDisplayName(name.c_str(), nullptr);
+    if (SUCCEEDED(hr) && !icon.empty()) hr = ctl->SetIconPath(icon.c_str(), nullptr);
+    if (FAILED(hr)) NXLOG_W("audio", "xaudio2: naming the audio session failed (0x%08lx)", static_cast<unsigned long>(hr));
+    release_com(ctl);
+    release_com(mgr);
+}
+
+void name_audio_session(const std::wstring& device_id) {
+    const std::string title = session_display_name();
+    if (title.empty()) return;
+    const int n = MultiByteToWideChar(CP_UTF8, 0, title.c_str(), -1, nullptr, 0);
+    std::wstring name(n > 0 ? static_cast<size_t>(n - 1) : 0, L'\0');
+    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, title.c_str(), -1, name.data(), n);
+    // "<exe path>,0": the first icon group of the exe. An exe without one (tests) keeps the mixer's default icon.
+    std::wstring icon;
+    wchar_t exe[MAX_PATH * 4] = {};
+    const DWORD len = GetModuleFileNameW(nullptr, exe, static_cast<DWORD>(std::size(exe)));
+    if (len > 0 && len < std::size(exe) && FindResourceW(nullptr, MAKEINTRESOURCEW(1), MAKEINTRESOURCEW(14) /* RT_GROUP_ICON */))
+        icon = std::wstring(exe, len) + L",0";
+
+    IMMDeviceEnumerator* en = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&en)))) return;
+    std::vector<std::wstring> done;
+    auto name_device = [&](IMMDevice* dev) {
+        if (!dev) return;
+        LPWSTR id = nullptr;
+        if (SUCCEEDED(dev->GetId(&id)) && id) {
+            const std::wstring sid(id);
+            CoTaskMemFree(id);
+            if (std::find(done.begin(), done.end(), sid) == done.end()) {
+                done.push_back(sid);
+                name_session_on(dev, name, icon);
+            }
+        }
+        dev->Release();
+    };
+    if (!device_id.empty()) {
+        IMMDevice* dev = nullptr;
+        if (SUCCEEDED(en->GetDevice(device_id.c_str(), &dev))) name_device(dev);
+    } else {
+        for (ERole role : {eConsole, eMultimedia}) {
+            IMMDevice* dev = nullptr;
+            if (SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, role, &dev))) name_device(dev);
+        }
+    }
+    en->Release();
+    if (!done.empty()) NXLOG_I("audio", "xaudio2: audio session named \"%s\"%s", title.c_str(), icon.empty() ? " (no exe icon)" : ", exe icon");
 }
 
 class XAudio2Sink final : public AudioSink {
@@ -132,6 +209,7 @@ private:
     uint32_t channels_ = 0;
     uint32_t rate_ = 48000;
     float applied_volume_ = 1.0f;     // the volume last set on the source voice (write thread)
+    bool session_named_ = false;      // the mixer name and icon are set (once per sink: the session outlives the voices)
 
     std::mutex mu_;                   // guards slots_ (write, queued_frames and the callback)
     std::mutex voice_mu_;             // keeps source_ alive while queued_frames() reads it from another thread (the stats logger);
@@ -142,6 +220,7 @@ private:
     std::atomic<uint64_t> frames_written_{0};
     std::atomic<uint64_t> frames_accepted_{0};
     std::atomic<uint64_t> frames_dropped_{0};
+    std::atomic<uint64_t> frames_audible_{0};
     std::atomic<uint64_t> underruns_{0};
     std::atomic<uint32_t> queued_peak_{0};
     std::atomic<uint64_t> submitted_frames_{0};          // frames handed to the voice since open()
@@ -187,15 +266,21 @@ bool XAudio2Sink::open(uint32_t sample_rate, uint32_t channels) {
                                              AudioCategory_GameEffects);
     };
     hr = create_master(device_id.empty() ? nullptr : device_id.c_str());
+    bool used_default = device_id.empty();
     if (FAILED(hr) && !device_id.empty()) {
         NXLOG_W("audio", "xaudio2: the chosen output device failed (CreateMasteringVoice 0x%08lx); using the default device",
                 static_cast<unsigned long>(hr));
         hr = create_master(nullptr);
+        used_default = true;
     }
     if (FAILED(hr)) {
         NXLOG_W("audio", "xaudio2: no audio output device (CreateMasteringVoice 0x%08lx)", static_cast<unsigned long>(hr));
         teardown();
         return false;
+    }
+    if (!session_named_) {
+        name_audio_session(used_default ? std::wstring() : device_id);
+        session_named_ = true;
     }
 
     // Stereo is plain PCM; 5.1 needs WAVEFORMATEXTENSIBLE with the channel mask.
@@ -286,6 +371,21 @@ void XAudio2Sink::teardown() {
 
 uint32_t XAudio2Sink::write(const int16_t* pcm, uint32_t frames) {
     const uint32_t accepted = (pcm && frames) ? submit(pcm, frames) : 0;
+    if (accepted) {
+        // Frames that are not silence (any sample of magnitude 64 or more): the periodic stats line tells silent stretches from playing ones.
+        const size_t ch = channels_ ? channels_ : 2;
+        uint64_t audible = 0;
+        for (uint32_t f = 0; f < accepted; f++) {
+            const int16_t* s = pcm + f * ch;
+            for (size_t c = 0; c < ch; c++) {
+                if (s[c] >= 64 || s[c] <= -64) {
+                    audible++;
+                    break;
+                }
+            }
+        }
+        frames_audible_.fetch_add(audible, std::memory_order_relaxed);
+    }
     frames_written_.fetch_add(frames, std::memory_order_relaxed);
     frames_accepted_.fetch_add(accepted, std::memory_order_relaxed);
     frames_dropped_.fetch_add(frames - accepted, std::memory_order_relaxed);
@@ -403,6 +503,7 @@ SinkStats XAudio2Sink::stats() {
     s.frames_written = frames_written_.load(std::memory_order_relaxed);
     s.frames_accepted = frames_accepted_.load(std::memory_order_relaxed);
     s.frames_dropped = frames_dropped_.load(std::memory_order_relaxed);
+    s.frames_audible = frames_audible_.load(std::memory_order_relaxed);
     s.underruns = underruns_.load(std::memory_order_relaxed);
     s.queued_peak = queued_peak_.load(std::memory_order_relaxed);
     s.queued_peak_frames = queue_peak_frames_.load(std::memory_order_relaxed);

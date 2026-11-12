@@ -534,8 +534,8 @@ the movie (as on the console at 30 fps), 1.00 in the 3D cutscene after it at 24-
 their own thread (Gamepad with press-to-rebind, Keyboard and mouse bindings, More graphics settings, Debug info, Log). Changes apply at once
 and are saved in `controls.ini`; "(next start)" entries are runtime keys in `controls.ini [config]` (`section.key = value`, applied at start
 unless the ini or `NXRT_*` set them; game-module defaults give way via `config_set_default`). The bar is hidden in fullscreen; there the ImGui
-window (F1, View + Menu) is the menu (`[gfx] overlay_menu`). Alt alone and F10 stay game keys. **An open drop-down holds the game's frame**
-(Windows' modal menu loop runs on the game thread that pumps the window; audio continues, the watchdog is fed); dialogs do not. Checked as
+window (F1, View + Menu) is the menu (`[gfx] overlay_menu`). Alt alone and F10 stay game keys. **Since 2026-11-12 the window has a thread of its own**
+(`[gfx] window_thread`, platform.cpp): Windows' modal loops (dragging/sizing the window, title-bar buttons, drop-downs, the system menu) run there and no longer stop the game or its sound streams (measured: 10 s window drag and 10 s system menu, frames and audio continuous; before, the game stopped for the whole loop). The bar's commands run on the window thread; what touches play state goes to the next frame (`at_frame` in play.cpp). Checked as
 named instances on the title screen (`work\run\nm1`..`nm3` of the menu branch): bar and client size 1280x720, fullscreen round trip, each dialog,
 a menu toggle saved, a 12 s drop-down without a freeze report, press-to-rebind with the virtual pad from the native dialog. Native UI is
 driven and captured without the mouse through ctypes (`PostMessage WM_COMMAND`, `SC_KEYMENU`, `PrintWindow`): boot screenshots and `@shot`

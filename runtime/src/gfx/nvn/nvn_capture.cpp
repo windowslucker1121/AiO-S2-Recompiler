@@ -1407,7 +1407,7 @@ int run_replay(const std::string& folder) {
         for (auto& e : L.events) {
             if (e.kind == 0) gpu::submit(e.lists);
             else if (e.win) gpu::present(e.win.get(), e.index);
-            if (platform::initialised() && platform::has_window()) platform::pump_events();
+            if (platform::initialised() && platform::has_window() && !platform::window_thread()) platform::pump_events();
         }
         ++loop;
         if (loop == 1 || loop % 300 == 0) NXLOG_I(kTag, "loop %llu", static_cast<unsigned long long>(loop));
