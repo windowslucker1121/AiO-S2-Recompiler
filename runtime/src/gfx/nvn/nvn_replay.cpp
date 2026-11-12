@@ -1231,7 +1231,7 @@ void pre_layout_note(Texture* t) {
 }
 // Starts a pass on the current render targets if none is open for them. False when there is nothing to render to.
 void bind_skip_reset();   // below (bind_sets)
-extern uint64_t g_oc_ph[6];
+extern uint64_t g_oc_ph[10];
 // exp_op_cost: bind_sets ticks per graphics set index and step (0 signature + memo look-up, 1 kept-set look-up and check, 2 build, 3 bind),
 // and counts of each (R4 diagnostics)
 extern uint64_t g_oc_bs[4][4], g_oc_bsn[4][4];
@@ -5646,6 +5646,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (g_dirty & (kPipe | kDesc)) {
         const ShaderInfo* stages[kStages] = {vs, S.stage[kFragment], S.stage[kGeometry], tcs_now(), S.stage[kTessEval], nullptr, nullptr, nullptr};
         const ShaderInfo* mstages[kStages] = {nullptr, S.stage[kFragment], nullptr, nullptr, nullptr, nullptr, S.stage[kTask], S.stage[kMesh]};
+        OcPhase ph(6);
         g_pl = prog_layout(mesh ? mstages : stages);
     }
     if (!g_trigger_fs.empty() && !g_trigger_done && trigger_time_ok() && S.stage[kFragment] && S.stage[kFragment]->hash.compare(0, g_trigger_fs.size(), g_trigger_fs) == 0) {
@@ -5684,6 +5685,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (g_prog_writes || g_xfb_active) g_pass_unsafe = true;
     const VkPrimitiveTopology topo = mesh ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : vk_topology(mode);
     if ((g_dirty & kPipe) || topo != g_pipe_topo || !g_pipe) {
+        OcPhase ph(7);
         GraphicsKey key;
         build_key(key, topo, mesh);
         g_pipe = graphics_pipeline(key, *pl);
@@ -5875,6 +5877,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
                     S.tess_outer[0], S.tess_outer[1], S.tess_outer[2], S.tess_outer[3], S.tess_inner[0], S.tess_inner[1]);
     }
     if (!mesh && (g_dirty & (kVb | kPipe))) {
+        OcPhase ph(8);
         for (uint32_t i = 0; i < g_key_attr_count; ++i) {
             const uint32_t binding = g_key_binding[i];
             bool done = false;
@@ -6080,6 +6083,7 @@ void do_draw_elements(const P_DrawElements& p) {
     count_primitives(p.mode, p.count, p.instance_count);
     VkPrimitiveTopology topo;
     if (!begin_draw(static_cast<int>(p.mode), true, static_cast<int>(p.type), &topo)) { counters().draws_skipped.fetch_add(1); return; }
+    OcPhase ph_after(9);
     if (g_trace) {   // the indices and the first attributes of the first vertices
         const uint32_t isz0 = index_size_bytes(static_cast<int>(p.type));
         const uint8_t* ix = host_ptr(p.index_address);
@@ -7792,9 +7796,10 @@ bool op_keeps_sets(Op op) {
 
 // [nvn] exp_op_cost (measurement only): render-thread ticks per command kind and, for draws and dispatches, per (fragment or compute
 // shader, vertex or mesh shader); logged every 10 s as ms per present.
-struct OpCost { uint64_t ticks = 0, n = 0, ph[6] = {}; };
+struct OpCost { uint64_t ticks = 0, n = 0, ph[10] = {}; };
 uint64_t g_oc_bs[4][4] = {}, g_oc_bsn[4][4] = {};
-uint64_t g_oc_ph[6] = {};   // ticks of phases of the current op: prepare_textures, bind_sets, gmem_before_op, ensure_pass, out_before_op, set_dynamic_state
+uint64_t g_oc_ph[10] = {};   // ticks of phases of the current op: prepare_textures, bind_sets, gmem_before_op, ensure_pass, out_before_op, set_dynamic_state,
+                             // program layout, pipeline key and look-up, vertex buffers, after begin_draw (index buffer, the draw)
 OpCost g_oc_op[256];
 std::unordered_map<uint64_t, OpCost> g_oc_prog;
 std::unordered_map<uint64_t, std::string> g_oc_name;
@@ -7838,10 +7843,12 @@ void op_cost_log() {
     }
     NXLOG_I(kTag, "exp_op_cost per present by program:%s", b.c_str());
     {
-        double ph[6] = {};
-        for (const auto& [k, v] : g_oc_prog) for (int i = 0; i < 6; ++i) ph[i] += v.ph[i];
-        NXLOG_I(kTag, "exp_op_cost phases of draws and dispatches per present: prepare_textures %.3f, bind_sets %.3f, gmem_before_op %.3f, ensure_pass %.3f, out_before_op %.3f, dynamic state %.3f ms",
-                ph[0] / tpms / fr, ph[1] / tpms / fr, ph[2] / tpms / fr, ph[3] / tpms / fr, ph[4] / tpms / fr, ph[5] / tpms / fr);
+        double ph[10] = {};
+        for (const auto& [k, v] : g_oc_prog) for (int i = 0; i < 10; ++i) ph[i] += v.ph[i];
+        NXLOG_I(kTag, "exp_op_cost phases of draws and dispatches per present: prepare_textures %.3f, bind_sets %.3f, gmem_before_op %.3f, ensure_pass %.3f, out_before_op %.3f, dynamic state %.3f, "
+                "program layout %.3f, pipeline %.3f, vertex buffers %.3f, after begin_draw %.3f ms",
+                ph[0] / tpms / fr, ph[1] / tpms / fr, ph[2] / tpms / fr, ph[3] / tpms / fr, ph[4] / tpms / fr, ph[5] / tpms / fr, ph[6] / tpms / fr, ph[7] / tpms / fr,
+                ph[8] / tpms / fr, ph[9] / tpms / fr);
     }
     {
         std::string c;
@@ -7903,7 +7910,7 @@ void run_list(const CmdList& list, int depth) {
                 const uint64_t k = reinterpret_cast<uint64_t>(a) * 31 ^ reinterpret_cast<uint64_t>(b);
                 OpCost& c = g_oc_prog[k];
                 c.ticks += dt; ++c.n;
-                for (int i = 0; i < 6; ++i) { c.ph[i] += g_oc_ph[i]; g_oc_ph[i] = 0; }
+                for (int i = 0; i < 10; ++i) { c.ph[i] += g_oc_ph[i]; g_oc_ph[i] = 0; }
                 if (c.n == 1) g_oc_name[k] = std::string(cs ? "cs " : "") + (a ? a->hash.substr(0, 8) : "-") + (b ? "/" + b->hash.substr(0, 8) : "");
             }
         } oc_op;
