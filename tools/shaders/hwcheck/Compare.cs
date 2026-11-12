@@ -48,7 +48,7 @@ namespace Hwcheck
         /// Tolerance of a MUFU form: (ulps, absolute) or null = exact.
         public static (int ulp, double abs)? Tolerance(SassInst i)
         {
-            if (i.Opcode != "MUFU") return null;
+            if (i.Opcode != "MUFU" || Environment.GetEnvironmentVariable("HWCHECK_EXACT") == "1") return null;
             if (i.Mods.Contains("F16")) return (1, 0);
             if (i.Mods.Contains("SIN") || i.Mods.Contains("COS")) return (0, Math.Pow(2, -20));
             if (i.Mods.Contains("TANH")) return (0, Math.Pow(2, -10));

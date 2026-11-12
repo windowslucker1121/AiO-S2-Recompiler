@@ -84,6 +84,7 @@ namespace Hwcheck
                     Text = inst.ToSassText(), Inst = inst, Words = words, Mem = mem,
                 });
             }
+            if (args.Contains("--sin-pairs")) cases = SinPairs(cases);   // FMUL.RZ x, 1/(2pi) then MUFU.SIN/COS of it, as one case (AmpereFuse)
             Console.WriteLine($"{cases.Count} test instructions, {perShapeCount.Count} shapes");
 
             // ---- nvdisasm agrees with our decoder on every rewritten word
@@ -185,6 +186,28 @@ namespace Hwcheck
         static readonly Regex DisLine = new(@"^\s*/\*([0-9a-f]{4,})\*/\s*(.*?)\s*;\s*/\*\s*(0x[0-9a-f]{16})\s*\*/\s*$");
 
         static string Norm(string s) => Regex.Replace(s.Trim().TrimEnd(';').Trim(), @"\s+", " ");
+
+        /// Two-instruction cases "FMUL.FTZ.RZ R1, R0, 1/(2pi); MUFU.SIN|COS R2, R1" from the encodings found (needs --game-corpus with an
+        /// --only that keeps FMUL and MUFU): the translator emits the MUFU as sin(R0) / cos(R0) (AmpereFuse); compared with the hardware pair.
+        static List<Case> SinPairs(List<Case> cases)
+        {
+            static ulong SetField(ulong w, int bit, int v) => (w & ~(0xffUL << bit)) | ((ulong)(uint)v << bit);
+            var fm = cases.OrderBy(c => c.Inst.Mods.Contains("FTZ") ? 0 : 1).FirstOrDefault(c => c.Inst.Opcode == "FMUL" && c.Inst.Mods.Contains("RZ") && c.Inst.Operands.Any(o => o.Kind == OperandKind.FImm && (o.ImmBits & 0xffffffff) == 0x3e22f983));
+            var res = new List<Case>();
+            if (fm == null) { Console.WriteLine("sin pairs: no FMUL.RZ by 1/(2pi) found"); return res; }
+            var (flo, fhi) = fm.Words[0];
+            flo = SetField(SetField(flo, 16, 1), 24, 0);
+            foreach (var mu in cases.Where(c => c.Inst.Opcode == "MUFU" && (c.Inst.Mods.Contains("SIN") || c.Inst.Mods.Contains("COS")) && c.Inst.Mods.Count == 1))
+            {
+                var (mlo, mhi) = mu.Words[0];
+                mlo = SetField(SetField(mlo, 16, 2), 32, 1);
+                var a = SassDecoder.Decode(flo, fhi, 0); var b = SassDecoder.Decode(mlo, mhi, 0x10);
+                res.Add(new Case { Id = $"c{res.Count:d4}", Source = "pair", Key = "SINPAIR." + string.Join('.', b.Mods), Text = a.ToSassText(), Detail = b.ToSassText(),
+                                   Inst = b, Words = new List<(ulong, ulong)> { (flo, fhi), (mlo, mhi) } });
+                Console.WriteLine($"sin pair: {a.ToSassText()} {b.ToSassText()}");
+            }
+            return res;
+        }
 
         /// nvdisasm text of raw words, by instruction index (null = refused).
         static string[] Disasm(IReadOnlyList<(ulong lo, ulong hi)> words, string dir)

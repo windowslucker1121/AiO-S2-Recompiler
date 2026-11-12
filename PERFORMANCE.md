@@ -3,7 +3,7 @@
 Living document for the frame-rate work. Detailed per-session notes, with every key, measurement and pitfall, stay in
 `AGENTS.md` ("Performance work" and the "Session 2026-11-xx" paragraphs). Config keys are in `runtime/docs/CONFIG.md`.
 This file is the overview: where we are, how we measure, what paid, what did not, and what is next.
-Last update: 2026-11-12, branch `perf/render-r3` (R3).
+Last update: 2026-11-12, branch `perf/gpu-r4` (G4).
 
 ## Goal and constraints (from the user)
 
@@ -292,6 +292,40 @@ Start: ~76 fps no trace, 1% low ~60; main busy ~10.2 ms + culling submission #3 
   16 KiB frame-globals buffers (compute storage slot 8; two of them, both written each frame) that #6's draws bind as uniform block 0
   (snapshotted at record time) and fragment storage slot 10. Overlap would need the runtime to double-buffer those game buffers (copy
   for #6's readers before #3 runs), plus a second timeline per queue. Not built; ceiling ~1.8 ms, realistic less (both share the SMs).
+
+## GPU round 4 (G4, 2026-11-12, branch `perf/gpu-r4`)
+
+Village 1080 uncapped. The frame is render-thread bound (replay ~11.5-12 ms per frame = the frame; GPU busy ~8.5-9 ms by the frame
+trace's `gpu.busy`), so a GPU change is judged by GPU busy *and* render-thread replay in paired windows.
+- **The hot grass meshes are not code-bound.** Empty-program test (G4's measurement switches: `NXRT_HARNESS_MESH_EXP=empty` makes a mesh
+  program only its EXIT, `=zeroprims` emits no primitive, `NXRT_HARNESS_EXP_EMPTY=1` the same for other stages; each translated into a private
+  cache, then skip windows `v:<hash>` / `c:<hash>` in the same run): leaving out grass f3054ac2 or 6ec65625 saves 1.19-1.23 ms of GPU busy
+  each, and **exactly as much with their program empty** (and with zero primitives); GPU exec drops only 0.24-0.58 ms and starve rises by
+  ~1 ms. So the 1.2 ms each is the GPU around these indirect mesh draws (the record copies and their barriers, pass breaks), not their code.
+  The shader code's own share of GPU busy (full minus empty): fern fbb731e2 ~0.44 ms, mesh 4b9e2d28 ~0.24 ms, shadow mesh 7477b2c8 ~0,
+  HiZ a17259b2 ~0, fog 20593fd9 ~0.
+- **Kept: `[nvn] mesh_ahead_mem` + `mesh_ahead_pass`** (default on, `cpuperf_ab_what` name `mesh_mem`; CONFIG.md). The `{count, first}` ->
+  `{count, 1, 1}` record copies of the mesh-indirect draws used to happen ahead of their pass only until the look-ahead met an occlusion
+  report, a uniform update, a barrier or a target change; ~16 draws per frame still ended their pass and copied between two full barriers.
+  The look-ahead now goes on over commands with a known write range (checked against the records), barriers and events, and across passes
+  (target changes, clears, discards, texture copies), and does not scan again over a range it found free of mesh draws. Paired windows (2
+  runs): **fps +2.3 / +1.7 median (19/19, 20/20)**, median frame -0.27 / -0.29 ms, GPU busy -0.53 / -0.52 ms, full barriers -34 per frame,
+  render replay +0.12 / +0.13 ms (without the re-scan memo: +0.45). A18 on the nb3 capture: 25 mesh draws, x sum 4,398 in every loop; village
+  capture replay SSIM 0.49282 (off 0.49288, G3's 0.49285). About 11 draws per frame still copy in their pass (the look-ahead ends at writing
+  dispatches and other commands; statistics line `mesh_copy_ahead look-ahead ended by:`). With signal events allowed too (final form),
+  2 more runs: fps +1.75 / +2.25 median (21/21 both), GPU busy -0.52 ms, replay +0.09 / +0.12 ms; A18 again 4,398 in every loop, SSIM 0.49288.
+- **Translator experiments, opt-in only (measured no GPU-time gain):** sin/cos fusion (`NXRT_HARNESS_SIN_FUSE=1`: MUFU.SIN/COS of an
+  `FMUL.RZ x, 1/(2pi)` emitted as sin(x), which the driver compiles into the same FMUL.RZ + MUFU pair; f3054ac2 -7% host instructions),
+  shifted mesh store addresses proven (`NXRT_HARNESS_MESH_PROOF_SHIFT=1`: shadow mesh 7477b2c8 40 stores, 1,590 -> 938 instructions),
+  predicated instructions run unconditionally where the old value is dead on the guard-false paths (`NXRT_HARNESS_SPECULATE=1`: proves few
+  in the hot meshes; the ceiling, measured by dropping all predication, was ~620 of f3054ac2's ~3,400). In game (private cache with the first
+  two, 2 pairs): main submission exec 9.79 / 9.99 vs 9.77 / 9.92 ms, noise.
+- **Tool fix:** `pipestat` enabled every available feature, robustBufferAccess included (the runtime turns robustness off), so earlier
+  counts included bounds checks on descriptor loads; now off (`PIPESTAT_ROBUST=1` for the old behaviour). Driver-code dumps: a SPIR-V id
+  bound salt defeats the driver's disk cache (scratch `work/g4/drvsass.py`, not committed). Main-body counts vs the console's SASS
+  (robustness off): f3054ac2 3,388 vs 1,776, 6ec65625 10,323 vs 2,760, fbb731e2 8,336 vs 1,417, 7477b2c8 1,590 vs 473.
+- `hwcheck --sin-pairs` (two-instruction FMUL.RZ + MUFU.SIN/COS cases from the game corpus): the CUDA launch of the two-word kernel fails
+  (CUDA_ERROR_INVALID_VALUE, single MUFU cases pass); not resolved, the fusion stays opt-in.
 
 ## What is open, by expected gain
 

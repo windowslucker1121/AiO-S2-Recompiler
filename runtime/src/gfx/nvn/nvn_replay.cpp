@@ -242,7 +242,7 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbHotSkip = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbR3b = 4194304, kAbR3e = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbG3b = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbR3c = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbTexShare = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbR3f = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbKeepChain = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbHotSkip = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbR3b = 4194304, kAbR3e = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbMeshAhead2 = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbR3c = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbTexShare = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbR3f = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbKeepChain = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
 // computed once and kept in a constant-initialized atomic: ab_on() calls it in every "off" window (hundreds of thousands of times per frame),
 // and a guarded local static there made the off windows ~0.6 ms per frame slower than the on windows with nothing switched (nvn_cfg.h)
 std::atomic<uint64_t> g_ab_mask_v{~0ull};
@@ -260,7 +260,7 @@ uint64_t ab_mask_compute() {
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"hot_skip", kAbHotSkip}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"g3b", kAbG3b}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -970,13 +970,14 @@ uint64_t g_pass_end_line[8192] = {};
 uint64_t g_pass_end_draws[8192] = {};
 uint64_t g_draw_ops = 0;   // draw commands reached by run_list (mesh_copy_ahead)
 void mesh_pre_clear();     // below (mesh_copy_ahead)
+bool mesh_ahead_pass_on();  // below
 void end_pass(bool to_pass = false, std::source_location loc = std::source_location::current()) {
     if (gstats::active()) gstats::draw_end(F->cb);   // [prof] gpu_stats: a draw that returned without drawing
     if (P.open) {
         const uint32_t ln = loc.line() & 8191;
         ++g_pass_end_line[ln];
         g_pass_end_draws[ln] += g_pass_draws;
-        mesh_pre_clear();
+        if (!mesh_ahead_pass_on()) mesh_pre_clear();   // else the copies stay for the later passes the look-ahead covered
     }
     if (!P.open) {
         if (!to_pass && !g_pending.empty()) {
@@ -6341,6 +6342,13 @@ struct MeshSim {
     uint64_t draws;
     std::vector<std::pair<uint64_t, uint64_t>> written, records;   // [lo, hi): storage the scanned draws may write; the records collected
 };
+uint64_t g_mesh_stop[static_cast<int>(Op::Count)] = {};   // what ended the look-ahead, by command (statistics)
+uint64_t g_mesh_inpass = 0;                               // {count, first} draws that still copied in the pass (statistics)
+bool mesh_ahead_mem_on() {
+    const bool on = NX_CFG_BOOL("nvn", "mesh_ahead_mem", true);
+    return on && ab_on(kAbMeshAhead2);
+}
+bool mesh_ahead_pass_on() { return mesh_ahead_mem_on() && NX_CFG_BOOL("nvn", "mesh_ahead_pass", true); }
 bool mesh_overlaps(const std::vector<std::pair<uint64_t, uint64_t>>& v, uint64_t lo, uint64_t hi) {
     for (const auto& r : v) if (lo < r.second && r.first < hi) return true;
     return false;
@@ -6411,6 +6419,33 @@ bool mesh_scan(RecordReader rd, int depth, MeshSim& sim, int& budget, std::vecto
                 }
                 break;
             }
+            // [nvn] mesh_ahead_mem (default on, G4): the look-ahead goes on over commands that write memory at an address they name (the
+            // occlusion counter reports and resets inside the passes, uniform updates, buffer clears and copies): their ranges join
+            // sim.written, so a later record they may write ends it as before
+            case Op::ReportCounter: case Op::ReportValue: case Op::ResetCounter: case Op::UpdateUniformBuffer: case Op::ClearBuffer:
+            case Op::CopyBufferToBuffer: {
+                if (!mesh_ahead_mem_on()) { ++g_mesh_stop[static_cast<int>(op)]; return false; }
+                uint64_t lo = 0, n = 0;
+                if (op == Op::ReportCounter) { lo = rd.payload<P_Counter>().address; n = 32; }
+                else if (op == Op::ReportValue) { lo = rd.payload<P_ReportValue>().address; n = 16; }
+                else if (op == Op::UpdateUniformBuffer) { const auto& u = rd.payload<P_UpdateUniformBuffer>(); lo = u.address + static_cast<uint64_t>(u.offset); n = u.size; }
+                else if (op == Op::ClearBuffer) { const auto& c = rd.payload<P_ClearBuffer>(); lo = c.address; n = c.size; }
+                else if (op == Op::CopyBufferToBuffer) { const auto& c = rd.payload<P_CopyBufferToBuffer>(); lo = c.dst; n = c.size; }
+                if (n) {
+                    if (mesh_overlaps(sim.records, lo, lo + n)) { ++g_mesh_stop[static_cast<int>(op)]; return false; }
+                    sim.written.emplace_back(lo, lo + n);
+                }
+                break;
+            }
+            case Op::Barrier: case Op::WaitEvent: case Op::SignalEvent:   // an event's value lives in the event object, not in a record
+                if (!mesh_ahead_mem_on()) { ++g_mesh_stop[static_cast<int>(op)]; return false; }
+                break;
+            // [nvn] mesh_ahead_pass (default on with mesh_ahead_mem, G4): on past the pass: target changes, clears and discards write
+            // attachments only, so the records of later passes' draws are copied with this one's (one barrier pair for several passes)
+            case Op::SetRenderTargets: case Op::ClearColor: case Op::ClearDepthStencil: case Op::DiscardColor: case Op::DiscardDepthStencil: case Op::SetRenderEnable:
+            case Op::ClearTexture: case Op::CopyTextureToTexture:
+                if (!mesh_ahead_pass_on()) { ++g_mesh_stop[static_cast<int>(op)]; return false; }
+                break;
             case Op::Nop: case Op::BindTextures: case Op::BindImages: case Op::BindVertexAttribs: case Op::BindVertexStreams:
             case Op::BindBlend: case Op::BindColor: case Op::BindChannelMask: case Op::BindDepthStencil: case Op::BindPolygon: case Op::BindMultisample:
             case Op::SetTexturePool: case Op::SetSamplerPool: case Op::SetViewports: case Op::SetScissors: case Op::SetDepthRanges: case Op::SetDepthBounds:
@@ -6420,12 +6455,18 @@ bool mesh_scan(RecordReader rd, int depth, MeshSim& sim, int& budget, std::vecto
             case Op::PopDebugGroup:
                 break;
             default:
+                ++g_mesh_stop[static_cast<int>(op)];
                 return false;
         }
     }
     return true;
 }
 void mesh_copies_ahead() {
+    // a look-ahead that went past the previous pass still covers this one's draws: its copies serve them
+    if (!g_mesh_pre.empty() && g_draw_ops < g_mesh_pre_until && mesh_ahead_pass_on()) return;
+    // a look-ahead that found no mesh draw up to where it stopped: none before that point either (no scan per pass begin there)
+    static uint64_t none_until = 0;
+    if (g_draw_ops < none_until && mesh_ahead_pass_on()) return;
     g_mesh_pre.clear();
     if (!mesh_copy_ahead_on() || g_rd_depth < 0 || !g_rd_cur[g_rd_depth] || !device().features().mesh_shader) return;
     if (!g_mesh2_present || counters().presents.load(std::memory_order_relaxed) + 1 > g_mesh2_present + 120) return;
@@ -6441,7 +6482,7 @@ void mesh_copies_ahead() {
     draws.clear();
     int budget = 4096;
     mesh_scan(*g_rd_cur[g_rd_depth], g_rd_depth, sim, budget, draws);
-    if (draws.empty()) return;
+    if (draws.empty()) { none_until = g_draw_ops + sim.draws; return; }
     g_mesh_pre_until = g_draw_ops + sim.draws;   // the draws the scan saw before it stopped (this one is counted already)
     bool barrier = false;
     for (const P_DrawMesh& p : draws) {
@@ -6509,6 +6550,7 @@ void do_draw_mesh(const P_DrawMesh& p) {
             for (uint32_t i = 0; i < n; ++i) { w[3 * i] = 0; w[3 * i + 1] = 1; w[3 * i + 2] = 1; }
             std::vector<VkBufferCopy> regions(n);
             for (uint32_t i = 0; i < n; ++i) regions[i] = {ib.offset + stride * i, u.offset + 12ull * i, 4};
+            ++g_mesh_inpass;
             end_pass();
             memory_barrier(F->cb);
             vkCmdCopyBuffer(F->cb, ib.buffer, u.buffer, n, regions.data());
@@ -6854,7 +6896,7 @@ uint64_t g_disp_end_mark = ~0ull;
 // barrier between them (the game's own barriers, honoured as full barriers, order what it needs; NVN dispatches are unordered otherwise).
 bool dispatch_trust_on() {
     const bool on = NX_CFG_BOOL("nvn", "dispatch_trust", false);
-    return on && ab_on(kAbG3b);
+    return on;   // (its cpuperf_ab bit went to G4's mesh_mem)
 }
 uint64_t g_disp_n = 0, g_disp_after = 0, g_disp_after_ind = 0;
 
@@ -8822,8 +8864,14 @@ void replay_begin_submit(Frame& f) {
                         (unsigned long long)g_pre_layout_n, g_break_prone.size(), (unsigned long long)g_uil_retags, (unsigned long long)g_uil_retag_kept_open);
                 NXLOG_I(kTag, "fill_ahead: %llu looks ahead over %llu dispatches, %llu ranges copied in early (%llu KiB)", (unsigned long long)g_fa_scans,
                         (unsigned long long)g_fa_dispatches, (unsigned long long)g_fa_ranges, (unsigned long long)(g_fa_bytes >> 10));
-                NXLOG_I(kTag, "mesh_copy_ahead: %llu record copies before their pass, %llu draws used one", (unsigned long long)g_mesh_pre_n,
-                        (unsigned long long)g_mesh_pre_used);
+                NXLOG_I(kTag, "mesh_copy_ahead: %llu record copies before their pass, %llu draws used one, %llu copied in their pass", (unsigned long long)g_mesh_pre_n,
+                        (unsigned long long)g_mesh_pre_used, (unsigned long long)g_mesh_inpass);
+                {
+                    std::string st;
+                    for (int k = 0; k < static_cast<int>(Op::Count); ++k)
+                        if (g_mesh_stop[k]) { char b[64]; std::snprintf(b, sizeof b, " %s %llu", op_name(static_cast<Op>(k)), (unsigned long long)g_mesh_stop[k]); st += b; }
+                    NXLOG_I(kTag, "mesh_copy_ahead look-ahead ended by:%s", st.c_str());
+                }
                 NXLOG_I(kTag, "texture work that ended an open pass: %llu breaks; textures by old layout: general %llu, color attachment %llu, depth attachment %llu, "
                         "depth read-only %llu, transfer %llu, undefined %llu, other %llu; CPU-written (uploads) %llu, storage images %llu",
                         (unsigned long long)g_pt_breaks, (unsigned long long)g_pt_from[0], (unsigned long long)g_pt_from[1], (unsigned long long)g_pt_from[2],
