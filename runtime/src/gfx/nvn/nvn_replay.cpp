@@ -5172,7 +5172,12 @@ bool ubo_dyn_path_on() {
 }
 struct DynUbo { uint64_t addr = 0, size = 0, gen = 0; ReadDep rd; BufRef br; };
 FlatMap64<DynUbo> g_dyn_ubo;                 // per address and size: the last resolve and the decision it depends on
-struct Dyn0Last { VkDescriptorSet ds = VK_NULL_HANDLE; bool bad = false; VkBuffer buf[16] = {}; uint32_t range[16] = {}; };
+DynUbo g_dyn_slot[8][16];                    // per stage and uniform slot: the entry of the last draw (no hash look-up while a block stays bound)
+struct Dyn0Slot { uint8_t stage = 0, idx = 0, dyn = 0; };
+struct Dyn0Last {
+    VkDescriptorSet ds = VK_NULL_HANDLE; bool bad = false; VkBuffer buf[16] = {}; uint32_t range[16] = {};
+    uint8_t nslots = 0xff; Dyn0Slot slots[16];   // the program's dynamic blocks (stage, uniform slot, offset index); 0xff: not listed yet
+};
 FlatMap64<Dyn0Last> g_dyn0_last;             // per program layout: the set of its last draw (or bad: its set 0 cannot be kept)
 FlatMap64<VkDescriptorSet> g_dyn0_sets;      // by content: program layout, buffers, ranges
 uint64_t g_dyn0_gen = 1, g_dyn0_src[3] = {};
@@ -5190,35 +5195,60 @@ uint64_t dyn0_gen_now() {
 VkDescriptorSet dyn0_set(const ProgLayout& pl, uint32_t* offs) {
     if (g_draw_support.buffer || !out_lazy()) { ++g_dyn_stat[5]; return VK_NULL_HANDLE; }
     const uint64_t gen = dyn0_gen_now();
-    static const VkDeviceSize align = std::max<VkDeviceSize>(1, device().properties().limits.minUniformBufferOffsetAlignment);
+    static const VkDeviceSize amask = std::max<VkDeviceSize>(1, device().properties().limits.minUniformBufferOffsetAlignment) - 1;   // a power of two
+    static VkBuffer dummy = VK_NULL_HANDLE;
+    if (!dummy) dummy = dummy_buffer();
     const bool verify = set_reuse_mode() == SetReuse::Verify;
     const uint64_t ch0 = verify ? mem::ww::changes() : 0, ov0 = verify ? out_version() : 0;
+    Dyn0Last* L = g_dyn0_last.find(reinterpret_cast<uint64_t>(&pl));
+    if (!L) { g_dyn0_last.put(reinterpret_cast<uint64_t>(&pl), Dyn0Last{}); L = g_dyn0_last.find(reinterpret_cast<uint64_t>(&pl)); }
+    if (L->bad) { ++g_dyn_stat[4]; return VK_NULL_HANDLE; }
+    if (L->nslots == 0xff) {   // the program's dynamic blocks, listed once
+        L->nslots = 0;
+        for (const uint16_t bi_ : pl.set_idx[0]) {
+            const BindingDesc& d = pl.bindings[bi_];
+            if (d.dyn == 0xff) continue;
+            const int idx = d.shader->refl.bindings[d.index].nvn.index;
+            L->slots[L->nslots++] = Dyn0Slot{static_cast<uint8_t>(d.nvn_stage), static_cast<uint8_t>(idx >= 0 && idx < 16 ? idx : 0xff), d.dyn};
+        }
+    }
     VkBuffer bufs[16];
     uint32_t ranges[16];
-    for (const uint16_t bi_ : pl.set_idx[0]) {
-        const BindingDesc& d = pl.bindings[bi_];
-        if (d.dyn == 0xff) continue;
-        const int idx = d.shader->refl.bindings[d.index].nvn.index;
-        const GState::Bind* bind = idx >= 0 && idx < 16 ? &S.ubo[d.nvn_stage][idx] : nullptr;
-        if (!bind || !bind->addr) { bufs[d.dyn] = dummy_buffer(); ranges[d.dyn] = 65536; offs[d.dyn] = 0; continue; }
+    for (uint32_t si = 0; si < L->nslots; ++si) {
+        const Dyn0Slot sl = L->slots[si];
+        const GState::Bind* bind = sl.idx < 16 && sl.stage < kStages ? &S.ubo[sl.stage][sl.idx] : nullptr;
+        if (!bind || !bind->addr) { bufs[sl.dyn] = dummy; ranges[sl.dyn] = 65536; offs[sl.dyn] = 0; continue; }
         const uint64_t size = bind->size ? bind->size : 65536;
         if (!g_upd.empty() && upd_find(bind->addr, size)) { ++g_dyn_stat[1]; return VK_NULL_HANDLE; }
-        const uint64_t k = (bind->addr * 0x9E3779B97F4A7C15ull) ^ size;
-        DynUbo* e = g_dyn_ubo.find(k);
-        DynUbo fresh;
-        if (!e || e->addr != bind->addr || e->size != size || e->gen != gen || !read_dep_check(e->rd, kReadUniform)) {
+        DynUbo& c = g_dyn_slot[sl.stage & 7][sl.idx];
+        DynUbo* e = &c;
+        if (c.addr != bind->addr || c.size != size || c.gen != gen) {
+            const uint64_t k = (bind->addr * 0x9E3779B97F4A7C15ull) ^ size;
+            DynUbo* h = g_dyn_ubo.find(k);
+            if (h && h->addr == bind->addr && h->size == size && h->gen == gen) c = *h;
+            else c.addr = 0;
+        }
+        if (!c.addr || !read_dep_check(c.rd, kReadUniform)) {
             ++g_dyn_stat[9];
-            fresh.addr = bind->addr; fresh.size = size; fresh.gen = gen;
-            fresh.br = resolve_read_dep(bind->addr, bind->size, kReadUniform, &fresh.rd);
-            if (!fresh.br.ok) { ++g_dyn_stat[2]; return VK_NULL_HANDLE; }
-            if (fresh.rd.keep) {
+            c.addr = bind->addr; c.size = size; c.gen = gen;
+            c.br = resolve_read_dep(bind->addr, bind->size, kReadUniform, &c.rd);
+            if (!c.br.ok) { ++g_dyn_stat[2]; c.addr = 0; return VK_NULL_HANDLE; }
+            if (c.rd.keep) {
                 if (g_dyn_ubo.size() > 262144) g_dyn_ubo.clear();
-                g_dyn_ubo.put(k, fresh);
+                g_dyn_ubo.put((bind->addr * 0x9E3779B97F4A7C15ull) ^ size, c);
+            } else {
+                DynUbo once = c;   // a decision that cannot be kept: used once, never found again
+                c.addr = 0;
+                e = &once;
+                if (once.br.offset & amask) { ++g_dyn_stat[3]; return VK_NULL_HANDLE; }
+                bufs[sl.dyn] = once.br.buffer;
+                ranges[sl.dyn] = static_cast<uint32_t>(std::min<uint64_t>(std::min<uint64_t>(size, once.br.avail), 65536));
+                offs[sl.dyn] = static_cast<uint32_t>(once.br.offset);
+                continue;
             }
-            e = &fresh;
         }
         const BufRef& br = e->br;
-        if (br.offset % align) { ++g_dyn_stat[3]; return VK_NULL_HANDLE; }
+        if (br.offset & amask) { ++g_dyn_stat[3]; return VK_NULL_HANDLE; }
         if (verify) {
             ++g_dyn_verify_n;
             const BufRef v = resolve_read(bind->addr, bind->size, kReadUniform);
@@ -5229,14 +5259,12 @@ VkDescriptorSet dyn0_set(const ProgLayout& pl, uint32_t* offs) {
                                                      (unsigned long long)size, (void*)v.buffer, (unsigned long long)v.offset, (void*)br.buffer, (unsigned long long)br.offset);
             }
         }
-        bufs[d.dyn] = br.buffer;
-        ranges[d.dyn] = static_cast<uint32_t>(std::min<uint64_t>(std::min<uint64_t>(size, br.avail), 65536));
-        offs[d.dyn] = static_cast<uint32_t>(br.offset);
+        bufs[sl.dyn] = br.buffer;
+        ranges[sl.dyn] = static_cast<uint32_t>(std::min<uint64_t>(std::min<uint64_t>(size, br.avail), 65536));
+        offs[sl.dyn] = static_cast<uint32_t>(br.offset);
     }
     const uint32_t n = pl.dyn_n;
-    Dyn0Last* L = g_dyn0_last.find(reinterpret_cast<uint64_t>(&pl));
-    if (L && L->bad) { ++g_dyn_stat[4]; return VK_NULL_HANDLE; }
-    if (L && L->ds && std::memcmp(L->buf, bufs, n * sizeof(VkBuffer)) == 0 && std::memcmp(L->range, ranges, n * 4) == 0) { ++g_dyn_stat[6]; return L->ds; }
+    if (L->ds && std::memcmp(L->buf, bufs, n * sizeof(VkBuffer)) == 0 && std::memcmp(L->range, ranges, n * 4) == 0) { ++g_dyn_stat[6]; return L->ds; }
     uint64_t ck = 0xcbf29ce484222325ull ^ reinterpret_cast<uint64_t>(&pl);
     for (uint32_t i = 0; i < n; ++i) ck = ((ck ^ reinterpret_cast<uint64_t>(bufs[i])) * 1099511628211ull ^ ranges[i]) * 1099511628211ull;
     VkDescriptorSet ds = VK_NULL_HANDLE;
@@ -5251,8 +5279,7 @@ VkDescriptorSet dyn0_set(const ProgLayout& pl, uint32_t* offs) {
         g_dyn0_bufs = nullptr;
         g_dyn0_ranges = nullptr;
         if (rec.bad || !rec.ds) {   // something else in set 0 is per draw: this program stays on the old path until the sets are forgotten
-            Dyn0Last& b = L ? *L : (g_dyn0_last.put(reinterpret_cast<uint64_t>(&pl), Dyn0Last{}), *g_dyn0_last.find(reinterpret_cast<uint64_t>(&pl)));
-            b.bad = true;
+            L->bad = true;
             ++g_dyn_stat[4];
             return VK_NULL_HANDLE;
         }
@@ -5260,7 +5287,6 @@ VkDescriptorSet dyn0_set(const ProgLayout& pl, uint32_t* offs) {
         g_dyn0_sets.put(ck, ds);
         ++g_dyn_stat[8];
     }
-    if (!L) { g_dyn0_last.put(reinterpret_cast<uint64_t>(&pl), Dyn0Last{}); L = g_dyn0_last.find(reinterpret_cast<uint64_t>(&pl)); }
     L->ds = ds;
     std::memcpy(L->buf, bufs, n * sizeof(VkBuffer));
     std::memcpy(L->range, ranges, n * 4);
@@ -5320,6 +5346,7 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
                 ++g_dyn_stat[0];
                 bind_graphics_set(pl, bp, 0, d0, offs);
                 ++g_sstat[0][4];
+                oc_step(0, 0);   // exp_op_cost: under set 0's sig+memo
                 continue;
             }
         }
