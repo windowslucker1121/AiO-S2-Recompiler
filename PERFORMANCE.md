@@ -122,11 +122,14 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | fps100 | `flush_copy`: device-local copies of the ~300 CPU_CACHED pools outside the heap's primary view (vertex/index data), kept current by the game's flushes | village GPU busy 18.8 → 14.8 ms, +2.75 fps (16/17), 1% low +2.9 |
 | fps100 | `cmd_publish_batch` (recorder ring published every 32 packets); `render_priority = highest` for the render and recorder threads | replay −0.44 ms; +0.4 fps (13/17) |
 | fps100 | `servable_cache` (out_servable answers keyed by change counters, verify clean); `keep_memo` (kept sets enter the epoch memo) | replay −0.84 ms (16/16), +2 fps; replay −0.11 ms, +0.4 fps |
+| gpu-time (round 2) | `pt_copy`: pools whose pointers a pointer shader's bound storage buffers hold (light-probe grids and record tables of the foliage meshes, 11 pools) are copied whole into the device-local pool copy, and the guest page table points their valid pages there (2 MiB leaves only when the whole span qualifies). The fern mesh fbb731e2 (39k mesh invocations per frame) read those through the bus | **village +4.2 / +4.6 fps median** (20/23, 17/21), median frame −1.2 ms, main-submission GPU busy −1.4..−1.55 ms, game sync wait −1.2 ms |
+| gpu-time | #3 compute re-translated in C1's form (fog 20593fd9, 24458020, beb1205f: runtime blocks dumped with `[nvn] dump_shader`) | stamped culling submission 4.32 → 4.09 ms |
 
 Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
 - F1's set: 3,419 gpt corpus blocks plus 12 runtime blocks; backup `gpt_backup_v9`.
 - C1's set: 550 compute gpt blocks plus 12 runtime blocks; backup `gpt_backup_v10`.
-- Not re-translated yet: 16 compute gpt runtime blocks without a dump (e.g. 20593fd9, beb1205f). Dump them with `[nvn] dump_shader`.
+- 2026-11-12 (gpu-time): 20593fd9, 24458020, beb1205f re-translated in C1's form (backup `gpt_backup_v12`). The other compute gpt
+  runtime blocks without a dump are still in the old form. Dump them with `[nvn] dump_shader`.
 - **A full shader preparation is due**, as the last step.
 
 ## What we tried and dropped (measured)
