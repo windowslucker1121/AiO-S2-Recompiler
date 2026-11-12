@@ -255,6 +255,8 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
   - `NXRT_HARNESS_GMEM_IGNORE_MASK=1` (measurement only, wrong where a held result lives only in the pool copy): the fast path whatever
     the slot mask says, i.e. what a runtime with every mask 0 gives: 41.5 / 40.7 vs 41.7 / 42.2 fps, no GPU gain.
   - `NXRT_HARNESS_MESH_EXP=noprims` (measurement only): every mesh work group runs but emits no primitive.
+  - `NXRT_HARNESS_MESH_PAYLOAD_EXACT=1` (experiment, off): the task payload is declared at the block's own size (control +0x5a, rounded
+    to 16 bytes) instead of 4 KiB. The grass task/mesh draws took the same GPU time with it (PERFORMANCE.md, GPU round 5).
 - Not built, with the reason: vector stores (the gpt pre-raster stages have no STG); vector loads for the bound-slot path (the GPU side of
   the gpt draws is not on the critical path, see `IGNORE_MASK`); per-thread-indexed constant buffer reads through storage buffers (the
   console's own SASS reads them with LDC as well); pointer tables bound as storage buffers (a load through them still needs a bounds check

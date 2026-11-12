@@ -48,6 +48,34 @@ Village outside 1080 uncapped, paired `cpuperf_ab = 300` windows; three of the f
   outside load this is mostly contention. A quiet census was not run.
 - Tooling note: `lock.py` must read `tasklist` as bytes (German code page: text decoding returned None, acquire crashed when the lock
   freed) and every batch must abort when acquire fails.
+**2026-11-12 (P2, `perf/p2-coherence`): the "coherence v2" gate (copy always the GPU's binding) measured; the full model was not built.**
+Measurement-only switch `[nvn] exp_coh_free` (`off | on | ab`; CONFIG.md, with `exp_coh_free_parts` and `exp_coh_free_cs`): graphics
+draws bind every buffer from the pool copy unchecked when the copy has held every page of the range at some point (`Mirror::ever`),
+skip the draws' held-result checks (`out_before_op`; indirect arguments are still settled) and the graphics pointer-window flushes
+(`gmem_before_op`), get pointer slot masks 0 and read-only storage from the copy. Wrong picture allowed (pages the CPU rewrote since).
+Village outside, 1080 uncapped, frame trace, paired 300-present windows (`cpuperf_ab_what = none`), another agent's idle-priority build
+(4 clang-cl) on the machine in both window kinds:
+- **All parts (65 pairs): fps +5.2 median (61/65), render replay -0.79 ms (59/65), GPU busy -0.98 ms, GPU exec -1.01 ms, game sync wait
+  -0.86 ms** (means on 83.3 fps / replay 10.31 / busy 10.34 vs off 78.2 / 11.03 / 11.18). The render-thread gate (replay >= -1.5 ms) is
+  not met; the GPU drops by ~1 ms in every pair. So the per-draw coherence work is worth ~0.8 ms of replay at most, not the ~2 ms the
+  sampler share suggested (most of those functions' time is checks that a v2 would still need in another form, or below the noise).
+- **Which part pays** (one part per run, 36-47 pairs each; absolute fps differs between runs, compare deltas):
+  - read-only graphics storage buffers bound from the copy (`exp_coh_free_parts = 4`): **GPU busy -1.51 ms**, fps +1.9 (27/36), replay
+    +-0. Today those bindings read the pool (host memory over PCIe) unless a held result covers them. This is the lead: bind read-only
+    storage of draws from the copy with the same valid-page decision uniform blocks get (`resolve_read_dep`), not unchecked. (Not the
+    dropped `exp_ssbo_copy`, which also marked their slots for pointer shaders and paid for the slot search.)
+  - graphics pointer slot masks 0 (`= 2`): nothing (fps -0.05, GPU +0.00): only 45 of ~7,000 graphics pointer-stage tables have a slot
+    marked; graphics already runs the inline fast path. The slot-mask lever is compute's (`exp_cs_gmem_none`, 3.7 slots per dispatch).
+  - unchecked bindings + no held-result checks + no pointer-window flushes without the storage part (`= 1`): replay -0.47 ms but GPU
+    +2.1 ms and fps -10.9: draws then read held compute results from the pool (stale culling data, more work). Correctness, not a lever.
+- **Unchecked compute uniforms hang the GPU.** The first form of the gate also took compute uniform blocks from the copy unchecked: TDR
+  60-90 s in (device checkpoints: compute cs 961b7f2d 64x64, after beb1205f; instruction-pointer faults = a runaway loop on stale
+  CPU-written data). Any v2 must keep CPU-written pages current before every compute reader.
+- **What a full v2 would still need** (not built, per the user's wrap-up): CPU-written pages brought current per submission chunk (a
+  sweep driven by the front plan's addresses; write-watch as the dirty collector for uncached pools, arm before copy; flush-driven for
+  cached ones) before *every* reader, compute included; GPU results resident in the copy with only CPU readers fetching (guards, first-page
+  counter reads); page-table entries at the copies, updated GPU-ordered (vkCmdUpdateBuffer after the writing dispatch), for compute's slot
+  masks. Expected from this gate: ~0.8 ms replay and ~1 ms GPU in the village, most of the GPU part reachable with the storage change alone.
 
 **2026-11-12 (R6, `perf/render-r6`): set 0's uniform blocks are dynamic uniform buffers (`[nvn] ubo_dynamic`, default on).** Village
 outside 1080 uncapped, no frame trace, 60-200 s, same machine: before 87.5 fps, 1% low 65.9, frames over 10 ms 97.8%, render replay median
@@ -489,6 +517,46 @@ trace's `gpu.busy`), so a GPU change is judged by GPU busy *and* render-thread r
   - `ban_skip` (ranges of banned pages): 0 banned uniform pages in the village: removed. A persistent content-keyed texture-set cache: not built
     (set 2 builds spend 0.57 of 0.69 ms resolving, the cache could save <= 0.1 ms).
 
+## GPU round 5 (G5 / P3, 2026-11-12, branch `perf/gpu-overlap`): the culling submission on a second queue
+
+Village 1080 uncapped. Question: can the culling submission #3 (2.5 ms of GPU, ~150 dispatches, mostly small) run beside the main
+submission #6 on a second queue?
+- **Timing, measured (frame trace, 7,321 steady frames, `work/g5/gpuchain.py`):** #3's GPU span 2.47 ms median (p10 2.07, p90 3.37);
+  it starts 0.08 ms after the previous #6 ends. #3's replay ends a median **0.71 ms before** the previous #6 ends on the GPU (p10 2.02
+  before, p90 1.35 after). The next #6's first chunk is handed over and then waits 2.5 ms behind #3 on the GPU.
+- **Dependencies, measured (trace of two+ frames, storage addresses now in the texture lines: `@addr/size` or `@v<pool>+off/size`;
+  `work/g5/deps.py`):**
+  - *Head overlap* (#3(N) beside the start of #6(N)) is impossible: #6(N)'s first draw already binds what #3(N) writes (the 9.9 MB
+    light-cluster grid, the 192-byte SH buffer, 16 KiB frame-globals buffers, a 14.7 KB pointer-written buffer). Real RAW.
+  - *Tail overlap* (#3(N) beside the end of #6(N-1)) needs ~96 write-after-read ranges protected, not just the two round 3 named: the
+    cluster grid (9.9 MB), the material table (720 KB), frame globals, the culling record buffers (0.6-16 MB, read by the mesh draws
+    and their record copies), per-object 16/40 KiB buffers. #6(N-1) reads them through storage bindings, uniform blocks and pointers.
+  - So the usable window is the ~0.7 ms between #3(N)'s replay end and #6(N-1)'s GPU end, at the price of double-buffering ~30 MB of
+    game buffers for every reader kind (bindings, dynamic uniform offsets, the guest page table, mesh-indirect copies).
+- **Built for measurement (default off):** `[gfx] second_queue = same | compute` (a second VkQueue: another queue of the main family, or
+  a compute-only family), `[nvn] exp_async_cull` (draw-less submissions on it; a join on the first queue waits for its timeline value and
+  signals the serial, so host waits and slot reuse stay ordered; `compute` decides before recording by scanning the lists for compute-only
+  work and records into a per-slot pool of that family), `exp_async_cull_ab` (only in the on windows of `cpuperf_ab`).
+- **Ceiling run not measured:** the paired-window runs with these keys (`work/g5/s_ab_same.json`, `s_ab_comp.json`: `cpuperf_ab = 300`,
+  `cpuperf_ab_what` = an unknown name so only the async switch moves) were lost to the lock incidents of the day and the wrap-up; the
+  code is built and committed, untested in game. Upper bound from the timing above: ~0.7 ms of GPU wall per frame (less, since #3 then
+  shares the SMs with #6's tail), and only together with the WAR protection. Verdict for 144 fps: not worth the double-buffering;
+  #3's own GPU time (2.5 ms; P2's coherence work removes its shadow-in pairs and slot searches) is the better lever.
+- **W4, the two grass mesh draws (stamped `gpu_draws`, same exe, back-to-back runs):** grass prepass `d 40478981 f3054ac2` 1.17 ms,
+  grass colour `d 4097c13f 6ec65625` 1.15 ms, fern `fbb731e2` 0.34 ms per frame: still the two largest GPU items. **Their cost is the
+  task stage, not the mesh stage:** G4's `NXRT_HARNESS_MESH_EXP=empty` emptied only mesh programs (tasks are excluded in
+  AmpereTranslator.cs), which is why an empty mesh cost the same. The grass tasks (Foliage 3,200-byte-payload task blocks c6f3f11e,
+  97de564f, 1aff15a8, fd8debac, ...) are GPU-driven culling loops: one work group per cell (index < 4096), a frustum test of the cell, then
+  up to 256 items in batches of 32 with per-item tests and pointer loads (`LDG.E.STRONG.SM`), surviving items written to the payload,
+  VOTE/POPC compaction, then the mesh launch. Translated, a task executable is 47-56 registers and 40-55 KB of driver code against ~700
+  instructions of the console's SASS (~4x); the mesh limits are small (96 vertices / 32 primitives; output 2.6 KiB for the prepass mesh).
+  - Tried: the task payload declared at its real size (`NXRT_HARNESS_MESH_PAYLOAD_EXACT=1`: 3,200 B instead of 4 KiB; 624 task/mesh
+    blocks change; private cache `work/g5/cache_pay`, not merged): 1.167 / 1.155 ms vs 1.168 / 1.153 ms. No gain; the switch stays off.
+  - Next for W4 (not done): the task stage's own code (the culling loop, ~4x the console's instructions; the F2/G3 route of comparing the
+    driver's machine code with the SASS), and whether the prepass and the colour draw run the same culling twice.
+- `gpu_stats` per-family lines (`[prof] gpu_stats`) did not list the grass draws at all and report task invocations 0 for every family
+  (the draws inside the game's occlusion queries are not measured): use stamps for them.
+
 ## Game side P4 (GS, 2026-11-12, branch `perf/game-side`)
 
 Village outside, 1080, uncapped, alone; G = frame - game GPU sync wait from `[diag] frame_csv` (no frame trace: the trace times every
@@ -661,5 +729,6 @@ of it but cost the render thread +3.2 ms: running it on the recorder thread woul
   | V1 | memo race |
   | M1 | cache merge |
   | G1 | draw anatomy |
+  | P2 | coherence v2 gate (`exp_coh_free`) |
 
   All of them are finished; no agent is running at the time of writing.

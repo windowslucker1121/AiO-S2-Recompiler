@@ -71,6 +71,7 @@ struct Frame {
     VkCommandBuffer cb = VK_NULL_HANDLE;
     uint64_t serial = 0;          // the timeline value this submission signals when the GPU has run it
     void* slot = nullptr;         // nvn_gpu.cpp: the submission slot (command pool, descriptor pools, upload memory)
+    bool q2 = false;              // [nvn] exp_async_cull: recorded for the second queue's family (no chunks or splits)
     // Host-visible memory valid until the submission has completed: small per-draw data (support buffer, driver constants,
     // inline uniform data). align is a power of two.
     UploadAlloc upload(VkDeviceSize size, VkDeviceSize align);
@@ -185,7 +186,19 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use);
 // 1: the copy; 2: the pool, but the copy could serve it once its pages are current. keep false: the decision depends on something the check
 // cannot see (no copy chunk yet): the set is not kept.
 struct Mirror;
-struct ReadDep { Mirror* m = nullptr; const void* pool = nullptr; uint64_t first = 0, last = 0; uint8_t state = 0; bool mirror_on = false; bool keep = true; uint32_t hot_till = 0; };
+struct ReadDep { Mirror* m = nullptr; const void* pool = nullptr; uint64_t first = 0, last = 0; uint8_t state = 0; bool mirror_on = false; bool keep = true; uint8_t cf = 0; uint32_t hot_till = 0; };
+// [nvn] exp_coh_free (P2 gate, measurement only; off | on | ab = the "on" windows of [nvn] cpuperf_ab): graphics draws bind every buffer the
+// pool copy has ever held from the copy without checks, skip the held-result checks (out_before_op for draws, gmem_before_op for draws) and
+// get pointer slot masks of 0 (every pointer stage on the inline fast path). The picture may be wrong (pages the CPU rewrote since their
+// copy). It measures what a coherence model where the copy is always the GPU's binding could save on the render thread and the GPU.
+// Set per submission by the replay (render thread).
+// [nvn] exp_coh_free_parts (bit set, default 7): 1 unchecked copy bindings and no held-result checks of draws (g_coh_free), 2 slot masks 0
+// (g_coh_mask0), 4 read-only graphics storage from the copy (g_coh_ssbo). g_coh_win: the gate's window is on.
+// Bits 8 / 16 / 32 switch the parts of bit 1 one at a time: the draws' held-result checks (g_coh_odb), the graphics pointer-window flushes
+// (g_coh_gmem), the bindings (g_coh_free).
+extern bool g_coh_free, g_coh_win, g_coh_mask0, g_coh_ssbo, g_coh_odb, g_coh_gmem;
+extern bool g_coh_compute;   // build_set resolves a compute binding: the gate does not apply (ReadDep::cf 2)
+int coh_free_mode();   // 0 off, 1 on, 2 ab
 BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* dep);
 // True when resolve_read would decide the same now (and then does what it would do besides: marks the pages used or wanted).
 bool read_dep_check(const ReadDep& dep, int use);
@@ -398,7 +411,10 @@ std::shared_ptr<FrontPlan> front_submit(const std::vector<Ref<CmdList>>& lists);
 void front_replay_begin(const std::shared_ptr<FrontPlan>& p);
 void front_replay_end(const std::shared_ptr<FrontPlan>& p);
 void replay_end_submit(Frame& f);
-void replay_request_trace();      // trace the next whole presented frame (any thread)
+// [nvn] exp_async_cull: true when the lists (called ones included) hold only compute-queue work; counts their dispatches (any thread)
+bool submission_compute_only(const std::vector<Ref<CmdList>>& lists, uint32_t* dispatches, int* bad_op);
+bool ab_window_on();   // [nvn] cpuperf_ab: true in "on" windows (and without windows)
+void replay_request_trace();     // trace the next whole presented frame (any thread)
 void replay_shutdown();           // destroys pipelines and layouts (render thread, device idle)
 // Frame capture (nvn_capture.cpp): the replay's persistent GPU state at the start of a captured frame. snapshot copies it (render thread,
 // between submissions); image splits a snapshot into raw bytes and the objects it references (any thread); restore makes it the replay's

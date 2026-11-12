@@ -40,7 +40,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (IsRz(mem)) { Dst(ctx, d, WorkGroupIndex(ctx)); return; }
             if (prog.Mesh.IsTask) throw Unsup("task ISBERD past the work-group index");
             int payload = AmpereMesh.PayloadId(ctx.ResourceManager);
-            IrOperand v = ctx.Load(StorageKind.SharedMemory, payload, WordIndex(ctx, mem, AmpereMeshInfo.PayloadWords));
+            IrOperand v = ctx.Load(StorageKind.SharedMemory, payload, WordIndex(ctx, mem, prog.Mesh.PayloadDeclWords));
             // A dynamic address may be 0 as well.
             IrOperand zero = ctx.ICompareEqual(MemAddress(ctx, mem), Const(0));
             Dst(ctx, d, ctx.ConditionalSelect(zero, WorkGroupIndex(ctx), v));
@@ -58,7 +58,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (prog.Mesh.IsTask)
             {
                 if (!attr || !w32) throw Unsup("task ISBEWR other than .ATTR.32 (the payload)");
-                ctx.Store(StorageKind.SharedMemory, AmpereMesh.PayloadId(rm), WordIndex(ctx, mem, AmpereMeshInfo.PayloadWords), value);
+                ctx.Store(StorageKind.SharedMemory, AmpereMesh.PayloadId(rm), WordIndex(ctx, mem, prog.Mesh.PayloadDeclWords), value);
                 return;
             }
             if (attr)

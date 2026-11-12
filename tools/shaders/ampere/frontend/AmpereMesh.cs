@@ -48,6 +48,10 @@ namespace Ryujinx.Graphics.Shader.Translation
         public List<(int Location, int Component)> Lines = new();
 
         public const int PayloadWords = 1024;   // the declared task payload (4 KiB; the game's largest is 0xc80 bytes); task and mesh agree
+        /// NXRT_HARNESS_MESH_PAYLOAD_EXACT=1 (experiment, default off): the payload is declared at the block's own size (control +0x5a,
+        /// rounded up to 16 bytes) instead of 4 KiB, so the driver reserves less on-chip memory per task work group.
+        public static readonly bool PayloadExact = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_PAYLOAD_EXACT") == "1";
+        public int PayloadDeclWords => PayloadExact && PayloadBytes > 0 ? Math.Min(PayloadWords, (PayloadBytes + 15) / 16 * 4) : PayloadWords;
 
         public int AttrWords => Math.Max(1, (MaxVertices + 31) / 32 * Math.Max(1, Lines.Count) * 32);
         public int MapWords => 2 + (3 * MaxPrimitives + 3) / 4;
@@ -144,7 +148,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         // ---- front end: the ISBE regions as shared memories ----------------------------------------------------------------------
 
         internal static int PayloadId(ResourceManager rm) => _cur.PayloadId >= 0 ? _cur.PayloadId
-            : _cur.PayloadId = rm.Properties.AddSharedMemory(new MemoryDefinition(PayloadName, AggregateType.Array | AggregateType.U32, AmpereMeshInfo.PayloadWords));
+            : _cur.PayloadId = rm.Properties.AddSharedMemory(new MemoryDefinition(PayloadName, AggregateType.Array | AggregateType.U32, _cur.Info.PayloadDeclWords));
         internal static int AttrId(ResourceManager rm) => _cur.AttrId >= 0 ? _cur.AttrId
             : _cur.AttrId = rm.Properties.AddSharedMemory(new MemoryDefinition(AttrName, AggregateType.Array | AggregateType.U32, _cur.Info.AttrWords));
         internal static int MapId(ResourceManager rm) => _cur.MapId >= 0 ? _cur.MapId

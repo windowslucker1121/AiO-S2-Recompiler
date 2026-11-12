@@ -60,6 +60,8 @@ nxrt::GaugeCounter g_gauge_barriers_img("nvn.cnt.barriers_img");   // image layo
 struct Slot {
     VkCommandPool pool = VK_NULL_HANDLE;
     VkCommandBuffer cb = VK_NULL_HANDLE;
+    VkCommandPool pool2 = VK_NULL_HANDLE;   // [nvn] exp_async_cull with a second queue of another family: its pool and command buffer
+    VkCommandBuffer cb2 = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> split_cbs;   // command buffers frame_split continues in (from the slot's pool; reused after each pool reset)
     size_t split_used = 0;
     std::vector<VkDescriptorPool> dpools;
@@ -103,6 +105,11 @@ struct Gpu {
     bool keep_aspect = false;
     bool installed_entry_points = false;
     VkSemaphore timeline = VK_NULL_HANDLE;
+    // [nvn] exp_async_cull: submissions run on the device's second queue ([gfx] second_queue), each signalling tl2 = its own count; a
+    // join on the first queue waits for it and signals the serial there, so the serial timeline stays in order.
+    VkSemaphore tl2 = VK_NULL_HANDLE;
+    uint64_t tl2_val = 0;
+    uint64_t async_n = 0;
     std::atomic<uint64_t> completed{0};
     uint64_t submitted = 0;               // render thread: last serial handed to vkQueueSubmit2
     uint64_t recording = 0;               // render thread: serial of the submission being recorded (0 outside)
@@ -326,6 +333,7 @@ Slot& acquire_slot() {
     s.gp_labels.clear();
     retire();
     vkResetCommandPool(g->dev->device(), s.pool, 0);
+    if (s.pool2) vkResetCommandPool(g->dev->device(), s.pool2, 0);
     s.split_used = 0;
     // [nvn] dset_recycle: the slot's submission has completed, so its sets are free: they go back to the slot's lists by layout and the next
     // submission in this slot takes them instead of allocating (the driver's vkAllocateDescriptorSets was ~0.5 us per set, ~800 sets per frame
@@ -765,9 +773,16 @@ void memory_barrier(VkCommandBuffer cb, std::source_location loc) {
 // ---- submission --------------------------------------------------------------------------------------------------------
 namespace {
 
+// [nvn] exp_async_cull (measurement only) and, with [nvn] exp_async_cull_ab, only in the "on" windows of [nvn] cpuperf_ab (paired windows)
+bool async_cull_now() {
+    if (!g || !g->tl2) return false;
+    static const bool ab = config_get_bool("nvn", "exp_async_cull_ab", false);
+    return !ab || ab_window_on();
+}
+
 // `serial`: the one reserved when the job was queued (queue_submit). 0: a submission made inside a render job (texture dumps of the trace):
 // it takes the next serial when nothing queued holds one, else it signals nothing and the queue is drained after it.
-uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint64_t serial = 0) {
+uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint64_t serial = 0, bool q2_hint = false) {
     NXFT("replay");
     nxrt::HitchTimer ht_replay(nxrt::kHpRenderReplay);
     struct ReplayEv {   // frame trace: the same span with the serial (critical-path analysis: queued -> replayed -> signalled)
@@ -788,31 +803,101 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
     f.cb = s.cb;
     f.serial = serial;
     f.slot = &s;
+    // [nvn] exp_async_cull with a second queue of another family: the submission is recorded into the slot's command buffer of that family
+    if (q2_hint && !unsignalled && g->tl2 && g->dev->queue2_family() != g->dev->queue_family()) {
+        if (!s.pool2) {
+            VkCommandPoolCreateInfo ci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+            ci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+            ci.queueFamilyIndex = g->dev->queue2_family();
+            if (vkCreateCommandPool(g->dev->device(), &ci, nullptr, &s.pool2) == VK_SUCCESS) {
+                VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+                ai.commandPool = s.pool2;
+                ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                ai.commandBufferCount = 1;
+                if (vkAllocateCommandBuffers(g->dev->device(), &ai, &s.cb2) != VK_SUCCESS) s.cb2 = VK_NULL_HANDLE;
+            }
+        }
+        if (s.cb2) { f.cb = s.cb2; f.q2 = true; }
+    }
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(s.cb, &bi);
+    vkBeginCommandBuffer(f.cb, &bi);
     const uint32_t qi = static_cast<uint32_t>(&s - g->slots) * 2;
-    gstats::slot_begin(s.cb, static_cast<uint32_t>(&s - g->slots));   // [prof] gpu_stats (measurement only)
+    gstats::slot_begin(f.cb, static_cast<uint32_t>(&s - g->slots));   // [prof] gpu_stats (measurement only)
     if (g->gpool) {
-        vkCmdResetQueryPool(s.cb, g->gpool, static_cast<uint32_t>(&s - g->slots) * kGpMax, kGpMax);
+        vkCmdResetQueryPool(f.cb, g->gpool, static_cast<uint32_t>(&s - g->slots) * kGpMax, kGpMax);
         s.gp_n = 0;
         s.gp_labels.clear();
         gpass_stamp(f, "(start)", 0);
     }
     if (g->qpool) {
-        vkCmdResetQueryPool(s.cb, g->qpool, qi, 2);
-        vkCmdWriteTimestamp(s.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g->qpool, qi);
+        vkCmdResetQueryPool(f.cb, g->qpool, qi, 2);
+        vkCmdWriteTimestamp(f.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g->qpool, qi);
         s.timed = true;
         s.ck_n = 0;
-        if (g->cpool) vkCmdResetQueryPool(s.cb, g->cpool, static_cast<uint32_t>(&s - g->slots) * kCkMax, kCkMax);
+        if (g->cpool) vkCmdResetQueryPool(f.cb, g->cpool, static_cast<uint32_t>(&s - g->slots) * kCkMax, kCkMax);
         s.cpu_t0 = ft::now_ns();
     }
     checkpoint(f, "submission start");
+    const uint64_t draws0 = g->ctr.draws.load(std::memory_order_relaxed), disp0 = g->ctr.dispatches.load(std::memory_order_relaxed);
     record(f);
     checkpoint(f, "submission end");
     if (g->gpool) gpass_stamp(f, "tail", 0);
     // f.cb, not s.cb: frame_split / frame_chunk may have moved the recording on to another command buffer of the slot
     if (g->qpool) vkCmdWriteTimestamp(f.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->qpool, qi + 1);
+    // [nvn] exp_async_cull (measurement only: no dependency on the first queue's work is kept, the picture may be wrong): a submission
+    // without draws and in one command buffer runs on the second queue, beside whatever the first queue still runs.
+    const bool drawless = g->ctr.draws.load(std::memory_order_relaxed) == draws0;
+    if (f.q2 && !drawless) NXLOG_E(kTag, "exp_async_cull: serial %llu was recorded for the second queue but drew", static_cast<unsigned long long>(serial));
+    if (f.q2 || (!unsignalled && async_cull_now() && g->dev->queue2_family() == g->dev->queue_family() && s.split_used == 0 && f.cb == s.cb && drawless &&
+                 g->ctr.dispatches.load(std::memory_order_relaxed) - disp0 >= static_cast<uint64_t>(NX_CFG_INT("nvn", "exp_async_cull_min", 1)))) {
+        vkEndCommandBuffer(f.cb);
+        const uint64_t v = ++g->tl2_val;
+        VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+        cbi.commandBuffer = f.cb;
+        VkSemaphoreSubmitInfo sg = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+        sg.semaphore = g->tl2;
+        sg.value = v;
+        sg.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        si.commandBufferInfoCount = 1;
+        si.pCommandBufferInfos = &cbi;
+        si.signalSemaphoreInfoCount = 1;
+        si.pSignalSemaphoreInfos = &sg;
+        VkResult r;
+        {
+            std::lock_guard<std::mutex> lk(g->dev->queue2_mutex());
+            r = vkQueueSubmit2(g->dev->queue2(), 1, &si, VK_NULL_HANDLE);
+        }
+        VkSemaphoreSubmitInfo wt = sg;   // the join: the first queue waits for it and signals the serial
+        VkSemaphoreSubmitInfo sig = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+        sig.semaphore = g->timeline;
+        sig.value = serial;
+        sig.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkSubmitInfo2 sj = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        sj.waitSemaphoreInfoCount = r == VK_SUCCESS ? 1 : 0;
+        sj.pWaitSemaphoreInfos = &wt;
+        sj.signalSemaphoreInfoCount = 1;
+        sj.pSignalSemaphoreInfos = &sig;
+        {
+            std::lock_guard<std::mutex> lk(g->dev->queue_mutex());
+            const VkResult rj = vkQueueSubmit2(g->dev->queue(), 1, &sj, VK_NULL_HANDLE);
+            if (r == VK_SUCCESS) r = rj;
+        }
+        if (r != VK_SUCCESS) {
+            NXLOG_E(kTag, "async submission: vkQueueSubmit2 failed (%d)", static_cast<int>(r));
+            if (r == VK_ERROR_DEVICE_LOST) device_lost("NVN async submission");
+        }
+        if (g->async_n++ == 0) NXLOG_I(kTag, "exp_async_cull: serial %llu (%llu dispatches, no draws) ran on the second queue", static_cast<unsigned long long>(serial),
+                                       static_cast<unsigned long long>(g->ctr.dispatches.load() - disp0));
+        s.serial = serial;
+        g->submitted = serial;
+        g->last_submitted.store(serial);
+        g->recording = 0;
+        g->ctr.submits.fetch_add(1);
+        g->ctr.submit_replay_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()));
+        return serial;
+    }
     if (!unsignalled && cmdq::queue_submit_end(g->dev->device(), f.cb, g->dev->queue(), &g->dev->queue_mutex(), g->timeline, serial)) {
         // [nvn] submit_async: the recorder ends and submits it in order (it signals the serial; a failed submit signals from the host)
         s.serial = serial;
@@ -875,7 +960,7 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
 // submission), then goes on recording the same submission (same serial) in a fresh command buffer of the slot. Render thread only. The caller has
 // ended its render pass and queries, and must treat everything bound in the old command buffer as unbound.
 bool frame_split(Frame& f) {
-    if (!g || !on_render_thread() || !f.slot || f.cb == VK_NULL_HANDLE) return false;
+    if (!g || !on_render_thread() || !f.slot || f.cb == VK_NULL_HANDLE || f.q2) return false;
     Slot& s = *static_cast<Slot*>(f.slot);
     VkDevice dev = g->dev->device();
     if (s.split_used == s.split_cbs.size()) {
@@ -925,7 +1010,7 @@ bool frame_split(Frame& f) {
 // synchronization scope is all work submitted before it on the queue). Render thread only; the caller has ended its render pass and its
 // queries and treats everything bound in the old command buffer as unbound.
 bool frame_chunk(Frame& f) {
-    if (!g || !f.slot || f.cb == VK_NULL_HANDLE) return false;
+    if (!g || !f.slot || f.cb == VK_NULL_HANDLE || f.q2) return false;
     NXFT("replay.chunk");
     Slot& s = *static_cast<Slot*>(f.slot);
     VkDevice dev = g->dev->device();
@@ -972,7 +1057,7 @@ bool frame_chunk(Frame& f) {
 }
 
 // Queues a submission with the next serial (in queue order). wait: until the render thread has run it (and, with gpu_done, the GPU too).
-uint64_t queue_submit(std::function<void(Frame&)> record, bool wait, bool gpu_done) {
+uint64_t queue_submit(std::function<void(Frame&)> record, bool wait, bool gpu_done, bool q2_hint = false) {
     if (on_render_thread()) {
         const uint64_t serial = submit_on_render_thread(record);
         if (gpu_done) { wait_serial_blocking(serial); retire(); }
@@ -984,8 +1069,8 @@ uint64_t queue_submit(std::function<void(Frame&)> record, bool wait, bool gpu_do
     {
         std::lock_guard<std::mutex> lk(g->qmu);
         serial = g->reserved.fetch_add(1) + 1;
-        g->queue.push_back([record = std::move(record), serial, done, gpu_done] {
-            submit_on_render_thread(record, serial);
+        g->queue.push_back([record = std::move(record), serial, done, gpu_done, q2_hint] {
+            submit_on_render_thread(record, serial, q2_hint);
             if (gpu_done) { wait_serial_blocking(serial); retire(); }
             if (done) {
                 std::lock_guard<std::mutex> l2(done->m);
@@ -1032,6 +1117,15 @@ uint64_t submit(const std::vector<Ref<CmdList>>& lists) {
     bool recorded = false;
     const bool snap = capture::on_submit(lists, &recorded);   // the first submission of a frame being captured: the GPU state it starts from
     std::shared_ptr<FrontPlan> plan = async_submit() && !on_render_thread() ? front_submit(lists) : nullptr;   // [nvn] front_plan
+    bool q2_hint = false;   // [nvn] exp_async_cull with a compute-family second queue: decided before recording
+    if (async_cull_now() && g->dev->queue2_family() != g->dev->queue_family() && async_submit() && !on_render_thread() && !snap && !recorded) {
+        uint32_t nd = 0;
+        int bad = -1;
+        q2_hint = submission_compute_only(lists, &nd, &bad) && nd >= static_cast<uint32_t>(NX_CFG_INT("nvn", "exp_async_cull_min", 1));
+        static std::atomic<int> logged{0};
+        if (nd >= 8 && !q2_hint && logged.fetch_add(1) < 8)
+            NXLOG_I(kTag, "exp_async_cull: a submission with %u dispatches stays on the first queue (op %d)", nd, bad);
+    }
     const uint64_t serial = queue_submit([lists, snap, recorded, plan](Frame& f) {
         if (recorded) capture::frame_submit_begin(snap);
         if (snap) capture::state_taken(replay_state_snapshot());
@@ -1041,7 +1135,7 @@ uint64_t submit(const std::vector<Ref<CmdList>>& lists) {
         front_replay_end(plan);
         replay_end_submit(f);
         if (recorded) capture::frame_submit_end();
-    }, !async_submit(), false);
+    }, !async_submit(), false, q2_hint);
     if (async_submit() && !on_render_thread()) texlook_submit(lists, serial);   // textures the coming draws use: prepared in the background meanwhile
     if (ft::on()) ft::mark("q.sub", static_cast<uint32_t>(serial));   // frame trace: when the game queued this serial (critical-path analysis)
     return serial;
@@ -1327,6 +1421,12 @@ bool bring_up(gfx::Device& dev, gfx::Renderer* rend, FrameLimiter* limiter, bool
         return false;
     }
     vk_gauge_semaphores().add(1);
+    if (dev.queue2() && config_get_bool("nvn", "exp_async_cull", false)) {
+        if (vkCreateSemaphore(dev.device(), &sci, nullptr, &gp->tl2) == VK_SUCCESS) {
+            vk_gauge_semaphores().add(1);
+            NXLOG_W(kTag, "exp_async_cull: submissions without draws run on the second queue (measurement only: no dependencies kept)");
+        }
+    }
     for (Slot& s : gp->slots)
         if (!create_slot(s)) {
             NXLOG_E(kTag, "creating a submission slot failed");
@@ -1452,11 +1552,13 @@ void tear_down() {
             vk_gauge_command_pools().sub(1);
             if (s.cb) vk_gauge_command_buffers().sub(1);
         }
+        if (s.pool2) vkDestroyCommandPool(d.device(), s.pool2, nullptr);
     }
     if (gp->qpool) { vkDestroyQueryPool(d.device(), gp->qpool, nullptr); vk_gauge_query_pools().sub(1); }
     if (gp->cpool) { vkDestroyQueryPool(d.device(), gp->cpool, nullptr); vk_gauge_query_pools().sub(1); }
     if (gp->gpool) { vkDestroyQueryPool(d.device(), gp->gpool, nullptr); vk_gauge_query_pools().sub(1); }
     if (gp->timeline) { vkDestroySemaphore(d.device(), gp->timeline, nullptr); vk_gauge_semaphores().sub(1); }
+    if (gp->tl2) { vkDestroySemaphore(d.device(), gp->tl2, nullptr); vk_gauge_semaphores().sub(1); }
     g = nullptr;
     delete gp;
 }
