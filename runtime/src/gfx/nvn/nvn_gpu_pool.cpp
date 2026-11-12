@@ -1473,6 +1473,7 @@ std::vector<FCopy*> g_fc_list;                    // render thread
 uint64_t g_fc_bytes = 0;
 std::atomic<uint64_t> g_fc_flush_pages{0}, g_fc_gpu_pages{0}, g_fc_copied{0}, g_fc_dev{0}, g_fc_host{0};
 int g_fc_on = -1;                                 // cpuperf_ab can switch it per window (flush_copy_enable)
+std::atomic<uint64_t> g_fc_gen{0};                 // moves when a copy is made or destroyed (fc_gpu_wrote's last-hit cache)
 
 bool fc_mode() {
     // a capture replay rewrites the captured memory every loop without flushes: no flush copies there
@@ -1511,8 +1512,18 @@ FCopy* fc_find_locked(uint64_t addr) {   // g_fc_mu held (shared)
     return addr < it->first + f->npages * kPageBytes ? f : nullptr;
 }
 bool fc_gpu_wrote(uint64_t addr, uint64_t size) {   // true: pages a binding may use went stale (the next draw binds again)
-    std::shared_lock<std::shared_mutex> lk(g_fc_mu);   // fc_destroy cannot free it meanwhile
-    FCopy* f = fc_find_locked(addr);
+    // fc_for and fc_destroy run on the render thread: there the map cannot change under us (no lock; ~1,500 calls per frame: reports)
+    std::shared_lock<std::shared_mutex> lk(g_fc_mu, std::defer_lock);
+    if (!on_render_thread()) lk.lock();
+    // the last copy hit (reports and storage writes come in runs into the same pool)
+    static thread_local FCopy* last_fc = nullptr;
+    static thread_local uint64_t last_lo = 0, last_hi = 0, last_gen = ~0ull;
+    FCopy* f = nullptr;
+    if (last_gen == g_fc_gen.load(std::memory_order_acquire) && addr >= last_lo && addr < last_hi) f = last_fc;
+    else {
+        f = fc_find_locked(addr);
+        if (f) { last_fc = f; last_lo = reinterpret_cast<uint64_t>(f->pg->base); last_hi = last_lo + f->npages * kPageBytes; last_gen = g_fc_gen.load(std::memory_order_acquire); }
+    }
     if (!f) return false;
     const uint64_t base = reinterpret_cast<uint64_t>(f->pg->base);
     const uint64_t first = (addr - base) / kPageBytes, last = (addr + size - 1 - base) / kPageBytes;
@@ -1539,7 +1550,7 @@ FCopy* fc_for(PoolGpu* pg, MemoryPool* mp) {
     f->want.assign(words, 0);
     g_fc_bytes += pg->size;
     FCopy* raw = f.release();
-    { std::unique_lock<std::shared_mutex> lk(g_fc_mu); g_fc_by_base[reinterpret_cast<uint64_t>(pg->base)] = raw; }
+    { std::unique_lock<std::shared_mutex> lk(g_fc_mu); g_fc_by_base[reinterpret_cast<uint64_t>(pg->base)] = raw; g_fc_gen.fetch_add(1); }
     g_fc_list.push_back(raw);
     pg->fcopy = raw;
     static int logged = 0;
@@ -1626,7 +1637,7 @@ void fc_destroy(PoolGpu* pg) {   // pool_gpu_destroy (deferred until the GPU is 
     FCopy* f = static_cast<FCopy*>(pg->fcopy);
     if (!f) return;
     pg->fcopy = nullptr;
-    { std::unique_lock<std::shared_mutex> lk(g_fc_mu); g_fc_by_base.erase(reinterpret_cast<uint64_t>(pg->base)); }
+    { std::unique_lock<std::shared_mutex> lk(g_fc_mu); g_fc_by_base.erase(reinterpret_cast<uint64_t>(pg->base)); g_fc_gen.fetch_add(1); }
     g_fc_list.erase(std::remove(g_fc_list.begin(), g_fc_list.end(), f), g_fc_list.end());
     g_fc_bytes -= std::min<uint64_t>(g_fc_bytes, pg->size);
     if (f->buf.buffer) device().destroy_buffer(f->buf);

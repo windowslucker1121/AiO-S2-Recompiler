@@ -124,6 +124,8 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | fps100 | `servable_cache` (out_servable answers keyed by change counters, verify clean); `keep_memo` (kept sets enter the epoch memo) | replay −0.84 ms (16/16), +2 fps; replay −0.11 ms, +0.4 fps |
 | gpu-time (round 2) | `pt_copy`: pools whose pointers a pointer shader's bound storage buffers hold (light-probe grids and record tables of the foliage meshes, 11 pools) are copied whole into the device-local pool copy, and the guest page table points their valid pages there (2 MiB leaves only when the whole span qualifies). The fern mesh fbb731e2 (39k mesh invocations per frame) read those through the bus | **village +4.2 / +4.6 fps median** (20/23, 17/21), median frame −1.2 ms, main-submission GPU busy −1.4..−1.55 ms, game sync wait −1.2 ms |
 | gpu-time | #3 compute re-translated in C1's form (fog 20593fd9, 24458020, beb1205f: runtime blocks dumped with `[nvn] dump_shader`) | stamped culling submission 4.32 → 4.09 ms |
+| gpu-time | `indirect_from_held`: indirect arguments inside one held result read from its copy (no whole 6.5 MB copy-back per indirect dispatch) | culling submission 3.31 → 3.08 ms (stamped), main submission and mesh invocations unchanged |
+| gpu-time | `pt_copy` measured again without the frame trace, hazard off (the fps verdict) | **fps +2.7 median (25/25), 1% low +4.7 (24/25)** |
 
 Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
 - F1's set: 3,419 gpt corpus blocks plus 12 runtime blocks; backup `gpt_backup_v9`.
@@ -182,6 +184,16 @@ Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
   a separate memo for texture-free sets (`memo_nt`: replay +0.13 ms, removed); a per-slot memo of `physical_buffer_address` (noise,
   removed); `compute_out_lazy = 0` with the GPU headroom flush_copy gave (GPU +6 ms, 47 fps); mesh shaders with direct outputs and the
   early primitive count (`NXRT_HARNESS_MESH_DIRECT` + `MESH_EARLY_COUNT`, private cache): GPU busy −0.14 ms only.
+
+- **gpu-time round 2 (2026-11-12), village 1080, paired windows:**
+  - `hazard` moved onto the recorder thread (pass barrier by a look-ahead through the queued commands; also fixed: the old tracker read
+    descriptor summaries before the queued `cmd_thread_desc` updates). GPU busy −1.1 ms (22/23), barriers 615 → 177 per frame, but
+    without the frame trace the frame is render-thread bound and it cost fps −1.9 (replay +0.46 ms); without the look-ahead (barrier at
+    every pass with anything unordered) −3.6. Stays off; turn it on when the GPU is the limit.
+  - `exp_ssbo_copy` (read-only storage buffers of pointer draws bound from the pool copy and their slots marked): GPU busy +0.6 ms (the
+    slot search costs more than the bus). Removed.
+  - `gmem_scan_memo` (skip pointer-shader uniform scans when nothing changed): neutral (8/26), removed.
+  - pt_copy that split 2 MiB leaves into page leaves: HiZ a17259b2 0.24 → 0.48 ms (a walk per 4 KiB page); now spans stay whole.
 
 ## What is open, by expected gain
 

@@ -3393,6 +3393,10 @@ bool pt_ubo_on() {
 void pt_scan_binding(uint64_t addr, uint64_t size, uint64_t max = 256) {
     static const bool on = nxrt::config_get_bool("nvn", "pt_copy", true);
     if (!on || !addr) return;
+    static uint64_t recent[4096] = {};   // a direct-mapped filter in front of the set (called per binding of every pointer-shader draw)
+    uint64_t& slot = recent[((addr >> 4) ^ (addr >> 16)) & 4095];
+    if (slot == addr) return;
+    slot = addr;
     static std::unordered_set<uint64_t> seen;
     if (!seen.insert(addr).second) return;
     const uint64_t n = std::min<uint64_t>(size ? size : max, max) & ~uint64_t{7};
