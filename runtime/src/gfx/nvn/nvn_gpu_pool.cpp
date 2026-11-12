@@ -2956,6 +2956,13 @@ bool out_split_on() {
 // submission. the game's job workers read small GPU results (16-192 KiB) a page at a time, a new page every second or so: split, each new page was
 // a guard fault that waited for the submission still on the GPU (20-50 ms, the periodic hitches of the first scene). Whole, the copy-back
 // costs microseconds and the CPU finds the pool current.
+// [nvn] out_split_held (experiment G3, default off; cpuperf_ab_what g3a): results still held from an earlier submission are split too.
+std::atomic<bool> g_split_held{true};
+void out_split_held_enable(bool on) { g_split_held.store(on, std::memory_order_relaxed); }
+bool out_split_held_on() {
+    static const bool cfg = NX_CFG_BOOL("nvn", "out_split_held", false);
+    return cfg && g_split_held.load(std::memory_order_relaxed);
+}
 uint64_t out_split_min() {
     static const uint64_t b = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "compute_out_split_min_kb", 1024))) << 10;
     return b;
@@ -3016,7 +3023,7 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
             // A result still held from an earlier submission is not split again (it goes back whole when the CPU has read some of it). Splitting
             // it too (2026-11-08: the game's eight GPU culling buffers, the CPU reads and clears only their first page) cut the end-of-submission
             // copies from ~850 to ~150 MiB/s but took the first scene from ~31 to ~22 fps.
-            if (hold && !e.guarded && e.last > e.first && out_split_on() && e.size >= out_split_min()) {
+            if (hold && (!e.guarded || out_split_held_on()) && e.last > e.first && out_split_on() && e.size >= out_split_min()) {
                 const int sp = out_split(i, serial, part_copies, part_bufs, rearm);
                 if (sp == 1) { g_on_deferred.fetch_add(1, std::memory_order_relaxed); continue; }   // held for its guarded pages
                 if (sp == 2) { gone.push_back(i); continue; }                                       // every page went back (part_copies)

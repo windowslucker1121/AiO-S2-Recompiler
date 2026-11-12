@@ -244,6 +244,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return ctx.ConditionalSelect(denormal, ctx.BitwiseAnd(v, Const(unchecked((int)0x80000000))), v);
         }
 
+        /// NXRT_HARNESS_FTZ_FOLD=1 (experiment, default off; G3: -1..-1.5% driver instructions, too small to re-translate every block for): flushes that cannot change the result are left out. A compare against an
+        /// immediate that is neither zero nor denormal answers the same for a denormal and for a zero (both lie strictly between
+        /// -FLT_MIN and FLT_MIN); truncation and rounding to nearest give a zero of the same sign for both. Only FLOOR / CEIL and compares
+        /// against zero or a register keep the flush.
+        static readonly bool FtzFold = Environment.GetEnvironmentVariable("NXRT_HARNESS_FTZ_FOLD") == "1";
+        static bool NormalNonZeroImm(Op o) => o.Kind == OperandKind.FImm && ((uint)o.ImmBits >> 23 & 0xff) != 0;
+        static IrOperand FtzSrcRounded(EmitterContext ctx, SassInst i, Op o) =>
+            FtzFold && !Has(i, "FLOOR") && !Has(i, "CEIL") ? FSrc(ctx, o) : FtzSrc(ctx, i, o);
+
         static IrOperand FSrc(EmitterContext ctx, Op o)
         {
             if (o.Kind == OperandKind.Imm) throw Unsup("integer immediate in a float operand");
@@ -471,7 +480,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 case "FRND":
                     {
                         if (Has(i, "F64")) throw Unsup();
-                        IrOperand a = FtzSrc(ctx, i, o[1]);
+                        IrOperand a = FtzSrcRounded(ctx, i, o[1]);
                         Dst(ctx, o[0], Has(i, "FLOOR") ? ctx.FPFloor(a) : Has(i, "CEIL") ? ctx.FPCeiling(a) : Has(i, "TRUNC") ? ctx.FPTruncate(a) : ctx.FPRound(a));
                         return;
                     }
@@ -714,7 +723,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         /// fp32 compare of FSETP/FSET: .FTZ flushes its inputs; without it a denormal keeps its value, so compare in fp64.
         static IrOperand FCompare(EmitterContext ctx, SassInst i, FComp c, Op a, Op b) =>
-            Has(i, "FTZ") ? GetFPComparison(ctx, c, FtzSrc(ctx, i, a), FtzSrc(ctx, i, b))
+            Has(i, "FTZ") ? GetFPComparison(ctx, c, FtzFold && NormalNonZeroImm(b) ? FSrc(ctx, a) : FtzSrc(ctx, i, a),
+                                            FtzFold && NormalNonZeroImm(a) ? FSrc(ctx, b) : FtzSrc(ctx, i, b))
                           : GetFPComparison(ctx, c, ExactF64(ctx, FBits(ctx, a)), ExactF64(ctx, FBits(ctx, b)), Instruction.FP64);
 
         static void EmitIsetpAmpere(EmitterContext ctx, SassInst i)
@@ -1175,7 +1185,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             if (Has(i, "F64") || Has(i, "U64") || Has(i, "S64")) { EmitF2i64Ampere(ctx, i); return; }
             IReadOnlyList<Op> o = i.Operands;
-            IrOperand src = Has(i, "F16") ? HalfLane(ctx, o[1]) : FtzSrc(ctx, i, o[1]);
+            IrOperand src = Has(i, "F16") ? HalfLane(ctx, o[1]) : FtzSrcRounded(ctx, i, o[1]);
             src = Has(i, "TRUNC") ? ctx.FPTruncate(src) : Has(i, "FLOOR") ? ctx.FPFloor(src) : Has(i, "CEIL") ? ctx.FPCeiling(src) : ctx.FPRound(src);
             bool unsigned = Has(i, "U32") || Has(i, "U16") || Has(i, "U8");
             if (unsigned) src = ctx.FPMaximum(src, ConstF(0));
