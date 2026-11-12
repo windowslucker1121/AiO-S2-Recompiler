@@ -188,12 +188,13 @@ private:
                     const double avg = samples ? static_cast<double>(sum) / samples : 0.0;
                     NXLOG_I("audio",
                             "sink %s: queue avg %.1f ms (%.1f..%.1f ms), underruns +%llu (%llu), dropped +%llu, written %.0f frames/s "
-                            "(rate %u)",
+                            "(rate %u), audible %.0f frames/s",
                             s->name(), avg * ms, (samples ? qmin : 0) * ms, qmax * ms,
                             static_cast<unsigned long long>(st.underruns - last.underruns),
                             static_cast<unsigned long long>(st.underruns),
                             static_cast<unsigned long long>(st.frames_dropped - last.frames_dropped),
-                            (st.frames_written - last.frames_written) / secs, st.sample_rate);
+                            (st.frames_written - last.frames_written) / secs, st.sample_rate,
+                            (st.frames_audible - last.frames_audible) / secs);
                 }
                 last = st;
                 window_start = now;

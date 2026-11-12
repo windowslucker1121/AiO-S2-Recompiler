@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Platform layer (S4b): SDL3 window, fullscreen, relative (raw) mouse, gamepad hot-plug, Vulkan surface creation.
-// Everything here is called from one thread (the one that created the window, normally the main thread). Events are not
-// returned: pump_events() turns them into nxrt::input events (input.h).
+// The window and SDL's event loop run on a host thread of their own, the window thread ([gfx] window_thread, default on), which only
+// pumps the window's messages: Windows' modal loops (moving or sizing the window, the title bar's buttons, the menus) then never stop the
+// game. Any thread may call the functions here: queries read the window state directly, changes run on the window thread (the ones that
+// return a result wait for it, set_window_title / set_relative_mouse / set_cursor_visible are queued). The events reach the input queue as
+// they come (input.h); pump_events() only pumps on the window thread. With [gfx] window_thread = false everything runs on the thread that
+// called init(), which must then pump.
 // Configuration (config.h): [gfx] hidden / NXRT_GFX_HIDDEN=1 creates the window hidden (automated tests).
 #pragma once
 #include <cstdint>
+#include <functional>
 
 namespace nxrt::platform {
 
@@ -14,6 +19,13 @@ struct InitOptions {
 bool init(const InitOptions& opt = {});   // idempotent; sets the SDL hints (raw mouse), SDL_Init(VIDEO|EVENTS|JOYSTICK|GAMEPAD)
 void shutdown();                           // closes the window and every opened gamepad, SDL_Quit
 bool initialised();
+
+// The window thread. window_thread(): it runs (init() started it). run_on_window_thread runs fn there and waits (Win32 calls that belong to
+// the window's thread: subclassing, menus); post_to_window_thread queues it. Both run fn at once on the window thread itself or without one.
+bool window_thread();
+bool on_window_thread();
+void run_on_window_thread(const std::function<void()>& fn);
+void post_to_window_thread(std::function<void()> fn);
 
 struct WindowDesc {
     const char* title = "nxrt";
@@ -69,7 +81,8 @@ bool gamepad_sensors(uint32_t id, float accel[3], float gyro[3]);      // latest
 bool gamepad_rumble(uint32_t id, uint16_t low, uint16_t high, uint32_t duration_ms);   // 0..65535 per motor; (0, 0) stops it; false when unsupported
 
 // Pumps the SDL event queue and translates it into input events and window state. wait: block for up to timeout_ms (-1 =
-// forever) for the first event (used while minimised). Returns the number of SDL events handled.
+// forever) for the first event (used while minimised). Returns the number of SDL events handled. Off the window thread (when it runs) this
+// pumps nothing (the window thread does) and returns 0; wait sleeps up to 50 ms instead.
 int pump_events(bool wait = false, int timeout_ms = -1);
 bool quit_requested();
 void clear_quit();

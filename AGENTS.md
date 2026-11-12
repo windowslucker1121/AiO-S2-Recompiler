@@ -520,8 +520,11 @@ u32 at this+0x2c8, the scale a float in main's data (main+0x4d41fc8); retail kee
 it back into +0x2c8 after every frame), so it advanced 1/60 s per presented frame and ran at fps/60 speed. The runtime's timestep module
 (entry hook on the same function, before the calc) now writes scale = measured frame time * 60 and the nearest whole rate into +0x2c8
 (`timestep::Sites::apply_step`, the game side `oot_core.cpp`). Movies: the movie player shows one decoded picture per frame, so while the game
-reads nn::codec pictures the step stays 1/60 (`Sites::fixed_step_during_movies`: the event timeline that starts the voice lines stays with the
-pictures, A11), and `fps_limit = auto` caps at `[display] auto_fps` (100) since 2026-11-11 (display rate 2026-11-09 .. 11-10; `Sites::cap_at_display_rate = true`; movies stay at 60 through the movie cap; uncapped measured at 1080: the house scene 64 fps, 1% low 48-53, first scene 50-62, village ~36). `oot` default `[time] min_rate = 10`: steps up
+reads nn::codec pictures the step is 1/60 per picture taken (`Sites::fixed_step_during_movies`, `[time] movie_follow_pictures`, 2026-11-12: the
+event timeline that starts the voice lines follows the frame step, not the pictures (proven with a frozen movie: the lines kept coming), so with
+1/60 per *frame* a late decoder put the intro's voice lines 2.4-3.8 s ahead of their pictures; now game time stays within one frame of movie time
+at cap 60 / 100 / uncapped, lines within 0.02 s; `[time] av_trace` logs every sound start with the movie picture; `[media] video_decode_ahead` = 8
+decodes on the decoder's own thread: frames without a new picture 578 -> 171 at cap 60, most in the movie's first 10 s), and `fps_limit = auto` caps at `[display] auto_fps` (100) since 2026-11-11 (display rate 2026-11-09 .. 11-10; `Sites::cap_at_display_rate = true`; movies stay at 60 through the movie cap; uncapped measured at 1080: the house scene 64 fps, 1% low 48-53, first scene 50-62, village ~36). `oot` default `[time] min_rate = 10`: steps up
 to 1/10 s, slower frames slow the game down; hitches over 100 ms are clamped (in a 40 s walk with pipeline builds game time was 84% of real
 time, in steady play 100%). `game_main` reads `[time]` again after the game's config defaults. `[time] mode = off` restores the retail step;
 `[time] csv = <file>` logs per frame host time, step, game time and movie pictures. **Measured (RTX 4080):** W held 2 s from
@@ -535,8 +538,8 @@ the movie (as on the console at 30 fps), 1.00 in the 3D cutscene after it at 24-
 their own thread (Gamepad with press-to-rebind, Keyboard and mouse bindings, More graphics settings, Debug info, Log). Changes apply at once
 and are saved in `controls.ini`; "(next start)" entries are runtime keys in `controls.ini [config]` (`section.key = value`, applied at start
 unless the ini or `NXRT_*` set them; game-module defaults give way via `config_set_default`). The bar is hidden in fullscreen; there the ImGui
-window (F1, View + Menu) is the menu (`[gfx] overlay_menu`). Alt alone and F10 stay game keys. **An open drop-down holds the game's frame**
-(Windows' modal menu loop runs on the game thread that pumps the window; audio continues, the watchdog is fed); dialogs do not. Checked as
+window (F1, View + Menu) is the menu (`[gfx] overlay_menu`). Alt alone and F10 stay game keys. **Since 2026-11-12 the window has a thread of its own**
+(`[gfx] window_thread`, platform.cpp): Windows' modal loops (dragging/sizing the window, title-bar buttons, drop-downs, the system menu) run there and no longer stop the game or its sound streams (measured: 10 s window drag and 10 s system menu, frames and audio continuous; before, the game stopped for the whole loop). The bar's commands run on the window thread; what touches play state goes to the next frame (`at_frame` in play.cpp). Checked as
 named instances on the title screen (`work\run\nm1`..`nm3` of the menu branch): bar and client size 1280x720, fullscreen round trip, each dialog,
 a menu toggle saved, a 12 s drop-down without a freeze report, press-to-rebind with the virtual pad from the native dialog. Native UI is
 driven and captured without the mouse through ctypes (`PostMessage WM_COMMAND`, `SC_KEYMENU`, `PrintWindow`): boot screenshots and `@shot`
@@ -1625,6 +1628,11 @@ Rules for agents:
   (`--prepare-shaders` refuses `--instance`; the "Preparing shaders" window is off for instances: it writes the shared shader data), and
   anything meant to write the shared pipeline cache or the default run's saves.
 - A build beside a running game is fine if memory allows; still only one build in `work\build\oot` at a time.
+- **Memory guard (2026-11-12, `fix/memory-guard`):** a player's default run was stopped at 19.5 GB by the old fixed 16 GB limit. Cause:
+  every save of the 4.5 GB pipeline cache allocated a heap buffer of its size (+4.4 GB private commit per save, also every ~2 s at boot
+  while prewarm grew the cache); named instances never save, so test runs never saw it. Saves and loads now go through file mappings
+  (`nxrt/file_map.h`: no commit step, measured old vs new exe), and `[memory] limit_gb` defaults to `auto` (physical RAM) with a 10 s
+  grace and pressure shedding (runtime/docs/CONFIG.md). `memory.limit_gb: 24` in test runs is no longer needed.
 - Checked live on 2026-11-06 (RTX 4080): two instances to the title through the MCP server; Enter to one reached only that one, each wrote
   only its folder, the game folder's `controls.ini`, `pipeline_keys.bin`, `shader_order.txt`, the shared `pipeline_cache.bin`, `prepare.state`
   and the default save stayed untouched; a second start of a running instance and the memory guard both exit 7.

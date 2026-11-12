@@ -23,6 +23,7 @@ struct SinkStats {
     uint32_t queued_peak_frames = 0;   // most frames queued at one time (sinks that can measure it)
     uint32_t queued_low_frames = 0;    // fewest frames queued after playback had started (the margin against an underrun)
     uint32_t sample_rate = 0;          // the rate of the last open() (0: never opened); turns frame counts into milliseconds
+    uint64_t frames_audible = 0;       // accepted frames with a sample of magnitude 64 or more, i.e. not silence (sinks that measure it)
 };
 
 class AudioSink {

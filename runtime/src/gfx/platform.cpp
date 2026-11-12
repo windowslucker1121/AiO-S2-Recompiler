@@ -1,14 +1,35 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SDL3 platform layer (declarations in include/nxrt/platform.h): window, fullscreen, raw relative mouse, gamepad hot-plug,
 // Vulkan surface, and the translation of SDL events into nxrt::input events (include/nxrt/input.h).
+//
+// The window thread ([gfx] window_thread, default on): SDL and the window live on a host thread of their own that does nothing but pump
+// the window's messages. Windows runs its modal loops (dragging or sizing the window, the title bar's buttons, the menu bar and the
+// system menu) inside the pump of the thread that owns the window; when that was the game's main thread, the game stopped for as long as
+// the player held the title bar or kept a menu open, and its sound streams ran dry. Now the game's threads never pump: they read the window
+// state (flags, sizes) directly and hand every change (fullscreen, mouse mode, cursor, title, size) to the window thread (ui_sync / ui_post).
+// Inside a modal loop SDL fires a 10 ms timer (SDL_EVENT_WINDOW_EXPOSED); the event watch runs the queued work there, so a change never
+// waits for the loop to end. Off: everything runs on the thread that calls init(), as before.
 #include "nxrt/platform.h"
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <functional>
+#include <future>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include "nxrt/config.h"
@@ -21,16 +42,93 @@ namespace {
 constexpr const char* kTag = "platform";
 constexpr Uint64 kFullscreenWaitMs = 2000;
 
-// All SDL state lives in this file. Everything runs on the thread that created the window.
-bool g_inited = false;
-bool g_quit = false;
+// All SDL state lives in this file. The window and SDL's event loop belong to the window thread (or, with [gfx] window_thread off, to the
+// thread that called init()).
+std::atomic<bool> g_inited{false};
+std::atomic<bool> g_quit{false};
 SDL_Window* g_window = nullptr;
 
 struct OpenPad {
     SDL_JoystickID id;
     SDL_Gamepad* pad;
 };
+std::mutex g_pads_mu;   // the window thread opens and closes pads; any thread polls them
 std::vector<OpenPad> g_pads;
+
+// ---- the window thread ----
+std::atomic<bool> g_threaded{false};          // the window thread runs SDL
+std::atomic<DWORD> g_ui_tid{0};               // its id (0: none)
+std::thread* g_ui_thread = nullptr;   // never destroyed at exit (a joinable std::thread would terminate the process)
+std::atomic<bool> g_ui_stop{false};
+std::mutex g_task_mu;
+std::deque<std::function<void()>> g_tasks;
+std::atomic<bool> g_tasks_pending{false};
+Uint32 g_wake_event = 0;                      // an SDL user event type that only wakes the window thread
+std::atomic<bool> g_cursor_want{true};        // the last cursor visibility asked for (set_cursor_visible dedupes against it)
+std::atomic<int> g_rel_want{-1};              // a relative mouse change on its way to the window thread (-1: none)
+
+bool on_ui_thread() { return !g_threaded.load(std::memory_order_acquire) || GetCurrentThreadId() == g_ui_tid.load(std::memory_order_relaxed); }
+
+// Runs the queued work (window thread only).
+void run_tasks() {
+    static thread_local bool running = false;   // a task's own SDL events reach the event watch: no nesting
+    if (running || !g_tasks_pending.load(std::memory_order_acquire)) return;
+    running = true;
+    struct Done { ~Done() { running = false; } } done;
+    for (;;) {
+        std::function<void()> f;
+        {
+            std::lock_guard<std::mutex> lk(g_task_mu);
+            if (g_tasks.empty()) {
+                g_tasks_pending.store(false, std::memory_order_release);
+                return;
+            }
+            f = std::move(g_tasks.front());
+            g_tasks.pop_front();
+        }
+        f();
+    }
+}
+
+void wake_ui() {
+    SDL_Event e;
+    SDL_zero(e);
+    e.type = g_wake_event;
+    SDL_PushEvent(&e);   // wakes SDL_WaitEventTimeout on the window thread
+}
+
+// Queues work for the window thread and returns at once. On the window thread itself (or without one) it runs now.
+void ui_post(std::function<void()> f) {
+    if (on_ui_thread()) {
+        f();
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_task_mu);
+        g_tasks.push_back(std::move(f));
+        g_tasks_pending.store(true, std::memory_order_release);
+    }
+    wake_ui();
+}
+
+// Runs work on the window thread and waits for its result. The window thread never waits for another thread, so this cannot deadlock;
+// inside a modal loop it takes up to one SDL live-resize tick (~10 ms).
+template <class F>
+auto ui_sync(F&& f) -> decltype(f()) {
+    if (on_ui_thread()) return f();
+    using R = decltype(f());
+    auto task = std::make_shared<std::packaged_task<R()>>(std::forward<F>(f));
+    std::future<R> fut = task->get_future();
+    ui_post([task] { (*task)(); });
+    return fut.get();
+}
+
+// SDL calls event watches for every event as it is queued, on the queuing thread. On the window thread that includes the live-resize
+// ticks SDL sends while Windows runs a modal loop: the queued work runs there too.
+bool SDLCALL ui_event_watch(void*, SDL_Event*) {
+    if (GetCurrentThreadId() == g_ui_tid.load(std::memory_order_relaxed)) run_tasks();
+    return true;
+}
 
 input::Event make_event(input::EventType type, uint64_t ts) {
     input::Event e;
@@ -136,6 +234,7 @@ const char* pad_kind_name(input::PadKind k) {
 
 // Opens a gamepad that SDL reports as added and fills its info entry.
 void gamepad_opened(SDL_JoystickID id, uint64_t ts) {
+    std::unique_lock<std::mutex> lk(g_pads_mu);
     for (const OpenPad& p : g_pads) {
         if (p.id == id) return;  // duplicate notification for a pad already open
     }
@@ -145,6 +244,7 @@ void gamepad_opened(SDL_JoystickID id, uint64_t ts) {
         return;
     }
     g_pads.push_back({id, pad});
+    lk.unlock();
 
     input::GamepadInfo info;
     info.id = id;
@@ -176,10 +276,12 @@ void gamepad_opened(SDL_JoystickID id, uint64_t ts) {
 
 // Closes a gamepad that SDL reports as removed and drops its info entry.
 void gamepad_closed(SDL_JoystickID id, uint64_t ts) {
+    std::unique_lock<std::mutex> lk(g_pads_mu);
     for (auto it = g_pads.begin(); it != g_pads.end(); ++it) {
         if (it->id != id) continue;
         SDL_CloseGamepad(it->pad);
         g_pads.erase(it);
+        lk.unlock();
         input::gamepad_remove_info(id);
         NXLOG_I(kTag, "gamepad %u removed", static_cast<unsigned>(id));
         input::Event e = make_event(input::EventType::GamepadRemoved, ts);
@@ -321,17 +423,112 @@ void translate(const SDL_Event& ev) {
     }
 }
 
+bool init_here(const InitOptions& opt);
+void shutdown_here();
+
+// The window thread: SDL's init, then the event loop until shutdown(). It waits for events (or queued work), translates them and runs the
+// queued work; it never waits for another thread.
+void ui_main(InitOptions opt, std::promise<bool>* started) {
+    g_ui_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    SetThreadDescription(GetCurrentThread(), L"nxrt-window");
+    // Input is read here: above the game's own threads, so a busy frame never delays a key or the window's answer to Windows.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    const bool ok = init_here(opt);
+    if (ok) {
+        g_wake_event = SDL_RegisterEvents(1);
+        SDL_AddEventWatch(&ui_event_watch, nullptr);
+    }
+    started->set_value(ok);
+    if (!ok) return;
+    while (!g_ui_stop.load(std::memory_order_acquire)) {
+        run_tasks();
+        SDL_Event ev;
+        // SDL wakes up by itself as often as the open gamepads need polling.
+        bool have = SDL_WaitEventTimeout(&ev, 50);
+        while (have) {
+            if (ev.type != g_wake_event) translate(ev);
+            have = SDL_PollEvent(&ev);
+        }
+    }
+    run_tasks();
+    SDL_RemoveEventWatch(&ui_event_watch, nullptr);
+    shutdown_here();
+}
+
 }  // namespace
 
 // ---- lifecycle ----------------------------------------------------------------------------------------------------
 
 bool init(const InitOptions& opt) {
     if (g_inited) return true;
+    if (!config_get_bool("gfx", "window_thread", true)) return init_here(opt);
+    g_ui_stop.store(false);
+    std::promise<bool> started;
+    std::future<bool> ok = started.get_future();
+    g_threaded.store(true, std::memory_order_release);
+    g_ui_thread = new std::thread(ui_main, opt, &started);
+    if (ok.get()) {
+        // A program that returns from main without shutdown(): the window thread ends before the statics it uses go away.
+        static const bool at_exit = (std::atexit([] { shutdown(); }), true);
+        (void)at_exit;
+        NXLOG_I(kTag, "the window runs on a thread of its own (window moves and menus do not stop the game)");
+        return true;
+    }
+    g_ui_thread->join();
+    delete g_ui_thread;
+    g_ui_thread = nullptr;
+    g_threaded.store(false, std::memory_order_release);
+    g_ui_tid.store(0);
+    return false;
+}
+
+void shutdown() {
+    if (!g_inited) return;
+    if (!g_threaded.load(std::memory_order_acquire)) {
+        shutdown_here();
+        return;
+    }
+    if (on_ui_thread()) {   // never joins itself: ends SDL here, the loop then leaves
+        g_ui_stop.store(true, std::memory_order_release);
+        shutdown_here();
+        return;
+    }
+    g_ui_stop.store(true, std::memory_order_release);
+    wake_ui();
+    if (g_ui_thread && g_ui_thread->joinable()) g_ui_thread->join();
+    delete g_ui_thread;
+    g_ui_thread = nullptr;
+    g_threaded.store(false, std::memory_order_release);
+    g_ui_tid.store(0);
+}
+
+bool initialised() { return g_inited; }
+
+bool window_thread() { return g_threaded.load(std::memory_order_acquire); }
+
+void run_on_window_thread(const std::function<void()>& fn) {
+    ui_sync([&fn] { fn(); });
+}
+
+void post_to_window_thread(std::function<void()> fn) { ui_post(std::move(fn)); }
+
+bool on_window_thread() { return on_ui_thread(); }
+
+namespace {
+
+bool init_here(const InitOptions& opt) {
+    if (g_inited) return true;
     // Hints must be set before SDL_Init. Raw, unaccelerated relative mouse; gamepads keep reporting when the window is
     // in the background.
     SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE, "0");
     SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    // The exe's own icon (resource 1, game-build/res/game.rc) for the window's title bar, Alt+Tab and the taskbar. Exes without one (tests)
+    // keep SDL's default.
+    if (FindResourceW(nullptr, MAKEINTRESOURCEW(1), MAKEINTRESOURCEW(14) /* RT_GROUP_ICON */)) {
+        SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");
+        SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");
+    }
 
     SDL_InitFlags flags = SDL_INIT_VIDEO | SDL_INIT_EVENTS;
     if (opt.gamepads) flags |= SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD;
@@ -347,26 +544,30 @@ bool init(const InitOptions& opt) {
     return true;
 }
 
-void shutdown() {
+void destroy_window_here() {
+    if (!g_window) return;
+    SDL_DestroyWindow(g_window);
+    g_window = nullptr;
+}
+
+void shutdown_here() {
     if (!g_inited) return;
-    destroy_window();
-    for (const OpenPad& p : g_pads) {
-        SDL_CloseGamepad(p.pad);
-        input::gamepad_remove_info(p.id);
+    destroy_window_here();
+    {
+        std::lock_guard<std::mutex> lk(g_pads_mu);
+        for (const OpenPad& p : g_pads) {
+            SDL_CloseGamepad(p.pad);
+            input::gamepad_remove_info(p.id);
+        }
+        g_pads.clear();
     }
-    g_pads.clear();
     SDL_Quit();
     g_inited = false;
     NXLOG_I(kTag, "shutdown");
 }
 
-bool initialised() { return g_inited; }
-
-// ---- window -----------------------------------------------------------------------------------------------------
-
-bool create_window(const WindowDesc& desc) {
-    if (!g_inited && !init()) return false;
-    if (g_window) destroy_window();  // one window at a time
+bool create_window_here(const WindowDesc& desc) {
+    if (g_window) destroy_window_here();  // one window at a time
 
     SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (desc.resizable) flags |= SDL_WINDOW_RESIZABLE;
@@ -384,10 +585,18 @@ bool create_window(const WindowDesc& desc) {
     return true;
 }
 
+}  // namespace
+
+// ---- window -----------------------------------------------------------------------------------------------------
+
+bool create_window(const WindowDesc& desc) {
+    if (!g_inited && !init()) return false;
+    return ui_sync([&desc] { return create_window_here(desc); });
+}
+
 void destroy_window() {
     if (!g_window) return;
-    SDL_DestroyWindow(g_window);
-    g_window = nullptr;
+    ui_sync([] { destroy_window_here(); });
 }
 
 bool has_window() { return g_window != nullptr; }
@@ -400,12 +609,18 @@ void* native_hwnd() {
 }
 
 void set_window_title(const char* title) {
-    if (g_window && title) SDL_SetWindowTitle(g_window, title);
+    if (!g_window || !title) return;
+    ui_post([t = std::string(title)] {
+        if (g_window) SDL_SetWindowTitle(g_window, t.c_str());
+    });
 }
 
 void pixel_size(int* w, int* h) { current_pixel_size(w, h); }
 
-bool set_window_size(int w, int h) { return g_window != nullptr && SDL_SetWindowSize(g_window, w, h); }
+bool set_window_size(int w, int h) {
+    if (!on_ui_thread()) return ui_sync([=] { return set_window_size(w, h); });
+    return g_window != nullptr && SDL_SetWindowSize(g_window, w, h);
+}
 
 bool minimized() { return window_flag(SDL_WINDOW_MINIMIZED); }
 
@@ -417,6 +632,7 @@ bool visible() { return g_window != nullptr && !window_flag(SDL_WINDOW_HIDDEN); 
 
 bool set_fullscreen(FullscreenMode mode, int w, int h, float hz) {
     if (!g_window) return false;
+    if (!on_ui_thread()) return ui_sync([=] { return set_fullscreen(mode, w, h, hz); });
     bool ok = false;
     switch (mode) {
         case FullscreenMode::Windowed:
@@ -511,6 +727,7 @@ int window_display() {
 
 bool move_to_display(int number) {
     if (!g_window) return false;
+    if (!on_ui_thread()) return ui_sync([=] { return move_to_display(number); });
     const std::vector<SDL_DisplayID> ids = display_ids();
     if (number < 1 || number > static_cast<int>(ids.size())) return false;
     const SDL_DisplayID id = ids[static_cast<size_t>(number - 1)];
@@ -526,7 +743,8 @@ bool move_to_display(int number) {
 
 // ---- relative mouse -----------------------------------------------------------------------------------------------
 
-bool set_relative_mouse(bool on) {
+namespace {
+bool set_relative_mouse_here(bool on) {
     if (!g_window) return false;
     if (!SDL_SetWindowRelativeMouseMode(g_window, on)) {
         NXLOG_W(kTag, "set_relative_mouse(%d) failed: %s", on ? 1 : 0, SDL_GetError());
@@ -534,12 +752,42 @@ bool set_relative_mouse(bool on) {
     }
     return true;
 }
+}  // namespace
 
-bool relative_mouse() { return g_window != nullptr && SDL_GetWindowRelativeMouseMode(g_window); }
+// From another thread than the window's: queued (the frame never waits for it), and relative_mouse() answers the asked-for mode until the
+// window thread has applied it.
+bool set_relative_mouse(bool on) {
+    if (!g_window) return false;
+    if (on_ui_thread()) {
+        g_rel_want.store(-1, std::memory_order_relaxed);
+        return set_relative_mouse_here(on);
+    }
+    g_rel_want.store(on ? 1 : 0, std::memory_order_relaxed);
+    ui_post([on] {
+        set_relative_mouse_here(on);
+        int want = on ? 1 : 0;
+        g_rel_want.compare_exchange_strong(want, -1, std::memory_order_relaxed);   // a newer request stays pending
+    });
+    return true;
+}
 
-// The OS cursor of the window (menus draw it; relative mode hides it by itself). Cheap when nothing changes.
+bool relative_mouse() {
+    if (!g_window) return false;
+    const int want = g_rel_want.load(std::memory_order_relaxed);
+    if (want >= 0) return want == 1;
+    return SDL_GetWindowRelativeMouseMode(g_window);
+}
+
+// The OS cursor of the window (menus draw it; relative mode hides it by itself). Cheap when nothing changes: the last state asked for is
+// compared on the calling thread, the change itself runs on the window thread (the cursor belongs to the thread of the window under it).
 void set_cursor_visible(bool on) {
     if (!g_window) return;
+    if (!on_ui_thread()) {
+        if (g_cursor_want.exchange(on, std::memory_order_relaxed) == on && on == SDL_CursorVisible()) return;
+        ui_post([on] { set_cursor_visible(on); });
+        return;
+    }
+    g_cursor_want.store(on, std::memory_order_relaxed);
     if (on == SDL_CursorVisible()) return;
     if (on) SDL_ShowCursor();
     else SDL_HideCursor();
@@ -554,6 +802,13 @@ bool relative_mouse_is_raw() {
 
 int pump_events(bool wait, int timeout_ms) {
     if (!g_inited) return 0;
+    if (!on_ui_thread()) {
+        // The window thread pumps by itself. Called from elsewhere this flushes: everything queued so far (also events pushed from this thread)
+        // is translated before it returns. A wait (a minimised window) sleeps here instead of holding the window thread. Play mode never calls it
+        // per frame with a window thread (a modal loop would make it wait for the loop's next tick).
+        if (wait) Sleep(static_cast<DWORD>(timeout_ms < 0 || timeout_ms > 50 ? 50 : timeout_ms));
+        return ui_sync([] { return pump_events(false, 0); });
+    }
     SDL_Event ev;
     int handled = 0;
     bool have = false;
@@ -581,6 +836,7 @@ uint64_t ticks_ns() { return SDL_GetTicksNS(); }
 // ---- gamepad polling, sensors and rumble ------------------------------------------------------------------------------
 
 bool gamepad_poll(uint32_t id, GamepadRaw* out) {
+    std::lock_guard<std::mutex> lk(g_pads_mu);
     SDL_Gamepad* pad = find_pad(id);
     if (!pad || !out) return false;
     static_assert(SDL_GAMEPAD_AXIS_COUNT == 6, "GamepadRaw::axes holds the six SDL axes");
@@ -597,6 +853,7 @@ bool gamepad_poll(uint32_t id, GamepadRaw* out) {
 }
 
 bool gamepad_sensors(uint32_t id, float accel[3], float gyro[3]) {
+    std::lock_guard<std::mutex> lk(g_pads_mu);
     SDL_Gamepad* pad = find_pad(id);
     if (!pad || !accel || !gyro) return false;
     const bool present = SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL) && SDL_GamepadSensorEnabled(pad, SDL_SENSOR_ACCEL) &&
@@ -607,6 +864,7 @@ bool gamepad_sensors(uint32_t id, float accel[3], float gyro[3]) {
 }
 
 bool gamepad_rumble(uint32_t id, uint16_t low, uint16_t high, uint32_t duration_ms) {
+    std::lock_guard<std::mutex> lk(g_pads_mu);
     SDL_Gamepad* pad = find_pad(id);
     if (!pad) return false;
     return SDL_RumbleGamepad(pad, low, high, duration_ms);
@@ -615,6 +873,7 @@ bool gamepad_rumble(uint32_t id, uint16_t low, uint16_t high, uint32_t duration_
 // ---- Vulkan -------------------------------------------------------------------------------------------------------
 
 const char* const* vulkan_instance_extensions(uint32_t* count) {
+    if (!on_ui_thread()) return ui_sync([count] { return vulkan_instance_extensions(count); });
     if (count) *count = 0;
     if (!SDL_Vulkan_LoadLibrary(nullptr)) {
         NXLOG_E(kTag, "SDL_Vulkan_LoadLibrary failed: %s", SDL_GetError());
@@ -628,6 +887,7 @@ const char* const* vulkan_instance_extensions(uint32_t* count) {
 
 bool create_vulkan_surface(void* vk_instance, uint64_t* surface_out) {
     if (!g_window || !vk_instance || !surface_out) return false;
+    if (!on_ui_thread()) return ui_sync([=] { return create_vulkan_surface(vk_instance, surface_out); });
     VkSurfaceKHR surface = nullptr;
     if (!SDL_Vulkan_CreateSurface(g_window, static_cast<VkInstance>(vk_instance), nullptr, &surface)) {
         NXLOG_E(kTag, "SDL_Vulkan_CreateSurface failed: %s", SDL_GetError());
