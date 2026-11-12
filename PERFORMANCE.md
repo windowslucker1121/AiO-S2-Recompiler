@@ -259,7 +259,9 @@ Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
 the GPU must lose ~2 ms per frame (G3's work) and the render thread ~1.5 ms (replay ~11.3 ms with hazard on). Render-thread leads left:
 the per-object uniform sets (set 0: ~1,750 kept-set checks per frame, mostly cache misses on the kept-set table and its dependencies),
 first-sighting texture sets (~370 per frame), compute sets (~250 built per frame, never reused), the per-op loop for ~35k commands per frame.
-Pinning the game's main thread (G ~10 ms) has not been tried.
+Pinning the game's main thread (G ~10 ms) has not been tried. Long frames left in the final village runs: one burst at ~65 s after the load
+(31 new textures, ~5 MB uploaded on the render thread: 93 ms + 50 ms frames, once per run); otherwise 0-3 frames over 20 ms per 2 minutes.
+The share of frames over 15 ms still varies between runs (0.7% / 12.4% in two back-to-back runs of the same exe).
 
 
 **After R8:** the village is GPU-bound (~14.5 ms of GPU per frame); the render thread (~13 ms, ~11-12 with PGO) has ~2 ms of slack.
