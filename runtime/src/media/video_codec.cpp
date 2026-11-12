@@ -80,6 +80,10 @@ constexpr size_t kPacketBacklog = 32;                     // packets not decoded
 bool g_log = false;
 uint64_t g_max_pictures = 0;   // [media] video_max_pictures (tests): a stream ends after this many pictures (0 = never)
 int g_threads = 4;
+// [media] video_test_stall = <picture>:<ms> (measurements): each decoder holds its pictures back for <ms> once it delivered <picture>, as a
+// decoder that falls behind would (the AV sync tests: the game's sounds must wait with the pictures).
+uint64_t g_stall_at = 0;
+double g_stall_s = 0;
 std::atomic<bool> g_enabled{false};
 std::atomic<uint64_t> s_created{0}, s_destroyed{0}, s_packets{0}, s_decoded{0}, s_delivered{0}, s_read{0}, s_errors{0};
 std::mutex g_err_mu;
@@ -214,6 +218,9 @@ struct Decoder {
     std::vector<uint8_t> last;                            // last decoded picture (NV12) for the end-of-stream buffer
     uint16_t last_w = 0, last_h = 0;
     uint64_t pictures = 0;
+    uint64_t delivered = 0;                               // pictures placed in output buffers
+    bool stalled = false;                                 // [media] video_test_stall done or running
+    std::chrono::steady_clock::time_point stall_end{};
 };
 
 std::mutex g_reg_mu;
@@ -367,6 +374,16 @@ void place(Pool& pool, const Picture& p) {
 bool assign(Decoder& d) {
     bool any = false;
     while (!d.waiting.empty() && !d.ready.empty()) {
+        if (g_stall_at && d.delivered >= g_stall_at) {   // [media] video_test_stall
+            const auto now = std::chrono::steady_clock::now();
+            if (!d.stalled) {
+                d.stalled = true;
+                d.stall_end = now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(g_stall_s));
+                NXLOG_I("vcodec", "decoder %u: test stall: pictures held back for %.0f ms after picture %llu", d.id, g_stall_s * 1e3,
+                        static_cast<unsigned long long>(d.delivered));
+            }
+            if (now < d.stall_end) break;
+        }
         const auto [index, seq] = d.waiting.front();
         d.waiting.pop_front();
         Picture p = std::move(d.ready.front());
@@ -377,6 +394,7 @@ bool assign(Decoder& d) {
         d.info[index] = BufInfo{p.w, p.h, p.pts, p.eos};
         d.done_seq.store(seq);
         any = true;
+        d.delivered++;
         s_delivered++;
     }
     return any;
@@ -1092,6 +1110,15 @@ bool install_video_codec_hle() {
         }
         g_log = config_get_bool("media", "video_decoder_log", false);
         g_max_pictures = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("media", "video_max_pictures", 0)));
+        {
+            const std::string st = config_get_str("media", "video_test_stall", "");
+            unsigned long long at = 0;
+            double ms = 0;
+            if (!st.empty() && std::sscanf(st.c_str(), "%llu:%lf", &at, &ms) == 2 && at > 0 && ms > 0) {
+                g_stall_at = at;
+                g_stall_s = ms / 1e3;
+            }
+        }
         const int64_t hw = std::max(1u, std::thread::hardware_concurrency());
         g_threads = static_cast<int>(std::clamp<int64_t>(config_get_int("media", "video_decoder_threads", std::clamp<int64_t>(hw / 2, 4, 8)), 1, 16));
         for (const Import& im : kImports) {

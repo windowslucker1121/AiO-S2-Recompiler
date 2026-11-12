@@ -53,6 +53,12 @@ struct Config {
     bool fix_budget = true;
     bool fix_stuck_tracker = true;
     double movie_max = 0.5;          // longest delta handed to the movie player in one call (seconds)
+    // Sites::fixed_step_during_movies: the step follows the pictures the game took (one 1/60 s step per picture; a frame that got no new
+    // picture gets the shortest step and the next frames make up for it), so the event timeline cannot run ahead of a late decoder.
+    // false (default until verified) = one 1/60 s step per frame while a movie shows, picture or not.
+    bool movie_follow_pictures = false;   // WIP 2026-11-12: not verified in game yet
+    double movie_hold = 1.0;         // seconds without a new picture (decoder still live) the step keeps waiting for one before it runs freely
+    bool av_trace = false;           // a log line per sound start with the game frame and the movie pictures taken (AV sync measurements)
     int log_every = 0;
     std::string csv;
     uint64_t game_base = 0x7100000000ull;
@@ -138,6 +144,11 @@ bool active_mode();
 // A game with Sites::fixed_step_during_movies is showing a movie (it took a decoded picture in the last 0.5 s): its frames are one picture
 // each, so the frame limiter must not run above [display] console_fps meanwhile (play.cpp caps it). Any thread; lock-free.
 bool movie_showing();
+
+// [time] av_trace: one log line per sound start (an audio renderer voice started, an Opus stream started) with the game frame, the movie
+// pictures the game took so far and the game time, to measure sounds against pictures. Any thread; one relaxed load when off.
+bool av_trace_on();
+void av_note_sound(const char* kind, int64_t id, int64_t a, int64_t b);
 
 struct Stats {
     uint64_t frames = 0;

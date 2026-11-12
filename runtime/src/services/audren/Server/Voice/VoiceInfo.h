@@ -32,6 +32,11 @@
 #include "../MemoryPool/PoolMapper.h"
 #include "WaveBuffer.h"
 
+namespace nxrt::timestep {
+bool av_trace_on();
+void av_note_sound(const char* kind, int64_t id, int64_t a, int64_t b);
+}  // namespace nxrt::timestep
+
 namespace nxrt::audren {
 
 class VoiceContext;
@@ -337,6 +342,8 @@ class VoiceInfo {
                 NXAUDREN_FATAL("Unhandled PlayState");
         }
 
+        if (newServerPlayState == server::PlayState::Started && oldServerPlayState != server::PlayState::Started && ::nxrt::timestep::av_trace_on())
+            ::nxrt::timestep::av_note_sound("voice", Id, static_cast<int64_t>(SampleFormat), SampleRate);   // [time] av_trace
         PlayState = newServerPlayState;
     }
 

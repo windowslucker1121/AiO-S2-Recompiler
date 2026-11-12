@@ -60,6 +60,9 @@ Config load_config() {
     c.fix_budget = config_get_bool("time", "fix_budget", true);
     c.fix_stuck_tracker = config_get_bool("time", "fix_stuck_tracker", true);
     c.movie_max = std::clamp(config_get_double("time", "movie_max", 0.5), 0.01, 5.0);
+    c.movie_follow_pictures = config_get_bool("time", "movie_follow_pictures", false);
+    c.movie_hold = std::clamp(config_get_double("time", "movie_hold", 1.0), 0.0, 10.0);
+    c.av_trace = config_get_bool("time", "av_trace", false);
     c.log_every = static_cast<int>(std::clamp<int64_t>(config_get_int("time", "log_every", 0), 0, 1000000));
     c.csv = config_get_str("time", "csv", "");
     c.game_base = static_cast<uint64_t>(config_get_int("time", "game_base", static_cast<int64_t>(game::info().main_base)));
@@ -166,6 +169,10 @@ struct G {
     bool movie_fixed = false;                                  // Sites::fixed_step_during_movies
     uint64_t movie_pics = 0;                                   // movie_pictures() at the last change
     double movie_pics_at = -1.0;                               // when it changed (clock_now seconds)
+    bool movie_anchored = false;                               // movie_follow_pictures: the step follows the pictures since movie_anchor
+    uint64_t movie_anchor = 0;                                 // movie_pictures() when the movie was first seen
+    double movie_given = 0;                                    // game time handed out since then (seconds)
+    uint64_t movie_short = 0;                                  // frames that got the short step because no picture came (statistics)
     double render_wrap = 0;            // the game's wrap of the render-timing counter (Sites::render_counter_wrap)
 
     // statistics
@@ -229,6 +236,61 @@ std::atomic<double> g_movie_pics_at{-1.0};   // movie_pics_at for movie_showing(
 // Pictures of movies the game has taken so far: the movie list's (platform 1 HLE) plus nn::codec's decoded pictures read (platform 2).
 uint64_t movie_pictures() { return media::movie_stats().video_frames_delivered + media::video_codec_stats().frames_read; }
 
+std::atomic<bool> g_av_trace{false};
+std::atomic<uint64_t> g_av_frame{0};       // the frame number, for av_note_sound on other threads
+std::atomic<uint64_t> g_av_anchor{0};      // movie_pictures() at the start of the movie showing now (0 = none)
+std::atomic<double> g_av_sim{0.0};         // game time handed out so far (seconds)
+
+// Sites::fixed_step_during_movies. The game's movie player takes one decoded picture per frame, and the event timeline that starts the
+// movie's voice lines and sounds runs on the frame step. A fixed 1/60 s step per frame kept them together only while every frame got a new
+// picture: the decoder fell behind at the start of a movie (~100 pictures in its first seconds) and now and then later (~1 frame in 170),
+// so the timeline ran ahead of the pictures by up to ~2.7 s at the end of the 154 s intro (2026-11-12). Now the game time follows the
+// pictures: after each frame it is one 1/60 s step per picture taken since the movie began. A frame that got no picture gets the shortest
+// step ([time] max_rate), and the frames after it make up the difference once pictures come again. pics: movie_pictures() now (taken
+// by the frames before this one).
+double movie_step(G& s, double now, double dt, uint64_t pics) {
+    const Config& c = s.cfg;
+    const bool fresh = pics != s.movie_pics;
+    if (fresh) {
+        s.movie_pics = pics;
+        s.movie_pics_at = now;
+        g_movie_pics_at.store(now, std::memory_order_relaxed);
+    }
+    const double ago = s.movie_pics_at >= 0.0 ? now - s.movie_pics_at : 1e9;
+    if (!c.movie_follow_pictures) return ago < 0.5 ? static_cast<double>(kGameStep) : dt;   // a movie is showing: one 1/60 s step per frame
+    if (s.movie_anchored) {
+        // The movie goes on while pictures come, or while a decoder is still open and the last picture is under movie_hold old (a late
+        // decoder: the timeline waits for it). A finalized decoder ends it at once.
+        const media::VideoCodecStats v = media::video_codec_stats();
+        const bool live = v.decoders_created > v.decoders_destroyed;
+        const bool keep = live ? ago < std::max(0.5, c.movie_hold) : (v.decoders_created == 0 && ago < 0.5);
+        if (!keep) {
+            NXLOG_I(kTag, "movie: the step runs freely again after %llu pictures (%s); %llu frames waited for a late picture",
+                    static_cast<unsigned long long>(pics - s.movie_anchor), live ? "no picture for a while" : "decoder closed",
+                    static_cast<unsigned long long>(s.movie_short));
+            s.movie_anchored = false;
+            g_av_anchor.store(0, std::memory_order_relaxed);
+        }
+    }
+    if (!s.movie_anchored) {
+        if (!fresh) return dt;
+        s.movie_anchored = true;
+        s.movie_anchor = pics;
+        s.movie_given = 0;
+        s.movie_short = 0;
+        g_av_anchor.store(pics, std::memory_order_relaxed);
+        NXLOG_I(kTag, "movie: the step follows the pictures from picture %llu on (frame %llu)", static_cast<unsigned long long>(pics),
+                static_cast<unsigned long long>(s.frame));
+    }
+    // After this frame the game will have taken one more picture: hand out the game time that needs.
+    const double want = static_cast<double>(pics + 1 - s.movie_anchor) * static_cast<double>(kGameStep) - s.movie_given;
+    const double lo = 1.0 / c.max_rate, hi = 4.0 * static_cast<double>(kGameStep);
+    if (want < 0.5 * static_cast<double>(kGameStep)) s.movie_short++;
+    const double step = std::clamp(want, lo, hi);
+    s.movie_given += step;
+    return step;
+}
+
 // ---- the frame boundary: entry hook on CGameArchitectureSupport::Update -------------------------------------------------------------
 void begin_frame() {
     G& s = g();
@@ -264,12 +326,7 @@ void begin_frame() {
             double dt = s.stepper.step(elapsed);
             if (s.movie_fixed) {
                 const uint64_t pics = movie_pictures();
-                if (pics != s.movie_pics) {
-                    s.movie_pics = pics;
-                    s.movie_pics_at = now;
-                    g_movie_pics_at.store(now, std::memory_order_relaxed);
-                }
-                if (s.movie_pics_at >= 0.0 && now - s.movie_pics_at < 0.5) dt = kGameStep;   // a movie is showing: one picture, one 1/60 s step
+                dt = movie_step(s, now, dt, pics);
             }
             publish_dt(static_cast<float>(dt));
         }
@@ -286,6 +343,8 @@ void begin_frame() {
     s.st.frames = s.frame;
     s.st.last_dt = s.dt;
     if (!retail) s.st.sim_seconds += s.dt;
+    g_av_frame.store(s.frame, std::memory_order_relaxed);
+    g_av_sim.store(s.st.sim_seconds, std::memory_order_relaxed);
     if (elapsed >= 0) {
         s.st.last_elapsed = elapsed;
         if (s.n_elapsed == 0 || elapsed < s.st.min_elapsed) s.st.min_elapsed = elapsed;
@@ -452,6 +511,8 @@ void install(const Config& cfg) {
     s.movie_fixed = sites && sites->fixed_step_during_movies;
     s.movie_pics = 0;
     s.movie_pics_at = -1.0;
+    s.movie_anchored = false;
+    g_av_trace.store(cfg.av_trace, std::memory_order_relaxed);
     s.st = Stats{};
     s.sum_elapsed = 0;
     s.n_elapsed = 0;
@@ -472,9 +533,9 @@ void install(const Config& cfg) {
     }
     if (cfg.mode != Mode::Off || cfg.off_rate > 0.0) add_hooks(cfg);
     s.installed = true;
-    NXLOG_I(kTag, "mode %s (%s), rate %.0f, clamp %.0f..%.0f Hz, smooth %d, pace %d, fixes: friction %d render_timings %d streaming %d budget %d stuck_tracker %d movie %d, %zu hooks at base 0x%llx",
+    NXLOG_I(kTag, "mode %s (%s), rate %.0f, clamp %.0f..%.0f Hz, smooth %d, pace %d, fixes: friction %d render_timings %d streaming %d budget %d stuck_tracker %d movie %d, movie step follows pictures %d (hold %.1f s), %zu hooks at base 0x%llx",
             mode_name(cfg.mode), s.det ? "deterministic" : "host clock", cfg.mode == Mode::Fixed ? cfg.rate : 0.0, cfg.min_rate, cfg.max_rate, cfg.smooth,
-            cfg.pace, cfg.fix_friction, cfg.fix_render_timings, cfg.fix_streaming, cfg.fix_budget, cfg.fix_stuck_tracker, cfg.movie_real, s.hooks.size(),
+            cfg.pace, cfg.fix_friction, cfg.fix_render_timings, cfg.fix_streaming, cfg.fix_budget, cfg.fix_stuck_tracker, cfg.movie_real, cfg.movie_follow_pictures, cfg.movie_hold, s.hooks.size(),
             static_cast<unsigned long long>(cfg.game_base));
 }
 
@@ -519,6 +580,18 @@ bool active() { return g().active.load(); }
 bool movie_showing() {
     const double at = g_movie_pics_at.load(std::memory_order_relaxed);
     return at >= 0.0 && clock_now() - at < 0.5;
+}
+
+bool av_trace_on() { return g_av_trace.load(std::memory_order_relaxed); }
+
+void av_note_sound(const char* kind, int64_t id, int64_t a, int64_t b) {
+    if (!av_trace_on()) return;
+    const uint64_t pics = movie_pictures(), anchor = g_av_anchor.load(std::memory_order_relaxed);
+    // "movie picture" = pictures taken since the movie showing now began (-1 = none): at 60 pictures/s, picture / 60 is the movie time.
+    NXLOG_I("av", "sound %s %lld (%lld, %lld): frame %llu, movie picture %lld, pictures %llu, game time %.4f s, host %.4f s", kind,
+            static_cast<long long>(id), static_cast<long long>(a), static_cast<long long>(b),
+            static_cast<unsigned long long>(g_av_frame.load(std::memory_order_relaxed)), anchor ? static_cast<long long>(pics - anchor) : -1LL,
+            static_cast<unsigned long long>(pics), g_av_sim.load(std::memory_order_relaxed), qpc_seconds());
 }
 
 Stats stats() {
