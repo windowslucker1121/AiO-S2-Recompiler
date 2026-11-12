@@ -3,7 +3,7 @@
 Living document for the frame-rate work. Detailed per-session notes, with every key, measurement and pitfall, stay in
 `AGENTS.md` ("Performance work" and the "Session 2026-11-xx" paragraphs). Config keys are in `runtime/docs/CONFIG.md`.
 This file is the overview: where we are, how we measure, what paid, what did not, and what is next.
-Last update: 2026-11-12, branch `perf/gpu-r4` (G4).
+Last update: 2026-11-12, branch `perf/render-r4` (R4).
 
 ## Goal and constraints (from the user)
 
@@ -16,6 +16,30 @@ Last update: 2026-11-12, branch `perf/gpu-r4` (G4).
   area-load frame work.
 
 ## Where we are (2026-11-12, RTX 4080, Ryzen 7 5800X3D, 1920x1080, uncapped)
+
+**2026-11-12 (R4, render thread and long frames, `perf/render-r4`): the render thread is now the only limit for 100 fps** (GPU busy
+~8.5-8.9 ms after G4; render replay ~11.0-11.8 ms per frame, idle 0.05-0.2 ms). Alternating final runs, R3's exe vs R4's (same shared shader
+cache, quiet machine): fps 78.3 / 83.4 vs 82.7 / 84.1, 1% low 51.2 / 60.0 vs 42.9 (one 170 ms render stall during an outside download) / 61.9,
+frames over 15 ms 14.9% / 0.9% vs 1.2% / 0.6%, frames over 10 ms ~97-99% either way.
+- **The run-to-run swing of frames over 15 ms (R3: 12.4% vs 0.7%) and the "~65 s burst" had one main cause: texture image churn**
+  (`tex_share_index`, below). The game makes a 960x540 R11G11B10F target as a new texture object every fourth frame; when the new object's
+  first use came after the old one's finalize but before the render thread ran its release, nothing was found (alias search: live objects
+  only; park: not yet parked) and a new VkImage was made, the old one destroyed a frame later. Which order the threads took changed from run to
+  run and for minutes within a run: windows of 38-62 fps, image creation up to 200 ms (21 images, 219 ms in one frame), GPU stalls (sync waits
+  13-110 ms). With the index, steady textures created per frame 0.2-1.2 -> 0.00.
+- **What is left in frames over 15 ms on a quiet machine:** the heavy frames of the game's own 4-frame cycle (draws ~2,290 / 2,300 / 2,165
+  / 2,060). With no slack in the pipeline (now render-bound) the heavy frames' cost lands in their own present interval; which phase a run
+  locks into decides whether that shows as 12/12/12/10 or 14/14/11/10 ms (`tools/perf/frames_report.py <frames.csv>` prints it as "ms by draw rank in 4-frame blocks").
+- **Long frames from outside the game:** other agents' ThinLTO links (lld-link, ~8 cores for 15-30 s), dotnet / VBCSCompiler builds and
+  translator batches during a run gave 40-80 ms game-side frames and 60-70 fps windows; once a 5 s whole-process stall (audio thread too).
+  Use `tools/perf/cpuwatch.ps1 -Out <log> -Seconds <n>` (every 5 s: processes over 0.3 cores, GPU clock / load / power / memory) beside every measuring run and discard
+  windows with outside load. Do not build while one of your own runs is measuring (a below-normal build still cost ~15 fps in the last 30 s).
+- **Render thread at its floor in this design.** exp_op_cost (now split per set index and step, and per begin_draw phase): per frame
+  bind_sets ~3.1 ms (set 0 uniform kept-set checks ~2,000 at ~0.39 us, set 2 texture builds ~420 at 1.6 us of which 1.3 us resolving),
+  prepare_textures 0.7, out_before_op 0.5, pipeline key + look-up 0.4, vertex buffers 0.3, the rest per op (~30k ops: BindBuffers 11k,
+  BindTextures 5.7k, ReportCounter / ResetCounter 1.5k each at ~0.2 us). No single item over ~0.8 ms; every memo tried (pipelines, set-0
+  memo bypass, content-keyed texture sets) found too few repeats or too little cost behind the look-up. 8.5 ms needs a structural change
+  (see "What is open").
 
 **2026-11-12 (R3, render thread): village ~74 -> ~82.6 fps, 1% low ~55 -> ~60, frames over 15 ms 5.9% -> 1.5% (no frame trace, no
 sampler; `perf/render-r3`).** The big step was not a cut but a placement: the render thread and the recorder thread pinned to two separate
@@ -72,7 +96,7 @@ per frame < 10 ms; the CPU chain cannot shorten it.
 - **Feature switches:** `AbFeat` in `nvn_replay.cpp` is a uint64 bit set. All 64 bits are used (59-62 R8: handle_big, chunk_async,
   pds_q, fb_image; 63 pt_copy). Free bits by retiring dead experiments first. R3 took the bits of chunk_time, keep_writes, vi_upload,
   cs_gmem_flush, vrs, sig_tex and alloc_batch (those keys still work, just without paired windows) for `dset_recycle`, `render_pin`,
-  `occ_mark_late`, `copy_image_q`, `tex_keyed`, `submit_async` and `r3a`; the cmd_copies bit went to G3's `g3b`.
+  `occ_mark_late`, `copy_image_q`, `tex_keyed`, `submit_async` and `r3a`; the cmd_copies bit went to G3's `g3b`. R4: `tex_keyed` -> `tex_share`, `submit_async` -> `keep_chain`, `lookahead` -> `hot_skip`.
 - **Since R3 the render thread and the recorder are pinned (`render_cpus = auto`) and `hazard` is on by default.** A run that should
   compare against older numbers sets `nvn.render_cpus: "off"` and `nvn.hazard: "off"`.
 - **Real-clock GPU breakdowns:** these are measurement-only skip words in `[nvn] skip_fs_file`, and live edits take effect:
@@ -164,6 +188,9 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | R3 | `r3a`: texture-only resolves without copying `TexResolved` (~150 bytes, up to 6 copies per binding), chunk check fast path, gmem pointer table without a 4 KiB clear per op, 4 recent pools in `physical_buffer_address` | replay -0.45 ms (22/25), fps +1.6 |
 | R3 | `dset_recycle`: descriptor sets of a frame slot go back to per-layout lists when its submission completed (no `vkAllocateDescriptorSets` for ~800 sets per frame) | replay -0.34 ms (22/25), 1% low +1.45 |
 | R3 | `cmd_thread_copy_image`: `vkCmdCopyImage` and image clears queued for the recorder (~11 drains per frame fewer) | replay -0.34 ms (17/22), fps +0.5 |
+| R4 | `tex_share_index`: images of pool textures indexed by storage and layout while they have owners; a new object over the same storage shares the image of one finalized (or dropped) before its release ran | removes the texture-churn windows (38-62 fps for minutes); paired fps +0.55 median (17/24), 1% low +3.6; steady images made 0.2-1.2 -> 0.00 per frame |
+| R4 | `keep_chain`: kept descriptor sets remember their successor per set index (~78% right), take it without the hash table and prefetch it | replay -0.08 / -0.11 ms (17/23, 22/23), fps +0.15 / +0.40 |
+| R4 | `hot_skip`: uniform blocks over hot pages resolve to the pool until the hold ends; their kept-set checks skip the page checks | replay -0.04 / -0.10 ms (14/23, 21/24), fps +0.05 / +0.37 |
 | R3 | `occ_mark_late`: samples-passed reports' GPU writes noted at the flush; per-set binding index lists (`ProgLayout::set_idx`) | replay -0.10 ms (17/23); index lists not paired (always on) |
 
 Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
@@ -327,7 +354,28 @@ trace's `gpu.busy`), so a GPU change is judged by GPU busy *and* render-thread r
 - `hwcheck --sin-pairs` (two-instruction FMUL.RZ + MUFU.SIN/COS cases from the game corpus): the CUDA launch of the two-word kernel fails
   (CUDA_ERROR_INVALID_VALUE, single MUFU cases pass); not resolved, the fusion stays opt-in.
 
+- **R4 (2026-11-12), village paired windows:**
+  - `mirror_hot_window = 8` (pages rewritten every fourth frame faulting every cycle): faults per frame unchanged (6.8), fps +0.3: removed.
+  - `memo_skip` (bypass the set memo for set indices with few hits): at < 2% it never skipped (set 0 hits ~2.1%); at < 10% it skipped 7 M
+    look-ups per run for replay +0.01 / -0.03 ms: removed.
+  - `pipe_memo` (pipeline per program layout, state content hashes and pass formats, 4,096 slots): 45-47% hits, replay -0.02 / -0.10 ms:
+    removed. Most draws change the program to one with another state combination.
+  - `keep_tex_keyed` again (after tex_share): 7% of first sightings found, failed texture checks; set 2 kept checks 0.16 -> 0.52 ms: stays off.
+  - `ban_skip` (ranges of banned pages): 0 banned uniform pages in the village: removed. A persistent content-keyed texture-set cache: not built
+    (set 2 builds spend 0.57 of 0.69 ms resolving, the cache could save <= 0.1 ms).
+
 ## What is open, by expected gain
+
+**After R4:** the render thread (~11-11.8 ms replay, idle ~0.1 ms) is the only limit for 100 fps; the GPU is at ~8.5-8.9 ms. Per-draw work
+is ~3.2 us over ~2,100 draws plus ~3 ms of per-op and submission work, spread over dozens of items of 0.1-0.8 ms each. Ways to the ~2.5 ms
+still needed, all structural: (1) a front-end thread that decodes the lists and does the coherence-free work one submission ahead (texture
+resolves, pipeline keys and look-ups, program layouts, set signatures, handle look-ups: ~20% of the render thread's self time by the sampler)
+and hands the render thread compact draw records; (2) push-based validity for kept sets (per-page or per-64-page versions bumped by write
+faults, copies, GPU writes and fills, so a kept set is checked by comparing a few counters instead of the page bits); (3) uniform blocks by
+dynamic offset (removes ~2,000 set-0 binds per frame) only together with the final shader preparation, since the pipeline layouts change.
+Off the render thread: write-watch arming (~0.3 ms per frame of VirtualProtect in mirror_begin_submit / out_end_submit) could move to a
+worker only with an ordering proof against concurrent invalidates.
+
 
 **After R3:** the village at ~82 fps is GPU-bound with hazard and pinning (render thread idle ~0.8 ms per frame with hazard on). For 100 fps
 the GPU must lose ~2 ms per frame (G3's work) and the render thread ~1.5 ms (replay ~11.3 ms with hazard on). Render-thread leads left:
