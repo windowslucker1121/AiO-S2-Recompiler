@@ -89,7 +89,7 @@ constexpr uint64_t kEnd = ~0ull;
 struct Rng { uint64_t space = 0, lo = 0, hi = 0; bool bda = true; };
 struct BufInfo { uint64_t space = 0, base = 0, size = kEnd; bool bda = true; };
 struct BufView { VkBuffer buf; VkDeviceSize off, range; };
-struct Res { uint8_t kind = 0; bool storage = false; Rng r; uint64_t img = 0; };   // kind 0 buffer, 1 image, 2 unknown (anything)
+struct Res { uint8_t kind = 0; bool storage = false; uint8_t dyn = 0xff; Rng r; uint64_t img = 0; };   // kind 0 buffer, 1 image, 2 unknown (anything); dyn: index of its dynamic offset
 struct Sum {
     uint64_t ver = 0;
     std::vector<std::pair<uint32_t, Res>> e;   // key: binding << 16 | array element
@@ -97,6 +97,8 @@ struct Sum {
     uint64_t seen_wm = 0;                 // ... with these bindings' storage descriptors as written (~0: all)
     uint64_t gb = 0;                      // granule bloom of its buffer ranges (gbits)
     bool has_img = false, has_bda = false, has_unknown = false;
+    uint8_t ndyn = 0;                     // dynamic descriptors (their ranges move with the offsets of each bind)
+    uint64_t seen_dynh = 0;               // ... registered with these offsets (hash)
 };
 // A 64-bit bloom of the 2 MiB granules a range touches (all bits for a range over 8 granules).
 inline uint64_t gbits(uint64_t space, uint64_t lo, uint64_t hi) {
@@ -109,11 +111,19 @@ inline uint64_t gbits(uint64_t space, uint64_t lo, uint64_t hi) {
 void sum_refresh(Sum& s) {
     s.gb = 0;
     s.has_img = s.has_bda = s.has_unknown = false;
-    for (const auto& [k, x] : s.e) {
+    // dynamic descriptors: indices of their offsets in binding order (Vulkan's order of a set's dynamic offsets)
+    uint32_t keys[16];
+    uint32_t nk = 0;
+    for (const auto& [k, x] : s.e) if (x.dyn != 0xff && nk < 16) keys[nk++] = k;
+    std::sort(keys, keys + nk);
+    s.ndyn = static_cast<uint8_t>(nk);
+    for (auto& [k, x] : s.e) {
+        if (x.dyn != 0xff) x.dyn = static_cast<uint8_t>(std::find(keys, keys + nk, k) - keys);
         if (x.kind == 0) { s.gb |= gbits(x.r.space, x.r.lo, x.r.hi); s.has_bda |= x.r.bda; }
         else if (x.kind == 1) s.has_img = true;
         else s.has_unknown = true;
     }
+    if (s.ndyn) s.gb = ~0ull;   // the ranges move with each bind's offsets
 }
 // What a module or pipeline writes: flags, and per descriptor set the bindings its stores reach (bit b: binding b; kFStore in flags:
 // a store whose target is not known, so every storage descriptor counts as written).
@@ -392,9 +402,9 @@ void VKAPI_PTR h_uds(VkDevice d, uint32_t n, const VkWriteDescriptorSet* w, uint
                     if (!b.buffer) break;
                     r.kind = 0;
                     r.storage = w[i].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || w[i].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+                    r.r = buf_rng_locked(b.buffer, b.offset, b.range);
                     if (w[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC || w[i].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
-                        r.r = buf_rng_locked(b.buffer, b.offset, kEnd);   // a dynamic offset moves it: to the end
-                    else r.r = buf_rng_locked(b.buffer, b.offset, b.range);
+                        r.dyn = 0;   // moved by the bind's dynamic offset (its index: sum_refresh)
                     has = true;
                     break;
                 }
@@ -617,6 +627,9 @@ void ph_decide(bool barrier) { g_ph_bar = barrier; }
 // Bound state per bind point (0 graphics, 1 compute).
 struct BindPt {
     VkDescriptorSet sets[16] = {};
+    uint8_t ndyn[16] = {};        // dynamic offsets bound with each set (0xff: not known, the ranges reach to the buffers' ends)
+    uint32_t dyn[16][16] = {};
+    uint64_t dynh[16] = {};
     uint32_t pend = 0;            // sets not yet registered since the last barrier
     PInfo pi;
     uint32_t push_set = 0;
@@ -795,16 +808,30 @@ void build_bp(int bp) {
             }
             Sum& sm = *c.s;
             const uint64_t wm = wmask(b.pi, i);
-            if (sm.seen_ep == g_ep && sm.seen_ver == sm.ver && (sm.seen_wm & wm) == wm) continue;
+            const uint64_t dh = sm.ndyn ? b.dynh[i] : 0;
+            if (sm.seen_ep == g_ep && sm.seen_ver == sm.ver && (sm.seen_wm & wm) == wm && sm.seen_dynh == dh) continue;
             sm.seen_ep = g_ep;
             sm.seen_ver = sm.ver;
             sm.seen_wm = wm;
+            sm.seen_dynh = dh;
             // reads: as ranges only when what is unordered (D, or Dp before an open pass) may meet them; else the set as a whole
-            const bool meets = sm.has_unknown || D.all || D.bda || Dp.all || Dp.bda || (sm.gb & (D.gb | Dp.gb)) ||
+            const bool meets = sm.ndyn || sm.has_unknown || D.all || D.bda || Dp.all || Dp.bda || (sm.gb & (D.gb | Dp.gb)) ||
                                (sm.has_img && !(D.img.empty() && Dp.img.empty()));
             bool any_w = false;
             for (const auto& [k, x] : sm.e) {
                 const bool wr = written(wm, k, x);
+                if (x.dyn != 0xff && x.kind == 0) {   // a dynamic descriptor: its range at this bind's offset
+                    if (!(wr || meets)) continue;
+                    Res y = x;
+                    if (b.ndyn[i] != 0xff && x.dyn < b.ndyn[i]) {
+                        const uint64_t off = b.dyn[i][x.dyn];
+                        y.r.lo += off;
+                        if (y.r.hi != kEnd) y.r.hi += off;
+                    } else y.r.hi = kEnd;
+                    add_res(y, wr);
+                    any_w |= wr;
+                    continue;
+                }
                 if (wr || meets) add_res(x, wr);
                 any_w |= wr;
             }
@@ -899,6 +926,15 @@ void VKAPI_PTR h_bds(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayou
         for (uint32_t i = 0; i < n && first + i < 16; ++i) {
             b.sets[first + i] = sets[i];
             b.pend |= 1u << (first + i);
+            // a set's dynamic offsets: known when one set is bound (all of them are its own)
+            const uint32_t s = first + i;
+            if (nd == 0) { b.ndyn[s] = 0; b.dynh[s] = 0; }
+            else if (n == 1 && nd <= 16) {
+                b.ndyn[s] = static_cast<uint8_t>(nd);
+                uint64_t h = 0xcbf29ce484222325ull;
+                for (uint32_t k = 0; k < nd; ++k) { b.dyn[s][k] = dyn[k]; h = (h ^ dyn[k]) * 1099511628211ull; }
+                b.dynh[s] = h | 1;
+            } else { b.ndyn[s] = 0xff; b.dynh[s] = 2; }
         }
     }
     if (!dry()) n_bds(cb, bp, l, first, n, sets, nd, dyn);

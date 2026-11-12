@@ -242,7 +242,7 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbHotSkip = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbR3b = 4194304, kAbR3e = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbMeshAhead2 = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbR3c = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbFront = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbTexShare = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbR3f = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbKeepChain = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbHotSkip = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbR3b = 4194304, kAbR3e = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbMeshAhead2 = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbR3c = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbFront = 1ull << 56, kAbReflectLit = 1ull << 58, kAbR6 = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbTexShare = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbR3f = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbKeepChain = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
 // computed once and kept in a constant-initialized atomic: ab_on() calls it in every "off" window (hundreds of thousands of times per frame),
 // and a guarded local static there made the off windows ~0.6 ms per frame slower than the on windows with nothing switched (nvn_cfg.h)
 std::atomic<uint64_t> g_ab_mask_v{~0ull};
@@ -260,7 +260,7 @@ uint64_t ab_mask_compute() {
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"hot_skip", kAbHotSkip}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"r6", kAbR6}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -1357,7 +1357,7 @@ bool attachment_layout(VkImageLayout l) { return l == VK_IMAGE_LAYOUT_COLOR_ATTA
 uint64_t g_uil_retags = 0, g_uil_retag_kept_open = 0;   // statistics
 bool uil_retag_on() {
     const bool on = NX_CFG_BOOL("nvn", "uil_retag", true);
-    return on && nxrt::gfx::g_unified_layouts && ab_on(kAbUilRetag);
+    return on && nxrt::gfx::g_unified_layouts;   // its paired-window bit went to r6 (R6)
 }
 bool uil_retag_ok(Texture* t) {
     if (!t || t->cpu_dirty.load()) return false;
@@ -3943,6 +3943,8 @@ struct KeepRec {
     VkDescriptorSet ds = VK_NULL_HANDLE;
 };
 KeepRec* g_krec = nullptr;      // build_set records into it while bind_sets builds a set it may keep
+const VkBuffer* g_dyn0_bufs = nullptr;    // ubo_dynamic: build_set writes the dynamic bindings with these buffers at offset 0 ...
+const uint32_t* g_dyn0_ranges = nullptr;  // ... and these ranges (by BindingDesc::dyn)
 uint64_t g_last_set_key = 0;    // the content key of the last set build_set resolved
 std::unordered_map<VkDescriptorSet, uint64_t> g_set_content;   // set_reuse = verify: the content key of each kept set
 VkDescriptorSet keep_alloc(VkDescriptorSetLayout layout);   // below: a set of the persistent pools
@@ -4005,7 +4007,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
         VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w.dstBinding = d.binding;
         w.descriptorCount = 1;
-        w.descriptorType = d.type;
+        w.descriptorType = d.dyn != 0xff ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : d.type;
         KDep* kd = nullptr;
         if (g_krec) { g_krec->deps.emplace_back(); kd = &g_krec->deps.back(); }
         auto kbad = [&](const char* why) { if (g_krec && !g_krec->bad) g_krec->bad = why; };
@@ -4042,6 +4044,10 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                 }
                 case NvnSource::UniformBlock: {
                     const int idx = b.nvn.index;
+                    if (g_dyn0_bufs && d.dyn != 0xff) {   // ubo_dynamic: the buffer at offset 0; the draw's offset comes with the bind
+                        bi = {g_dyn0_bufs[d.dyn], 0, g_dyn0_ranges[d.dyn]};
+                        break;
+                    }
                     if (idx >= 0 && idx < 16 && S.ubo[d.nvn_stage][idx].addr) {
                         const GState::Bind& bind = S.ubo[d.nvn_stage][idx];
                         if (d.nvn_stage == kCompute || !out_lazy()) {                   // draws: checked before the op (out_before_op)
@@ -5085,9 +5091,14 @@ bool exp_static_on() {
 VkCommandBuffer g_bs_cb = VK_NULL_HANDLE;
 VkPipelineLayout g_bs_layout = VK_NULL_HANDLE;
 VkDescriptorSet g_bs_ds[16] = {};
+uint32_t g_bs_dyn[16] = {};                  // the dynamic offsets set 0 was bound with (ubo_dynamic)
+const uint32_t g_dyn_zero[16] = {};
 uint64_t g_bs_skipped = 0, g_bs_bound = 0;   // statistics
 void bind_skip_reset() { g_bs_cb = VK_NULL_HANDLE; }
-void bind_graphics_set(const ProgLayout& pl, VkPipelineBindPoint bp, uint32_t set, VkDescriptorSet ds) {
+// `dyn`: set 0's dynamic offsets when the layout has them (null: zeros, a set built with the blocks' own offsets)
+void bind_graphics_set(const ProgLayout& pl, VkPipelineBindPoint bp, uint32_t set, VkDescriptorSet ds, const uint32_t* dyn = nullptr) {
+    const uint32_t nd = set == 0 ? pl.dyn_n : 0;
+    if (nd && !dyn) dyn = g_dyn_zero;
     const bool on = NX_CFG_BOOL("nvn", "bind_skip", true);
     if (bp == VK_PIPELINE_BIND_POINT_GRAPHICS && on && ab_on(kAbBindSkip) && set < 16) {
         if (g_bs_cb != F->cb || g_bs_layout != pl.layout) {
@@ -5095,11 +5106,12 @@ void bind_graphics_set(const ProgLayout& pl, VkPipelineBindPoint bp, uint32_t se
             g_bs_layout = pl.layout;
             std::memset(g_bs_ds, 0, sizeof g_bs_ds);
         }
-        if (g_bs_ds[set] == ds) { ++g_bs_skipped; return; }
+        if (g_bs_ds[set] == ds && (!nd || std::memcmp(g_bs_dyn, dyn, nd * 4) == 0)) { ++g_bs_skipped; return; }
         g_bs_ds[set] = ds;
+        if (nd) std::memcpy(g_bs_dyn, dyn, nd * 4);
     }
     ++g_bs_bound;
-    vkCmdBindDescriptorSets(F->cb, bp, pl.layout, set, 1, &ds, 0, nullptr);
+    vkCmdBindDescriptorSets(F->cb, bp, pl.layout, set, 1, &ds, nd, nd ? dyn : nullptr);
 }
 
 // [nvn] memo_storage_check (default on): the epoch memo's key of a set with storage buffers holds whether a held compute result overlaps any
@@ -5146,6 +5158,120 @@ bool set_has_textures(const ProgLayout& pl, uint32_t set) {
 }
 uint64_t g_sstat_tk[4][2] = {};   // r3_diag: first sightings by set, and how many an image-keyed signature had seen in an earlier present
 uint64_t g_sstat[4][5] = {};   // r3 statistics per graphics set index: memo hit, kept (valid or built), first sighting, keep refused, all binds
+// ---- [nvn] ubo_dynamic (R6) -------------------------------------------------------------------------------------------------------
+// With ubo_dynamic_layouts() (nvn_pipeline.cpp) set 0's uniform blocks of graphics programs are dynamic uniform buffers. A draw's set 0 is
+// then the program's set for the buffers (and ranges) its blocks resolve to, bound with the blocks' offsets as dynamic offsets. Per draw
+// only each block's copy-or-pool decision (a memo per address, checked with read_dep_check as a kept set checks it) and a look-up of the set
+// by its buffers: no signature, memo, kept-set table or build for the per-object constants (village outside: ~2,000 kept-set checks and
+// ~120 builds of set 0 per frame before). Sets come from the persistent pools (keep_alloc) and are forgotten when a pool unregisters (its
+// buffers may go) or the persistent pools start a new era. Falls back to the old path (zero offsets) for update ranges, unresolved or
+// unaligned blocks, render scales and !out_lazy. [nvn] ubo_dynamic_path = false (or the off windows of cpuperf_ab_what r6): the old path.
+bool ubo_dyn_path_on() {
+    const bool on = NX_CFG_BOOL("nvn", "ubo_dynamic_path", true);
+    return on && ab_on(kAbR6);
+}
+struct DynUbo { uint64_t addr = 0, size = 0, gen = 0; ReadDep rd; BufRef br; };
+FlatMap64<DynUbo> g_dyn_ubo;                 // per address and size: the last resolve and the decision it depends on
+struct Dyn0Last { VkDescriptorSet ds = VK_NULL_HANDLE; bool bad = false; VkBuffer buf[16] = {}; uint32_t range[16] = {}; };
+FlatMap64<Dyn0Last> g_dyn0_last;             // per program layout: the set of its last draw (or bad: its set 0 cannot be kept)
+FlatMap64<VkDescriptorSet> g_dyn0_sets;      // by content: program layout, buffers, ranges
+uint64_t g_dyn0_gen = 1, g_dyn0_src[3] = {};
+uint64_t g_dyn_stat[10] = {};   // draws on the path; fallbacks: update range, unresolved, unaligned, not keepable, support/lazy; last-set hits, content hits, built; memo re-resolves
+uint64_t g_dyn_verify_n = 0, g_dyn_verify_bad = 0, g_dyn_verify_raced = 0;
+uint64_t dyn0_gen_now() {
+    const uint64_t a = pool_unregister_generation(), b = pool_registry_generation(), c = g_keep_eras;
+    if (a != g_dyn0_src[0] || b != g_dyn0_src[1] || c != g_dyn0_src[2]) {
+        if (a != g_dyn0_src[0] || c != g_dyn0_src[2]) { g_dyn0_sets.clear(); g_dyn0_last.clear(); }   // buffers may be gone, pools released
+        g_dyn0_src[0] = a; g_dyn0_src[1] = b; g_dyn0_src[2] = c;
+        ++g_dyn0_gen;   // the memo's decisions are resolved again (a pool registered later may own an address now)
+    }
+    return g_dyn0_gen;
+}
+VkDescriptorSet dyn0_set(const ProgLayout& pl, uint32_t* offs) {
+    if (g_draw_support.buffer || !out_lazy()) { ++g_dyn_stat[5]; return VK_NULL_HANDLE; }
+    const uint64_t gen = dyn0_gen_now();
+    static const VkDeviceSize align = std::max<VkDeviceSize>(1, device().properties().limits.minUniformBufferOffsetAlignment);
+    const bool verify = set_reuse_mode() == SetReuse::Verify;
+    const uint64_t ch0 = verify ? mem::ww::changes() : 0, ov0 = verify ? out_version() : 0;
+    VkBuffer bufs[16];
+    uint32_t ranges[16];
+    for (const uint16_t bi_ : pl.set_idx[0]) {
+        const BindingDesc& d = pl.bindings[bi_];
+        if (d.dyn == 0xff) continue;
+        const int idx = d.shader->refl.bindings[d.index].nvn.index;
+        const GState::Bind* bind = idx >= 0 && idx < 16 ? &S.ubo[d.nvn_stage][idx] : nullptr;
+        if (!bind || !bind->addr) { bufs[d.dyn] = dummy_buffer(); ranges[d.dyn] = 65536; offs[d.dyn] = 0; continue; }
+        const uint64_t size = bind->size ? bind->size : 65536;
+        if (!g_upd.empty() && upd_find(bind->addr, size)) { ++g_dyn_stat[1]; return VK_NULL_HANDLE; }
+        const uint64_t k = (bind->addr * 0x9E3779B97F4A7C15ull) ^ size;
+        DynUbo* e = g_dyn_ubo.find(k);
+        DynUbo fresh;
+        if (!e || e->addr != bind->addr || e->size != size || e->gen != gen || !read_dep_check(e->rd, kReadUniform)) {
+            ++g_dyn_stat[9];
+            fresh.addr = bind->addr; fresh.size = size; fresh.gen = gen;
+            fresh.br = resolve_read_dep(bind->addr, bind->size, kReadUniform, &fresh.rd);
+            if (!fresh.br.ok) { ++g_dyn_stat[2]; return VK_NULL_HANDLE; }
+            if (fresh.rd.keep) {
+                if (g_dyn_ubo.size() > 262144) g_dyn_ubo.clear();
+                g_dyn_ubo.put(k, fresh);
+            }
+            e = &fresh;
+        }
+        const BufRef& br = e->br;
+        if (br.offset % align) { ++g_dyn_stat[3]; return VK_NULL_HANDLE; }
+        if (verify) {
+            ++g_dyn_verify_n;
+            const BufRef v = resolve_read(bind->addr, bind->size, kReadUniform);
+            if ((v.buffer != br.buffer || v.offset != br.offset) && (mem::ww::changes() != ch0 || out_version() != ov0)) {
+                ++g_dyn_verify_raced;   // a page release or a settled copy-back began on another thread meanwhile: the check answered for its moment
+            } else if (v.buffer != br.buffer || v.offset != br.offset) {
+                if (++g_dyn_verify_bad < 20) NXLOG_W(kTag, "ubo_dynamic verify: block %llx/%llu resolves to %p+%llx now, the memo had %p+%llx", (unsigned long long)bind->addr,
+                                                     (unsigned long long)size, (void*)v.buffer, (unsigned long long)v.offset, (void*)br.buffer, (unsigned long long)br.offset);
+            }
+        }
+        bufs[d.dyn] = br.buffer;
+        ranges[d.dyn] = static_cast<uint32_t>(std::min<uint64_t>(std::min<uint64_t>(size, br.avail), 65536));
+        offs[d.dyn] = static_cast<uint32_t>(br.offset);
+    }
+    const uint32_t n = pl.dyn_n;
+    Dyn0Last* L = g_dyn0_last.find(reinterpret_cast<uint64_t>(&pl));
+    if (L && L->bad) { ++g_dyn_stat[4]; return VK_NULL_HANDLE; }
+    if (L && L->ds && std::memcmp(L->buf, bufs, n * sizeof(VkBuffer)) == 0 && std::memcmp(L->range, ranges, n * 4) == 0) { ++g_dyn_stat[6]; return L->ds; }
+    uint64_t ck = 0xcbf29ce484222325ull ^ reinterpret_cast<uint64_t>(&pl);
+    for (uint32_t i = 0; i < n; ++i) ck = ((ck ^ reinterpret_cast<uint64_t>(bufs[i])) * 1099511628211ull ^ ranges[i]) * 1099511628211ull;
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    if (VkDescriptorSet* h = g_dyn0_sets.find(ck)) { ds = *h; ++g_dyn_stat[7]; }
+    else {
+        KeepRec rec;
+        g_krec = &rec;
+        g_dyn0_bufs = bufs;
+        g_dyn0_ranges = ranges;
+        build_set(pl, 0);
+        g_krec = nullptr;
+        g_dyn0_bufs = nullptr;
+        g_dyn0_ranges = nullptr;
+        if (rec.bad || !rec.ds) {   // something else in set 0 is per draw: this program stays on the old path until the sets are forgotten
+            Dyn0Last& b = L ? *L : (g_dyn0_last.put(reinterpret_cast<uint64_t>(&pl), Dyn0Last{}), *g_dyn0_last.find(reinterpret_cast<uint64_t>(&pl)));
+            b.bad = true;
+            ++g_dyn_stat[4];
+            return VK_NULL_HANDLE;
+        }
+        ds = rec.ds;
+        g_dyn0_sets.put(ck, ds);
+        ++g_dyn_stat[8];
+    }
+    if (!L) { g_dyn0_last.put(reinterpret_cast<uint64_t>(&pl), Dyn0Last{}); L = g_dyn0_last.find(reinterpret_cast<uint64_t>(&pl)); }
+    L->ds = ds;
+    std::memcpy(L->buf, bufs, n * sizeof(VkBuffer));
+    std::memcpy(L->range, ranges, n * 4);
+    return ds;
+}
+
+// [nvn] exp_set0_free (measurement only, R6; cpuperf_ab_what r6): the ceiling of the set-0 work. A graphics set 0 the memo or set_keep may
+// reuse is bound from the last kept set 0 of the same program, unchecked (stale per-object uniform blocks: the picture is wrong).
+struct S0Free { VkDescriptorSet ds = VK_NULL_HANDLE; uint64_t era = 0; };
+FlatMap64<S0Free> g_s0free;
+uint64_t g_s0free_hits = 0;
 void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
     g_c0_cached = -1;   // the state may have changed since the last draw's table
     const SetReuse mode = bp == VK_PIPELINE_BIND_POINT_GRAPHICS && ab_on(kAbSetReuse) ? set_reuse_mode() : SetReuse::Off;
@@ -5188,6 +5314,24 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
         VkDescriptorSet ds = VK_NULL_HANDLE;
         uint64_t sig = 0;
         if (oc) oc_t = __rdtsc();
+        if (set == 0 && pl.dyn_n && (reusable & 1u) && ubo_dyn_path_on()) {   // ubo_dynamic
+            uint32_t offs[16];
+            if (const VkDescriptorSet d0 = dyn0_set(pl, offs)) {
+                ++g_dyn_stat[0];
+                bind_graphics_set(pl, bp, 0, d0, offs);
+                ++g_sstat[0][4];
+                continue;
+            }
+        }
+        const bool s0f = set == 0 && (reusable & 1u) && NX_CFG_BOOL("nvn", "exp_set0_free", false) && ab_on(kAbR6);
+        if (s0f) {
+            if (const S0Free* h = g_s0free.find(reinterpret_cast<uint64_t>(&pl)); h && h->era == g_keep_eras && h->ds) {
+                ++g_s0free_hits;
+                bind_graphics_set(pl, bp, set, h->ds);
+                ++g_sstat[set][4];
+                continue;
+            }
+        }
         if (reusable & (1u << set)) {
             sig = set_signature(pl, set);
             if (memo_chk & (1u << set)) sig ^= storage_set_clear(pl, set) ? 0x636c656172ull : 0x68656c64ull;   // memo_storage_check: the held-result state is part of the key
@@ -5264,6 +5408,7 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
             // checks per frame for sets the same few draws bind again and again). The memo's epoch holds the pool registry and page-release
             // counters since V1; kept sets were left out of the memo before those were in it.
             if (ds && keep_memo_on()) g_set_memo.put(sig, ds);
+            if (ds && s0f) g_s0free.put(reinterpret_cast<uint64_t>(&pl), S0Free{ds, g_keep_eras});
             oc_step(set, 1);
         } else if (!ds && keep_only & (1u << set)) {   // writes storage: kept and checked, never in the memo (its writes are noted per draw)
             set_signature(pl, set);
@@ -9442,6 +9587,13 @@ void replay_begin_submit(Frame& f) {
                         (unsigned long long)g_sstat[2][0], (unsigned long long)g_sstat[2][1], (unsigned long long)g_sstat[2][2], (unsigned long long)g_sstat[2][3], (unsigned long long)g_sstat[2][4],
                         (unsigned long long)g_sstat[3][0], (unsigned long long)g_sstat[3][1], (unsigned long long)g_sstat[3][2], (unsigned long long)g_sstat[3][3], (unsigned long long)g_sstat[3][4]);
                 NXLOG_I(kTag, "keep_tex_keyed: %llu first sightings looked up by image, %llu found (or kept)", (unsigned long long)g_tk_tries, (unsigned long long)g_tk_hits);
+                if (ubo_dynamic_layouts())
+                    NXLOG_I(kTag, "ubo_dynamic: %llu set-0 binds with dynamic offsets (last set %llu, by content %llu, built %llu; blocks resolved again %llu); "
+                            "old path: update range %llu, unresolved %llu, unaligned %llu, not keepable %llu, render scale or eager results %llu; verify %llu of %llu differ (%llu more raced); exp_set0_free %llu",
+                            (unsigned long long)g_dyn_stat[0], (unsigned long long)g_dyn_stat[6], (unsigned long long)g_dyn_stat[7], (unsigned long long)g_dyn_stat[8],
+                            (unsigned long long)g_dyn_stat[9], (unsigned long long)g_dyn_stat[1], (unsigned long long)g_dyn_stat[2], (unsigned long long)g_dyn_stat[3],
+                            (unsigned long long)g_dyn_stat[4], (unsigned long long)g_dyn_stat[5], (unsigned long long)g_dyn_verify_bad, (unsigned long long)g_dyn_verify_n, (unsigned long long)g_dyn_verify_raced,
+                            (unsigned long long)g_s0free_hits);
                 if (g_sstat_tk[2][0] || g_sstat_tk[0][0])
                     NXLOG_I(kTag, "r3_diag: first sightings that an image-keyed signature saw in an earlier present: set 0 %llu of %llu, set 1 %llu of %llu, set 2 %llu of %llu",
                             (unsigned long long)g_sstat_tk[0][1], (unsigned long long)g_sstat_tk[0][0], (unsigned long long)g_sstat_tk[1][1], (unsigned long long)g_sstat_tk[1][0],
