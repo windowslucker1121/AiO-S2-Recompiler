@@ -477,6 +477,11 @@ submission #6 on a second queue?
   a compute-only family), `[nvn] exp_async_cull` (draw-less submissions on it; a join on the first queue waits for its timeline value and
   signals the serial, so host waits and slot reuse stay ordered; `compute` decides before recording by scanning the lists for compute-only
   work and records into a per-slot pool of that family), `exp_async_cull_ab` (only in the on windows of `cpuperf_ab`).
+- **Ceiling run not measured:** the paired-window runs with these keys (`work/g5/s_ab_same.json`, `s_ab_comp.json`: `cpuperf_ab = 300`,
+  `cpuperf_ab_what` = an unknown name so only the async switch moves) were lost to the lock incidents of the day and the wrap-up; the
+  code is built and committed, untested in game. Upper bound from the timing above: ~0.7 ms of GPU wall per frame (less, since #3 then
+  shares the SMs with #6's tail), and only together with the WAR protection. Verdict for 144 fps: not worth the double-buffering;
+  #3's own GPU time (2.5 ms; P2's coherence work removes its shadow-in pairs and slot searches) is the better lever.
 - **W4, the two grass mesh draws (stamped `gpu_draws`, same exe, back-to-back runs):** grass prepass `d 40478981 f3054ac2` 1.17 ms,
   grass colour `d 4097c13f 6ec65625` 1.15 ms, fern `fbb731e2` 0.34 ms per frame: still the two largest GPU items. **Their cost is the
   task stage, not the mesh stage:** G4's `NXRT_HARNESS_MESH_EXP=empty` emptied only mesh programs (tasks are excluded in
