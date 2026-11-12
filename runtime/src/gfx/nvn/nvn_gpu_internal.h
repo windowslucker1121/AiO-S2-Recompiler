@@ -189,6 +189,7 @@ struct ReadDep { Mirror* m = nullptr; const void* pool = nullptr; uint64_t first
 BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* dep);
 // True when resolve_read would decide the same now (and then does what it would do besides: marks the pages used or wanted).
 bool read_dep_check(const ReadDep& dep, int use);
+void read_dep_prefetch(const ReadDep& dep);   // cache hints for a read_dep_check soon (keep_chain)
 // The device-local copy of [gpu_address, +size) for the compute shadows (nvn_replay.cpp): its chunk and offset (buf null: no copy for it, or the
 // range spans two chunks), and whether the copy holds the pool's bytes right now. Call it before note_gpu_write invalidates the range.
 struct MirrorSpan { VkBuffer buf = VK_NULL_HANDLE; VkDeviceSize offset = 0; bool valid = false; VkDeviceSize avail = 0; };   // avail: bytes to the chunk's end
