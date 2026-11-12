@@ -135,7 +135,7 @@ Ref<CmdList> handle_lookup_table(uint64_t handle);
 
 // The render thread and the texture look-ahead look up thousands of handles per frame, each under g_mu shared (contended by the game
 // thread's registrations): a direct-mapped cache per thread. A cached list is the handle's list for as long as it is not dropped.
-Ref<CmdList> handle_lookup(uint64_t handle) {
+Ref<CmdList> handle_lookup(uint64_t handle, bool count_call) {
     const bool cfg = NX_CFG_BOOL("nvn", "handle_cache", true);
     if (!cfg || !g_cache_on.load(std::memory_order_relaxed)) return handle_lookup_table(handle);
     struct Slot { uint64_t h = 0; Ref<CmdList> l; };
@@ -144,7 +144,7 @@ Ref<CmdList> handle_lookup(uint64_t handle) {
     thread_local Slot* cache = new Slot[16384];
     Slot& s = cache[(handle >> 3) & g_cache_mask.load(std::memory_order_relaxed)];
     if (s.h == handle && s.l && !s.l->dropped.load(std::memory_order_acquire)) {
-        s.l->calls.fetch_add(1, std::memory_order_relaxed);
+        if (count_call) s.l->calls.fetch_add(1, std::memory_order_relaxed);
         return s.l;
     }
     Ref<CmdList> l = handle_lookup_table(handle);
