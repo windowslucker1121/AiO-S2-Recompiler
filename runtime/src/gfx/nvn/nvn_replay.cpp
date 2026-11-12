@@ -1235,6 +1235,7 @@ extern uint64_t g_oc_ph[10];
 // exp_op_cost: bind_sets ticks per graphics set index and step (0 signature + memo look-up, 1 kept-set look-up and check, 2 build, 3 bind),
 // and counts of each (R4 diagnostics)
 extern uint64_t g_oc_bs[4][4], g_oc_bsn[4][4];
+extern uint64_t g_oc_bt[4][3];   // exp_op_cost: build_set ticks per set index: resolving, the content-cache look-up and the allocation + update, sets
 bool exp_op_cost_on();
 struct OcPhase { int i; uint64_t t0; explicit OcPhase(int k) : i(k), t0(exp_op_cost_on() ? __rdtsc() : 0) {} ~OcPhase() { if (t0) g_oc_ph[i] += __rdtsc() - t0; } };
 void pass_lookahead();   // below: settles the reads of the coming draws before the pass begins
@@ -3813,6 +3814,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
     static std::vector<VkDescriptorImageInfo> iinfo;
     static std::vector<VkBufferView> tinfo;
     writes.clear(); binfo.clear(); iinfo.clear(); tinfo.clear();
+    const uint64_t bt0 = exp_op_cost_on() && set < 4 ? __rdtsc() : 0;
     const size_t nb = pl.bindings.size();
     writes.reserve(nb);
     binfo.reserve(nb);
@@ -4205,6 +4207,9 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
     }
     ++g_sets_built;
     g_last_set_key = key;
+    const uint64_t bt1 = bt0 ? __rdtsc() : 0;
+    if (bt0) { g_oc_bt[set][0] += bt1 - bt0; ++g_oc_bt[set][2]; }
+    struct BtTail { uint64_t t, s; ~BtTail() { if (t) g_oc_bt[s][1] += __rdtsc() - t; } } bt_tail{bt1, set};
     if (g_krec && !g_krec->bad) {   // a set to keep: from the persistent pools, never one of the submission's
         g_krec->content = key;
         VkDescriptorSet ds = keep_alloc(pl.sets[set]);
@@ -7798,6 +7803,7 @@ bool op_keeps_sets(Op op) {
 // shader, vertex or mesh shader); logged every 10 s as ms per present.
 struct OpCost { uint64_t ticks = 0, n = 0, ph[10] = {}; };
 uint64_t g_oc_bs[4][4] = {}, g_oc_bsn[4][4] = {};
+uint64_t g_oc_bt[4][3] = {};
 uint64_t g_oc_ph[10] = {};   // ticks of phases of the current op: prepare_textures, bind_sets, gmem_before_op, ensure_pass, out_before_op, set_dynamic_state,
                              // program layout, pipeline key and look-up, vertex buffers, after begin_draw (index buffer, the draw)
 OpCost g_oc_op[256];
@@ -7859,6 +7865,14 @@ void op_cost_log() {
             c += t;
         }
         NXLOG_I(kTag, "exp_op_cost bind_sets per present:%s", c.c_str());
+        c.clear();
+        for (int s = 0; s < 4; ++s) {
+            char t[160];
+            std::snprintf(t, sizeof t, " set %d: resolve %.3f ms, cache/alloc/update %.3f ms, %.0f builds;", s, g_oc_bt[s][0] / tpms / fr, g_oc_bt[s][1] / tpms / fr, g_oc_bt[s][2] / fr);
+            c += t;
+        }
+        NXLOG_I(kTag, "exp_op_cost build_set per present:%s", c.c_str());
+        std::memset(g_oc_bt, 0, sizeof g_oc_bt);
         std::memset(g_oc_bs, 0, sizeof g_oc_bs);
         std::memset(g_oc_bsn, 0, sizeof g_oc_bsn);
     }
