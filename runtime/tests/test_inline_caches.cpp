@@ -2,7 +2,7 @@
 // Inline caches of the lifted code (recomp/include/nxrecomp/ctx.h NX_ICALL / NX_IIMPORT, src/core/abi_glue.cpp nx_icall_miss /
 // nx_iimport_miss, src/core/dispatch.cpp ic_fill): a site caches a lifted target and calls it directly; a changed target misses
 // and is dispatched; a site whose target keeps changing is frozen and still dispatched right; a replaced registration empties
-// every cache; HLE thunks are never cached by an indirect call site.
+// every cache; HLE thunks are cached by an indirect call site only when marked direct (hle_mark_direct).
 #include "nxrt/dispatch.h"
 #include "nxrt/memory.h"
 #include "test_framework.h"
@@ -66,4 +66,36 @@ NXTEST(hle_thunks_are_not_cached_by_call_sites) {
     CHECK(ic.t == nullptr);
     nx_icall(&c, h, &ic);
     CHECK_EQ(g_hle, 2);
+}
+
+namespace {
+int g_direct = 0, g_direct2 = 0;
+void direct_fn(::Ctx* c) { g_direct++; c->x[0] = 7; }
+void direct_fn2(::Ctx* c) { g_direct2++; c->x[0] = 8; }
+}  // namespace
+
+// A thunk marked direct (an implemented NVN entry point) is cached by the call site; a new handler for it empties the caches and
+// is not cached until it is marked again.
+NXTEST(direct_hle_thunks_are_cached_and_dropped_when_replaced) {
+    const uint64_t h = hle_register("ic_test_direct", direct_fn);
+    REQUIRE(h != 0);
+    hle_mark_direct("ic_test_direct");
+    NxIc ic{};
+    ::Ctx c{};
+    nx_icall(&c, h, &ic);
+    CHECK_EQ(c.x[0], 7u);
+    REQUIRE(ic.t != nullptr);
+    CHECK_EQ(ic.t->addr, h);
+    nx_icall(&c, h, &ic);
+    CHECK_EQ(g_direct, 2);
+    CHECK_EQ(hle_register("ic_test_direct", direct_fn2), h);
+    CHECK(ic.t == nullptr);
+    nx_icall(&c, h, &ic);
+    CHECK_EQ(c.x[0], 8u);
+    CHECK(ic.t == nullptr);                        // not marked again: dispatched
+    hle_mark_direct("ic_test_direct");
+    nx_icall(&c, h, &ic);
+    REQUIRE(ic.t != nullptr);
+    nx_icall(&c, h, &ic);
+    CHECK_EQ(g_direct2, 3);
 }

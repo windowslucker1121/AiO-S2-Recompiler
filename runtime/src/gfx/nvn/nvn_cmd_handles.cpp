@@ -45,8 +45,16 @@ struct Dropped {
     uint64_t start, end;         // the dropped list's region
     uint64_t by_start, by_end;   // the overlapping list's region
     uint32_t draws, records;
+    uint64_t handle;             // 0: empty slot
 };
-std::unordered_map<uint64_t, Dropped> g_dropped;
+// Direct-mapped by handle (handles are issued 8 apart), newest wins: no allocation under the exclusive lock. The game's threads drop
+// ~4,000 lists per frame in handle_register; the map insert (and its periodic clear) was part of that cost.
+constexpr size_t kDroppedSlots = 1u << 14;
+Dropped* g_dropped = new Dropped[kDroppedSlots]{};
+const Dropped* dropped_find(uint64_t handle) {
+    const Dropped& d = g_dropped[(handle >> 3) & (kDroppedSlots - 1)];
+    return d.handle == handle ? &d : nullptr;
+}
 std::atomic<uint32_t> g_miss_logged{0};
 
 // Not in the game's command memory: no region, or a region in an overflow ring.
@@ -55,10 +63,9 @@ bool unbacked(const Entry& e) { return e.end <= e.start || is_overflow_addr(e.st
 void drop_locked(uint64_t handle, const char* why = "?", uint64_t by = 0, uint64_t by_start = 0, uint64_t by_end = 0) {
     auto it = g_handles.find(handle);
     if (it == g_handles.end()) return;
-    if (g_dropped.size() > 65536) g_dropped.clear();
-    g_dropped[handle] = Dropped{why, by, it->second.start, it->second.end, by_start, by_end,
-                                it->second.list ? it->second.list->draw_count : 0u,
-                                it->second.list ? it->second.list->record_count : 0u};
+    g_dropped[(handle >> 3) & (kDroppedSlots - 1)] = Dropped{why, by, it->second.start, it->second.end, by_start, by_end,
+                                                             it->second.list ? it->second.list->draw_count : 0u,
+                                                             it->second.list ? it->second.list->record_count : 0u, handle};
     if (it->second.end > it->second.start) {
         auto r = g_regions.find(it->second.start);
         if (r != g_regions.end() && r->second == handle) g_regions.erase(r);
@@ -111,9 +118,16 @@ uint64_t handle_register(Ref<CmdList> list) {
             auto e = g_handles.find(prev->second);
             if (e != g_handles.end() && e->second.end > list->mem_start) it = prev;
         }
-        std::vector<uint64_t> drop;
-        for (; it != g_regions.end() && it->first < list->mem_end; ++it) drop.push_back(it->second);
-        for (uint64_t d : drop) drop_locked(d, "overlap", h, list->mem_start, list->mem_end);
+        // usually one or two lists: collected on the stack (drop_locked erases from g_regions)
+        uint64_t small[16];
+        size_t n = 0;
+        std::vector<uint64_t> more;
+        for (; it != g_regions.end() && it->first < list->mem_end; ++it) {
+            if (n < 16) small[n++] = it->second;
+            else more.push_back(it->second);
+        }
+        for (size_t i = 0; i < n; ++i) drop_locked(small[i], "overlap", h, list->mem_start, list->mem_end);
+        for (uint64_t d : more) drop_locked(d, "overlap", h, list->mem_start, list->mem_end);
         g_regions[list->mem_start] = h;
     }
     Entry e;
@@ -158,17 +172,17 @@ Ref<CmdList> handle_lookup_table(uint64_t handle) {
     auto it = g_handles.find(handle);
     if (it == g_handles.end()) {
         g_missing.fetch_add(1);
-        auto d = g_dropped.find(handle);
-        const bool empty = d != g_dropped.end() && d->second.records == 0;   // an empty list: nothing is lost
+        const Dropped* d = dropped_find(handle);
+        const bool empty = d && d->records == 0;   // an empty list: nothing is lost
         if (!empty && g_miss_logged.fetch_add(1) < 200) {
-            if (d == g_dropped.end())
+            if (!d)
                 NXLOG_W("nvn.handles", "unknown handle 0x%llx: %s", static_cast<unsigned long long>(handle),
                         handle >= g_next.load() || handle < 0x1000 ? "never issued" : "issued, drop not recorded");
             else
                 NXLOG_W("nvn.handles", "unknown handle 0x%llx (%u records, %u draws, region %llx-%llx): dropped by %s, handle 0x%llx region %llx-%llx",
-                        static_cast<unsigned long long>(handle), d->second.records, d->second.draws, static_cast<unsigned long long>(d->second.start),
-                        static_cast<unsigned long long>(d->second.end), d->second.why, static_cast<unsigned long long>(d->second.by),
-                        static_cast<unsigned long long>(d->second.by_start), static_cast<unsigned long long>(d->second.by_end));
+                        static_cast<unsigned long long>(handle), d->records, d->draws, static_cast<unsigned long long>(d->start),
+                        static_cast<unsigned long long>(d->end), d->why, static_cast<unsigned long long>(d->by),
+                        static_cast<unsigned long long>(d->by_start), static_cast<unsigned long long>(d->by_end));
         }
         return {};
     }

@@ -45,6 +45,12 @@ HleFn hle_lookup(const char* name);                       // the registered hand
 // directly, skipping the per-thunk call count, [hle] trace and the in_import bookkeeping. The name must be registered first.
 void hle_mark_leaf(const char* name);
 HleFn hle_leaf_fn(uint64_t addr);                         // the handler of a leaf thunk at addr, else nullptr
+// A handler that does not need hle_current_name() (every implemented NVN entry point; the logging stubs do need it): an indirect
+// call (BLR through a proc pointer) to its thunk may be cached in the call site's inline cache and run the handler directly,
+// skipping dispatch_call's per-thunk count, [hle] trace and slow-call trace events. [cpu] hle_direct = on (default) | off | ab
+// (windows of [cpu] hle_direct_ab_ms, frame-trace marks hd.on / hd.off). A changed handler empties every inline cache.
+void hle_mark_direct(const char* name);
+HleFn hle_direct_fn(uint64_t addr);                       // the handler of a direct (or leaf) thunk at addr while hle_direct is on, else nullptr
 bool hle_is_thunk(uint64_t addr);
 const char* hle_name_at(uint64_t addr);                   // name behind a thunk address or nullptr
 size_t hle_count();

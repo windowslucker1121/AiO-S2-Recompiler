@@ -57,6 +57,14 @@ class GameConfig:
     # it off for a lift.
     scratch_locals = True
 
+    # x0..x8, x19..x29 and SP as function-local variables (program.localize_callee_saved, needs local_flags): loaded at entry
+    # and after sites / SVCs, written to the context before every call and at every exit (only what changed since the context
+    # was last in step); x19..x29 and SP are kept across calls (the callee preserves them), x0..x8 are loaded again after each.
+    # Removes the reloads clang made after every guest store, but measured slower (village, 2026-11-12: game time per frame
+    # 6.75 / 6.72 vs 6.36 / 6.34 ms): every local is loaded at entry and most are spilled to the host stack again. OFF by default
+    # (lift output unchanged); NX_CALLEE_LOCALS=1 turns it on for a lift, NX_CALLEE_LOCALS_REGS chooses the registers.
+    callee_locals = False
+
     # host function names to treat as noreturn-like terminators (none by default)
     noreturn_imports = ()
 

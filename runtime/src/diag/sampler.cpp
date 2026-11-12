@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // In-process sampling profiler (S34), for machines where no profiler can run without administrator rights.
 // `[prof] sample_hz` (env NXRT_PROF_SAMPLE_HZ, default 0 = off): a thread suspends every registered thread (or those named in `[prof]
-// sample_threads`, comma-separated) in turn, reads its context, walks
+// sample_threads`, comma-separated; `[prof] sample_from_s` delays the first sample; `[prof] sample_raw = <file>` also writes every
+// sample with its time on the frame trace's clock: `<ns> <thread> <leaf>;<caller>;... ` up to 16 frames, `[wait]` for a blocked
+// thread, so samples can be placed inside a frame of the trace) in turn, reads its context, walks
 // its host stack (the same allocation-free walk as the freeze watchdog) and resumes it. A thread whose instruction pointer sits right after a
 // `syscall` instruction is blocked in the kernel (a wait, a sleep, a yield); its sample gets the leaf frame `[wait]`. Every other sample is
 // the thread running user code. Samples are written as folded stacks, equal stacks added up, to `[prof] sample_out` (default
@@ -25,6 +27,7 @@
 
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
+#include "nxrt/ftrace.h"
 #include "nxrt/log.h"
 #include "nxrt/symbols.h"
 #include "stackwalk.h"
@@ -79,6 +82,7 @@ bool after_syscall(uint64_t ip) {
 }
 
 void flush_samples(State& s);
+std::string frame_name(uint64_t addr, std::unordered_map<uint64_t, std::string>& cache);
 
 void loop() {
     State& s = st();
@@ -86,6 +90,15 @@ void loop() {
     auto next = std::chrono::steady_clock::now() + period;
     auto last_flush = std::chrono::steady_clock::now();
     std::vector<Sample> batch;
+    // [prof] sample_from_s (default 0): no samples before this many seconds after the sampler started (leave the boot and load out).
+    const auto from = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                                             std::chrono::duration<double>(config_get_double("prof", "sample_from_s", 0.0)));
+    while (!s.stop.load() && std::chrono::steady_clock::now() < from) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    next = std::chrono::steady_clock::now() + period;
+    FILE* raw = nullptr;
+    const std::string raw_path = config_get_str("prof", "sample_raw", "");
+    if (!raw_path.empty()) raw = std::fopen(raw_path.c_str(), "wb");
+    std::string raw_buf;
     while (!s.stop.load()) {
         std::this_thread::sleep_until(next);
         next += period;
@@ -94,6 +107,7 @@ void loop() {
         batch.assign(recs.size(), Sample{});
         std::vector<char> ok(recs.size(), 0);
         const uint32_t label = s.label.load(std::memory_order_relaxed);
+        const uint64_t t_raw = raw ? ft::now_ns() : 0;
         for (size_t i = 0; i < recs.size(); i++) {
             HANDLE h = static_cast<HANDLE>(recs[i].host_handle);
             if (!h || recs[i].host_tid == GetCurrentThreadId()) continue;
@@ -123,8 +137,26 @@ void loop() {
             s.agg[key]++;
             s.total++;
             s.waiting += x.waiting;
+            if (raw) {
+                raw_buf += std::to_string(t_raw);
+                raw_buf += ' ';
+                raw_buf += names[i];
+                raw_buf += ' ';
+                if (x.waiting) raw_buf += "[wait]";
+                else
+                    for (int k = 0; k < static_cast<int>(x.n) && k < 16; k++) {
+                        raw_buf += frame_name(x.frames[k], s.cache);
+                        raw_buf += ';';
+                    }
+                raw_buf += '\n';
+            }
         }
         if (std::chrono::steady_clock::now() - last_flush > std::chrono::seconds(3)) {   // the run may end without a normal shutdown: write as we go
+            if (raw && !raw_buf.empty()) {
+                std::fwrite(raw_buf.data(), 1, raw_buf.size(), raw);
+                std::fflush(raw);
+                raw_buf.clear();
+            }
             flush_samples(s);
             last_flush = std::chrono::steady_clock::now();
         }
