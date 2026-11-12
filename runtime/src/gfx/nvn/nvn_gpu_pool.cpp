@@ -949,6 +949,7 @@ struct Mirror {
     std::vector<uint64_t> want;         // bitmap: a draw wanted the page while it was not valid
     std::vector<uint32_t> copied_at;    // present count of the last copy (0: never)
     std::vector<uint64_t> used;         // bitmap: a draw read the page from the copy since it was copied
+    std::vector<uint64_t> ever;         // bitmap: the copy has held the page's bytes at some point (exp_coh_free gate: never garbage)
     std::vector<uint8_t> score;         // copies in a row that the CPU overwrote before any draw read them
     std::vector<uint8_t> backoff;       // how often the page has been hot in a row (the hold doubles each time)
     std::vector<uint32_t> hot_until;    // present count until which the page is not copied
@@ -1140,6 +1141,7 @@ Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
     m->want.assign(words, 0);
     m->copied_at.assign(static_cast<size_t>(m->npages), 0);
     m->used.assign(words, 0);
+    m->ever.assign(words, 0);
     m->score.assign(static_cast<size_t>(m->npages), 0);
     m->backoff.assign(static_cast<size_t>(m->npages), 0);
     m->hot_until.assign(static_cast<size_t>(m->npages), 0);
@@ -1710,8 +1712,23 @@ void read_dep_prefetch(const ReadDep& d) {
     if (static_cast<size_t>(d.first >> 6) < d.m->used.size()) _mm_prefetch(reinterpret_cast<const char*>(d.m->used.data() + (d.first >> 6)), _MM_HINT_T0);
 }
 bool hot_skip_on();   // below
+bool g_coh_free = false, g_coh_win = false, g_coh_mask0 = false, g_coh_ssbo = false, g_coh_odb = false, g_coh_gmem = false;
+bool g_coh_compute = false;
+int coh_free_mode() {
+    static const int m = [] {
+        const std::string v = config_get_str("nvn", "exp_coh_free", "off");
+        return v == "on" || v == "1" || v == "true" ? 1 : v == "ab" ? 2 : 0;
+    }();
+    return m;
+}
 bool read_dep_check(const ReadDep& d, int use) {
     if (d.mirror_on != g_mirror_on) return false;
+    if (g_coh_free) {               // exp_coh_free: the gate's decisions hold for the whole window (compute ones are checked as usual)
+        if (d.cf == 1) return true;
+        if (d.cf == 0) return false;
+    } else if (d.cf != 0) {
+        return false;
+    }
     if (d.state == 0) { g_use_skip[use % 3]++; return true; }
     Mirror& m = *d.m;
     if (d.state == 2 && d.hot_till && !m.any_fresh && presents_now() < d.hot_till && hot_skip_on()) {   // hot_skip: still in the pool
@@ -1750,6 +1767,7 @@ BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* d
     ReadDep& d = dep ? *dep : scratch;
     d = ReadDep();
     d.mirror_on = g_mirror_on;
+    d.cf = g_coh_free ? (g_coh_compute ? 2 : 1) : 0;
     BufRef out = resolve_in_pool(gpu_address, size, &mp, &pg, &poff);
     d.pool = mp;
     if (!g_mirror_on) return out;
@@ -1769,6 +1787,27 @@ BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* d
     d.m = m;
     d.first = first;
     d.last = last;
+    if (d.cf == 1) {   // the gate: the copy whenever it has held every page of the range at some point (or a result there), unchecked
+        bool ever = true;
+        for (uint64_t p = first; p <= last && ever;) {
+            const uint64_t lo = p & 63, hi = std::min<uint64_t>(63, lo + (last - p));
+            const uint64_t mask = (hi - lo == 63) ? ~uint64_t{0} : (((uint64_t{1} << (hi - lo + 1)) - 1) << lo);
+            const size_t w = static_cast<size_t>(p >> 6);
+            ever = ((m->ever[w] | m->gpu_new[w].load(std::memory_order_relaxed)) & mask) == mask;
+            p += hi - lo + 1;
+        }
+        if (ever) {
+            d.state = 1;
+            out.buffer = cb;
+            out.offset = poff - (first / chunk_pages) * kChunkBytes;
+            out.avail = std::min<uint64_t>(kChunkBytes, m->pool_bytes - (first / chunk_pages) * kChunkBytes) - out.offset;
+            return out;
+        }
+        d.state = 2;
+        bits_put(m->want, first, last, true);   // copied in once (off windows and the warm-up fill the copy)
+        m->any_want = true;
+        return out;
+    }
     if (range_valid(*m, first, last - first + 1) || (out_lazy() && new_servable(*m, first, last))) {
         d.state = 1;
         out.buffer = cb;
@@ -1838,6 +1877,7 @@ void mirror_span_written(uint64_t gpu_address, uint64_t size) {
             m.copied_at[static_cast<size_t>(i)] = now ? now : 1;
             bit_put(m.want, i, false);
         }
+        bits_put(m.ever, p, q - 1, true);
         p = q;
     }
 }
@@ -1927,6 +1967,7 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
             g_fill_fail[1]++;
         }
         if (copy) {
+            bits_put(m.ever, p, q - 1, true);
             copies.push_back(VkBufferCopy{p * kPageBytes - src_base, p * kPageBytes - base, (q - p) * kPageBytes});
             for (uint64_t i = p; i < q; ++i) g_st_back_pages.fetch_add(back_get(m, i) ? 1 : 0, std::memory_order_relaxed);
             g_st_copyin_pages.fetch_add(q - p, std::memory_order_relaxed);
@@ -2040,6 +2081,7 @@ void mirror_begin_submit(Frame& f, bool on) {
                 if (m.pt_target) m.pt_pending.push_back(i);   // [nvn] pt_copy: points at the copy once settled
             }
             if (armed) {
+                bits_put(m.ever, p, q - 1, true);
                 for (uint64_t i = p; i < q; ++i) g_st_back_pages.fetch_add(back_get(m, i) ? 1 : 0, std::memory_order_relaxed);
                 g_st_copyin_pages.fetch_add(q - p, std::memory_order_relaxed);
                 const uint64_t base = (p / chunk_pages) * kChunkBytes;
