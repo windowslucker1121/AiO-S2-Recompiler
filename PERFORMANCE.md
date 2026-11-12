@@ -60,7 +60,7 @@ pairs). Paired windows (`cpuperf_ab_what = r6`, the old path on the same dynamic
   no longer the render thread's.
 - **Dropped:** `submit_async` again (now `cpuperf_ab_what = r6b`): replay -0.21 ms in two runs, fps +0.35 (29/45) / +0.05 (24/45): off.
 - **Where the frame is now** (village, no trace, ~88-90 fps): render replay median ~9.7-10.0 ms, render idle ~1.0-1.5 ms, GPU 91-95% busy
-  (nvidia-smi) and the game's own CPU frame alternating: by draw-count rank in the 4-frame cycle 12.9 / 13.1 / 9.4 / 10.0 ms with render
+  (cpuwatch GPU load) and the game's own CPU frame alternating: by draw-count rank in the 4-frame cycle 12.9 / 13.1 / 9.4 / 10.0 ms with render
   idle 2.1-2.5 ms in the two heavy frames (the game's main thread waits longer on its workers there). The game's GPU sync waits on the big
   submission of the previous frame (`chain.py`: queued -> replay start 1.6 ms, replay 9.2 ms, the GPU ends ~4.6 ms after the replay with
   the trace): GPU and game CPU frame are now co-limits with the render thread. Stamped GPU per frame (gpu_passes + gpu_draws, inflated):
@@ -468,7 +468,7 @@ Parallel pass recording (R6 design note, not built)
 
 Ceiling: the big submission is ~9.2 of ~10.2 ms of replay per frame; ~2,200 draws in ~55 passes. Split across two threads the
 draw work of the long passes (the main colour, depth prepass and shadow passes hold most draws) could save up to ~3-4 ms of
-replay. But since R6 the frame is co-limited by the GPU (nvidia-smi 91-95% busy at ~89 fps) and by the game's own CPU frame
+replay. But since R6 the frame is co-limited by the GPU (cpuwatch GPU load 91-95% at ~89 fps) and by the game's own CPU frame
 (main thread G p50 8.7 ms with the frame trace, 4-frame cycle with render idle 2+ ms in the heavy frames): a replay cut converts
 into fps at less than half its size (R6 pairs: replay -0.64 ms -> median frame -0.10 ms). The parallel replay's fps ceiling at
 the current GPU load is therefore ~+3-5 fps, not +30.
