@@ -258,6 +258,12 @@ Slot& acquire_slot() {
             static const uint16_t z = ft::zone_id("gpu.exec");
             const double ns = static_cast<double>(ts[1] - ts[0]) * g->dev->properties().limits.timestampPeriod;
             ft::event(z, s.cpu_t0, s.cpu_t0 + static_cast<uint64_t>(ns), static_cast<uint32_t>(s.serial));
+            {   // the GPU's own clock (ns) of the submission's first and last timestamp: the critical-path analysis maps it onto the CPU clock
+                // through the timeline signals the game's waits see (no calibrated timestamps)
+                static const uint16_t zr = ft::zone_id("gpu.raw");
+                const double per = g->dev->properties().limits.timestampPeriod;
+                ft::event(zr, static_cast<uint64_t>(static_cast<double>(ts[0]) * per), static_cast<uint64_t>(static_cast<double>(ts[1]) * per), static_cast<uint32_t>(s.serial));
+            }
             g_gpu_exec_ns.fetch_add(static_cast<uint64_t>(ns), std::memory_order_relaxed);
             g_gpu_busy_ns.fetch_add(static_cast<uint64_t>(ns), std::memory_order_relaxed);   // less the waits for parts, below
             // The span above runs from the first part's start to the last part's end: with submission chunks it includes the time the GPU
@@ -715,6 +721,10 @@ namespace {
 uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint64_t serial = 0) {
     NXFT("replay");
     nxrt::HitchTimer ht_replay(nxrt::kHpRenderReplay);
+    struct ReplayEv {   // frame trace: the same span with the serial (critical-path analysis: queued -> replayed -> signalled)
+        uint64_t t0 = ft::on() ? ft::now_ns() : 0; uint64_t serial = 0;
+        ~ReplayEv() { if (t0 && serial) { static const uint16_t z = ft::zone_id("replay.s"); ft::event(z, t0, ft::now_ns(), static_cast<uint32_t>(serial)); } }
+    } rev;
     const auto t0 = std::chrono::steady_clock::now();
     Slot& s = acquire_slot();
     bool unsignalled = false;
@@ -724,6 +734,7 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         else { serial = g->submitted; unsignalled = true; }
     }
     g->recording = serial;
+    rev.serial = serial;
     Frame f;
     f.cb = s.cb;
     f.serial = serial;
@@ -968,6 +979,7 @@ uint64_t submit(const std::vector<Ref<CmdList>>& lists) {
         if (recorded) capture::frame_submit_end();
     }, !async_submit(), false);
     if (async_submit() && !on_render_thread()) texlook_submit(lists, serial);   // textures the coming draws use: prepared in the background meanwhile
+    if (ft::on()) ft::mark("q.sub", static_cast<uint32_t>(serial));   // frame trace: when the game queued this serial (critical-path analysis)
     return serial;
 }
 
@@ -1021,6 +1033,10 @@ bool wait_serial(uint64_t serial, uint64_t timeout_ns) {
     if (timeout_ns == 0) return false;
     NXFT("sync.wait");
     nxrt::HitchTimer ht(nxrt::kHpGameSyncWait);
+    struct WaitEv {   // frame trace: the wait with its serial
+        uint64_t t0 = ft::on() ? ft::now_ns() : 0; uint64_t serial;
+        ~WaitEv() { if (t0) { static const uint16_t z = ft::zone_id("sync.w"); ft::event(z, t0, ft::now_ns(), static_cast<uint32_t>(serial)); } }
+    } wev{ft::on() ? ft::now_ns() : 0, serial};
     g_wait_serial.store(serial);
     g_wait_timeout.store(timeout_ns);
     struct Counted { Counted() { g_waiters++; g_waits_begun++; } ~Counted() { g_waiters--; g_waits_done++; } } counted;
