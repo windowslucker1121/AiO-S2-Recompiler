@@ -2181,11 +2181,11 @@ inline uint64_t pool_fast_key(const Texture* t, uint64_t stamp) {
 
 // The set of this pool array, its entries brought up to date with the bound pool (once per present, or when images were created since).
 struct PsMemo { const PoolBinding* pb = nullptr; const void* owner = nullptr; PoolSet* st = nullptr; };
-PsMemo g_ps_memo[64];
+PsMemo g_ps_memo[2048];   // per binding (a few hundred programs per frame: 64 slots thrashed)
 PoolSet* pool_set_sync(const PoolBinding& pb) {
     const void* owner = pb.sampler ? static_cast<const void*>(S.spool.get()) : static_cast<const void*>(S.tpool.get());
     // the map entry of (binding, pool): remembered per binding (the key's other fields come from the binding; map nodes do not move)
-    PsMemo& pm = g_ps_memo[(reinterpret_cast<uintptr_t>(&pb) >> 4) & 63];
+    PsMemo& pm = g_ps_memo[((reinterpret_cast<uintptr_t>(&pb) >> 3) * 0x9E3779B97F4A7C15ull) >> 53];
     if (pm.pb != &pb || pm.owner != owner || !pm.st) {
         pm.pb = &pb;
         pm.owner = owner;
@@ -5313,7 +5313,7 @@ FlatMap64<VkDescriptorSet> g_img_sets;
 // kept-set check, no first-sighting bookkeeping); off: only after a kept-set miss.
 bool tex_img_early_on() {
     const bool on = NX_CFG_BOOL("nvn", "tex_img_early", true);
-    return on && ab_on(kAbR6b);
+    return on;   // its paired-window bit went to submit_async (R6)
 }
 FlatMap64<uint8_t> g_img_ok;   // per program layout and set: 1 every binding is a sampled texture, 2 not
 uint64_t g_img_era = ~0ull, g_img_stat[5] = {};   // looked up, found, built, refused (feedback / no image), verify differences
@@ -5336,16 +5336,20 @@ uint64_t img_set_key(const ProgLayout& pl, uint32_t set) {
     k = (k ^ smp_tune_now()) * 1099511628211ull;
     for (const uint16_t bi : pl.set_idx[set]) {
         const BindingDesc& d = pl.bindings[bi];
-        const DescriptorBinding& b = d.shader->refl.bindings[d.index];
         const TexResolved& r = resolve_texture_ref(d);
         uint64_t part = 0x6e756c6cull;   // no texture: the dummy view and sampler
         if (r.tex) {
             const uint64_t st = tex_view_stamp(r.tex);
             if (!st || is_color_feedback(r.tex)) { ++g_img_stat[3]; return 0; }
-            const ViewRequest q = make_request(b, r);
-            part = (st * 0x9e3779b97f4a7c15ull) ^ bytes_hash(&q, sizeof q);
-            part = (part ^ reinterpret_cast<uint64_t>(r.tex->fmt)) * 1099511628211ull;
-            part = (part ^ static_cast<uint64_t>(tex_sampled_layout(r.tex))) * 1099511628211ull;
+            // what make_request reads (the binding, the texture's swizzle and depth/stencil mode, the view info) instead of the request itself;
+            // the sampled layout follows from the format
+            const Texture& t = *r.tex;
+            part = (st * 0x9e3779b97f4a7c15ull) ^ reinterpret_cast<uint64_t>(&d);
+            part = (part ^ (static_cast<uint64_t>(static_cast<uint8_t>(t.b.swizzle[0])) | static_cast<uint64_t>(static_cast<uint8_t>(t.b.swizzle[1])) << 8 |
+                            static_cast<uint64_t>(static_cast<uint8_t>(t.b.swizzle[2])) << 16 | static_cast<uint64_t>(static_cast<uint8_t>(t.b.swizzle[3])) << 24 |
+                            static_cast<uint64_t>(static_cast<uint32_t>(t.b.depth_stencil_mode)) << 32)) * 1099511628211ull;
+            part = (part ^ (r.has_view ? bytes_hash(&r.view, sizeof r.view) : 0x76)) * 1099511628211ull;
+            part = (part ^ reinterpret_cast<uint64_t>(t.fmt)) * 1099511628211ull;
             part = (part ^ (r.has_sampler ? bytes_hash(&r.smp, sizeof r.smp) : 0x51)) * 1099511628211ull;
         }
         k = ((k ^ d.binding) * 1099511628211ull ^ part) * 1099511628211ull;
@@ -9618,7 +9622,7 @@ void replay_begin_submit(Frame& f) {
             g_cpu_ab_on = con;
             cmdq::set_copies(true);   // (the cmd_copies cpuperf_ab bit went to G3's g3b)
             cmdq::set_copy_image(ab_on(kAbR3c));
-            cmdq::set_submit_async(true);   // (its cpuperf_ab bit went to keep_chain, R4)
+            cmdq::set_submit_async(ab_on(kAbR6b));   // cpuperf_ab_what r6b (R6; was keep_chain's, R4)
             cmdq::set_chunk_async(ab_on(kAbChunkAsync));
             cmdq::set_pds(ab_on(kAbPdsQ));
             cmdq::set_desc(ab_on(kAbCmdDesc));
