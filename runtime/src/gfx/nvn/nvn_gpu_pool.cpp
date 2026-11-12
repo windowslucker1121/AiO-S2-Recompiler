@@ -743,6 +743,7 @@ uint64_t physical_buffer_address_uncached(uint64_t gpu_address, uint64_t size);
 
 std::atomic<uint64_t> g_vmap_gen{0};
 void virtual_maps_changed() { g_vmap_gen.fetch_add(1, std::memory_order_release); }
+uint64_t virtual_maps_generation() { return g_vmap_gen.load(std::memory_order_acquire); }
 uint64_t physical_buffer_address(uint64_t gpu_address, uint64_t size) {
     // Per-thread memo (the render thread asks for every uniform and storage binding: ~10k per frame in the village scene, a few hundred
     // distinct ranges). The answer depends only on the pool registry and the virtual pools' mappings: both counters are in the entry.
