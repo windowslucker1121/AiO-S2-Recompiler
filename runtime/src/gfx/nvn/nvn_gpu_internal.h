@@ -236,6 +236,7 @@ bool out_overlaps(uint64_t addr, uint64_t size);
 uint64_t out_version();
 void servable_cache_enable(bool on);   // cpuperf_ab (servable_cache)
 uint64_t out_grow_version();   // moves only when held results may cover more pages ([nvn] overlap_grow)
+bool ab_hot_window_on();  // false in an off window of [nvn] cpuperf_ab with hot_window
 bool ab_tex_share_on();  // false in an off window of [nvn] cpuperf_ab with tex_share
 bool ab_tex_park_on();   // false in an off window of [nvn] cpuperf_ab with tex_park
 bool ab_overlap_grow_on();   // false in an off window of [nvn] cpuperf_ab with overlap_grow
