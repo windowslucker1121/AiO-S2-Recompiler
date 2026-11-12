@@ -17,6 +17,35 @@ Last update: 2026-11-12, branch `perf/render-r6` (R6).
 
 ## Where we are (2026-11-12, RTX 4080, Ryzen 7 5800X3D, 1920x1080, uncapped)
 
+**2026-11-12 (P2, `perf/p2-coherence`): the "coherence v2" gate (copy always the GPU's binding) measured; the full model was not built.**
+Measurement-only switch `[nvn] exp_coh_free` (`off | on | ab`; CONFIG.md, with `exp_coh_free_parts` and `exp_coh_free_cs`): graphics
+draws bind every buffer from the pool copy unchecked when the copy has held every page of the range at some point (`Mirror::ever`),
+skip the draws' held-result checks (`out_before_op`; indirect arguments are still settled) and the graphics pointer-window flushes
+(`gmem_before_op`), get pointer slot masks 0 and read-only storage from the copy. Wrong picture allowed (pages the CPU rewrote since).
+Village outside, 1080 uncapped, frame trace, paired 300-present windows (`cpuperf_ab_what = none`), another agent's idle-priority build
+(4 clang-cl) on the machine in both window kinds:
+- **All parts (65 pairs): fps +5.2 median (61/65), render replay -0.79 ms (59/65), GPU busy -0.98 ms, GPU exec -1.01 ms, game sync wait
+  -0.86 ms** (means on 83.3 fps / replay 10.31 / busy 10.34 vs off 78.2 / 11.03 / 11.18). The render-thread gate (replay >= -1.5 ms) is
+  not met; the GPU drops by ~1 ms in every pair. So the per-draw coherence work is worth ~0.8 ms of replay at most, not the ~2 ms the
+  sampler share suggested (most of those functions' time is checks that a v2 would still need in another form, or below the noise).
+- **Which part pays** (one part per run, 36-47 pairs each; absolute fps differs between runs, compare deltas):
+  - read-only graphics storage buffers bound from the copy (`exp_coh_free_parts = 4`): **GPU busy -1.51 ms**, fps +1.9 (27/36), replay
+    +-0. Today those bindings read the pool (host memory over PCIe) unless a held result covers them. This is the lead: bind read-only
+    storage of draws from the copy with the same valid-page decision uniform blocks get (`resolve_read_dep`), not unchecked. (Not the
+    dropped `exp_ssbo_copy`, which also marked their slots for pointer shaders and paid for the slot search.)
+  - graphics pointer slot masks 0 (`= 2`): nothing (fps -0.05, GPU +0.00): only 45 of ~7,000 graphics pointer-stage tables have a slot
+    marked; graphics already runs the inline fast path. The slot-mask lever is compute's (`exp_cs_gmem_none`, 3.7 slots per dispatch).
+  - unchecked bindings + no held-result checks + no pointer-window flushes without the storage part (`= 1`): replay -0.47 ms but GPU
+    +2.1 ms and fps -10.9: draws then read held compute results from the pool (stale culling data, more work). Correctness, not a lever.
+- **Unchecked compute uniforms hang the GPU.** The first form of the gate also took compute uniform blocks from the copy unchecked: TDR
+  60-90 s in (device checkpoints: compute cs 961b7f2d 64x64, after beb1205f; instruction-pointer faults = a runaway loop on stale
+  CPU-written data). Any v2 must keep CPU-written pages current before every compute reader.
+- **What a full v2 would still need** (not built, per the user's wrap-up): CPU-written pages brought current per submission chunk (a
+  sweep driven by the front plan's addresses; write-watch as the dirty collector for uncached pools, arm before copy; flush-driven for
+  cached ones) before *every* reader, compute included; GPU results resident in the copy with only CPU readers fetching (guards, first-page
+  counter reads); page-table entries at the copies, updated GPU-ordered (vkCmdUpdateBuffer after the writing dispatch), for compute's slot
+  masks. Expected from this gate: ~0.8 ms replay and ~1 ms GPU in the village, most of the GPU part reachable with the storage change alone.
+
 **2026-11-12 (R6, `perf/render-r6`): set 0's uniform blocks are dynamic uniform buffers (`[nvn] ubo_dynamic`, default on).** Village
 outside 1080 uncapped, no frame trace, 60-200 s, same machine: before 87.5 fps, 1% low 65.9, frames over 10 ms 97.8%, render replay median
 10.88 ms; after 90.0 fps, 1% low 65.7, frames over 10 ms 80.7%, replay median 10.21 ms (first form; the tuned path adds ~0.2 ms more in
@@ -589,5 +618,6 @@ of it but cost the render thread +3.2 ms: running it on the recorder thread woul
   | V1 | memo race |
   | M1 | cache merge |
   | G1 | draw anatomy |
+  | P2 | coherence v2 gate (`exp_coh_free`) |
 
   All of them are finished; no agent is running at the time of writing.
