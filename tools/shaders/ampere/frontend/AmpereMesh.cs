@@ -51,10 +51,10 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         public int AttrWords => Math.Max(1, (MaxVertices + 31) / 32 * Math.Max(1, Lines.Count) * 32);
         public int MapWords => 2 + (3 * MaxPrimitives + 3) / 4;
-        /// NXRT_HARNESS_MESH_MAP_BYTES=1 (G3, being measured; default off): the index map holds one u32 per byte, so the program's 8-bit index writes are
+        /// NXRT_HARNESS_MESH_MAP_BYTES (default on, =0 off; G3: 4 alternating pairs, main GPU busy -0.22 ms, 3/4): the index map holds one u32 per byte, so the program's 8-bit index writes are
         /// plain stores. Packed, each was an atomic read-modify-write of a shared word; in a mesh shader the driver keeps shared memory in
         /// the stage's output buffer, which has no atomics, and made every index byte a MATCH.ANY loop.
-        public static readonly bool MapBytes = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_MAP_BYTES") == "1";
+        public static readonly bool MapBytes = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_MAP_BYTES") != "0";
         public int MapEntries => MapBytes ? MapWords * 4 : MapWords;
 
         /// From a block's code (SPH at 0) and NVN2 control section; null with `error` when the block uses something not handled.

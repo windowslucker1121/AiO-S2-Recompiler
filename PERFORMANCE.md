@@ -252,6 +252,44 @@ Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
   - Profile notes: the render thread is flat (run_list's own loop ~11%, begin_draw ~5.6%, keep machinery ~8%, texture resolution ~7%,
     no function over ~3% else). Set statistics per frame (`graphics sets by index`): set 0 (uniform blocks) ~1,750 kept-set checks and
     almost no memo hits (per-object constant addresses repeat across frames, not within one); set 2 (textures) ~370 first sightings.
+## GPU round 3 (G3, 2026-11-12, branch `perf/gpu-r3`)
+
+Village 1080 uncapped, real clocks (skip-word windows of the frame trace; main = the big submission, busy = without starve).
+Start: ~76 fps no trace, 1% low ~60; main busy ~10.2 ms + culling submission #3 ~3.4 ms per frame.
+- **Ablations** (main busy per frame): all full barriers −4.9 ms, but ~3.7 of it is the mesh-indirect copy barriers (`bar:6335,6337`):
+  without them the records race and the mesh draws get less work. Every other barrier site alone −0.1..−0.3. gpt draws −3.95 ms;
+  by draw: grass prepass mesh f3054ac2 −1.2 (one draw), grass colour mesh 6ec65625 −1.2 (one draw), fern fbb731e2 −0.45; the rest of
+  the gpt meshes ~0. Stamped order of one main submission: the non-gpt meshes 4b9e2d28 (~0.45) and 7477b2c8 (shadows, ~0.7) are next.
+- **New tool: the driver's own machine code.** `pipestat` with `PIPESTAT_CACHE=<file>` writes the pipeline cache data; it holds a zstd
+  frame (the first `28 b5 2f fd`) whose payload contains the SM89 code; `work/g3/cachesass.py` (git-ignored scratch) finds the EXIT word
+  and disassembles with nvdisasm `-b SM89`. Counts against the console's SASS: f3054ac2 3,856 vs 1,776 instructions (its 3 pointer loads
+  are not the cause: selects/compares of FTZ and NaN handling, shuffle calls, if-converted switches), 6ec65625 12,156 vs 2,760,
+  fbb731e2 9,626 vs 1,417, 4b9e2d28 874 vs 308, 7477b2c8 1,758 vs 473.
+- **Kept: task/mesh pointer loads vectorized again** (`NXRT_HARNESS_GMEM_MESH_FIX`, default on). Task and mesh blocks translate as
+  compute work groups, so C1's compute-only switch had turned F1's vector loads off for every mesh block (fbb731e2: 264 32-bit loads
+  instead of 66 LDG.128) and they read compute's slot-mask word (word 0 of a graphics c[0], a driver constant) instead of their own.
+  187 gpt mesh/task blocks change. 4 alternating pairs: main busy 10.23 → 10.07 ms (4/4).
+- **Kept: mesh index map one u32 per byte** (`NXRT_HARNESS_MESH_MAP_BYTES`, default on): the 8-bit index writes were atomic
+  read-modify-write loops (the driver keeps a mesh shader's shared memory in its output buffer and turns the atomics into MATCH.ANY
+  loops); driver code −5..−10% on meshes; on top of the fix above 4 more pairs: main busy −0.22 ms (3/4). Both together ~10.2 → ~9.8 ms.
+  **Shared cache updated** (all 785 mesh/task corpus blocks, 778 changed; backup `work/shaders/mesh_backup_g3`), byte-identical to the
+  private cache that passed the checks: A18 on the nb3 capture (25 mesh draws, x sum 4,398 in every traced loop), village capture replay
+  SSIM against its reference the same as the old cache (0.49285), in-game village screenshots normal (foliage, crowns, fog, no stripes).
+  The main checkout's harness must be rebuilt from the merged branch before any later re-translation, or the mesh blocks revert.
+- **Measured, opt-in:** `NXRT_HARNESS_MESH_MAP_BYTES=1` (the index map one u32 per byte: the 8-bit index writes were atomic
+  read-modify-write loops, which the driver turns into MATCH.ANY loops over the stage's output buffer): driver code −5..−10% on meshes.
+  `NXRT_HARNESS_FTZ_FOLD=1` (flushes that cannot change a compare against a nonzero immediate or a truncation): −1.5% instructions,
+  too small to re-translate every block for.
+- **Dropped:** `out_split_held` (split results held from an earlier submission, the culling tail): main busy +0.49 ms, fps −2.4 (0/19);
+  `[nvn] dispatch_trust` (the barrier after a dispatch owed and paid by the next call a plain dispatch does not make; the game's own
+  barriers order its dispatches): −58 barriers per frame, busy −0.07 ms (18/19): the ~90 tiny 4-5 µs dispatches of #3 are not drain
+  bound; code kept, default off (cpuperf_ab name g3b). `NXRT_HARNESS_GMEM_UMISS` (uniform miss branch by a subgroup vote): the driver's
+  compiler crashes (access violation) on it, with OpGroupNonUniformAny and with a ballot. `NXRT_HARNESS_INLINE_HELPERS`: no change (the
+  calls in the code are the driver's own WARPSYNC/SHFL subroutines).
+- **Second-queue overlap of #3:** #3(N+1) is replayed ~1.8 ms before #6(N) ends on the GPU and then waits behind it, so that is the
+  overlap ceiling. A two-frame trace (`[nvn] trace_frame` now marks every submission) shows #3 binds the frame-globals buffer that every
+  draw of #6 reads (0x...2f600, 16 KiB) as storage, so with ranges alone #3(N+1) conflicts with the last draw of #6(N); proving it
+  read-only needs per-binding write information in the trace. Not built.
 
 ## What is open, by expected gain
 
