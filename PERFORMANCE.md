@@ -3,12 +3,35 @@
 Living document for the frame-rate work. Detailed per-session notes, with every key, measurement and pitfall, stay in
 `AGENTS.md` ("Performance work" and the "Session 2026-11-xx" paragraphs). Config keys are in `runtime/docs/CONFIG.md`.
 This file is the overview: where we are, how we measure, what paid, what did not, and what is next.
-Last update: 2026-11-12, branch `perf/p1-pipeline` (P1).
+Last update: 2026-11-12 evening, branch `feat/perf-generic-runtime` (orchestrator summary after P1-P4).
+
+## Summary for the next session (2026-11-12 evening)
+
+- **Village outside, 1920x1080, uncapped, quiet machine: ~85-90 fps** (session start 2026-11-11: 49.6). Default frame cap is now
+  100 (`[display] auto_fps`). The target is now a **native, stable 144 fps** (6.9 ms per frame).
+- **All three loops are close to each other (~9-10 ms): GPU busy ~9-10 ms (main submission ~8, culling submission #3 ~2.5),
+  render-thread replay ~9.4 ms, the game's own CPU frame ~7.4 ms mean / ~9.6-10 ms on the heavy frame of its 4-frame cycle.**
+- Biggest steps of this session: core pinning of render/recorder + hazard tracker on (R3), dynamic uniform offsets for set 0 and
+  texture sets by image (R6), front_plan helper thread (R5), flush_copy / pt_copy / mesh record copies ahead (GPU), x86-64-v3 +
+  ThinLTO runtime, tex_share_index (stability: frames >15 ms ~1%).
+- Deep analysis with frame model, ranked wins and dead ends: `work\analysis_144\REPORT.md` (git-ignored). Packages P1-P4 ran
+  after it; their results are in the sections below. Net: no new default-on change from P1/P2/P3; P4 kept `hle_direct`.
+- **Leads for 144, from the measurements:** read-only graphics storage bound from the pool copy with a validity check (P2: GPU
+  -1.5 ms, +1.9 fps in its measurement-only form); the grass draws' task-stage culling loop (~1.15 ms each, G5); render-thread
+  structure (two-thread replay of #6, bindless textures); the game's single-thread recording stage (half of it is our NVN emulation).
+- **Dead ends confirmed this round:** sync_lead (GPU is the limit), recorder spin cut, helper pinning on the render core's sibling,
+  second-queue overlap of #3 (window ~0.7 ms, ~96 buffer ranges to double-buffer), callee_locals in the lifter (6% slower),
+  exact mesh task payload size.
+- Shared shader cache: mesh/task blocks re-translated in G3 (backups `work\shaders\mesh_backup_r8`, `mesh_backup_g3`); the main
+  checkout's harness was rebuilt from the merged branch. **The full shader preparation is still due** (every graphics pipeline
+  layout changed with `ubo_dynamic`: first runs build pipelines in the background for a few minutes).
+- Lock tooling lesson: agents' `lock.py` crashed on German `tasklist` output (decode as bytes) and batch scripts must abort when
+  acquiring fails; kill only own PIDs.
 
 ## Goal and constraints (from the user)
 
-- **A real, steady 60 fps in the village** (`load_state("village_outside")`), the heaviest scene, at the **pinned render
-  resolution 1920x1080** (`[oot] render_height = 1080`).
+- **Now: a native, stable 144 fps in the village** (`load_state("village_outside")`) (earlier goals: steady 60, then 100), the heaviest
+  scene, at the **pinned render resolution 1920x1080** (`[oot] render_height = 1080`).
 - No DLSS, FSR, frame generation, lower resolution or skipped game rendering. The game's own post-process chain (including its
   upscaler network) stays. Resolution changes only via DLSS-like tech later, and only if the user asks.
 - Beyond 60 is welcome. Measure everything and keep only what pays.
