@@ -1135,31 +1135,56 @@ Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
 // ---- [nvn] pt_copy (default on; cpuperf_ab_what pt_copy): the guest page table points pointer shaders at the pool copy -----------------
 // Pointer shaders (A17 "gpt") read game memory through the page table, which maps the pools' host imports: every such load crosses the bus.
 // For pools whose pointers the replay sees in a pointer shader's bound storage buffers (pt_note_pointer), the whole pool is copied (the
-// mirror's own copy-in and write tracking) and the table entries of pages that are valid in the copy, hold no newer result and were copied
-// at least kPtSettle presents ago (the copy-in has run on the GPU) point at the copy. A GPU write into the pool (note_gpu_write) points its
-// pages back at once (before the write is submitted); pages the CPU wrote go back at the next submission start (absorb_writes).
+// mirror's own copy-in and write tracking) and the table entries of pages that are valid in the copy and were copied at least kPtSettle
+// presents ago (the copy-in has run on the GPU) point at the copy. A GPU write into the pool (note_gpu_write) points its pages back at once
+// (before the write is submitted); pages the CPU wrote go back at the next submission start (absorb_writes) and are copied in again.
+// Granularity: where the table holds a 2 MiB leaf of an import, the span is pointed at the copy as one 2 MiB leaf only when all of its 512
+// pages qualify (a split into page leaves would cost the shaders a walk per 4 KiB page instead of one per span); pages already in a page
+// node (import edges) go one by one.
 constexpr uint32_t kPtSettle = 4;
+constexpr uint64_t kSpanBytes = uint64_t{1} << 21, kSpanPages = kSpanBytes / 4096;
 int g_pt_on = -1;
-uint64_t g_pt_redirects = 0, g_pt_restores = 0, g_pt_targets = 0, g_pt_spans = 0;
-bool pt_span_on() {
-    static const bool on = config_get_bool("nvn", "pt_copy_spans", true);
-    return on;
-}
+uint64_t g_pt_redirects = 0, g_pt_restores = 0, g_pt_targets = 0, g_pt_spans = 0, g_pt_span_back = 0;
 bool pt_mode() {
     static const bool on = config_get_bool("nvn", "pt_copy", true) && device().features().buffer_device_address;
     return on;
 }
 bool pt_active() { return pt_mode() && g_pt_on != 0; }
-void pt_restore_page(Mirror& m, uint64_t p) {
+bool new_get(const Mirror& m, uint64_t p);
+bool page_valid(const Mirror& m, uint64_t p);
+uint64_t mirror_base(const Mirror& m) { return reinterpret_cast<uint64_t>(m.pg->base); }
+// The page node entry of `guest` without splitting a 2 MiB leaf (0: none, or a leaf holds it). g_addr_mu held.
+uint64_t page_entry_nosplit(uint64_t guest) {
+    const uint64_t e1 = pt::mid_entry(guest);
+    if (!e1) return 0;
+    const uint64_t v1 = pt::words()[e1 / 8];
+    if (!v1 || (v1 & 1)) return 0;
+    return v1 + ((guest >> 12) & 511) * 8;
+}
+// Page p goes back to the pool import (g_addr_mu held). A span pointed at the copy goes back whole (its pages lose their marks).
+void pt_back_locked(Mirror& m, uint64_t p) {
     if (!bit_get(m.redir, p)) return;
+    const uint64_t g = mirror_base(m) + p * kPageBytes;
+    const uint64_t e1 = pt::mid_entry(g);
+    if (e1 && pt::g_saved.count(e1)) {
+        pt::restore_saved(e1);
+        ++g_pt_span_back;
+        const uint64_t s = g & ~(kSpanBytes - 1);
+        const uint64_t p0 = (s - mirror_base(m)) / kPageBytes;
+        for (uint64_t q = p0; q < p0 + kSpanPages && q < m.npages; ++q)
+            if (bit_get(m.redir, q)) { bit_put(m.redir, q, false); --m.redir_n; }
+        ++g_pt_restores;
+        return;
+    }
     bit_put(m.redir, p, false);
     --m.redir_n;
     ++g_pt_restores;
+    if (const uint64_t e2 = page_entry_nosplit(g)) pt::restore_saved(e2);
+}
+void pt_restore_page(Mirror& m, uint64_t p) {
+    if (!bit_get(m.redir, p)) return;
     std::lock_guard<std::mutex> lk(g_addr_mu);
-    const uint64_t g = reinterpret_cast<uint64_t>(m.pg->base) + p * kPageBytes;
-    if (const uint64_t e1 = pt::mid_entry(g); e1 && !pt::g_saved.empty()) pt::restore_saved(e1);   // a 2 MiB leaf at the copy: its page node again
-    const uint64_t e2 = pt::page_entry(g);
-    if (e2) pt::restore_saved(e2);
+    pt_back_locked(m, p);
 }
 void pt_restore_range(Mirror& m, uint64_t first, uint64_t last) {
     if (m.redir.empty()) return;
@@ -1179,14 +1204,25 @@ void pt_restore_pages(Mirror& m, const std::vector<uint64_t>& pages) {
             m.any_want = true;
         }
 }
-bool new_get(const Mirror& m, uint64_t p);
-bool page_valid(const Mirror& m, uint64_t p);
-// Once per present, at the first submission: pages that may point at the copy do, the others go back.
+// Page p may point at the copy now.
+bool pt_ok(const Mirror& m, uint64_t p, uint32_t now) {
+    const uint32_t at = m.copied_at[static_cast<size_t>(p)];
+    return page_valid(m, p) && at && now - at >= kPtSettle && m.chunks[static_cast<size_t>(p * kPageBytes / kChunkBytes)].buffer;
+}
+uint64_t pt_copy_addr(Mirror& m, uint64_t p) {   // the device address of page p in the copy (0: none)
+    const uint64_t chunk_pages = kChunkBytes / kPageBytes;
+    const size_t ci = static_cast<size_t>(p / chunk_pages);
+    if (ci >= m.chunks.size() || !m.chunks[ci].buffer) return 0;
+    if (!m.chunk_dev[ci]) m.chunk_dev[ci] = device().buffer_address(m.chunks[ci].buffer);
+    return m.chunk_dev[ci] ? m.chunk_dev[ci] + (p - ci * chunk_pages) * kPageBytes : 0;
+}
+// Once per present, at the first submission: pages and spans that may point at the copy do, the others go back.
 void pt_pass(uint32_t now) {
     static uint32_t last = ~0u;
     if (now == last) return;
     last = now;
     const bool on = pt_active();
+    static std::vector<uint64_t> todo, keep, spans;
     for (Mirror* mp : g_mirrors) {
         Mirror& m = *mp;
         if (!m.pt_target) continue;
@@ -1197,9 +1233,9 @@ void pt_pass(uint32_t now) {
             m.pt_scan = true;
             continue;
         }
-        static std::vector<uint64_t> todo, keep;
         todo.clear();
         keep.clear();
+        spans.clear();
         if (m.pt_scan) {   // every page once
             m.pt_scan = false;
             for (uint64_t p = 0; p < m.npages; ++p) todo.push_back(p);
@@ -1208,70 +1244,66 @@ void pt_pass(uint32_t now) {
             todo.swap(m.pt_pending);
         }
         std::lock_guard<std::mutex> lk(g_addr_mu);
-        const uint64_t base = reinterpret_cast<uint64_t>(m.pg->base);
-        const uint64_t chunk_pages = kChunkBytes / kPageBytes;
+        const uint64_t base = mirror_base(m);
         for (uint64_t p : todo) {
             if (p >= m.npages) continue;
             const bool valid = page_valid(m, p);
-            const uint32_t at = m.copied_at[static_cast<size_t>(p)];
-            const bool settled = at && now - at >= kPtSettle;
-            const bool ok = valid && settled && m.chunks[static_cast<size_t>(p / chunk_pages)].buffer;
+            const bool ok = pt_ok(m, p, now);
             const bool r = bit_get(m.redir, p);
-            if (valid && !settled && !r) keep.push_back(p);   // copied lately: next present
-            if (ok && !r) {
-                const size_t ci = static_cast<size_t>(p / chunk_pages);
-                if (!m.chunk_dev[ci]) m.chunk_dev[ci] = device().buffer_address(m.chunks[ci].buffer);
-                if (!m.chunk_dev[ci]) continue;
-                const uint64_t e2 = pt::page_entry(base + p * kPageBytes);
-                if (!e2) continue;
-                const uint64_t old = pt::words()[e2 / 8];
-                if (!(old & 1)) continue;
-                pt::g_saved.emplace(e2, old);
-                pt::put(e2, (m.chunk_dev[ci] + (p - ci * chunk_pages) * kPageBytes) | 1);
-                bit_put(m.redir, p, true);
-                ++m.redir_n;
-                ++g_pt_redirects;
-            } else if (!ok && r) {
-                bit_put(m.redir, p, false);
-                --m.redir_n;
-                ++g_pt_restores;
-                if (const uint64_t e1 = pt::mid_entry(base + p * kPageBytes); e1) pt::restore_saved(e1);
-                const uint64_t e2 = pt::page_entry(base + p * kPageBytes);
-                if (e2) pt::restore_saved(e2);
-            }
             if (!valid && !new_get(m, p)) { bit_put(m.want, p, true); m.any_want = true; }
+            if (r && !ok) { pt_back_locked(m, p); continue; }
+            if (r) continue;
+            if (valid && !ok) keep.push_back(p);   // copied lately: next present
+            if (!ok) continue;
+            const uint64_t g = base + p * kPageBytes;
+            const uint64_t e1 = pt::mid_entry(g);
+            if (!e1) continue;
+            const uint64_t v1 = pt::words()[e1 / 8];
+            if (v1 & 1) {   // a 2 MiB leaf: the whole span or nothing
+                const uint64_t s = g & ~(kSpanBytes - 1);
+                if (spans.empty() || spans.back() != s) spans.push_back(s);
+                continue;
+            }
+            if (!v1) continue;
+            const uint64_t e2 = v1 + ((g >> 12) & 511) * 8;
+            const uint64_t old = pt::words()[e2 / 8];
+            const uint64_t dev = pt_copy_addr(m, p);
+            if (!(old & 1) || !dev) continue;
+            pt::g_saved.emplace(e2, old);
+            pt::put(e2, dev | 1);
+            bit_put(m.redir, p, true);
+            ++m.redir_n;
+            ++g_pt_redirects;
+        }
+        // spans: all 512 pages in this pool, in one chunk of the copy, and qualifying
+        for (uint64_t s : spans) {
+            if (s < base || s + kSpanBytes > base + m.npages * kPageBytes) continue;
+            const uint64_t p0 = (s - base) / kPageBytes;
+            if (p0 * kPageBytes / kChunkBytes != (p0 + kSpanPages - 1) * kPageBytes / kChunkBytes) continue;
+            const uint64_t e1 = pt::mid_entry(s);
+            if (!e1 || pt::g_saved.count(e1)) continue;
+            const uint64_t v1 = pt::words()[e1 / 8];
+            if (!(v1 & 1)) continue;
+            bool all = true;
+            for (uint64_t q = p0; q < p0 + kSpanPages && all; ++q) all = pt_ok(m, q, now) && !bit_get(m.redir, q);
+            const uint64_t dev = pt_copy_addr(m, p0);
+            if (!all || !dev) continue;
+            pt::g_saved.emplace(e1, v1);
+            pt::put(e1, dev | 1);
+            for (uint64_t q = p0; q < p0 + kSpanPages; ++q) bit_put(m.redir, q, true);
+            m.redir_n += kSpanPages;
+            ++g_pt_spans;
         }
         m.pt_pending.insert(m.pt_pending.end(), keep.begin(), keep.end());
-        // 2 MiB spans whose 512 pages all point at the copy (in one chunk) become one 2 MiB leaf again: a pointer shader's page cache then
-        // covers the whole span (one walk instead of one per 4 KiB page)
-        if (pt_span_on() && m.redir_n >= 512) {
-            for (uint64_t g = (base + (uint64_t{1} << 21) - 1) & ~((uint64_t{1} << 21) - 1); g + (uint64_t{1} << 21) <= base + m.npages * kPageBytes;
-                 g += uint64_t{1} << 21) {
-                const uint64_t p0 = (g - base) / kPageBytes;
-                if (p0 / chunk_pages != (p0 + 511) / chunk_pages || (p0 & 63)) continue;
-                bool all = true;
-                for (uint64_t w = 0; w < 8 && all; ++w) all = m.redir[static_cast<size_t>((p0 >> 6) + w)] == ~uint64_t{0};
-                if (!all) continue;
-                const uint64_t e1 = pt::mid_entry(g);
-                if (!e1) continue;
-                const uint64_t v1 = pt::words()[e1 / 8];
-                if ((v1 & 1) || !v1 || pt::g_saved.count(e1)) continue;   // already a leaf (ours or an import's)
-                const size_t ci = static_cast<size_t>(p0 / chunk_pages);
-                if (!m.chunk_dev[ci]) continue;
-                pt::g_saved.emplace(e1, v1);
-                pt::put(e1, (m.chunk_dev[ci] + (p0 - ci * chunk_pages) * kPageBytes) | 1);
-                ++g_pt_spans;
-            }
-        }
     }
     static uint32_t last_log = 0;
     if (now - last_log >= 1200) {
         last_log = now;
         uint64_t n = 0, pages = 0;
         for (Mirror* mp : g_mirrors) if (mp->pt_target) { ++n; pages += mp->redir_n; }
-        NXLOG_I(kTag, "pt_copy: %llu pools, %llu MiB of pages read from the copy now; %llu redirects, %llu back, %llu spans split, %llu 2 MiB leaves at the copy",
+        NXLOG_I(kTag, "pt_copy: %llu pools, %llu MiB read from the copy now; %llu page and %llu 2 MiB redirects, %llu back (%llu spans)",
                 (unsigned long long)n, (unsigned long long)(pages * kPageBytes >> 20), (unsigned long long)g_pt_redirects,
-                (unsigned long long)g_pt_restores, (unsigned long long)pt::g_split, (unsigned long long)g_pt_spans);
+                (unsigned long long)g_pt_spans, (unsigned long long)g_pt_restores, (unsigned long long)g_pt_span_back);
     }
 }
 
