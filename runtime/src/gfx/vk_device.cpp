@@ -1051,14 +1051,44 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         if (!limits_.fsr_sizes) features_.fragment_shading_rate = false;
     }
     if (!headless) dev_exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-    float prio = 1.0f;
-    VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    const float prio[2] = {1.0f, 1.0f};
+    VkDeviceQueueCreateInfo qcis[2] = {{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}, {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}};
+    VkDeviceQueueCreateInfo& qci = qcis[0];
     qci.queueFamilyIndex = queue_family_;
     qci.queueCount = 1;
-    qci.pQueuePriorities = &prio;
+    qci.pQueuePriorities = prio;
+    uint32_t nqci = 1;
+    // [gfx] second_queue: same (a second queue of the main family) | compute (a queue of a family with compute and no graphics) | off
+    int q2_mode = 0;   // 1 same family, 2 compute family
+    uint32_t q2_index = 0;
+    {
+        const std::string m = config_get_str("gfx", "second_queue", "off");
+        uint32_t nqf = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_, &nqf, nullptr);
+        std::vector<VkQueueFamilyProperties> qfp(nqf);
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_, &nqf, qfp.data());
+        if (m == "same" && qfp[queue_family_].queueCount >= 2) {
+            q2_mode = 1;
+            qci.queueCount = 2;
+            q2_index = 1;
+            queue2_family_ = queue_family_;
+        } else if (m == "compute") {
+            for (uint32_t i = 0; i < nqf; ++i)
+                if (i != queue_family_ && (qfp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && !(qfp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && qfp[i].timestampValidBits) {
+                    q2_mode = 2;
+                    queue2_family_ = i;
+                    qcis[1].queueFamilyIndex = i;
+                    qcis[1].queueCount = 1;
+                    qcis[1].pQueuePriorities = prio;
+                    nqci = 2;
+                    break;
+                }
+        }
+        if (m != "off") NXLOG_I(kTag, "second queue: %s (family %u)", q2_mode == 1 ? "same family" : q2_mode == 2 ? "compute family" : "none available", queue2_family_);
+    }
     VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &en};
-    dci.queueCreateInfoCount = 1;
-    dci.pQueueCreateInfos = &qci;
+    dci.queueCreateInfoCount = nqci;
+    dci.pQueueCreateInfos = qcis;
     dci.enabledExtensionCount = static_cast<uint32_t>(dev_exts.size());
     dci.ppEnabledExtensionNames = dev_exts.data();
     r = vkCreateDevice(physical_, &dci, nullptr, &device_);
@@ -1088,6 +1118,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     nvn::be::hazard::install_create_hooks();   // [nvn] hazard: what pipelines, sets and buffers touch (nvn_hazard.cpp)
     if (config_get_bool("gfx", "exp_bda_probe", false)) probe_bda_placement(physical_, device_, a12.bufferDeviceAddressCaptureReplay);
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
+    if (q2_mode) vkGetDeviceQueue(device_, queue2_family_, q2_index, &queue2_);
     if (config_get_bool("gfx", "exp_bda_probe", false)) probe_sparse_window(physical_, device_, queue_, queue_family_);
 
     uint32_t nq = 0;

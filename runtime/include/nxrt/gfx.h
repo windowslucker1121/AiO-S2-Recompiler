@@ -174,6 +174,11 @@ public:
     VkQueue queue() const { return queue_; }
     uint32_t queue_family() const { return queue_family_; }
     std::mutex& queue_mutex() { return queue_mutex_; }              // hold while calling vkQueueSubmit / vkQueuePresentKHR
+    // [gfx] second_queue = same | compute (default off): a second queue for work that may run beside the first one (nvn async
+    // submissions). same: another queue of the main family; compute: a queue of a compute-only family. Null without one.
+    VkQueue queue2() const { return queue2_; }
+    uint32_t queue2_family() const { return queue2_family_; }
+    std::mutex& queue2_mutex() { return queue2_mutex_; }
     VmaAllocator allocator() const { return vma_; }
     uint64_t buffer_address(VkBuffer b) const;   // vkGetBufferDeviceAddress (0 without the feature or the usage bit)
     VkSurfaceKHR surface() const { return surface_; }              // null when headless
@@ -238,6 +243,9 @@ private:
     uint32_t queue_family_ = 0;
     uint32_t timestamp_valid_bits_ = 0;
     std::mutex queue_mutex_;
+    VkQueue queue2_ = VK_NULL_HANDLE;
+    uint32_t queue2_family_ = 0;
+    std::mutex queue2_mutex_;
     std::atomic<bool> lost_reported_{false};
     std::function<std::string(uint64_t)> checkpoint_describer_;
     VmaAllocator vma_ = nullptr;

@@ -486,6 +486,46 @@ trace's `gpu.busy`), so a GPU change is judged by GPU busy *and* render-thread r
   - `ban_skip` (ranges of banned pages): 0 banned uniform pages in the village: removed. A persistent content-keyed texture-set cache: not built
     (set 2 builds spend 0.57 of 0.69 ms resolving, the cache could save <= 0.1 ms).
 
+## GPU round 5 (G5 / P3, 2026-11-12, branch `perf/gpu-overlap`): the culling submission on a second queue
+
+Village 1080 uncapped. Question: can the culling submission #3 (2.5 ms of GPU, ~150 dispatches, mostly small) run beside the main
+submission #6 on a second queue?
+- **Timing, measured (frame trace, 7,321 steady frames, `work/g5/gpuchain.py`):** #3's GPU span 2.47 ms median (p10 2.07, p90 3.37);
+  it starts 0.08 ms after the previous #6 ends. #3's replay ends a median **0.71 ms before** the previous #6 ends on the GPU (p10 2.02
+  before, p90 1.35 after). The next #6's first chunk is handed over and then waits 2.5 ms behind #3 on the GPU.
+- **Dependencies, measured (trace of two+ frames, storage addresses now in the texture lines: `@addr/size` or `@v<pool>+off/size`;
+  `work/g5/deps.py`):**
+  - *Head overlap* (#3(N) beside the start of #6(N)) is impossible: #6(N)'s first draw already binds what #3(N) writes (the 9.9 MB
+    light-cluster grid, the 192-byte SH buffer, 16 KiB frame-globals buffers, a 14.7 KB pointer-written buffer). Real RAW.
+  - *Tail overlap* (#3(N) beside the end of #6(N-1)) needs ~96 write-after-read ranges protected, not just the two round 3 named: the
+    cluster grid (9.9 MB), the material table (720 KB), frame globals, the culling record buffers (0.6-16 MB, read by the mesh draws
+    and their record copies), per-object 16/40 KiB buffers. #6(N-1) reads them through storage bindings, uniform blocks and pointers.
+  - So the usable window is the ~0.7 ms between #3(N)'s replay end and #6(N-1)'s GPU end, at the price of double-buffering ~30 MB of
+    game buffers for every reader kind (bindings, dynamic uniform offsets, the guest page table, mesh-indirect copies).
+- **Built for measurement (default off):** `[gfx] second_queue = same | compute` (a second VkQueue: another queue of the main family, or
+  a compute-only family), `[nvn] exp_async_cull` (draw-less submissions on it; a join on the first queue waits for its timeline value and
+  signals the serial, so host waits and slot reuse stay ordered; `compute` decides before recording by scanning the lists for compute-only
+  work and records into a per-slot pool of that family), `exp_async_cull_ab` (only in the on windows of `cpuperf_ab`).
+- **Ceiling run not measured:** the paired-window runs with these keys (`work/g5/s_ab_same.json`, `s_ab_comp.json`: `cpuperf_ab = 300`,
+  `cpuperf_ab_what` = an unknown name so only the async switch moves) were lost to the lock incidents of the day and the wrap-up; the
+  code is built and committed, untested in game. Upper bound from the timing above: ~0.7 ms of GPU wall per frame (less, since #3 then
+  shares the SMs with #6's tail), and only together with the WAR protection. Verdict for 144 fps: not worth the double-buffering;
+  #3's own GPU time (2.5 ms; P2's coherence work removes its shadow-in pairs and slot searches) is the better lever.
+- **W4, the two grass mesh draws (stamped `gpu_draws`, same exe, back-to-back runs):** grass prepass `d 40478981 f3054ac2` 1.17 ms,
+  grass colour `d 4097c13f 6ec65625` 1.15 ms, fern `fbb731e2` 0.34 ms per frame: still the two largest GPU items. **Their cost is the
+  task stage, not the mesh stage:** G4's `NXRT_HARNESS_MESH_EXP=empty` emptied only mesh programs (tasks are excluded in
+  AmpereTranslator.cs), which is why an empty mesh cost the same. The grass tasks (Foliage 3,200-byte-payload task blocks c6f3f11e,
+  97de564f, 1aff15a8, fd8debac, ...) are GPU-driven culling loops: one work group per cell (index < 4096), a frustum test of the cell, then
+  up to 256 items in batches of 32 with per-item tests and pointer loads (`LDG.E.STRONG.SM`), surviving items written to the payload,
+  VOTE/POPC compaction, then the mesh launch. Translated, a task executable is 47-56 registers and 40-55 KB of driver code against ~700
+  instructions of the console's SASS (~4x); the mesh limits are small (96 vertices / 32 primitives; output 2.6 KiB for the prepass mesh).
+  - Tried: the task payload declared at its real size (`NXRT_HARNESS_MESH_PAYLOAD_EXACT=1`: 3,200 B instead of 4 KiB; 624 task/mesh
+    blocks change; private cache `work/g5/cache_pay`, not merged): 1.167 / 1.155 ms vs 1.168 / 1.153 ms. No gain; the switch stays off.
+  - Next for W4 (not done): the task stage's own code (the culling loop, ~4x the console's instructions; the F2/G3 route of comparing the
+    driver's machine code with the SASS), and whether the prepass and the colour draw run the same culling twice.
+- `gpu_stats` per-family lines (`[prof] gpu_stats`) did not list the grass draws at all and report task invocations 0 for every family
+  (the draws inside the game's occlusion queries are not measured): use stamps for them.
+
 ## Game side P4 (GS, 2026-11-12, branch `perf/game-side`)
 
 Village outside, 1080, uncapped, alone; G = frame - game GPU sync wait from `[diag] frame_csv` (no frame trace: the trace times every

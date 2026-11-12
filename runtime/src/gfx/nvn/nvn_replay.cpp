@@ -997,8 +997,14 @@ std::atomic<bool> g_trace_req{false};   // backend_trace_next_frame(): trace the
 
 const char* tex_desc(const Texture* t, char* buf, size_t n) {
     if (!t) { std::snprintf(buf, n, "-"); return buf; }
-    std::snprintf(buf, n, "t%u:%s %dx%dx%d L%u/%u%s%s", t->id, t->fmt ? t->fmt->name : "?", t->b.width, t->b.height, t->b.depth, t->levels, t->layers,
-                  t->b.samples > 1 ? " ms" : "", t->b.target == NVN_TEXTURE_TARGET_3D ? " 3D" : "");
+    // the storage: host address and size, or the virtual pool and offset (dependency analysis across frames: objects are new every frame)
+    char at[64];
+    if (t->mem) std::snprintf(at, sizeof at, " @%llx/%llu", static_cast<unsigned long long>(reinterpret_cast<uint64_t>(t->mem)), static_cast<unsigned long long>(t->storage_size));
+    else if (t->vpool) std::snprintf(at, sizeof at, " @v%llx+%llx/%llu", static_cast<unsigned long long>(reinterpret_cast<uint64_t>(t->vpool.get())),
+                                     static_cast<unsigned long long>(t->voffset), static_cast<unsigned long long>(t->storage_size));
+    else at[0] = 0;
+    std::snprintf(buf, n, "t%u:%s %dx%dx%d L%u/%u%s%s%s", t->id, t->fmt ? t->fmt->name : "?", t->b.width, t->b.height, t->b.depth, t->levels, t->layers,
+                  t->b.samples > 1 ? " ms" : "", t->b.target == NVN_TEXTURE_TARGET_3D ? " 3D" : "", at);
     return buf;
 }
 
@@ -9530,6 +9536,7 @@ void texlook_submit(const std::vector<Ref<CmdList>>& lists, uint64_t serial) {
 
 bool ab_tex_park_on() { return ab_on(kAbTexPark); }
 bool ab_tex_share_on() { return ab_on(kAbTexShare); }
+bool ab_window_on() { return g_cpu_ab_on; }   // [nvn] cpuperf_ab: the current window is an "on" window (features outside AbFeat, nvn_gpu.cpp)
 bool ab_hot_skip_on() { return ab_on(kAbHotSkip); }   // [nvn] cpuperf_ab_what hot_skip (nvn_gpu_pool.cpp)   // [nvn] cpuperf_ab_what tex_share (nvn_gpu_texture.cpp)   // [nvn] cpuperf_ab_what tex_park (nvn_gpu_texture.cpp)
 bool ab_overlap_grow_on() { return ab_on(kAbOverlapGrow); }
 bool ab_index_inc_on() { return ab_on(kAbIndexInc); }   // [nvn] cpuperf_ab_what index_inc (nvn_gpu_pool.cpp)   // [nvn] cpuperf_ab_what overlap_grow (nvn_gpu_pool.cpp)
@@ -10027,6 +10034,50 @@ void replay_end_submit(Frame& f) {
     }
     for (; g_dbg_depth > 0; --g_dbg_depth) vkCmdEndDebugUtilsLabelEXT(f.cb);   // labels cannot outlive their command buffer either
     F = nullptr;
+}
+
+// [nvn] exp_async_cull: whether a submission's lists (called ones included) hold only work a compute queue can run (dispatches, buffer
+// copies, clears and updates, barriers, state). Counts the dispatches; `bad` gets the first op that is not such work.
+namespace {
+bool compute_only_scan(const CmdList& list, int depth, uint32_t& dispatches, Op& bad) {
+    if (depth > kMaxDepth) return false;
+    for (RecordReader r(list); r.next();) {
+        const Op op = r.op();
+        switch (op) {
+            case Op::Dispatch: case Op::DispatchIndirect: ++dispatches; break;
+            case Op::Nop: case Op::BindProgram: case Op::BindBuffers: case Op::BindTextures: case Op::BindImages: case Op::SetTexturePool:
+            case Op::SetSamplerPool: case Op::ClearBuffer: case Op::CopyBufferToBuffer: case Op::UpdateUniformBuffer: case Op::Barrier:
+            case Op::FenceSync: case Op::WaitSync: case Op::SignalEvent: case Op::WaitEvent: case Op::PushDebugGroup: case Op::PopDebugGroup:
+            case Op::Small:
+                break;
+            case Op::CallCommands: {
+                const auto& p = r.payload<P_CallCommands>();
+                const uint64_t* h = reinterpret_cast<const uint64_t*>(r.blob<P_CallCommands>());
+                for (uint32_t i = 0; i < p.count; ++i) {
+                    Ref<CmdList> l = handle_lookup(h[i]);
+                    if (l && !compute_only_scan(*l, depth + 1, dispatches, bad)) return false;
+                }
+                break;
+            }
+            default:
+                if (static_cast<int>(op) >= static_cast<int>(Op::BindVertexAttribs) && static_cast<int>(op) <= static_cast<int>(Op::SetConservativeRaster) &&
+                    op != Op::SetRenderTargets)
+                    break;   // graphics state only: recorded at the next draw
+                bad = op;
+                return false;
+        }
+    }
+    return true;
+}
+}  // namespace
+bool submission_compute_only(const std::vector<Ref<CmdList>>& lists, uint32_t* dispatches, int* bad_op) {
+    uint32_t n = 0;
+    Op bad = Op::Nop;
+    for (const auto& l : lists)
+        if (l && !compute_only_scan(*l, 0, n, bad)) { *dispatches = n; *bad_op = static_cast<int>(bad); return false; }
+    *dispatches = n;
+    *bad_op = -1;
+    return true;
 }
 
 void replay_shutdown() {
