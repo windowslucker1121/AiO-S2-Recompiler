@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstring>
 #include <thread>
+#include <vector>
 
 #include "nxrt/memguard.h"
 
@@ -56,10 +57,81 @@ NXTEST(footprint_tracks_private_commit) {
 
 NXTEST(limit_gb_parsing) {
     CHECK_EQ(nxrt::memguard_limit_gb("12.5"), 12.5);
-    CHECK_EQ(nxrt::memguard_limit_gb("abc"), 8.0);
-    CHECK_EQ(nxrt::memguard_limit_gb(""), 8.0);
-    CHECK_EQ(nxrt::memguard_limit_gb(nullptr), 8.0);
-    CHECK_EQ(nxrt::memguard_limit_gb("-3"), 8.0);
+    CHECK_EQ(nxrt::memguard_limit_gb("auto"), 0.0);   // 0: derived from the machine
+    CHECK_EQ(nxrt::memguard_limit_gb("abc"), 0.0);
+    CHECK_EQ(nxrt::memguard_limit_gb(""), 0.0);
+    CHECK_EQ(nxrt::memguard_limit_gb(nullptr), 0.0);
+    CHECK_EQ(nxrt::memguard_limit_gb("-3"), 0.0);
+}
+
+// auto: the physical memory (the footprint already has the video memory taken out), never under 8 GB.
+NXTEST(auto_limit_follows_physical_memory) {
+    CHECK_EQ(nxrt::memguard_auto_limit(32ull << 30), 32ull << 30);
+    CHECK_EQ(nxrt::memguard_auto_limit(16ull << 30), 16ull << 30);
+    CHECK_EQ(nxrt::memguard_auto_limit(4ull << 30), 8ull << 30);
+}
+
+// A peak shorter than the grace time is only logged: the game is not stopped for a big temporary buffer.
+NXTEST(short_peak_within_grace_does_not_trip) {
+    g_trip_flag.store(false);
+    const uint64_t limit = nxrt::memguard_footprint() + kHeadroom;
+
+    nxrt::MemGuardOptions opt;
+    opt.limit_bytes = limit;
+    opt.poll_ms = 20;
+    opt.grace_ms = 2000;
+    opt.on_exceed = &set_flag_cb;
+    nxrt::memguard_start(opt);
+
+    void* p = commit_and_touch();
+    REQUIRE(p != nullptr);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    CHECK(nxrt::memguard_peak() >= limit);   // seen over the limit ...
+    VirtualFree(p, 0, MEM_RELEASE);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    CHECK(!g_trip_flag.load());              // ... but back under it within the grace time
+    CHECK(!nxrt::memguard_tripped());
+
+    nxrt::memguard_stop();
+    CHECK(!nxrt::memguard_running());
+}
+
+namespace {
+std::atomic<int> g_shed_on{0}, g_shed_off{0};
+uint64_t shed_cb(bool pressure) {
+    (pressure ? g_shed_on : g_shed_off).fetch_add(1);
+    return 0;
+}
+}  // namespace
+
+// Past the soft line the shedders run (once per episode) and memguard_pressure() is true; below it again they are told so.
+NXTEST(pressure_runs_shedders) {
+    static bool added = false;
+    if (!added) { nxrt::memguard_add_shedder("test", &shed_cb); added = true; }
+    g_shed_on.store(0);
+    g_shed_off.store(0);
+    nxrt::MemGuardOptions opt;
+    opt.limit_bytes = nxrt::memguard_footprint() + kTouchBytes * 4;   // soft line (80%) is under footprint + 96 MiB
+    opt.poll_ms = 20;
+    opt.grace_ms = 60000;
+    nxrt::memguard_start(opt);
+    void* p = nullptr;
+    // commit until past the soft line
+    std::vector<void*> blocks;
+    const auto deadline = Clock::now() + std::chrono::seconds(5);
+    while (!nxrt::memguard_pressure() && Clock::now() < deadline) {
+        if (blocks.size() < 4) blocks.push_back(commit_and_touch());
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    CHECK(nxrt::memguard_pressure());
+    CHECK_EQ(g_shed_on.load(), 1);
+    for (void* b : blocks) if (b) VirtualFree(b, 0, MEM_RELEASE);
+    const auto d2 = Clock::now() + std::chrono::seconds(5);
+    while (nxrt::memguard_pressure() && Clock::now() < d2) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK(!nxrt::memguard_pressure());
+    CHECK_EQ(g_shed_off.load(), 1);
+    (void)p;
+    nxrt::memguard_stop();
 }
 
 NXTEST(overrun_trips_callback_and_peak) {
@@ -69,6 +141,7 @@ NXTEST(overrun_trips_callback_and_peak) {
     nxrt::MemGuardOptions opt;
     opt.limit_bytes = limit;
     opt.poll_ms = 20;
+    opt.grace_ms = 0;
     opt.on_exceed = &set_flag_cb;
     nxrt::memguard_start(opt);
 
@@ -123,6 +196,7 @@ NXTEST(on_exceed_called_exactly_once) {
     nxrt::MemGuardOptions opt;
     opt.limit_bytes = limit;
     opt.poll_ms = 20;
+    opt.grace_ms = 0;
     opt.on_exceed = &count_cb;
     nxrt::memguard_start(opt);
 

@@ -1624,6 +1624,11 @@ Rules for agents:
   (`--prepare-shaders` refuses `--instance`; the "Preparing shaders" window is off for instances: it writes the shared shader data), and
   anything meant to write the shared pipeline cache or the default run's saves.
 - A build beside a running game is fine if memory allows; still only one build in `work\build\oot` at a time.
+- **Memory guard (2026-11-12, `fix/memory-guard`):** a player's default run was stopped at 19.5 GB by the old fixed 16 GB limit. Cause:
+  every save of the 4.5 GB pipeline cache allocated a heap buffer of its size (+4.4 GB private commit per save, also every ~2 s at boot
+  while prewarm grew the cache); named instances never save, so test runs never saw it. Saves and loads now go through file mappings
+  (`nxrt/file_map.h`: no commit step, measured old vs new exe), and `[memory] limit_gb` defaults to `auto` (physical RAM) with a 10 s
+  grace and pressure shedding (runtime/docs/CONFIG.md). `memory.limit_gb: 24` in test runs is no longer needed.
 - Checked live on 2026-11-06 (RTX 4080): two instances to the title through the MCP server; Enter to one reached only that one, each wrote
   only its folder, the game folder's `controls.ini`, `pipeline_keys.bin`, `shader_order.txt`, the shared `pipeline_cache.bin`, `prepare.state`
   and the default save stayed untouched; a second start of a running instance and the memory guard both exit 7.

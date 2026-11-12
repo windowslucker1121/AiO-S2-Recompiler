@@ -20,10 +20,12 @@
 #include <vector>
 
 #include "nxrt/config.h"
+#include "nxrt/file_map.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/instance.h"
 #include "nxrt/log.h"
+#include "nxrt/memguard.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_spirv_patch.h"
 #include "extras/hdr_nvn.h"
@@ -126,39 +128,20 @@ double ms_from(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
-// The cache file's bytes. A shader preparation leaves gigabytes on NVIDIA, so sizes are 64-bit: the C library's ftell answers -1 from 2 GiB on
-// (a prepared cache was then not loaded at all, and the session's next save replaced it with the few hundred MB it had compiled itself).
-bool read_cache_file(const std::string& path, std::vector<char>* out, uint64_t* file_bytes) {
-    std::error_code ec;
-    const std::filesystem::path p(std::u8string(reinterpret_cast<const char8_t*>(path.data()), path.size()));
-    *file_bytes = 0;
-    if (!std::filesystem::is_regular_file(p, ec)) return true;          // no file: nothing to load, nothing at stake
-    const uintmax_t len = std::filesystem::file_size(p, ec);
-    if (ec) return false;
-    *file_bytes = static_cast<uint64_t>(len);
-    if (len == 0) return true;
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return false;
-    out->resize(static_cast<size_t>(len));
-    constexpr size_t kChunk = size_t(256) << 20;                          // in pieces: no single read call of gigabytes
-    for (size_t at = 0; at < out->size();) {
-        const size_t n = std::min(kChunk, out->size() - at);
-        f.read(out->data() + at, static_cast<std::streamsize>(n));
-        if (static_cast<size_t>(f.gcount()) != n) { out->clear(); return false; }
-        at += n;
-    }
-    return true;
-}
+// The cache file is mapped, never read into a heap buffer (nxrt/file_map.h): a shader preparation leaves 4-5 GB on NVIDIA, and a heap copy
+// of that added its whole size to the process's private commit next to the driver's own copy (what the memory guard watches). Sizes are
+// 64-bit: the C library's ftell answered -1 from 2 GiB on (a prepared cache was then not loaded at all, and the session's next save
+// replaced it with the few hundred MB it had compiled itself).
 
 // Why a driver would ignore the file: its header names another device or driver build (VkPipelineCacheHeaderVersionOne).
-std::string cache_header_mismatch(const std::vector<char>& data) {
-    if (data.size() < 32) return "the file is shorter than a pipeline cache header";
+std::string cache_header_mismatch(const char* data, size_t size) {
+    if (size < 32) return "the file is shorter than a pipeline cache header";
     uint32_t w[4];
-    std::memcpy(w, data.data(), sizeof w);
+    std::memcpy(w, data, sizeof w);
     const VkPhysicalDeviceProperties& p = device().properties();
     if (w[1] != VK_PIPELINE_CACHE_HEADER_VERSION_ONE) return "unknown header version";
     if (w[2] != p.vendorID || w[3] != p.deviceID) return "it was made on another GPU";
-    if (std::memcmp(data.data() + 16, p.pipelineCacheUUID, VK_UUID_SIZE) != 0) return "it was made by another driver version (pipelineCacheUUID)";
+    if (std::memcmp(data + 16, p.pipelineCacheUUID, VK_UUID_SIZE) != 0) return "it was made by another driver version (pipelineCacheUUID)";
     return {};
 }
 
@@ -176,36 +159,36 @@ void ensure_cache() {
         if (std::filesystem::exists(p, ec) || !std::filesystem::exists(def, ec)) def = p.string();
     }
     g_cache_path = config_get_str("nvn", "pipeline_cache", def.c_str());
-    std::vector<char> data;
-    uint64_t file_bytes = 0;
+    nxrt::MappedFile data;
     const auto t0 = std::chrono::steady_clock::now();
-    if (!g_cache_path.empty() && !read_cache_file(g_cache_path, &data, &file_bytes)) {
+    if (!g_cache_path.empty() && !data.open(g_cache_path)) {
         g_cache_unreadable = true;
         NXLOG_W(kTag, "pipeline cache %s (%llu bytes) could not be read: the session starts with an empty cache and leaves the file alone",
-                g_cache_path.c_str(), static_cast<unsigned long long>(file_bytes));
+                g_cache_path.c_str(), static_cast<unsigned long long>(data.file_size()));
     }
     const double read_ms = ms_from(t0);
-    g_cache_big = file_bytes >= (64u << 20);
+    g_cache_big = data.file_size() >= (64u << 20);
     VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     ci.initialDataSize = data.size();
-    ci.pInitialData = data.empty() ? nullptr : data.data();
+    ci.pInitialData = data.size() ? data.data() : nullptr;
     const auto t1 = std::chrono::steady_clock::now();
     if (vkCreatePipelineCache(vkdev(), &ci, nullptr, &g_cache) != VK_SUCCESS) {
         NXLOG_W(kTag, "the driver refused the pipeline cache %s (%zu bytes): starting empty", g_cache_path.c_str(), data.size());
         ci.initialDataSize = 0;
         ci.pInitialData = nullptr;
         vkCreatePipelineCache(vkdev(), &ci, nullptr, &g_cache);
-    } else if (!data.empty()) {
+    } else if (data.size()) {
         const double create_ms = ms_from(t1);
         // What the driver kept of it: the floor for every later save. A driver ignores a file made by another build without an error.
         size_t held = 0;
         const auto t2 = std::chrono::steady_clock::now();
         vkGetPipelineCacheData(vkdev(), g_cache, &held, nullptr);
         g_cache_base = held;
-        const std::string why = cache_header_mismatch(data);
-        NXLOG_I(kTag, "pipeline cache loaded: %zu bytes from %s (read %.0f ms, driver %.0f ms; the driver holds %zu bytes, size query %.0f ms)%s%s",
+        const std::string why = cache_header_mismatch(data.data(), data.size());
+        NXLOG_I(kTag, "pipeline cache loaded: %zu bytes from %s (mapped, open %.0f ms, driver %.0f ms; the driver holds %zu bytes, size query %.0f ms)%s%s",
                 data.size(), g_cache_path.c_str(), read_ms, create_ms, held, ms_from(t2), why.empty() ? "" : "; ignored: ", why.c_str());
     }
+    data.close();   // the driver keeps its own copy
     g_cache_ready.store(true, std::memory_order_release);
 }
 
@@ -234,26 +217,17 @@ uint64_t save_cache() {
                     static_cast<unsigned long long>(g_cache_base), g_cache_path.c_str());
         return 0;
     }
-    std::vector<char> data(n);
-    if (vkGetPipelineCacheData(vkdev(), g_cache, &n, data.data()) != VK_SUCCESS) return 0;
-    const double get_ms = ms_from(t0);
-    // written to a temporary file and renamed, so a process that ends in the middle of it leaves the old cache intact
-    const std::filesystem::path path(std::u8string(reinterpret_cast<const char8_t*>(g_cache_path.data()), g_cache_path.size()));
-    std::filesystem::path tmp = path;
-    tmp += ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return 0;
-        f.write(data.data(), static_cast<std::streamsize>(n));
-        if (!f) return 0;
-    }
-    std::error_code ec;
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        std::filesystem::remove(path, ec);
-        std::filesystem::rename(tmp, path, ec);
-    }
-    if (ec) return 0;
+    // Straight into a writable mapping of the new file: a heap buffer of the cache's size (4.5 GB after a shader preparation) was charged to
+    // the private commit at once, and the memory guard stopped the game for it (+4.5 GB within one poll at a save after ~3000 new pipelines).
+    // Written as .tmp and renamed, so a process that ends in the middle of it leaves the old cache intact.
+    double get_ms = 0;
+    const uint64_t wrote = nxrt::write_file_mapped(g_cache_path, n, [&](void* view, size_t* bytes) {
+        const VkResult r = vkGetPipelineCacheData(vkdev(), g_cache, bytes, view);
+        get_ms = ms_from(t0);
+        return r == VK_SUCCESS;   // VK_INCOMPLETE: the cache grew after the size query; the next save writes it
+    });
+    if (!wrote) return 0;
+    n = static_cast<size_t>(wrote);
     if (n > g_cache_base) g_cache_base = n;
     if (n >= (64u << 20)) g_cache_big = true;       // from now on rewritten as rarely as a loaded big one
     if (g_cache_big || n >= (64u << 20)) NXLOG_I(kTag, "pipeline cache saved: %zu bytes to %s (driver %.0f ms, %.0f ms in all)", n, g_cache_path.c_str(), get_ms, ms_from(t0));
@@ -266,6 +240,8 @@ uint64_t save_cache() {
 // the write takes seconds. The ordinary small cache is written whenever something new appeared, as before.
 bool pipeline_cache_dirty() {
     if (!g_cache_dirty.load(std::memory_order_relaxed)) return false;
+    // Under memory pressure the save waits: it writes the whole cache (gigabytes after a shader preparation) through the file cache.
+    if (g_cache_big && nxrt::memguard_pressure()) return false;
     // [nvn] pipeline_cache_save_new (default 3000): new pipelines and parts before a big cache is written again
     static const uint32_t every = static_cast<uint32_t>(std::max<int64_t>(1, config_get_int("nvn", "pipeline_cache_save_new", 3000)));
     return !g_cache_big || g_new_since_save.load(std::memory_order_relaxed) >= every;
