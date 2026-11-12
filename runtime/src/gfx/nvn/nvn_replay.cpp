@@ -242,7 +242,7 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbR3b = 4194304, kAbR3e = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbG3b = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbR3c = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbR3g = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbR3f = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbR3d = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbLookahead = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbR3b = 4194304, kAbR3e = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbG3b = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbR3c = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbTexShare = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbR3f = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbKeepChain = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
 // computed once and kept in a constant-initialized atomic: ab_on() calls it in every "off" window (hundreds of thousands of times per frame),
 // and a guarded local static there made the off windows ~0.6 ms per frame slower than the on windows with nothing switched (nvn_cfg.h)
 std::atomic<uint64_t> g_ab_mask_v{~0ull};
@@ -260,7 +260,7 @@ uint64_t ab_mask_compute() {
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"lookahead", kAbLookahead}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"g3b", kAbG3b}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_keyed", kAbR3g}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"submit_async", kAbR3d}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"g3b", kAbG3b}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -1231,7 +1231,10 @@ void pre_layout_note(Texture* t) {
 }
 // Starts a pass on the current render targets if none is open for them. False when there is nothing to render to.
 void bind_skip_reset();   // below (bind_sets)
-extern uint64_t g_oc_ph[6];
+extern uint64_t g_oc_ph[10];
+// exp_op_cost: bind_sets ticks per graphics set index and step (0 signature + memo look-up, 1 kept-set look-up and check, 2 build, 3 bind),
+// and counts of each (R4 diagnostics)
+extern uint64_t g_oc_bs[4][4], g_oc_bsn[4][4];
 bool exp_op_cost_on();
 struct OcPhase { int i; uint64_t t0; explicit OcPhase(int k) : i(k), t0(exp_op_cost_on() ? __rdtsc() : 0) {} ~OcPhase() { if (t0) g_oc_ph[i] += __rdtsc() - t0; } };
 void pass_lookahead();   // below: settles the reads of the coming draws before the pass begins
@@ -4499,6 +4502,10 @@ struct KeepEntry {
     uint32_t retry_at = 0;
     std::vector<KDep> deps;
     std::vector<BVal> bvals;    // set_reuse = verify only
+    // [nvn] keep_chain: the entry of the same set index looked up after this one last time (valid while next_gen == g_keep_gen), and this
+    // entry's signature
+    struct KeepEntry* next = nullptr;
+    uint64_t next_gen = 0, sig = 0;
 };
 constexpr uint32_t kKeepAge = 600;          // presents without a use before an entry is dropped
 constexpr size_t kKeepMaxPools = 6;          // 16k sets each
@@ -4506,6 +4513,19 @@ constexpr uint16_t kKeepMaxFails = 6;
 // keyed by signatures that are hashes already: the key is its own hash (std::hash<uint64_t> hashed the 8 bytes one by one at every look-up)
 struct KeyIsHash { size_t operator()(uint64_t k) const noexcept { return static_cast<size_t>(k ^ (k >> 29)); } };
 std::unordered_map<uint64_t, KeepEntry, KeyIsHash> g_keep;
+// [nvn] keep_chain (default on; cpuperf_ab_what keep_chain): the game draws the same objects in the same order every frame, so the kept set a
+// set index needs next is, nearly always, the one it needed after the current one last time. Each entry remembers that successor (per set
+// index); a look-up whose signature equals the successor's takes it without the hash table, and finding an entry prefetches its successor,
+// the successor's dependencies and the copy's page bits they check. A kept-set check was ~0.46 us (exp_op_cost, village: ~2,000 per frame for
+// set 0 alone), most of it cache misses on the entry, its dependency array and the page bits. Moves on every erase (entries pointed to may go).
+uint64_t g_keep_gen = 1;
+KeepEntry* g_keep_prev[4] = {};
+uint64_t g_keep_prev_gen[4] = {};
+uint64_t g_keep_chain_hits = 0, g_keep_chain_tries = 0;   // statistics
+bool keep_chain_on() {
+    const bool on = NX_CFG_BOOL("nvn", "keep_chain", true);
+    return on && ab_on(kAbKeepChain);
+}
 std::vector<VkDescriptorPool> g_keep_pools;
 bool g_keep_full = false;
 uint64_t smp_tune_now() {
@@ -4553,6 +4573,7 @@ bool keep_writes_on() {
 }
 
 void keep_reset(bool release) {
+    ++g_keep_gen;
     g_keep.clear();
     g_set_content.clear();
     if (release) for (VkDescriptorPool p : g_keep_pools) keep_dpool_release(p);
@@ -4595,7 +4616,7 @@ void keep_begin_submit() {
     if (now >= g_keep_sweep_at) {
         g_keep_sweep_at = now + 300;
         for (auto it = g_keep.begin(); it != g_keep.end();) {
-            if (now > it->second.last_used + kKeepAge) { it = g_keep.erase(it); ++g_keep_evicted; }
+            if (now > it->second.last_used + kKeepAge) { it = g_keep.erase(it); ++g_keep_evicted; ++g_keep_gen; }
             else ++it;
         }
     }
@@ -4711,12 +4732,39 @@ __declspec(noinline) int keep_valid(KeepEntry& e) {   // noinline: its own line 
 // A kept set for set `set` of `pl` with signature `sig`, checked; or one built now (kept when it can be). Null: build it the usual way.
 VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_t sig, SetReuse mode, bool tex_keyed = false) {
     const uint32_t now = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
-    auto it = g_keep.find(sig);
+    const bool chain = set < 4 && !tex_keyed && !g_sig_var_on && keep_chain_on();
+    KeepEntry* hint = nullptr;
+    if (chain) {
+        KeepEntry* p = g_keep_prev[set];
+        if (p && g_keep_prev_gen[set] == g_keep_gen && p->next && p->next_gen == g_keep_gen) {
+            ++g_keep_chain_tries;
+            if (p->next->sig == sig) { hint = p->next; ++g_keep_chain_hits; }
+        }
+    }
+    KeepEntry* found = hint;
+    if (!found) { auto f = g_keep.find(sig); if (f != g_keep.end()) found = &f->second; }
+    if (chain && found) {   // the chain: this entry follows the previous one of its set index; its own successor is likely next
+        if (KeepEntry* p = g_keep_prev[set]; p && g_keep_prev_gen[set] == g_keep_gen && p != found) { p->next = found; p->next_gen = g_keep_gen; }
+        g_keep_prev[set] = found;
+        g_keep_prev_gen[set] = g_keep_gen;
+        found->sig = sig;
+        if (KeepEntry* n = found->next; n && found->next_gen == g_keep_gen) {
+            _mm_prefetch(reinterpret_cast<const char*>(n), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(n) + 64, _MM_HINT_T0);
+            const KDep* d = n->deps.data();
+            for (size_t i = 0; i < n->deps.size() && i < 8; ++i) {
+                _mm_prefetch(reinterpret_cast<const char*>(d + i), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(d + i) + 64, _MM_HINT_T0);
+                if (d[i].kind == 1 && d[i].rd.m) read_dep_prefetch(d[i].rd);
+            }
+        }
+    }
+    KeepEntry* pe = found;
     if (g_sig_var_on) {   // set_keep_diag: which left-out input would have found an entry made in an earlier present
         static std::unordered_map<uint64_t, uint32_t> seen[4];
         static uint32_t cleared = 0;
         if (now - cleared > 600) { for (auto& m : seen) m.clear(); cleared = now; }
-        if (it == g_keep.end()) {
+        if (!pe) {
             ++g_var_new;
             bool any = false;
             for (int v = 0; v < 4; ++v) {
@@ -4727,14 +4775,14 @@ VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_
         }
         for (int v = 0; v < 4; ++v) seen[v][g_sig_var[v]] = now;
     }
-    if (it != g_keep.end() && (it->second.pl != &pl || it->second.set != set || it->second.tex_keyed != tex_keyed)) it = g_keep.end();   // a signature collision: not this set
-    if (it != g_keep.end()) {
-        KeepEntry& e = it->second;
+    if (pe && ((*pe).pl != &pl || (*pe).set != set || (*pe).tex_keyed != tex_keyed)) pe = nullptr;   // a signature collision: not this set
+    if (pe) {
+        KeepEntry& e = (*pe);
         if (e.dead && now < e.retry_at) { e.last_used = now; return VK_NULL_HANDLE; }
-        if (e.dead) { g_keep.erase(it); it = g_keep.end(); }   // time to try again
+        if (e.dead) { g_keep.erase(sig); pe = nullptr; ++g_keep_gen; }   // time to try again
     }
-    if (it != g_keep.end()) {
-        KeepEntry& e = it->second;
+    if (pe) {
+        KeepEntry& e = (*pe);
         const uint64_t ch0 = mode == SetReuse::Verify ? mem::ww::changes() : 0, ov0 = mode == SetReuse::Verify ? out_version() : 0;
         const int why = keep_valid(e);
         if (why == 0) {
@@ -4774,7 +4822,7 @@ VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_
         e.last_fail = now;
         if (++e.fails > kKeepMaxFails) { e.dead = true; e.retry_at = now + 600; e.deps.clear(); e.deps.shrink_to_fit(); ++g_keep_dead_n; e.last_used = now; return VK_NULL_HANDLE; }
     }
-    if (it == g_keep.end()) {   // kept from its second sighting in a later present on: a set made for one frame only is never kept
+    if (!pe) {   // kept from its second sighting in a later present on: a set made for one frame only is never kept
         static FlatMap64<uint32_t> seen;
         static uint32_t cleared = 0;
         if (now - cleared > 600) { seen.clear(); cleared = now; }
@@ -4793,7 +4841,7 @@ VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_
         ++g_keep_bad_n;
         if (rec.bad) ++g_keep_bad_why[rec.bad];
         if (rec.bad && !g_keep_full) {   // not recorded again: this signature is built per submission while it is in use
-            KeepEntry& d = it != g_keep.end() ? it->second : g_keep[sig];
+            KeepEntry& d = pe ? (*pe) : g_keep[sig];
             d.pl = &pl;
             d.set = set;
             d.dead = true;
@@ -4803,8 +4851,9 @@ VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_
         }
         return ds;
     }
-    KeepEntry& e = it != g_keep.end() ? it->second : g_keep[sig];
-    if (it != g_keep.end()) ++g_keep_rebuilt; else ++g_keep_new;
+    KeepEntry& e = pe ? (*pe) : g_keep[sig];
+    e.sig = sig;   // keep_chain compares it
+    if (pe) ++g_keep_rebuilt; else ++g_keep_new;
     e.ds = rec.ds;
     e.pl = &pl;
     e.set = set;
@@ -4895,7 +4944,7 @@ uint8_t set_storage_mask(const ProgLayout& pl) {
 uint64_t g_tk_tries = 0, g_tk_hits = 0;   // keep_tex_keyed statistics
 bool keep_tex_keyed_on() {
     const bool on = NX_CFG_BOOL("nvn", "keep_tex_keyed", false);   // off: village paired replay +0.45 ms (4/27), only 10% of the look-ups found a set
-    return on && ab_on(kAbR3g);
+    return on;   // its paired-window bit went to tex_share (R4)
 }
 bool set_has_textures(const ProgLayout& pl, uint32_t set) {
     for (const uint16_t bi : pl.set_idx[set]) if (pl.bindings[bi].type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) return true;
@@ -4937,10 +4986,14 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
     // sets the memo may not reuse but set_keep may keep (storage writes): the same conditions as the memo's, graphics only
     const uint8_t keep_only = (mode != SetReuse::Off && reusable_ok && set_keep_on() && keep_writes_on()) ? static_cast<uint8_t>(set_keep_mask(pl) & ~reusable) : 0;
     const uint8_t memo_chk = (reusable && out_lazy() && memo_storage_check_on()) ? static_cast<uint8_t>(reusable & set_storage_mask(pl)) : 0;   // memo_storage_check
+    const bool oc = exp_op_cost_on() && bp == VK_PIPELINE_BIND_POINT_GRAPHICS;
+    uint64_t oc_t = oc ? __rdtsc() : 0;
+    auto oc_step = [&](uint32_t set, int k) { if (!oc) return; const uint64_t t = __rdtsc(); g_oc_bs[set][k] += t - oc_t; ++g_oc_bsn[set][k]; oc_t = t; };
     for (uint32_t set = 0; set < 4; ++set) {
         if (!pl.has_set[set]) continue;
         VkDescriptorSet ds = VK_NULL_HANDLE;
         uint64_t sig = 0;
+        if (oc) oc_t = __rdtsc();
         if (reusable & (1u << set)) {
             sig = set_signature(pl, set);
             if (memo_chk & (1u << set)) sig ^= storage_set_clear(pl, set) ? 0x636c656172ull : 0x68656c64ull;   // memo_storage_check: the held-result state is part of the key
@@ -4984,6 +5037,7 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
                 }
             }
         }
+        oc_step(set, 0);
         if (!ds && (reusable & (1u << set)) && set_keep_on()) {
             // not put in the memo: a kept set is checked at every use (its checks see changes the memo's epoch does not: with kept sets in the
             // memo, set_reuse = verify found a burst of stale memo hits right after the area load in the village)
@@ -5016,9 +5070,11 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
             // checks per frame for sets the same few draws bind again and again). The memo's epoch holds the pool registry and page-release
             // counters since V1; kept sets were left out of the memo before those were in it.
             if (ds && keep_memo_on()) g_set_memo.put(sig, ds);
+            oc_step(set, 1);
         } else if (!ds && keep_only & (1u << set)) {   // writes storage: kept and checked, never in the memo (its writes are noted per draw)
             set_signature(pl, set);
             ds = keep_lookup_or_build(pl, set, g_keep_sig ^ 0x6b6565702d77ull, mode);
+            oc_step(set, 1);
         }
         if (!ds) {
             if (bp != VK_PIPELINE_BIND_POINT_GRAPHICS) ++g_set_paths[0];
@@ -5043,8 +5099,10 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
             else { ++g_set_paths[3]; if (exp_static_on()) ++g_xs_built[g_xs.in_static ? 1 : 0][1]; }
             ds = build_set(pl, set);
             if (ds && (reusable & (1u << set))) g_set_memo.put(sig, ds);
+            oc_step(set, 2);
         }
         if (ds) bind_graphics_set(pl, bp, set, ds);
+        oc_step(set, 3);
         if (bp == VK_PIPELINE_BIND_POINT_GRAPHICS) ++g_sstat[set][4];
     }
     for (const PoolBinding& pb : pl.pool) {   // A7: the pool arrays' persistent sets
@@ -5588,6 +5646,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (g_dirty & (kPipe | kDesc)) {
         const ShaderInfo* stages[kStages] = {vs, S.stage[kFragment], S.stage[kGeometry], tcs_now(), S.stage[kTessEval], nullptr, nullptr, nullptr};
         const ShaderInfo* mstages[kStages] = {nullptr, S.stage[kFragment], nullptr, nullptr, nullptr, nullptr, S.stage[kTask], S.stage[kMesh]};
+        OcPhase ph(6);
         g_pl = prog_layout(mesh ? mstages : stages);
     }
     if (!g_trigger_fs.empty() && !g_trigger_done && trigger_time_ok() && S.stage[kFragment] && S.stage[kFragment]->hash.compare(0, g_trigger_fs.size(), g_trigger_fs) == 0) {
@@ -5626,6 +5685,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (g_prog_writes || g_xfb_active) g_pass_unsafe = true;
     const VkPrimitiveTopology topo = mesh ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : vk_topology(mode);
     if ((g_dirty & kPipe) || topo != g_pipe_topo || !g_pipe) {
+        OcPhase ph(7);
         GraphicsKey key;
         build_key(key, topo, mesh);
         g_pipe = graphics_pipeline(key, *pl);
@@ -5817,6 +5877,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
                     S.tess_outer[0], S.tess_outer[1], S.tess_outer[2], S.tess_outer[3], S.tess_inner[0], S.tess_inner[1]);
     }
     if (!mesh && (g_dirty & (kVb | kPipe))) {
+        OcPhase ph(8);
         for (uint32_t i = 0; i < g_key_attr_count; ++i) {
             const uint32_t binding = g_key_binding[i];
             bool done = false;
@@ -6022,6 +6083,7 @@ void do_draw_elements(const P_DrawElements& p) {
     count_primitives(p.mode, p.count, p.instance_count);
     VkPrimitiveTopology topo;
     if (!begin_draw(static_cast<int>(p.mode), true, static_cast<int>(p.type), &topo)) { counters().draws_skipped.fetch_add(1); return; }
+    OcPhase ph_after(9);
     if (g_trace) {   // the indices and the first attributes of the first vertices
         const uint32_t isz0 = index_size_bytes(static_cast<int>(p.type));
         const uint8_t* ix = host_ptr(p.index_address);
@@ -7734,8 +7796,10 @@ bool op_keeps_sets(Op op) {
 
 // [nvn] exp_op_cost (measurement only): render-thread ticks per command kind and, for draws and dispatches, per (fragment or compute
 // shader, vertex or mesh shader); logged every 10 s as ms per present.
-struct OpCost { uint64_t ticks = 0, n = 0, ph[6] = {}; };
-uint64_t g_oc_ph[6] = {};   // ticks of phases of the current op: prepare_textures, bind_sets, gmem_before_op, ensure_pass, out_before_op, set_dynamic_state
+struct OpCost { uint64_t ticks = 0, n = 0, ph[10] = {}; };
+uint64_t g_oc_bs[4][4] = {}, g_oc_bsn[4][4] = {};
+uint64_t g_oc_ph[10] = {};   // ticks of phases of the current op: prepare_textures, bind_sets, gmem_before_op, ensure_pass, out_before_op, set_dynamic_state,
+                             // program layout, pipeline key and look-up, vertex buffers, after begin_draw (index buffer, the draw)
 OpCost g_oc_op[256];
 std::unordered_map<uint64_t, OpCost> g_oc_prog;
 std::unordered_map<uint64_t, std::string> g_oc_name;
@@ -7779,10 +7843,24 @@ void op_cost_log() {
     }
     NXLOG_I(kTag, "exp_op_cost per present by program:%s", b.c_str());
     {
-        double ph[6] = {};
-        for (const auto& [k, v] : g_oc_prog) for (int i = 0; i < 6; ++i) ph[i] += v.ph[i];
-        NXLOG_I(kTag, "exp_op_cost phases of draws and dispatches per present: prepare_textures %.3f, bind_sets %.3f, gmem_before_op %.3f, ensure_pass %.3f, out_before_op %.3f, dynamic state %.3f ms",
-                ph[0] / tpms / fr, ph[1] / tpms / fr, ph[2] / tpms / fr, ph[3] / tpms / fr, ph[4] / tpms / fr, ph[5] / tpms / fr);
+        double ph[10] = {};
+        for (const auto& [k, v] : g_oc_prog) for (int i = 0; i < 10; ++i) ph[i] += v.ph[i];
+        NXLOG_I(kTag, "exp_op_cost phases of draws and dispatches per present: prepare_textures %.3f, bind_sets %.3f, gmem_before_op %.3f, ensure_pass %.3f, out_before_op %.3f, dynamic state %.3f, "
+                "program layout %.3f, pipeline %.3f, vertex buffers %.3f, after begin_draw %.3f ms",
+                ph[0] / tpms / fr, ph[1] / tpms / fr, ph[2] / tpms / fr, ph[3] / tpms / fr, ph[4] / tpms / fr, ph[5] / tpms / fr, ph[6] / tpms / fr, ph[7] / tpms / fr,
+                ph[8] / tpms / fr, ph[9] / tpms / fr);
+    }
+    {
+        std::string c;
+        for (int s = 0; s < 4; ++s) {
+            char t[200];
+            std::snprintf(t, sizeof t, " set %d: sig+memo %.3f ms/%.0f, keep %.3f/%.0f, build %.3f/%.0f, bind %.3f/%.0f;", s, g_oc_bs[s][0] / tpms / fr, g_oc_bsn[s][0] / fr,
+                          g_oc_bs[s][1] / tpms / fr, g_oc_bsn[s][1] / fr, g_oc_bs[s][2] / tpms / fr, g_oc_bsn[s][2] / fr, g_oc_bs[s][3] / tpms / fr, g_oc_bsn[s][3] / fr);
+            c += t;
+        }
+        NXLOG_I(kTag, "exp_op_cost bind_sets per present:%s", c.c_str());
+        std::memset(g_oc_bs, 0, sizeof g_oc_bs);
+        std::memset(g_oc_bsn, 0, sizeof g_oc_bsn);
     }
     for (auto& o : g_oc_op) o = OpCost{};
     g_oc_prog.clear();
@@ -7832,7 +7910,7 @@ void run_list(const CmdList& list, int depth) {
                 const uint64_t k = reinterpret_cast<uint64_t>(a) * 31 ^ reinterpret_cast<uint64_t>(b);
                 OpCost& c = g_oc_prog[k];
                 c.ticks += dt; ++c.n;
-                for (int i = 0; i < 6; ++i) { c.ph[i] += g_oc_ph[i]; g_oc_ph[i] = 0; }
+                for (int i = 0; i < 10; ++i) { c.ph[i] += g_oc_ph[i]; g_oc_ph[i] = 0; }
                 if (c.n == 1) g_oc_name[k] = std::string(cs ? "cs " : "") + (a ? a->hash.substr(0, 8) : "-") + (b ? "/" + b->hash.substr(0, 8) : "");
             }
         } oc_op;
@@ -8512,7 +8590,8 @@ void texlook_submit(const std::vector<Ref<CmdList>>& lists, uint64_t serial) {
     g_tl->cv.notify_one();
 }
 
-bool ab_tex_park_on() { return ab_on(kAbTexPark); }   // [nvn] cpuperf_ab_what tex_park (nvn_gpu_texture.cpp)
+bool ab_tex_park_on() { return ab_on(kAbTexPark); }
+bool ab_tex_share_on() { return ab_on(kAbTexShare); }   // [nvn] cpuperf_ab_what tex_share (nvn_gpu_texture.cpp)   // [nvn] cpuperf_ab_what tex_park (nvn_gpu_texture.cpp)
 bool ab_overlap_grow_on() { return ab_on(kAbOverlapGrow); }
 bool ab_index_inc_on() { return ab_on(kAbIndexInc); }   // [nvn] cpuperf_ab_what index_inc (nvn_gpu_pool.cpp)   // [nvn] cpuperf_ab_what overlap_grow (nvn_gpu_pool.cpp)
 bool ab_out_delta_on() { return ab_on(kAbOutDelta); }  // out_delta (nvn_gpu_pool.cpp delta copy-backs)
@@ -8643,7 +8722,7 @@ void replay_begin_submit(Frame& f) {
             g_cpu_ab_on = con;
             cmdq::set_copies(true);   // (the cmd_copies cpuperf_ab bit went to G3's g3b)
             cmdq::set_copy_image(ab_on(kAbR3c));
-            cmdq::set_submit_async(ab_on(kAbR3d));
+            cmdq::set_submit_async(true);   // (its cpuperf_ab bit went to keep_chain, R4)
             cmdq::set_chunk_async(ab_on(kAbChunkAsync));
             cmdq::set_pds(ab_on(kAbPdsQ));
             cmdq::set_desc(ab_on(kAbCmdDesc));
@@ -8775,11 +8854,11 @@ void replay_begin_submit(Frame& f) {
                 for (const auto& [k, e] : g_keep) dead += e.dead ? 1 : 0;
                 NXLOG_I(kTag, "kept descriptor sets (set_keep): %llu found valid, %llu first sightings, %llu new, %llu rebuilt after a failed check (pool generation %llu, uniform decision %llu, held result %llu, "
                         "texture %llu, sampler tuning %llu), %llu stopped after failing often, %llu not keepable (%s), %llu differed (verify); %zu entries (%zu not kept), "
-                        "%llu sets in %zu pools this era, %llu eras, %llu dropped by age",
+                        "%llu sets in %zu pools this era, %llu eras, %llu dropped by age; keep_chain %llu of %llu successors right",
                         (unsigned long long)g_keep_hit, (unsigned long long)g_keep_first, (unsigned long long)g_keep_new, (unsigned long long)g_keep_rebuilt, (unsigned long long)g_keep_fail[0],
                         (unsigned long long)g_keep_fail[1], (unsigned long long)g_keep_fail[2], (unsigned long long)g_keep_fail[3], (unsigned long long)g_keep_fail[4],
                         (unsigned long long)g_keep_dead_n, (unsigned long long)g_keep_bad_n, why.c_str(), (unsigned long long)g_keep_verify_bad, g_keep.size(), dead,
-                        (unsigned long long)g_keep_sets_era, g_keep_pools.size(), (unsigned long long)g_keep_eras, (unsigned long long)g_keep_evicted);
+                        (unsigned long long)g_keep_sets_era, g_keep_pools.size(), (unsigned long long)g_keep_eras, (unsigned long long)g_keep_evicted, (unsigned long long)g_keep_chain_hits, (unsigned long long)g_keep_chain_tries);
                 NXLOG_I(kTag, "sets built outside the memo and set_keep: compute %llu, reuse off for the draw %llu, a set with written storage or a per-draw c[0] %llu, reusable (first sightings, not keepable) %llu",
                         (unsigned long long)g_set_paths[0], (unsigned long long)g_set_paths[1], (unsigned long long)g_set_paths[2], (unsigned long long)g_set_paths[3]);
                 NXLOG_I(kTag, "memo_storage_check: %llu memo look-ups of storage sets over a held result", (unsigned long long)g_memo_storage_held);
@@ -8816,7 +8895,7 @@ void replay_begin_submit(Frame& f) {
                 park_stats(&pk, &tk, &st, &ex);
                 uint64_t ms = 0, mse = 0, msb = 0;
                 park_miss_stats(&ms, &mse, &msb);
-                NXLOG_I(kTag, "parked texture images (tex_park): %llu parked, %llu taken back (%llu of them stale: uploaded again), %llu expired; new images of pool textures with none parked %llu (%llu of them with a key that expired lately, %llu of 1 MiB or more)", (unsigned long long)pk, (unsigned long long)tk, (unsigned long long)st, (unsigned long long)ex, (unsigned long long)ms, (unsigned long long)mse, (unsigned long long)msb);
+                NXLOG_I(kTag, "parked texture images (tex_park): %llu parked, %llu taken back (%llu of them stale: uploaded again), %llu expired; new images of pool textures with none parked %llu (%llu of them with a key that expired lately, %llu of 1 MiB or more); images shared through the index (tex_share_index) %llu", (unsigned long long)pk, (unsigned long long)tk, (unsigned long long)st, (unsigned long long)ex, (unsigned long long)ms, (unsigned long long)mse, (unsigned long long)msb, (unsigned long long)share_hits());
             }
             if (exp_static_on()) {
                 const uint64_t pr = counters().presents.load(), ns = static_cast<uint64_t>(ft::now_ns()), tsc = __rdtsc();

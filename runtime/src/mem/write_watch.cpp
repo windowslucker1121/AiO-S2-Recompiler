@@ -543,6 +543,9 @@ bool all_valid(const Region* r, uint64_t first, uint64_t count) {
     return all_set(r->valid.get(), first, count);
 }
 
+void prefetch_valid(const Region* r, uint64_t page) {
+    if (r && page < r->npages) _mm_prefetch(reinterpret_cast<const char*>(r->valid.get() + (page >> 6)), _MM_HINT_T0);
+}
 bool page_valid(const Region* r, uint64_t page) { return r && page < r->npages && test(r->valid.get(), page); }
 bool any_valid(const Region* r, uint64_t first, uint64_t count) {
     if (!r || !count || first >= r->npages) return false;

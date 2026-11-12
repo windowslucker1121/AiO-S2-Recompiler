@@ -102,7 +102,9 @@ bool all_armed(const Region* r, uint64_t first, uint64_t count);
 // one bit per page, 64 per word). Word at a time: the per-binding check of the NVN replay (new_servable) over runs of thousands of pages.
 // also (optional): pages with their bit set there count as well.
 bool all_valid_or_armed(const Region* r, uint64_t first, uint64_t count, const std::atomic<uint64_t>* extra, const std::atomic<uint64_t>* also = nullptr);
-uint64_t guard_faults();   // accesses that hit a guarded page (statistics)
+uint64_t guard_faults();
+// Prefetches the word of the valid bits that holds `page` (a cache hint for an owner about to ask all_valid there; no effect otherwise).
+void prefetch_valid(const Region* r, uint64_t page);   // accesses that hit a guarded page (statistics)
 
 uint64_t faults();     // write faults handled so far (statistics; counted after the page was released)
 // Moves before a thread other than the owner (a write fault, a file read, a mapping change) clears a page's valid or armed state, so an

@@ -1699,6 +1699,11 @@ void pt_note_pointer(uint64_t v) {
 
 BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) { return resolve_read_dep(gpu_address, size, use, nullptr); }
 
+void read_dep_prefetch(const ReadDep& d) {
+    if (!d.m || d.state == 0) return;
+    mem::ww::prefetch_valid(d.m->ww, d.first);
+    if (static_cast<size_t>(d.first >> 6) < d.m->used.size()) _mm_prefetch(reinterpret_cast<const char*>(d.m->used.data() + (d.first >> 6)), _MM_HINT_T0);
+}
 bool read_dep_check(const ReadDep& d, int use) {
     if (d.mirror_on != g_mirror_on) return false;
     if (d.state == 0) { g_use_skip[use % 3]++; return true; }
