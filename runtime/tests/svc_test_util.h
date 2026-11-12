@@ -115,6 +115,12 @@ public:
     ~Session() { close(); }
     uint32_t handle() const { return h_; }
     bool valid() const { return h_ != 0; }
+    // Gives the handle up without closing it (for a handle that is then moved to the service).
+    uint32_t release() {
+        const uint32_t h = h_;
+        h_ = 0;
+        return h;
+    }
     void close() {
         if (h_) {
             nxrt::kernel::handle_close(h_);

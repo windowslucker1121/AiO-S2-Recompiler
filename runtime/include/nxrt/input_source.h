@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace nxrt::hid {
 
@@ -95,6 +96,18 @@ public:
 // handheld mode and player 1 as a connected idle FullKey pad (so a game that waits for a controller proceeds).
 void set_input_source(std::shared_ptr<InputSource> src);
 std::shared_ptr<InputSource> input_source();
+
+// Which open pad (SDL instance id, nxrt::input::GamepadInfo::id) plays which player beyond player 1: pad_ids[0] is player 2, pad_ids[1]
+// player 3, ... Empty (the default): every pad and the keyboard drive player 1 together. The controller applet (am.cpp) sets it when a
+// game asks for two or more players; the play layer's source (play.cpp poll_pads) reads it. A listed pad that is not open is a
+// disconnected player.
+void set_player_pads(const std::vector<uint32_t>& pad_ids);
+std::vector<uint32_t> player_pads();
+
+// Test aid ([test] unplug_player1_at_s, play.cpp): player 1 reads as disconnected, as when the console's only controller is pulled,
+// until the controller applet answers (am.cpp clears it). Lets a run reach the game's own ShowControllerSupport call.
+void set_player1_unplugged(bool on);
+bool player1_unplugged();
 
 // A source driven by code: the tests and scripted runs. Thread safe.
 class ManualInputSource : public InputSource {

@@ -359,6 +359,15 @@ frame at 854x480 (24.5 ms, the scene is split into passes every few draws), stor
 7.9 ms (844 per frame), gaps between passes 7.1 ms (788), compute 5.4 ms (largest: the network pass fea98fe7 1.9 ms, 20593fd9 0.8,
 beb1205f 0.6, culling root 0.5). First targets for FPS: the write-watch checks in `build_set` and the pass splitting.
 
+**System dialogs (library applets), 2026-11-12:** per-applet policies `[applet] <key> = auto | cancel | prompt` (`am.cpp` table, native
+windows in `src/services/applet_ui.cpp`; keys in runtime/docs/CONFIG.md, the applets oot can reach in runtime/docs/IPC_ANSWERS.md). Checked
+in game (house scene, test keys `[test] unplug_player1_at_s`, `controller_min_players`, `applet_windows_at_s`; `vpad attach2` for a second
+virtual pad): oot's own ShowControllerSupport call (player 1 missing) gets "1 player" and play goes on; the controller dialog lists the pads
+and OK stays disabled until enough are connected; the error / network notices and the web question open beside the running game. Found
+on the way: accessor command 170 (every applet creation aborted without it) and oot asking again every frame when answered more players
+than its own maximum (answers are capped now, DisconnectNpad takes an assigned pad back). Not reachable in oot offline, so not seen with the
+game's own call: error, web, net-connect, amiibo; two-player play with pads 2.. as players 2.. is unit-tested only (oot is single-player).
+
 ## Boot progress (`oot.exe --game game\oot\updates\131072 --log work\run\bootN\oot.log --max-seconds 60`)
 
 Each fix below moved the boot further; all are in the branch. Crash reports land next to the exe (`game-build\build\release\oot_crash.txt`,

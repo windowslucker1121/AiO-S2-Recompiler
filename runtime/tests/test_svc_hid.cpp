@@ -115,6 +115,23 @@ bool activate_npad(Hid& h, uint32_t styles) {
 
 }  // namespace
 
+NXTEST(hid_disconnect_npad_takes_back_an_assigned_pad) {
+    nxsvc::Env env;
+    services::hid_set_background_sampling(false);
+    Hid h;
+    REQUIRE(open_hid(h));
+    // Players 2 and 3 have pads 21 and 22 (the controller applet's assignment). DisconnectNpad(2) (player 3) takes pad 22 back; (1) then
+    // pad 21, which empties the list. Player 1 (id 0) is never taken.
+    hid::set_player_pads({21, 22});
+    CHECK_EQ(h.service.call(107, nxsvc::Args().u32(2).align(8).u64(kAruid)).result, 0u);
+    REQUIRE(hid::player_pads().size() == 1u);
+    CHECK_EQ(hid::player_pads()[0], 21u);
+    CHECK_EQ(h.service.call(107, nxsvc::Args().u32(0).align(8).u64(kAruid)).result, 0u);
+    CHECK_EQ(hid::player_pads().size(), 1u);
+    CHECK_EQ(h.service.call(107, nxsvc::Args().u32(1).align(8).u64(kAruid)).result, 0u);
+    CHECK(hid::player_pads().empty());
+}
+
 NXTEST(hid_shared_memory_handle) {
     nxsvc::Env env;
     services::hid_set_background_sampling(false);
