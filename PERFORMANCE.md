@@ -209,6 +209,9 @@ Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
   spills -> ~170): 69.3 / 69.4 vs 69.1 / 68.9 fps, noise; on the 14 hottest compute blocks (HiZ a17259b2 255 -> 128 registers): 65.6 / 68.6
   vs 68.8 / 69.3, worse. gpt draws without fragments (`skip_gpt = 2`): GPU -0.17 ms only (their cost is the pre-raster stage); gpt draws
   left out (`skip_gpt = 1`): +11.3 fps, GPU -2.3 ms (the ceiling of the pointer pre-raster stages).
+- **R8, hazard tracker (now on the recorder thread) at 5ff8131, paired, two runs:** GPU busy -1.1 ms per frame, but render replay +0.7
+  ms and fps -2.8 / -1.25 (0/15, 1/15): with it on the render thread becomes the limit (idle 1.2 -> 0.1-0.3 ms). Stays off; it pays once
+  the render thread has ~1 ms more slack.
 - **R8 (2026-11-12):** `park_shared` (the last reference of a shared image parks it): replay +0.14 ms, 1% low -2.3 (4/12), removed.
   The earlier paired gains of `handle_big` / `chunk_async` / `fb_image` alone were biased (see How to measure); re-measured together.
 - **gpu-time round 2 (2026-11-12), village 1080, paired windows:**
