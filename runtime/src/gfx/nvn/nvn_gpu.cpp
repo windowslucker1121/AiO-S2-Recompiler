@@ -1021,11 +1021,14 @@ uint64_t submit(const std::vector<Ref<CmdList>>& lists) {
     NXFT("submit");
     bool recorded = false;
     const bool snap = capture::on_submit(lists, &recorded);   // the first submission of a frame being captured: the GPU state it starts from
-    const uint64_t serial = queue_submit([lists, snap, recorded](Frame& f) {
+    std::shared_ptr<FrontPlan> plan = async_submit() && !on_render_thread() ? front_submit(lists) : nullptr;   // [nvn] front_plan
+    const uint64_t serial = queue_submit([lists, snap, recorded, plan](Frame& f) {
         if (recorded) capture::frame_submit_begin(snap);
         if (snap) capture::state_taken(replay_state_snapshot());
         replay_begin_submit(f);
+        front_replay_begin(plan);
         replay_lists(f, lists);
+        front_replay_end(plan);
         replay_end_submit(f);
         if (recorded) capture::frame_submit_end();
     }, !async_submit(), false);

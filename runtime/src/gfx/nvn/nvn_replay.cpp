@@ -242,7 +242,7 @@ uint64_t g_buf_ver = 1;        // moves when a buffer binding or the program cha
 // [nvn] cpuperf_ab_what (comma list) picks the features the windows switch: chunks, pass_chunks, set_reuse, odb (the skipped draw buffer
 // checks), lookahead; default chunks, set_reuse, odb, lookahead.
 bool g_cpu_ab_on = true;
-enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbHotSkip = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbR3b = 4194304, kAbR3e = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbMeshAhead2 = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbR3c = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbMemoExact = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbTexShare = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbR3f = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbKeepChain = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
+enum AbFeat : uint64_t { kAbChunks = 1, kAbPassChunks = 2, kAbSetReuse = 4, kAbOdb = 8, kAbHotSkip = 16, kAbBarrierKeep = 32, kAbEpochKeep = 64, kAbResolveCache = 128, kAbOverlapCache = 256, kAbEpochDispatch = 512, kAbMemoPass = 1024, kAbBindSkip = 2048, kAbTexPark = 4096, kAbGmemRo = 8192, kAbOverlapGrow = 16384, kAbFlatMaps = 32768, kAbPoolSync = 65536, kAbIndexInc = 131072, kAbOutDelta = 262144, kAbWriteDefer = 524288, kAbSetKeep = 1048576, kAbOdbInc = 2097152, kAbR3b = 4194304, kAbR3e = 8388608, kAbCmdThread = 16777216, kAbSkipGpt = 33554432, kAbTexLook = 67108864, kAbMeshAhead2 = 134217728, kAbPoolDepthIds = 268435456, kAbC0Persist = 536870912, kAbCsGmemHeld = 1ull << 30, kAbR3c = 1ull << 31, kAbRefillCompute = 1ull << 32, kAbPreLayout = 1ull << 33, kAbOccDefer = 1ull << 34, kAbCmdDesc = 1ull << 50, kAbOdbProg = 1ull << 51, kAbHandleCache = 1ull << 52, kAbPoolFast = 1ull << 53, kAbR3a = 1ull << 54, kAbOverlapPos = 1ull << 55, kAbHazard = 1ull << 35, kAbHazardPiggy = 1ull << 36, kAbFront = 1ull << 56, kAbReflectLit = 1ull << 58, kAbUilRetag = 1ull << 40, kAbFillAhead = 1ull << 41, kAbMeshAhead = 1ull << 42, kAbTexShare = 1ull << 37, kAbDrawCut = 1ull << 38, kAbOccBatch = 1ull << 48, kAbOccOff = 1ull << 49, kAbR3f = 1ull << 39, kAbCmdBatch = 1ull << 43, kAbFlushCopy = 1ull << 44, kAbKeepChain = 1ull << 45, kAbRenderPrio = 1ull << 46, kAbSrvCache = 1ull << 57, kAbKeepMemo = 1ull << 47, kAbHandleBig = 1ull << 59, kAbChunkAsync = 1ull << 60, kAbPdsQ = 1ull << 61, kAbFbImage = 1ull << 62, kAbPtCopy = 1ull << 63 };
 // computed once and kept in a constant-initialized atomic: ab_on() calls it in every "off" window (hundreds of thousands of times per frame),
 // and a guarded local static there made the off windows ~0.6 ms per frame slower than the on windows with nothing switched (nvn_cfg.h)
 std::atomic<uint64_t> g_ab_mask_v{~0ull};
@@ -260,7 +260,7 @@ uint64_t ab_mask_compute() {
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"hot_skip", kAbHotSkip}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"memo_exact", kAbMemoExact}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"flat_maps", kAbFlatMaps}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"uil_retag", kAbUilRetag}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"draw_cut", kAbDrawCut}, {"occ_batch", kAbOccBatch}, {"occ_off", kAbOccOff}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -279,7 +279,163 @@ inline bool ab_on(AbFeat f) { return g_cpu_ab_on || !(ab_mask() & f); }
 }  // namespace
 // [nvn] cpuperf_ab_what name memo_exact (measurement only; always on otherwise): the set memo's epoch counts page releases before they
 // happen (mem::ww::changes()) and settle moves the held-result version before gpu_new bits go. Off windows: the faults()-based epoch of before.
-bool memo_exact_on() { return ab_on(kAbMemoExact); }
+bool memo_exact_on() { return true; }   // V1 (2026-11-10): the exact epoch always; its paired-window bit went to front_plan (R5)
+
+// ---- front plan ([nvn] front_plan, R5) -------------------------------------------------------------------------------------------
+// The render thread is the only limit of the frame (~11 ms of replay for ~2,200 draws and ~35k commands, no single item over ~0.8 ms). Part
+// of its work depends only on the command stream and on objects that do not change between the game's submit and the replay; a thread of
+// its own (nvn-front) does that part for each submission when the game submits it, while the render thread is still replaying earlier ones:
+// the lists every CallCommands record calls (handle look-ups; the plan holds the lists, so the replay takes them without reference counts and
+// the last reference of a list is dropped on the front thread), the physical addresses of the uniform and storage bindings
+// (physical_buffer_address, valid while the pool registry and the virtual pools' mappings stay as they were) and, per draw and dispatch, the
+// program layout and set_signature's hashes of the bindings' raw inputs. The results are a stream in the replay's order (the front thread
+// walks the lists as the replay will: every CallCommands followed, state carried from submission to submission), published as it grows, so
+// the render thread reads them sequentially with one cursor, while the walk is still going on. An entry whose record is not the one the
+// replay is at ends the plan for the rest of the submission; a generation that moved, a dropped list and an entry not published in time
+// fall back to the old path. The forward scans of the replay (mesh_scan, fa_scan, la_scan) look entries up by record once the walk is done.
+// [nvn] front_plan = on (default) | off | verify (both paths, differences counted in the "front plan" statistics line; must stay 0).
+struct FpStream {
+    static constexpr size_t kChunk = size_t(1) << 15;   // words per chunk (256 KiB); an entry never straddles two
+    static constexpr size_t kMaxChunks = 512;
+    uint64_t* chunk[kMaxChunks] = {};
+    size_t n = 0;                          // words written (writer only)
+    std::atomic<size_t> pub{0};            // words the reader may read
+    bool full = false;
+    ~FpStream();
+    // Room for an entry of `words` words; null when the stream is full.
+    uint64_t* reserve(size_t words);
+    void publish() { pub.store(n, std::memory_order_release); }
+};
+struct FrontPlan {
+    std::vector<Ref<CmdList>> lists;          // the submission
+    std::vector<Ref<CmdList>> keep;           // every list it calls
+    FpStream st;                              // entries: rec, kind << 32 | payload words, payload
+    FlatMap64<uint32_t> idx;                  // record -> 1 + stream index of the first visit's payload (bind and call entries; read once done)
+    uint64_t pgen = 0, vgen = 0;              // pool registry and virtual-map generations the addresses were taken at
+    std::atomic<bool> phys_ok{false};         // the generations did not move while the walk took the addresses
+    std::atomic<bool> done{false}, replayed{false};
+    std::mutex keep_mu;                       // the replay's end and the walk's end both may release keep
+    uint64_t walk_ns = 0;
+};
+enum FpKind : uint32_t { kFsBind = 1, kFsCall = 2, kFsWork = 3, kFsSkip = 4 };   // kFsSkip: the rest of the chunk is padding
+// payload of kFsWork: ProgLayout*, bkok (bit n: bk of set n planned), bk[4]
+namespace {
+FrontPlan* g_fp = nullptr;        // render thread: the plan of the submission being replayed
+bool g_fp_phys = false, g_fp_off = false, g_fp_gens = false;
+size_t g_fp_pos = 0;              // the render thread's cursor in the stream
+int g_fp_mode = 0;                // 0 off, 1 on, 2 verify
+// statistics (render thread writes; the front thread reads them for its 10 s line)
+std::atomic<uint64_t> g_fp_st[20];
+enum { kFpSubs, kFpTaken, kFpLate, kFpCallHit, kFpCallMiss, kFpPhysHit, kFpPhysStale, kFpCallDiff, kFpPhysDiff, kFpWorkHit, kFpOff, kFpMismatch,
+       kFpScanHit, kFpWait, kFpSigHit, kFpSigDiff, kFpCallRace, kFpStN };
+inline void fp_count(int k, uint64_t n = 1) { g_fp_st[k].store(g_fp_st[k].load(std::memory_order_relaxed) + n, std::memory_order_relaxed); }
+int front_mode_cfg() {
+    static const int m = [] {
+        const std::string v = nxrt::config_get_str("nvn", "front_plan", "on");
+        return v == "off" || v == "0" ? 0 : v == "verify" ? 2 : 1;
+    }();
+    return m;
+}
+// The payload of the next entry, which must be of kind `kind` for the record at rec (null: none; the plan is off for the rest of the
+// submission then). The render thread calls it at every record the front thread makes an entry for.
+const uint64_t* fp_take(const uint8_t* rec, uint32_t kind) {
+    if (!g_fp || g_fp_off) return nullptr;
+    FpStream& s = g_fp->st;
+    for (int round = 0; round < 2; ++round) {
+        if (g_fp_pos % FpStream::kChunk + 2 > FpStream::kChunk) g_fp_pos = (g_fp_pos / FpStream::kChunk + 1) * FpStream::kChunk;   // a 1-word gap
+        size_t pub = s.pub.load(std::memory_order_acquire);
+        if (g_fp_pos + 2 > pub) {
+            if (g_fp->done.load(std::memory_order_acquire)) {
+                pub = s.pub.load(std::memory_order_acquire);
+                if (g_fp_pos + 2 > pub) { g_fp_off = true; fp_count(kFpOff); return nullptr; }
+            } else {   // the walk is behind the replay (it started late): wait a little, it walks far faster than the replay replays
+                const uint64_t t0 = __rdtsc();
+                fp_count(kFpWait);
+                while (g_fp_pos + 2 > s.pub.load(std::memory_order_acquire) && !g_fp->done.load(std::memory_order_acquire) && __rdtsc() - t0 < 400000) _mm_pause();
+                if (g_fp_pos + 2 > s.pub.load(std::memory_order_acquire)) { g_fp_off = true; fp_count(kFpLate); return nullptr; }
+            }
+        }
+        const uint64_t* e = s.chunk[g_fp_pos / FpStream::kChunk] + g_fp_pos % FpStream::kChunk;
+        const uint32_t k = static_cast<uint32_t>(e[1] >> 32), words = static_cast<uint32_t>(e[1]);
+        if (k == kFsSkip) { g_fp_pos = (g_fp_pos / FpStream::kChunk + 1) * FpStream::kChunk; continue; }
+        if (e[0] != reinterpret_cast<uint64_t>(rec) || k != kind) { g_fp_off = true; fp_count(kFpMismatch); return nullptr; }
+        g_fp_pos += 2 + words;   // published as a whole: the payload is there
+        if (!g_fp_gens) {        // the generations the addresses depend on, once per submission (the walk ends before or during the replay)
+            g_fp_gens = true;
+            fp_count(kFpTaken);
+        }
+        return e + 2;
+    }
+    return nullptr;
+}
+// Whether the plan's physical addresses hold: taken while the generations did not move, and they have not moved since.
+// Checked at every use (a pool registered during the replay moves the generation; physical_buffer_address would see it at once).
+inline bool fp_phys_now() {
+    if (g_fp->done.load(std::memory_order_acquire) && !g_fp->phys_ok.load(std::memory_order_relaxed)) { fp_count(kFpPhysStale); return false; }
+    if (g_fp->pgen != pool_registry_generation() || g_fp->vgen != virtual_maps_generation()) { fp_count(kFpPhysStale); return false; }
+    return true;
+}
+// Physical address i of a BindBuffers entry's payload v (null: compute it).
+inline uint64_t fp_phys_of(const uint64_t* v, uint32_t i, uint64_t addr, uint64_t size) {
+    if (v && fp_phys_now()) {
+        fp_count(kFpPhysHit);
+        if (g_fp_mode == 2 && physical_buffer_address(addr, size) != v[i]) fp_count(kFpPhysDiff);
+        return v[i];
+    }
+    return physical_buffer_address(addr, size);
+}
+// List i of a CallCommands entry's payload v (null: look it up); `hold` keeps a list looked up here alive.
+// Equivalent to handle_lookup: handles are never reused, so the list the walk found for a handle is the only list that handle can name, and a
+// list leaves the handle table only through drop_locked, which sets `dropped` first (handle_lookup's own per-thread cache relies on the same
+// flag). Not dropped now = handle_lookup would return this list now. verify: a look-up that misses because the list was dropped after the
+// check is a race (both answers were right at their moment), counted apart from real differences.
+inline const CmdList* fp_call_of(const uint64_t* v, uint32_t i, uint64_t handle, Ref<CmdList>& hold, bool count_call = true) {
+    if (v) {
+        const CmdList* l = reinterpret_cast<const CmdList*>(v[i]);
+        if (l && !l->dropped.load(std::memory_order_acquire)) {
+            fp_count(kFpCallHit);
+            if (g_fp_mode == 2) {
+                Ref<CmdList> x = handle_lookup(handle, false);
+                if (x.get() != l) fp_count(!x && l->dropped.load(std::memory_order_acquire) ? kFpCallRace : kFpCallDiff);
+            }
+            return l;
+        }
+        fp_count(kFpCallMiss);
+    }
+    hold = handle_lookup(handle, count_call);
+    return hold.get();
+}
+// The forward scans: look entries up by record (only once the walk is done; null otherwise).
+inline const uint64_t* fp_find(const uint8_t* rec) {
+    if (!g_fp || !g_fp->done.load(std::memory_order_acquire)) return nullptr;
+    const uint32_t* i = g_fp->idx.find(reinterpret_cast<uint64_t>(rec));
+    if (!i) return nullptr;
+    fp_count(kFpScanHit);
+    const size_t at = *i - 1;
+    return g_fp->st.chunk[at / FpStream::kChunk] + at % FpStream::kChunk;
+}
+const CmdList* fp_call(const uint8_t* rec, uint32_t i, uint64_t handle, Ref<CmdList>& hold, bool count_call = true) {
+    return fp_call_of(fp_find(rec), i, handle, hold, count_call);
+}
+uint64_t fp_phys(const uint8_t* rec, uint32_t i, uint64_t addr, uint64_t size) {
+    const uint64_t* v = g_fp ? fp_find(rec) : nullptr;
+    return fp_phys_of(v, i, addr, size);
+}
+// The work entry of the draw or dispatch at rec (run_list, before the command): its payload (null: none). Cleared at every other command.
+const uint64_t* g_fw = nullptr;
+inline void fp_work_at(const uint8_t* rec) {
+    g_fw = fp_take(rec, kFsWork);
+    if (g_fw && !g_fw[0]) g_fw = nullptr;   // no layout planned
+    if (g_fw) fp_count(kFpWorkHit);
+}
+// The planned raw-input hash of set `set` of pl (set_signature's bk).
+inline bool fp_bk(const ProgLayout& pl, uint32_t set, uint64_t& bk) {
+    if (!g_fw || g_fw[0] != reinterpret_cast<uint64_t>(&pl) || set >= 4 || !(g_fw[1] >> set & 1)) return false;
+    bk = g_fw[2 + set];
+    return true;
+}
+}  // namespace
+
 namespace {
 bool flat_set_maps_on() {
     const bool on = NX_CFG_BOOL("nvn", "flat_set_maps", true);
@@ -2931,8 +3087,8 @@ bool la_scan(RecordReader rd, int depth, LookSim& sim, std::unordered_set<uint64
                 for (uint32_t i = 0; i < p.count; ++i) {
                     const uint32_t k = p.first + i;
                     if (p.kind == kBufVertex && k < 16) sim.vtx[k] = {rg[i].address, rg[i].size};
-                    else if (p.kind == kBufUniform && p.stage < kStages && k < 16) sim.ubo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
-                    else if (p.kind == kBufStorage && p.stage < kStages && k < 16) sim.ssbo[p.stage][k] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
+                    else if (p.kind == kBufUniform && p.stage < kStages && k < 16) sim.ubo[p.stage][k] = {fp_phys(rd.pos(), i, rg[i].address, rg[i].size), rg[i].size};
+                    else if (p.kind == kBufStorage && p.stage < kStages && k < 16) sim.ssbo[p.stage][k] = {fp_phys(rd.pos(), i, rg[i].address, rg[i].size), rg[i].size};
                     else if (p.kind == kBufXfb && k < 4) sim.xfb[k] = {rg[i].address, rg[i].size};
                 }
                 break;
@@ -2973,7 +3129,8 @@ bool la_scan(RecordReader rd, int depth, LookSim& sim, std::unordered_set<uint64
                 const auto& p = rd.payload<P_CallCommands>();
                 const uint64_t* h = reinterpret_cast<const uint64_t*>(rd.blob<P_CallCommands>());
                 for (uint32_t i = 0; i < p.count; ++i) {
-                    Ref<CmdList> l = handle_lookup(h[i]);
+                    Ref<CmdList> hold;
+                    const CmdList* l = fp_call(rd.pos(), i, h[i], hold);
                     if (l && !la_scan(RecordReader(*l), depth + 1, sim, seen, budget)) return false;
                 }
                 break;
@@ -3170,7 +3327,7 @@ bool fa_scan(RecordReader rd, int depth, FaSim& sim, int& budget, uint32_t& disp
                 if (p.kind != kBufStorage || p.stage != kCompute) break;
                 const NVNbufferRange* rg = reinterpret_cast<const NVNbufferRange*>(rd.blob<P_BindBuffers>());
                 for (uint32_t i = 0; i < p.count; ++i)
-                    if (p.first + i < 16) sim.ssbo[p.first + i] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
+                    if (p.first + i < 16) sim.ssbo[p.first + i] = {fp_phys(rd.pos(), i, rg[i].address, rg[i].size), rg[i].size};
                 break;
             }
             case Op::Dispatch: case Op::DispatchIndirect:
@@ -3181,7 +3338,8 @@ bool fa_scan(RecordReader rd, int depth, FaSim& sim, int& budget, uint32_t& disp
                 const auto& p = rd.payload<P_CallCommands>();
                 const uint64_t* h = reinterpret_cast<const uint64_t*>(rd.blob<P_CallCommands>());
                 for (uint32_t i = 0; i < p.count; ++i) {
-                    Ref<CmdList> l = handle_lookup(h[i]);
+                    Ref<CmdList> hold;
+                    const CmdList* l = fp_call(rd.pos(), i, h[i], hold);
                     if (l && !fa_scan(RecordReader(*l), depth + 1, sim, budget, dispatches, out)) return false;
                 }
                 break;
@@ -4425,6 +4583,20 @@ uint64_t set_signature(const ProgLayout& pl, uint32_t set) {
     // program and bk alone (g_keep_sig). Pools, targets and update ranges are checked when a kept set is found (keep_valid).
     uint64_t bk = 0xcbf29ce484222325ull, ug = 0;
     auto mixb = [&](uint64_t v) { bk = (bk ^ v) * 1099511628211ull; };
+    uint64_t pbk = 0;
+    const bool planned = !g_sig_var_on && fp_bk(pl, set, pbk);   // [nvn] front_plan: the raw inputs hashed on the front thread
+    if (planned && g_fp_mode != 2) {
+        fp_count(kFpSigHit);
+        bk = pbk;
+        if (!g_upd.empty())   // the update-range generations (render-thread state)
+            for (const uint16_t bi_ : pl.set_idx[set]) {
+                const BindingDesc& d = pl.bindings[bi_];
+                const DescriptorBinding& b = d.shader->refl.bindings[d.index];
+                if (b.nvn.source != NvnSource::UniformBlock || b.nvn.index < 0 || b.nvn.index >= 16) continue;
+                const GState::Bind& u = S.ubo[d.nvn_stage][b.nvn.index];
+                if (const UpdRange* ur = u.addr ? upd_find(u.addr, u.size ? u.size : 65536) : nullptr) ug = (ug ^ ur->gen ^ d.binding) * 1099511628211ull + 1;
+            }
+    } else
     for (const uint16_t bi_ : pl.set_idx[set]) {
         const BindingDesc& d = pl.bindings[bi_];
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
@@ -4456,6 +4628,7 @@ uint64_t set_signature(const ProgLayout& pl, uint32_t set) {
             default: break;   // support buffer, constant data, driver constants: fixed (or in the signature above)
         }
     }
+    if (planned && g_fp_mode == 2 && pbk != bk) fp_count(kFpSigDiff);
     mix(bk);
     mix(ug);
     g_keep_sig = ((0x9e3779b97f4a7c15ull ^ (reinterpret_cast<uint64_t>(pl.layout) * 31 + set)) * 1099511628211ull ^ reinterpret_cast<uint64_t>(&pl)) * 1099511628211ull ^ bk;
@@ -6428,7 +6601,8 @@ bool mesh_scan(RecordReader rd, int depth, MeshSim& sim, int& budget, std::vecto
                 const auto& p = rd.payload<P_CallCommands>();
                 const uint64_t* h = reinterpret_cast<const uint64_t*>(rd.blob<P_CallCommands>());
                 for (uint32_t i = 0; i < p.count; ++i) {
-                    Ref<CmdList> l = handle_lookup(h[i], false);
+                    Ref<CmdList> hold;
+                    const CmdList* l = fp_call(rd.pos(), i, h[i], hold, false);
                     if (l && !mesh_scan(RecordReader(*l), depth + 1, sim, budget, out)) return false;
                 }
                 break;
@@ -8005,8 +8179,9 @@ void run_list(const CmdList& list, int depth) {
         g_rd_depth = depth;
         if (g_fa_left && !fa_run_op(r.op())) g_fa_left = 0;   // fill_ahead: the run of dispatches it looked at ended early
         switch (r.op()) {
-            case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: case Op::DrawMeshTasks: ++g_draw_ops; break;
-            default: break;
+            case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: case Op::DrawMeshTasks: ++g_draw_ops; fp_work_at(r.pos()); break;
+            case Op::Dispatch: case Op::DispatchIndirect: fp_work_at(r.pos()); break;
+            default: g_fw = nullptr; break;
         }
         ++g_resolve_gen;   // resolve_cache: results hold for one command
         chunk_at_op();
@@ -8031,13 +8206,14 @@ void run_list(const CmdList& list, int depth) {
                 auto set = [](GState::Bind& b, uint64_t addr, uint64_t size) {
                     if (b.addr != addr || b.size != size) { b = {addr, size}; ++g_buf_ver; }
                 };
+                const uint64_t* fpv = (p.kind == kBufUniform || p.kind == kBufStorage) ? fp_take(r.pos(), kFsBind) : nullptr;   // [nvn] front_plan
                 for (uint32_t i = 0; i < p.count; ++i) {
                     const uint32_t k = p.first + i;
                     const uint64_t v_before = g_buf_ver;
                     if (p.kind == kBufVertex && k < 16) set(S.vtx[k], rg[i].address, rg[i].size);
                     // a uniform or storage buffer in a virtual (sparse) pool is bound through the physical memory mapped there (physical_buffer_address)
-                    else if (p.kind == kBufUniform && p.stage < kStages && k < 16) set(S.ubo[p.stage][k], physical_buffer_address(rg[i].address, rg[i].size), rg[i].size);
-                    else if (p.kind == kBufStorage && p.stage < kStages && k < 16) set(S.ssbo[p.stage][k], physical_buffer_address(rg[i].address, rg[i].size), rg[i].size);
+                    else if (p.kind == kBufUniform && p.stage < kStages && k < 16) set(S.ubo[p.stage][k], fp_phys_of(fpv, i, rg[i].address, rg[i].size), rg[i].size);
+                    else if (p.kind == kBufStorage && p.stage < kStages && k < 16) set(S.ssbo[p.stage][k], fp_phys_of(fpv, i, rg[i].address, rg[i].size), rg[i].size);
                     else if (p.kind == kBufXfb && k < 4) set(S.xfb[k], rg[i].address, rg[i].size);
                     if (g_buf_ver != v_before)   // odb_incremental: this slot is checked again at the next draw
                         odb_mark(p.kind == kBufVertex ? kOdbVtx : p.kind == kBufUniform ? kOdbUbo : p.kind == kBufStorage ? kOdbSsbo : kOdbXfb,
@@ -8415,8 +8591,10 @@ void run_list(const CmdList& list, int depth) {
             case Op::CallCommands: {
                 const auto& p = r.payload<P_CallCommands>();
                 const uint64_t* h = reinterpret_cast<const uint64_t*>(r.blob<P_CallCommands>());
+                const uint64_t* fpv = fp_take(r.pos(), kFsCall);   // [nvn] front_plan: the lists the front thread looked up
                 for (uint32_t i = 0; i < p.count; ++i) {
-                    Ref<CmdList> l = handle_lookup(h[i]);
+                    Ref<CmdList> hold;
+                    const CmdList* l = fp_call_of(fpv, i, h[i], hold);
                     if (l) run_list(*l, depth + 1);
                     else log_once("missing-handle", "CallCommands of an unknown handle skipped");
                 }
@@ -8651,6 +8829,328 @@ void tl_main() {
 }
 
 }  // namespace
+
+// ---- front plan: the front thread ([nvn] front_plan; the plan and the render thread's side are near the top of this file) ------------
+namespace {
+std::mutex g_fs_chunk_mu;
+std::vector<uint64_t*> g_fs_chunks;   // free stream chunks (plans come and go six times a frame: no page faults for new memory)
+uint64_t* fs_chunk_new() {
+    {
+        std::lock_guard<std::mutex> lk(g_fs_chunk_mu);
+        if (!g_fs_chunks.empty()) { uint64_t* c = g_fs_chunks.back(); g_fs_chunks.pop_back(); return c; }
+    }
+    return new uint64_t[FpStream::kChunk];
+}
+void fs_chunk_free(uint64_t* c) {
+    std::lock_guard<std::mutex> lk(g_fs_chunk_mu);
+    if (g_fs_chunks.size() < 256) g_fs_chunks.push_back(c);
+    else delete[] c;
+}
+}  // namespace
+FpStream::~FpStream() {
+    for (uint64_t* c : chunk) if (c) fs_chunk_free(c);
+}
+uint64_t* FpStream::reserve(size_t words) {
+    if (full || words > kChunk) { full = true; return nullptr; }
+    size_t c = n / kChunk, o = n % kChunk;
+    if (o + words > kChunk) {   // pad the rest of this chunk
+        if (o + 2 <= kChunk) { chunk[c][o] = 0; chunk[c][o + 1] = static_cast<uint64_t>(kFsSkip) << 32; }
+        n = (c + 1) * kChunk;
+        c = n / kChunk;
+        o = 0;
+    }
+    if (c >= kMaxChunks) { full = true; return nullptr; }
+    if (!chunk[c]) chunk[c] = fs_chunk_new();
+    uint64_t* p = chunk[c] + o;
+    n += words;
+    return p;
+}
+namespace {
+struct FrontQ {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<std::shared_ptr<FrontPlan>> q;
+    std::vector<std::vector<Ref<CmdList>>> graves;   // lists of replayed plans: released here, not on the render thread (a last reference
+                                                     // destroys a list: ~1% of the render thread when handle_lookup's cache dropped them)
+    uint64_t faults = 0;
+};
+FrontQ* g_fq = nullptr;
+// The state a walk simulates: what the planned values depend on (programs, uniform and storage bindings, bound texture and image handles).
+struct FpSim {
+    const ShaderInfo* stage[kStages] = {};
+    GState::Bind ubo[kStages][16], ssbo[kStages][16];
+    uint64_t tex[kStages][64] = {};
+    uint64_t img[kStages][16] = {};
+};
+bool fp_expr_pure(const std::vector<HandleExprOp>& prog) {
+    for (const HandleExprOp& op : prog) if (op.kind == HandleExprOp::Storage) return false;   // storage words may be GPU results: not planned
+    return true;
+}
+// A work entry: the program layout the replay will use and set_signature's raw-input hash of each of its sets.
+void fp_work(FrontPlan& P, const FpSim& sim, const uint8_t* rec, bool dispatch, bool mesh) {
+    uint64_t* e = P.st.reserve(2 + 6);
+    if (!e) return;
+    e[0] = reinterpret_cast<uint64_t>(rec);
+    e[1] = static_cast<uint64_t>(kFsWork) << 32 | 6;
+    uint64_t* w = e + 2;
+    w[0] = w[1] = 0;
+    const ShaderInfo* st[kStages] = {};
+    if (dispatch) {
+        st[kCompute] = sim.stage[kCompute];
+    } else if (mesh) {
+        st[kFragment] = sim.stage[kFragment]; st[kTask] = sim.stage[kTask]; st[kMesh] = sim.stage[kMesh];
+    } else if (!sim.stage[kTessCtl] && !sim.stage[kTessEval]) {   // tessellation may take a generated control shader: not planned
+        st[kVertex] = sim.stage[kVertex]; st[kFragment] = sim.stage[kFragment]; st[kGeometry] = sim.stage[kGeometry];
+    }
+    const bool any = dispatch ? st[kCompute] != nullptr : mesh ? st[kMesh] != nullptr : st[kVertex] != nullptr;
+    const ProgLayout* pl = any ? prog_layout(st) : nullptr;
+    if (pl) {
+        w[0] = reinterpret_cast<uint64_t>(pl);
+        // set_signature's bk of each set (the same mixing), unless a binding's input is not the command stream's (c[0] tables of pointer
+        // shaders, handle expressions with storage words)
+        for (uint32_t set = 0; set < 4; ++set) {
+            w[2 + set] = 0;
+            if (!pl->has_set[set]) continue;
+            uint64_t bk = 0xcbf29ce484222325ull;
+            auto mixb = [&](uint64_t v) { bk = (bk ^ v) * 1099511628211ull; };
+            bool ok = true;
+            for (const uint16_t bi_ : pl->set_idx[set]) {
+                const BindingDesc& d = pl->bindings[bi_];
+                const DescriptorBinding& b = d.shader->refl.bindings[d.index];
+                mixb(d.binding);
+                const int stg = d.nvn_stage;
+                if (stg < 0 || stg >= kStages) { ok = false; break; }
+                switch (b.nvn.source) {
+                    case NvnSource::UniformBlock:
+                        if (b.nvn.index >= 0 && b.nvn.index < 16) { const GState::Bind& u = sim.ubo[stg][b.nvn.index]; mixb(u.addr); mixb(u.size); }
+                        break;
+                    case NvnSource::StorageBuffer: {
+                        const int slot = b.nvn.index >= 0 ? b.nvn.index : storage_slot_for(stg, b.nvn.c0_offset);
+                        if (slot >= 0 && slot < 16) { mixb(sim.ssbo[stg][slot].addr); mixb(sim.ssbo[stg][slot].size); }
+                        break;
+                    }
+                    case NvnSource::SamplerBinding:
+                        if (b.nvn.index >= 0 && b.nvn.index < 64) mixb(sim.tex[stg][b.nvn.index]);
+                        break;
+                    case NvnSource::ImageBinding:
+                        if (b.nvn.index >= 0 && b.nvn.index < 16) mixb(sim.img[stg][b.nvn.index]);
+                        break;
+                    case NvnSource::HandleInUniform: mixb(read_handle_word_in(sim.ubo[stg], b.nvn.bank, b.nvn.word)); break;
+                    case NvnSource::HandleExpr:
+                        if (!fp_expr_pure(b.nvn.expr)) { ok = false; break; }
+                        mixb(eval_handle_expr_in(d, b.nvn.expr, sim.ubo[stg], sim.ssbo[stg], nullptr));
+                        break;
+                    case NvnSource::DriverConstants:
+                        if (stg != kCompute && d.shader->refl.global_fallback && c0_persist_on()) ok = false;
+                        break;
+                    default: break;
+                }
+                if (!ok) break;
+            }
+            if (!ok) continue;
+            w[2 + set] = bk;
+            w[1] |= 1u << set;
+        }
+    } else {
+        for (uint32_t set = 0; set < 4; ++set) w[2 + set] = 0;
+    }
+    P.st.publish();
+}
+void fp_walk(FrontPlan& P, FpSim& sim, const CmdList& list, int depth) {
+    if (depth > kMaxDepth) return;
+    for (RecordReader r(list); r.next();) {
+        switch (r.op()) {
+            case Op::BindProgram: {
+                const auto& p = r.payload<P_BindProgram>();
+                const uint32_t bits = p.stages | ((p.stages & ((1u << kCompute) - 1)) ? ((1u << kTask) | (1u << kMesh)) : 0u);
+                for (int st = 0; st < kStages; ++st)
+                    if (bits & (1u << st)) sim.stage[st] = p.program ? p.program->stage[st] : nullptr;
+                break;
+            }
+            case Op::BindBuffers: {
+                const auto& p = r.payload<P_BindBuffers>();
+                if (p.kind != kBufUniform && p.kind != kBufStorage) break;
+                const NVNbufferRange* rg = reinterpret_cast<const NVNbufferRange*>(r.blob<P_BindBuffers>());
+                uint64_t* e = P.st.reserve(2 + p.count);
+                if (!e) return;
+                const size_t at = P.st.n - p.count;
+                e[0] = reinterpret_cast<uint64_t>(r.pos());
+                e[1] = static_cast<uint64_t>(kFsBind) << 32 | p.count;
+                for (uint32_t i = 0; i < p.count; ++i) {
+                    e[2 + i] = physical_buffer_address(rg[i].address, rg[i].size);
+                    const uint32_t k = p.first + i;
+                    if (p.stage < kStages && k < 16) (p.kind == kBufUniform ? sim.ubo : sim.ssbo)[p.stage][k] = {e[2 + i], rg[i].size};
+                }
+                const uint64_t key = reinterpret_cast<uint64_t>(r.pos());
+                if (!P.idx.find(key)) P.idx.put(key, static_cast<uint32_t>(at + 1));
+                P.st.publish();
+                break;
+            }
+            case Op::BindTextures: {
+                const auto& p = r.payload<P_BindTextures>();
+                const uint64_t* h = reinterpret_cast<const uint64_t*>(r.blob<P_BindTextures>());
+                for (uint32_t i = 0; i < p.count; ++i)
+                    if (p.stage < kStages && p.first + i < 64) sim.tex[p.stage][p.first + i] = h[i];
+                break;
+            }
+            case Op::BindImages: {
+                const auto& p = r.payload<P_BindTextures>();
+                const uint64_t* h = reinterpret_cast<const uint64_t*>(r.blob<P_BindTextures>());
+                for (uint32_t i = 0; i < p.count; ++i)
+                    if (p.stage < kStages && p.first + i < 16) sim.img[p.stage][p.first + i] = h[i];
+                break;
+            }
+            case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: fp_work(P, sim, r.pos(), false, false); break;
+            case Op::DrawMeshTasks: fp_work(P, sim, r.pos(), false, true); break;
+            case Op::Dispatch: case Op::DispatchIndirect: fp_work(P, sim, r.pos(), true, false); break;
+            case Op::CallCommands: {
+                const auto& p = r.payload<P_CallCommands>();
+                const uint64_t* h = reinterpret_cast<const uint64_t*>(r.blob<P_CallCommands>());
+                const uint64_t key = reinterpret_cast<uint64_t>(r.pos());
+                const uint32_t* have = P.idx.find(key);
+                uint64_t* e = P.st.reserve(2 + p.count);
+                if (!e) return;
+                const size_t at = P.st.n - p.count;
+                e[0] = key;
+                e[1] = static_cast<uint64_t>(kFsCall) << 32 | p.count;
+                if (have) {   // called again: the lists of its first visit
+                    const size_t f = *have - 1;
+                    const uint64_t* v = P.st.chunk[f / FpStream::kChunk] + f % FpStream::kChunk;
+                    for (uint32_t i = 0; i < p.count; ++i) e[2 + i] = v[i];
+                } else {
+                    for (uint32_t i = 0; i < p.count; ++i) {
+                        Ref<CmdList> l = handle_lookup(h[i], false);
+                        e[2 + i] = reinterpret_cast<uint64_t>(l.get());
+                        if (l) P.keep.push_back(std::move(l));
+                    }
+                    P.idx.put(key, static_cast<uint32_t>(at + 1));
+                }
+                P.st.publish();
+                for (uint32_t i = 0; i < p.count; ++i)   // walked at every call: the entries follow the replay's order
+                    if (const CmdList* l = reinterpret_cast<const CmdList*>(e[2 + i])) fp_walk(P, sim, *l, depth + 1);
+                break;
+            }
+            default: break;
+        }
+    }
+}
+// The walk reads guest memory (uniform words of texture handles) the game may unmap: a fault ends it (the plan holds what was done).
+bool fp_walk_guarded(FrontPlan& P, FpSim& sim, const CmdList& list) {
+    __try {
+        fp_walk(P, sim, list, 0);
+        return true;
+    } __except (1 /* EXCEPTION_EXECUTE_HANDLER */) {
+        return false;
+    }
+}
+void fp_main() {
+    log_set_thread_name("nvn-front");
+    FrontQ& Q = *g_fq;
+    uint64_t last_log = ft::now_ns(), walks = 0, walk_ns = 0, words = 0;
+    FpSim sim;   // carried from submission to submission in submission order, like the replay's state
+    for (;;) {
+        std::shared_ptr<FrontPlan> P;
+        {
+            std::unique_lock<std::mutex> lk(Q.mu);
+            Q.cv.wait(lk, [&] { return !Q.q.empty() || !Q.graves.empty(); });
+            if (!Q.graves.empty()) {
+                std::vector<std::vector<Ref<CmdList>>> g;
+                g.swap(Q.graves);
+                lk.unlock();
+                g.clear();
+                continue;
+            }
+            P = std::move(Q.q.front());
+            Q.q.pop_front();
+        }
+        const uint64_t t0 = ft::now_ns();
+        static const uint16_t zid = ft::zone_id("front.walk");
+        ft::Scope zs(zid, 0, 0);
+        P->pgen = pool_registry_generation();
+        P->vgen = virtual_maps_generation();
+        for (const Ref<CmdList>& l : P->lists) {
+            if (!l) continue;
+            if (!fp_walk_guarded(*P, sim, *l)) { ++Q.faults; break; }
+        }
+        P->phys_ok.store(P->pgen == pool_registry_generation() && P->vgen == virtual_maps_generation(), std::memory_order_relaxed);
+        P->lists.clear();
+        const uint64_t t1 = ft::now_ns();
+        P->walk_ns = t1 - t0;
+        ++walks;
+        walk_ns += t1 - t0;
+        words += P->st.n;
+        P->done.store(true, std::memory_order_release);
+        if (P->replayed.load(std::memory_order_acquire)) {   // the replay ended before the walk: nothing will hand the lists back
+            std::lock_guard<std::mutex> lk(P->keep_mu);
+            P->keep.clear();
+        }
+        if (t1 - last_log > 10ull * 1000000000ull) {
+            last_log = t1;
+            auto g = [](int k) { return static_cast<unsigned long long>(g_fp_st[k].load(std::memory_order_relaxed)); };
+            NXLOG_I(kTag, "front plan: %llu walks (%.3f ms, %.0f words each), %llu submissions replayed with a plan, %llu took entries; waits for the walk %llu, "
+                          "given up late %llu, ended by a record mismatch %llu, ran out %llu; calls %llu from the plan, %llu not (dropped / unknown); "
+                          "physical addresses %llu from the plan, %llu plans with moved generations; work entries %llu, set signatures %llu; scan look-ups %llu; "
+                          "verify differences: calls %llu (%llu more raced with a drop), physical addresses %llu, signatures %llu; walk faults %llu",
+                    static_cast<unsigned long long>(walks), walks ? static_cast<double>(walk_ns) / static_cast<double>(walks) * 1e-6 : 0.0,
+                    walks ? static_cast<double>(words) / static_cast<double>(walks) : 0.0, g(kFpSubs), g(kFpTaken), g(kFpWait), g(kFpLate), g(kFpMismatch),
+                    g(kFpOff), g(kFpCallHit), g(kFpCallMiss), g(kFpPhysHit), g(kFpPhysStale), g(kFpWorkHit), g(kFpSigHit), g(kFpScanHit), g(kFpCallDiff), g(kFpCallRace),
+                    g(kFpPhysDiff), g(kFpSigDiff), static_cast<unsigned long long>(Q.faults));
+        }
+    }
+}
+}  // namespace
+
+// The game thread, before queueing a submission: a plan the front thread fills (null when off).
+std::shared_ptr<FrontPlan> front_submit(const std::vector<Ref<CmdList>>& lists) {
+    if (!front_mode_cfg() || lists.empty()) return {};
+    static std::once_flag once;
+    std::call_once(once, [] {
+        g_fq = new FrontQ();   // never destroyed: the thread runs until the process ends
+        std::thread(fp_main).detach();
+        NXLOG_I(kTag, "front plan on: submissions are walked ahead of the replay ([nvn] front_plan)");
+    });
+    auto P = std::make_shared<FrontPlan>();
+    P->lists = lists;
+    {
+        std::lock_guard<std::mutex> lk(g_fq->mu);
+        g_fq->q.push_back(P);   // never dropped: the simulated state needs every submission
+    }
+    g_fq->cv.notify_one();
+    return P;
+}
+// The render thread, around the replay of the submission the plan belongs to.
+void front_replay_begin(const std::shared_ptr<FrontPlan>& P) {
+    g_fp = nullptr;
+    g_fw = nullptr;
+    g_fp_pos = 0;
+    g_fp_off = g_fp_gens = g_fp_phys = false;
+    if (!P) return;
+    g_fp_mode = front_mode_cfg();
+    if (!g_fp_mode || !ab_on(kAbFront)) return;
+    fp_count(kFpSubs);
+    g_fp = P.get();
+}
+void front_replay_end(const std::shared_ptr<FrontPlan>& P) {
+    if (P) {
+        P->replayed.store(true, std::memory_order_release);
+        if (P->done.load(std::memory_order_acquire) && g_fq) {   // the lists it holds go to the front thread to be released there
+            std::vector<Ref<CmdList>> k;
+            {
+                std::lock_guard<std::mutex> lk(P->keep_mu);
+                k.swap(P->keep);
+            }
+            if (!k.empty()) {
+                {
+                    std::lock_guard<std::mutex> lk(g_fq->mu);
+                    g_fq->graves.push_back(std::move(k));
+                }
+                g_fq->cv.notify_one();
+            }
+        }
+    }
+    g_fp = nullptr;
+    g_fw = nullptr;
+}
 
 // The game thread, after queueing a submission: the look-ahead scans it (above).
 void texlook_submit(const std::vector<Ref<CmdList>>& lists, uint64_t serial) {

@@ -391,6 +391,12 @@ TexStats tex_stats();
 void replay_begin_submit(Frame& f);
 void texlook_submit(const std::vector<Ref<CmdList>>& lists, uint64_t serial);   // game thread: [nvn] tex_lookahead scans the submission (nvn_replay.cpp)
 void replay_lists(Frame& f, const std::vector<Ref<CmdList>>& lists);
+// [nvn] front_plan (nvn_replay.cpp): the game thread makes a plan per submission that the front thread fills ahead of the replay;
+// the replay of that submission uses it between front_replay_begin and front_replay_end (render thread).
+struct FrontPlan;
+std::shared_ptr<FrontPlan> front_submit(const std::vector<Ref<CmdList>>& lists);
+void front_replay_begin(const std::shared_ptr<FrontPlan>& p);
+void front_replay_end(const std::shared_ptr<FrontPlan>& p);
 void replay_end_submit(Frame& f);
 void replay_request_trace();      // trace the next whole presented frame (any thread)
 void replay_shutdown();           // destroys pipelines and layouts (render thread, device idle)
