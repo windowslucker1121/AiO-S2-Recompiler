@@ -99,6 +99,34 @@ there replay New Game every time. A state made with another build still loads; t
 in the first eight minutes after New Game (the first scene's picture stayed black behind the intro's subtitles, the pause key showed
 nothing), so the `continue` route (A on the first title entry, meant to continue a save) is not checked against a real slot yet.
 
+### Script steps (input that is the same on every run)
+
+A reach step `{ script = "<file>.nxs", until = {wait_for arguments}, timeout_s }` hands a test-tooling script
+(`runtime/include/nxrt/tt_script.h`) to the running game. `load_state` then starts the run in the tooling's live mode (`[test] live =
+<run dir>/live.nxs`, with a holder script of one long `@sleep` so frames keep coming while the game boots); the step appends the script
+plus a new holder to the live file and drops the running holder (`live.nxs.abort`). `until` defaults to the script's last `@log` line. A
+relative file is looked up next to `ai_states.toml` first. For input that repeats exactly, scripts use the **scripted pad** (`stick left
+x y for n`, `stick right ...`, `press B for n`: written into player 1's pad at hid level) and **`@rate 60`** (the game step is exactly
+1/60 s per frame, so n frames are the same game time at any fps). Keyboard steps (`keydown W`) go through the window's input queue and
+land a frame or two apart between runs. `@shot <name>` writes `<run dir>/testout/shots/<name>.png`; the frame source is the present
+path, so a shot of a moving scene can be a frame or two apart between runs: compare shots taken after the input has been still a second.
+
+### Benchmark states (since 2026-11-12)
+
+Earlier fps numbers were measured with the camera looking down at the ground, which hides most of the scene. The two standard benchmark
+scenes look into the distance. Both hold the village save (a copy of `village_outside`'s) and reach the moment with routes in
+`recomp/games/oot/ai_states.toml` and scripts in `recomp/games/oot/bench/`:
+
+| State | Route / script | What |
+|---|---|---|
+| `bench_balcony_far` | `bench_balcony_far` / `balcony_far.nxs` | the hero on the balcony of his treehouse; right stick up for 45 frames: camera low behind him, pitched up over the village into the distance (far trees, houses, sky, haze); then still. Log `bench: balcony_far ready`, shot `balcony_far` |
+| `bench_village_walk` | `bench_village_walk` / `balcony_far.nxs` + `village_walk.nxs` | from that view: forward 240 frames (down the ladder), B (let go), then the left stick sideways 360 frames: the camera swings round the tree, past the houses into the open village (away from the girl on the path, whose dialogue would stop the walk). The walk is log `bench: village_walk start` .. `bench: village_walk end` (660 frames at a fixed 1/60 s step), shots `walk_ladder`, `walk_landed`, `walk_run1..3`, `walk_end` (60 still frames later) |
+
+`load_state("bench_balcony_far", instance=..., settings={"memory.limit_gb": 24, "diag.frame_csv": "frames.csv"})` returns once the
+view is set up; `bench_village_walk` returns when the walk is over. To measure the balcony and then the walk in one run, load
+`village_outside` with `route=["title", "continue", "in_game", "bench_balcony_far", {"sleep": 95}, {"script": "bench/village_walk.nxs"}]`.
+Reference pictures of the target views (not in git): `work\bench\` of the main checkout. How to measure: PERFORMANCE.md "How to measure".
+
 ## Bug bundles
 
 The player presses **F9** in the game window (`[bug] key`): the runtime writes a bundle at once (screenshot of the presented frame, log,
