@@ -60,7 +60,7 @@ Config load_config() {
     c.fix_budget = config_get_bool("time", "fix_budget", true);
     c.fix_stuck_tracker = config_get_bool("time", "fix_stuck_tracker", true);
     c.movie_max = std::clamp(config_get_double("time", "movie_max", 0.5), 0.01, 5.0);
-    c.movie_follow_pictures = config_get_bool("time", "movie_follow_pictures", false);
+    c.movie_follow_pictures = config_get_bool("time", "movie_follow_pictures", true);
     c.movie_hold = std::clamp(config_get_double("time", "movie_hold", 1.0), 0.0, 10.0);
     c.av_trace = config_get_bool("time", "av_trace", false);
     c.log_every = static_cast<int>(std::clamp<int64_t>(config_get_int("time", "log_every", 0), 0, 1000000));

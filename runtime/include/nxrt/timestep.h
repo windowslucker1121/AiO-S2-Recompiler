@@ -55,8 +55,8 @@ struct Config {
     double movie_max = 0.5;          // longest delta handed to the movie player in one call (seconds)
     // Sites::fixed_step_during_movies: the step follows the pictures the game took (one 1/60 s step per picture; a frame that got no new
     // picture gets the shortest step and the next frames make up for it), so the event timeline cannot run ahead of a late decoder.
-    // false (default until verified) = one 1/60 s step per frame while a movie shows, picture or not.
-    bool movie_follow_pictures = false;   // WIP 2026-11-12: not verified in game yet
+    // false = one 1/60 s step per frame while a movie shows, picture or not (before 2026-11-12: voice lines up to 3.8 s ahead of the pictures).
+    bool movie_follow_pictures = true;
     double movie_hold = 1.0;         // seconds without a new picture (decoder still live) the step keeps waiting for one before it runs freely
     bool av_trace = false;           // a log line per sound start with the game frame and the movie pictures taken (AV sync measurements)
     int log_every = 0;
