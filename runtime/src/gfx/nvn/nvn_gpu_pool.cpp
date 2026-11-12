@@ -994,14 +994,7 @@ constexpr uint64_t kCopyBudget = 64ull << 20;                        // bytes co
 constexpr uint8_t kHotHits = 2;                                      // two copies in a row overwritten before any draw read them: the page is hot ...
 constexpr uint32_t kHotHold = 600;                                   // ... and is not copied for 600 presents, twice that the next time, ...
 constexpr uint8_t kHotMaxShift = 4;                                  // ... up to 16 times
-// [nvn] mirror_hot_window (default 8; cpuperf_ab_what hot_window: 4 in its off windows): a write this many presents or fewer after the copy
-// counts even when draws read it. 4 missed the village's per-object data the game rewrites every fourth frame: whether such a write was
-// noted 4 or 5 presents after its copy depended on the frames' phase, so those pages faulted on the game's threads every cycle (frames with
-// 10+ write faults were ~1.2 ms longer, with the render thread waiting for the game).
-uint32_t hot_window() {
-    static const uint32_t w = static_cast<uint32_t>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "mirror_hot_window", 8), 1, 120));
-    return ab_hot_window_on() ? w : 4u;
-}
+constexpr uint32_t kHotWindow = 4;                                   // a write this many presents or fewer after the copy counts even when draws read it
 
 // [nvn] mirror_hot_used (default on): a page the CPU rewrites within kHotWindow presents of its copy, kHotHits times in a row, goes hot even
 // when draws read it (per-frame vertices, uniforms and texels). Each such rewrite was a write fault on the game's thread (a vectored exception
@@ -1352,7 +1345,7 @@ void absorb_writes(Mirror& m, uint32_t now) {
         back_put(m, p, p, false);
         bit_put(m.want, p, false);
         if (m.copied_at[i] == 0) continue;                     // never copied: nothing was wasted
-        const bool soon = hot_used_on() && now - m.copied_at[i] <= hot_window();   // rewritten right after its copy: per-frame data
+        const bool soon = hot_used_on() && now - m.copied_at[i] <= kHotWindow;   // rewritten right after its copy: per-frame data
         if (bit_get(m.used, p) && !soon) {
             m.score[i] = 0;
             m.backoff[i] = 0;
