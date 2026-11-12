@@ -331,7 +331,15 @@ def write_gen(build):
     text = text.replace('@GAME_ID@', g['id']).replace('@GAME_PRODUCT@', g['product'])
     with open(os.path.join(gen, 'game.manifest'), 'w', encoding='utf-8', newline='') as f:
         f.write(text)
-    shutil.copyfile(os.path.join(SDK, 'game.rc'), os.path.join(gen, 'game.rc'))
+    ico = os.path.join(SDK, 'game.ico')
+    if os.path.isfile(ico):
+        shutil.copyfile(os.path.join(SDK, 'game.rc'), os.path.join(gen, 'game.rc'))
+        shutil.copyfile(ico, os.path.join(gen, 'game.ico'))
+    else:   # an sdk folder from before the icon: the resources without it
+        with open(os.path.join(SDK, 'game.rc'), encoding='utf-8', newline='') as f:
+            rc = f.read()
+        with open(os.path.join(gen, 'game.rc'), 'w', encoding='utf-8', newline='') as f:
+            f.write(''.join(l for l in rc.splitlines(True) if not l.lstrip().startswith('1 ICON')))
     return gen
 
 

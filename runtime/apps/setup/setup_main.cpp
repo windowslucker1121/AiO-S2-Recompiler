@@ -2645,6 +2645,17 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
             GameItem& g = *reinterpret_cast<GameItem*>(w);
             g.game_running = false;
             if (sel() == &g) update_settings();   // the game may have changed its settings on the way out
+            if (l == 3) {
+                // exit code 3: the runtime's memory guard stopped the game (nxrt/memguard.h); never leave the player with a silent "crash"
+                std::wstring report = g.exe;
+                if (report.size() > 4 && _wcsicmp(report.c_str() + report.size() - 4, L".exe") == 0) report.resize(report.size() - 4);
+                report += L"_crash.txt";
+                const std::wstring log_path = join(g.lay.data, L"logs\\" + widen(g.def->log));
+                MessageBoxW(wnd_, (L"The game was stopped because it was running out of memory: it used more than this PC has for a while, "
+                                   L"or Windows had almost no memory left to give.\r\n\r\nClosing other programs helps, and so does letting "
+                                   L"Windows manage the page file size.\r\n\r\nThe report: " + report + L"\r\nIts log: " + log_path).c_str(),
+                            kAppName, MB_OK | MB_ICONWARNING);
+            }
             refresh();
             InvalidateRect(wnd_, nullptr, FALSE);
             InvalidateRect(cards_, nullptr, FALSE);

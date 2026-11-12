@@ -52,3 +52,20 @@ reach = ["title"]
 # still runs for minutes after its video ends; the picture of that scene was black in that run (A12).
 description = "New Game from fresh save data: the intro video cut short, the first 3D scene (thousands of draws) loaded behind it (~1 min)"
 reach = ["title", "new_game", "in_game"]
+
+# ---- benchmark states (tools/ai/README.md "Benchmark states", PERFORMANCE.md "How to measure") ----
+# The saved states bench_balcony_far and bench_village_walk (work/states/oot) hold the village save and reach the moment with these
+# routes: a script step (tools/ai/states.py) hands bench/*.nxs to the game through the test tooling's live mode. The scripts use the
+# scripted pad and a fixed game step (`@rate 60`), so the camera and the path are the same on every run.
+[route.bench_balcony_far]
+description = "balcony of the hero's house, camera low and pitched up: the view over the village into the distance; then still"
+steps = [
+  { script = "bench/balcony_far.nxs", timeout_s = 120 },
+]
+
+[route.bench_village_walk]
+description = "from the balcony view: down the ladder and a fixed run through the village (~13 s of game time at a fixed 1/60 s step)"
+steps = [
+  { script = "bench/balcony_far.nxs", timeout_s = 120 },
+  { script = "bench/village_walk.nxs", timeout_s = 300 },
+]

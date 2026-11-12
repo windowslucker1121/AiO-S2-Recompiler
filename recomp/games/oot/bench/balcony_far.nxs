@@ -1,0 +1,11 @@
+# Benchmark view "balcony far" (tools/ai/README.md "Benchmark states"). Starts right after the village save has loaded (free control on
+# the treehouse balcony, camera behind the hero looking down at the path). Frame-counted pad input with a fixed game step: the same
+# game time and the same input on every run, whatever the fps.
+@rate 60
+30
+# camera low behind the hero, pitched up: the view looks over the village into the distance (far trees, houses, sky)
+stick right 0 1 for 45
+30
+@shot balcony_far
+@rate 0
+@log bench: balcony_far ready
