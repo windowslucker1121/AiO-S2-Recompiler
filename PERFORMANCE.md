@@ -143,6 +143,7 @@ Gains are from paired windows unless stated. Rows are in rough chronological ord
 | R8 | handle expressions once per command; virtual-texture registry indexed and grouped by pool (find_alias and CPU-write checks no longer walk every texture under the registry lock) | alternating exes: replay 12.9 / 13.4 vs 14.6 / 13.95 ms |
 | R8 | unbiased cpuperf_ab; hot config switches read without guarded statics (`nvn_cfg.h`) | measurement; neutral |
 | R8 | runtime PGO, opt-in (`NXRT_PGO = generate | <profdata>`; the profile is not in the repository) | replay ~12.3 vs ~14.8 ms; no fps while GPU-bound |
+| R8 (shader side) | direct mesh outputs + real primitive count (`NXRT_HARNESS_MESH_DIRECT` / `MESH_EARLY_COUNT`) on by default; the shared cache's 785 mesh/task blocks re-translated (backup `work/shaders/mesh_backup_r8`). **The main checkout's harness must be rebuilt from the merged branch before any later re-translation**, or the mesh blocks revert | alternating private caches: 69.0 / 69.0 vs 66.7 / 66.6 fps, GPU -0.4..-0.5 ms; shared cache in game 69.2 fps, frames over 15 ms 45% -> 24% |
 | gpu-time | `indirect_from_held`: indirect arguments inside one held result read from its copy (no whole 6.5 MB copy-back per indirect dispatch) | culling submission 3.31 → 3.08 ms (stamped), main submission and mesh invocations unchanged |
 | gpu-time | `pt_copy` measured again without the frame trace, hazard off (the fps verdict) | **fps +2.7 median (25/25), 1% low +4.7 (24/25)** |
 
@@ -204,6 +205,13 @@ Shared shader cache, `work/shaders/oot/spirv` (git-ignored):
   removed); `compute_out_lazy = 0` with the GPU headroom flush_copy gave (GPU +6 ms, 47 fps); mesh shaders with direct outputs and the
   early primitive count (`NXRT_HARNESS_MESH_DIRECT` + `MESH_EARLY_COUNT`, private cache): GPU busy −0.14 ms only.
 
+- **R8 shader side (2026-11-12, GPU-bound village):** `NXRT_HARNESS_PROPAGATE=near:16` as a mesh default (hot meshes 255 registers with
+  spills -> ~170): 69.3 / 69.4 vs 69.1 / 68.9 fps, noise; on the 14 hottest compute blocks (HiZ a17259b2 255 -> 128 registers): 65.6 / 68.6
+  vs 68.8 / 69.3, worse. gpt draws without fragments (`skip_gpt = 2`): GPU -0.17 ms only (their cost is the pre-raster stage); gpt draws
+  left out (`skip_gpt = 1`): +11.3 fps, GPU -2.3 ms (the ceiling of the pointer pre-raster stages).
+- **R8, hazard tracker (now on the recorder thread) at 5ff8131, paired, two runs:** GPU busy -1.1 ms per frame, but render replay +0.7
+  ms and fps -2.8 / -1.25 (0/15, 1/15): with it on the render thread becomes the limit (idle 1.2 -> 0.1-0.3 ms). Stays off; it pays once
+  the render thread has ~1 ms more slack.
 - **R8 (2026-11-12):** `park_shared` (the last reference of a shared image parks it): replay +0.14 ms, 1% low -2.3 (4/12), removed.
   The earlier paired gains of `handle_big` / `chunk_async` / `fb_image` alone were biased (see How to measure); re-measured together.
 - **gpu-time round 2 (2026-11-12), village 1080, paired windows:**
