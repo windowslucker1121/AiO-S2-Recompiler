@@ -318,7 +318,13 @@ trace's `gpu.busy`), so a GPU change is judged by GPU busy *and* render-thread r
   buffer: a held result sent back at a submission chunk in between, same contents): in-pass copies ~4.8 -> ~1.2 per frame (left: draws past
   where a look-ahead ended at a writing dispatch), 2 runs: fps +2.2 / +1.85 median (19/20, 19/19), GPU busy -0.54 ms, full barriers -39 per frame,
   replay +0.13 / +0.18 ms. The statistics line `mesh_copy_ahead look-ahead ended by:` now also splits the in-pass copies by reason.
-- **Translator experiments, opt-in only (measured no GPU-time gain):** sin/cos fusion (`NXRT_HARNESS_SIN_FUSE=1`: MUFU.SIN/COS of an
+- **Look-ahead cost on the render thread** (sampler, village): ~25 look-aheads per present read ~13,500 commands (statistics line), ~2.2%
+  of the render thread's samples, 43% of it the handle look-ups of called lists. Cut: the look-ahead's handle look-ups no longer count calls,
+  storage bindings are resolved to physical addresses only when a writing draw needs them, a memo of the last stage set's write flag:
+  2.23% -> 2.08% (physical_buffer_address gone from it); paired replay cost +0.10 / +0.15 ms (before +0.13 / +0.18: within noise).
+- **The heavy frame of the game's 4-frame cycle** (frame trace, all features on, 40-200 s): GPU busy per frame median 8.1 ms, p90 9.19,
+  p99 9.29, max 10.0; by cycle position busy 9.17 / 9.10 / 7.58 / 7.54 ms while the frame is 11.1 / 13.0 / 12.3 / 12.0 ms and the render
+  replay 10.8 / 12.3 / 12.0 / 11.5 ms. No frame's GPU work is over ~9.5 ms (with the trace on); the heavy frames are the render thread's.- **Translator experiments, opt-in only (measured no GPU-time gain):** sin/cos fusion (`NXRT_HARNESS_SIN_FUSE=1`: MUFU.SIN/COS of an
   `FMUL.RZ x, 1/(2pi)` emitted as sin(x), which the driver compiles into the same FMUL.RZ + MUFU pair; f3054ac2 -7% host instructions),
   shifted mesh store addresses proven (`NXRT_HARNESS_MESH_PROOF_SHIFT=1`: shadow mesh 7477b2c8 40 stores, 1,590 -> 938 instructions),
   predicated instructions run unconditionally where the old value is dead on the guard-false paths (`NXRT_HARNESS_SPECULATE=1`: proves few

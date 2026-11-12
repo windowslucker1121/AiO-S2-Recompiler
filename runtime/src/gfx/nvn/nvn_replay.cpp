@@ -6340,6 +6340,7 @@ struct MeshSim {
     GState::Bind ssbo[kStages][16];
     bool writes;
     uint64_t draws;
+    uint32_t raw[kStages];   // storage slots set by the scan (raw addresses, resolved when a writing draw needs them)
     std::vector<std::pair<uint64_t, uint64_t>> written, records;   // [lo, hi): storage the scanned draws may write; the records collected
 };
 uint64_t g_mesh_stop[static_cast<int>(Op::Count)] = {};   // what ended the look-ahead, by command (statistics)
@@ -6370,15 +6371,19 @@ bool mesh_note_writes(MeshSim& sim) {
             if (slot < 0 || slot >= 16) return false;
             const GState::Bind& w = sim.ssbo[k][slot];
             if (!w.addr) continue;
-            const uint64_t hi = w.size ? w.addr + w.size : UINT64_MAX;
-            if (mesh_overlaps(sim.records, w.addr, hi)) return false;
-            sim.written.emplace_back(w.addr, hi);
+            // the scan keeps raw addresses (BindBuffers); the starting state is S.ssbo's, already resolved (sim.raw_from: slots set by the scan)
+            const uint64_t a = (sim.raw[k] >> slot & 1) ? physical_buffer_address(w.addr, w.size) : w.addr;
+            const uint64_t hi = w.size ? a + w.size : UINT64_MAX;
+            if (mesh_overlaps(sim.records, a, hi)) return false;
+            sim.written.emplace_back(a, hi);
         }
     }
     return true;
 }
+uint64_t g_mesh_scans = 0, g_mesh_scan_ops = 0;   // statistics: look-aheads and commands they read
 bool mesh_scan(RecordReader rd, int depth, MeshSim& sim, int& budget, std::vector<P_DrawMesh>& out) {
     while (rd.next()) {
+        ++g_mesh_scan_ops;
         if (--budget < 0) { ++g_mesh_stop_x[2]; return false; }
         const Op op = rd.op();
         switch (op) {
@@ -6387,7 +6392,13 @@ bool mesh_scan(RecordReader rd, int depth, MeshSim& sim, int& budget, std::vecto
                 const uint32_t bits = p.stages | ((p.stages & ((1u << kCompute) - 1)) ? ((1u << kTask) | (1u << kMesh)) : 0u);
                 for (int st = 0; st < kStages; ++st)
                     if (bits & (1u << st)) sim.st[st] = p.program ? p.program->stage[st] : nullptr;
-                sim.writes = prog_writes_memory(sim.st);
+                {
+                    // the stages' write flags change only with their shader infos: a one-entry memo of the last stage set
+                    static const ShaderInfo* last[kStages] = {};
+                    static bool last_w = false;
+                    if (std::memcmp(last, sim.st, sizeof last) != 0) { std::memcpy(last, sim.st, sizeof last); last_w = prog_writes_memory(sim.st); }
+                    sim.writes = last_w;
+                }
                 break;
             }
             case Op::BindBuffers: {   // storage bindings of the graphics stages: where writing draws write
@@ -6395,7 +6406,8 @@ bool mesh_scan(RecordReader rd, int depth, MeshSim& sim, int& budget, std::vecto
                 if (p.kind != kBufStorage || p.stage >= kStages) break;
                 const NVNbufferRange* rg = reinterpret_cast<const NVNbufferRange*>(rd.blob<P_BindBuffers>());
                 for (uint32_t i = 0; i < p.count; ++i)
-                    if (p.first + i < 16) sim.ssbo[p.stage][p.first + i] = {physical_buffer_address(rg[i].address, rg[i].size), rg[i].size};
+                    if (p.first + i < 16) sim.ssbo[p.stage][p.first + i] = {rg[i].address, rg[i].size};   // raw: resolved in mesh_note_writes
+                for (uint32_t i = 0; i < p.count; ++i) if (p.first + i < 16) sim.raw[p.stage] |= 1u << (p.first + i);
                 break;
             }
             case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: case Op::DrawMeshTasks:
@@ -6416,7 +6428,7 @@ bool mesh_scan(RecordReader rd, int depth, MeshSim& sim, int& budget, std::vecto
                 const auto& p = rd.payload<P_CallCommands>();
                 const uint64_t* h = reinterpret_cast<const uint64_t*>(rd.blob<P_CallCommands>());
                 for (uint32_t i = 0; i < p.count; ++i) {
-                    Ref<CmdList> l = handle_lookup(h[i]);
+                    Ref<CmdList> l = handle_lookup(h[i], false);
                     if (l && !mesh_scan(RecordReader(*l), depth + 1, sim, budget, out)) return false;
                 }
                 break;
@@ -6475,6 +6487,7 @@ void mesh_copies_ahead() {
     static MeshSim sim;
     for (int k = 0; k < kStages; ++k) sim.st[k] = S.stage[k];
     std::memcpy(sim.ssbo, S.ssbo, sizeof sim.ssbo);
+    std::memset(sim.raw, 0, sizeof sim.raw);
     sim.written.clear();
     sim.records.clear();
     sim.writes = prog_writes_memory(sim.st);
@@ -6483,6 +6496,7 @@ void mesh_copies_ahead() {
     static std::vector<P_DrawMesh> draws;
     draws.clear();
     int budget = 16384;
+    ++g_mesh_scans;
     mesh_scan(*g_rd_cur[g_rd_depth], g_rd_depth, sim, budget, draws);
     if (draws.empty()) { none_until = g_draw_ops + sim.draws; return; }
     g_mesh_pre_until = g_draw_ops + sim.draws;   // the draws the scan saw before it stopped (this one is counted already)
@@ -8879,8 +8893,8 @@ void replay_begin_submit(Frame& f) {
                     std::string st;
                     for (int k = 0; k < static_cast<int>(Op::Count); ++k)
                         if (g_mesh_stop[k]) { char b[64]; std::snprintf(b, sizeof b, " %s %llu", op_name(static_cast<Op>(k)), (unsigned long long)g_mesh_stop[k]); st += b; }
-                    NXLOG_I(kTag, "mesh_copy_ahead look-ahead ended by:%s; in-pass copies: past the look-ahead %llu, none copied %llu, other records %llu (same address: other count/stride %llu, other buffer %llu); ended by draws: record written %llu, writing draw %llu, budget %llu",
-                            st.c_str(), (unsigned long long)g_mesh_inpass_why[0], (unsigned long long)g_mesh_inpass_why[1], (unsigned long long)g_mesh_inpass_why[2], (unsigned long long)g_mesh_inpass_why[3], (unsigned long long)g_mesh_inpass_why[4], (unsigned long long)g_mesh_stop_x[0], (unsigned long long)g_mesh_stop_x[1], (unsigned long long)g_mesh_stop_x[2]);
+                    NXLOG_I(kTag, "mesh_copy_ahead look-ahead ended by:%s; in-pass copies: past the look-ahead %llu, none copied %llu, other records %llu (same address: other count/stride %llu, other buffer %llu); ended by draws: record written %llu, writing draw %llu, budget %llu; %llu look-aheads read %llu commands",
+                            st.c_str(), (unsigned long long)g_mesh_inpass_why[0], (unsigned long long)g_mesh_inpass_why[1], (unsigned long long)g_mesh_inpass_why[2], (unsigned long long)g_mesh_inpass_why[3], (unsigned long long)g_mesh_inpass_why[4], (unsigned long long)g_mesh_stop_x[0], (unsigned long long)g_mesh_stop_x[1], (unsigned long long)g_mesh_stop_x[2], (unsigned long long)g_mesh_scans, (unsigned long long)g_mesh_scan_ops);
                 }
                 NXLOG_I(kTag, "texture work that ended an open pass: %llu breaks; textures by old layout: general %llu, color attachment %llu, depth attachment %llu, "
                         "depth read-only %llu, transfer %llu, undefined %llu, other %llu; CPU-written (uploads) %llu, storage images %llu",
