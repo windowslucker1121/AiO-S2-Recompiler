@@ -6344,6 +6344,8 @@ struct MeshSim {
 };
 uint64_t g_mesh_stop[static_cast<int>(Op::Count)] = {};   // what ended the look-ahead, by command (statistics)
 uint64_t g_mesh_inpass = 0;                               // {count, first} draws that still copied in the pass (statistics)
+uint64_t g_mesh_inpass_why[5] = {};
+uint64_t g_mesh_stop_x[3] = {};                           // look-ahead ends: a record an earlier draw may write, a draw writing memory, budget                       // ... with no copies past the look-ahead's end, none (covered), others only
 bool mesh_ahead_mem_on() {
     const bool on = NX_CFG_BOOL("nvn", "mesh_ahead_mem", true);
     return on && ab_on(kAbMeshAhead2);
@@ -6377,7 +6379,7 @@ bool mesh_note_writes(MeshSim& sim) {
 }
 bool mesh_scan(RecordReader rd, int depth, MeshSim& sim, int& budget, std::vector<P_DrawMesh>& out) {
     while (rd.next()) {
-        if (--budget < 0) return false;
+        if (--budget < 0) { ++g_mesh_stop_x[2]; return false; }
         const Op op = rd.op();
         switch (op) {
             case Op::BindProgram: {
@@ -6402,11 +6404,11 @@ bool mesh_scan(RecordReader rd, int depth, MeshSim& sim, int& budget, std::vecto
                     const uint64_t stride = p.stride ? static_cast<uint64_t>(p.stride) : 8;
                     const uint32_t n = p.multi ? std::max<uint32_t>(1, std::min<uint32_t>(p.max_count, 4096)) : 1;
                     const uint64_t hi = p.indirect + stride * (n - 1) + 8;
-                    if (mesh_overlaps(sim.written, p.indirect, hi)) return false;   // a draw before it may write its records
+                    if (mesh_overlaps(sim.written, p.indirect, hi)) { ++g_mesh_stop_x[0]; return false; }   // a draw before it may write its records
                     sim.records.emplace_back(p.indirect, hi);
                     out.push_back(p);
                 }
-                if (sim.writes && !mesh_note_writes(sim)) return false;
+                if (sim.writes && !mesh_note_writes(sim)) { ++g_mesh_stop_x[1]; return false; }
                 ++sim.draws;
                 break;
             case Op::CallCommands: {
@@ -6480,7 +6482,7 @@ void mesh_copies_ahead() {
     if (sim.writes && !mesh_note_writes(sim)) return;   // the draw that begins the pass (it runs before the ones looked at)
     static std::vector<P_DrawMesh> draws;
     draws.clear();
-    int budget = 4096;
+    int budget = 16384;
     mesh_scan(*g_rd_cur[g_rd_depth], g_rd_depth, sim, budget, draws);
     if (draws.empty()) { none_until = g_draw_ops + sim.draws; return; }
     g_mesh_pre_until = g_draw_ops + sim.draws;   // the draws the scan saw before it stopped (this one is counted already)
@@ -6536,7 +6538,9 @@ void do_draw_mesh(const P_DrawMesh& p) {
             g_mesh2_present = counters().presents.load(std::memory_order_relaxed) + 1;
             if (g_draw_ops > g_mesh_pre_until) g_mesh_pre.clear();   // past the command where the look-ahead stopped
             for (const MeshPre& m : g_mesh_pre)
-                if (m.indirect == p.indirect && m.n == n && m.stride == stride && m.src == ib.buffer && m.src_off == ib.offset) { pre = &m; break; }
+                // the same records: also when they now resolve to another buffer (a held result sent back to its pool at a submission
+                // chunk in between: the same contents; the look-ahead saw no command that may write them) - mesh_ahead_mem
+                if (m.indirect == p.indirect && m.n == n && m.stride == stride && ((m.src == ib.buffer && m.src_off == ib.offset) || mesh_ahead_mem_on())) { pre = &m; break; }
         }
         if (pre) {   // mesh_copy_ahead: copied before the pass began
             buf = pre->buf;
@@ -6551,6 +6555,11 @@ void do_draw_mesh(const P_DrawMesh& p) {
             std::vector<VkBufferCopy> regions(n);
             for (uint32_t i = 0; i < n; ++i) regions[i] = {ib.offset + stride * i, u.offset + 12ull * i, 4};
             ++g_mesh_inpass;
+            {
+                int why = g_mesh_pre.empty() ? (g_draw_ops > g_mesh_pre_until ? 0 : 1) : 2;
+                if (why == 2) for (const MeshPre& m : g_mesh_pre) if (m.indirect == p.indirect) { why = (m.n != n || m.stride != stride) ? 3 : 4; break; }
+                ++g_mesh_inpass_why[why];
+            }
             end_pass();
             memory_barrier(F->cb);
             vkCmdCopyBuffer(F->cb, ib.buffer, u.buffer, n, regions.data());
@@ -8870,7 +8879,8 @@ void replay_begin_submit(Frame& f) {
                     std::string st;
                     for (int k = 0; k < static_cast<int>(Op::Count); ++k)
                         if (g_mesh_stop[k]) { char b[64]; std::snprintf(b, sizeof b, " %s %llu", op_name(static_cast<Op>(k)), (unsigned long long)g_mesh_stop[k]); st += b; }
-                    NXLOG_I(kTag, "mesh_copy_ahead look-ahead ended by:%s", st.c_str());
+                    NXLOG_I(kTag, "mesh_copy_ahead look-ahead ended by:%s; in-pass copies: past the look-ahead %llu, none copied %llu, other records %llu (same address: other count/stride %llu, other buffer %llu); ended by draws: record written %llu, writing draw %llu, budget %llu",
+                            st.c_str(), (unsigned long long)g_mesh_inpass_why[0], (unsigned long long)g_mesh_inpass_why[1], (unsigned long long)g_mesh_inpass_why[2], (unsigned long long)g_mesh_inpass_why[3], (unsigned long long)g_mesh_inpass_why[4], (unsigned long long)g_mesh_stop_x[0], (unsigned long long)g_mesh_stop_x[1], (unsigned long long)g_mesh_stop_x[2]);
                 }
                 NXLOG_I(kTag, "texture work that ended an open pass: %llu breaks; textures by old layout: general %llu, color attachment %llu, depth attachment %llu, "
                         "depth read-only %llu, transfer %llu, undefined %llu, other %llu; CPU-written (uploads) %llu, storage images %llu",
