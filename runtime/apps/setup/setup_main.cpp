@@ -37,6 +37,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -66,7 +67,8 @@ constexpr wchar_t kAppName[] = L"Recomp Library";
 constexpr UINT kMsgLine = WM_APP + 1;     // wParam: StepRun*, lParam: std::string* (one output line of that step)
 constexpr UINT kMsgExit = WM_APP + 2;     // wParam: StepRun*, lParam: exit code
 constexpr UINT kMsgCheck = WM_APP + 3;    // wParam: GameItem*, lParam: std::string* (the prepare check's answer)
-constexpr UINT kMsgDlss = WM_APP + 5;     // lParam: std::wstring* (empty: DLSS downloaded, else the error)
+constexpr UINT kMsgDlss = WM_APP + 5;     // wParam: exit code, lParam: std::wstring* (the error, empty on success)
+constexpr UINT kMsgDlssLine = WM_APP + 7; // lParam: std::wstring* (a progress line of fetch_dlss.py)
 constexpr UINT kMsgReqs = WM_APP + 4;
 constexpr UINT kMsgGameExit = WM_APP + 6; // wParam: GameItem*, lParam: the game's exit code     // lParam: std::vector<Check>* (the PC's checks, made on a thread)
 constexpr UINT_PTR kTimer = 1;
@@ -312,7 +314,7 @@ enum class Btn { primary, normal, danger };
 enum Id : int {
     ID_CARDS = 100, ID_STEPS, ID_LOG, ID_REQ_LIST, ID_REQ_FIX,
     ID_PLAY, ID_PREP, ID_CANCEL, ID_REBUILD, ID_SRC_NUP, ID_SRC_FOLDER, ID_DATA, ID_OPEN_DATA, ID_SHORTCUT, ID_REMOVE,
-    ID_RECHECK, ID_COPY, ID_OPEN_INI, ID_ADD, ID_SETTINGS, ID_MORE, ID_DETAILS, ID_PLAY_AS_IS,
+    ID_RECHECK, ID_COPY, ID_OPEN_INI, ID_ADD, ID_SETTINGS, ID_MORE, ID_DETAILS, ID_PLAY_AS_IS, ID_DLSS,
     IDM_ADD = 1000, IDM_EXIT, IDM_RECHECK, IDM_ABOUT, IDM_REPORT, IDM_PAGE0, IDM_BACK = IDM_PAGE0 + 8, IDM_PREV_GAME, IDM_NEXT_GAME,
 };
 
@@ -390,8 +392,11 @@ private:
     void refresh();                       // texts and enabled states of the controls of the current page
     void update_settings();               // the settings panel shows the selected game
     void download_dlss();                 // licence dialog, then fetch_dlss.py as a child
+    void dlss_show(const std::wstring& status, bool busy);   // the DLSS status in Settings and on This PC
     void handle_args(const std::wstring& line, bool live);   // a second start's command line (--game, --page, --tab, --add)
     Child dlss_child_;
+    std::wstring dlss_status_;            // the last DLSS status line (progress, result); empty: what dlss_state says
+    bool dlss_busy_ = false;
 
     HINSTANCE inst_ = nullptr;
     HWND wnd_ = nullptr, cards_ = nullptr, settings_ = nullptr;
@@ -408,7 +413,7 @@ private:
     std::vector<const Check*> pc_checks() const;   // every check, problems first
     void paint_pc(gp::Graphics& g);
     HWND b_more_ = nullptr;
-    HWND b_play_ = nullptr, b_cancel_ = nullptr, b_recheck_ = nullptr, b_copy_ = nullptr, b_open_ini_ = nullptr;
+    HWND b_play_ = nullptr, b_cancel_ = nullptr, b_recheck_ = nullptr, b_copy_ = nullptr, b_open_ini_ = nullptr, b_dlss_ = nullptr;
     RECT brand_rect_{}, pc_rect_{}, add_rect_{}, report_rect_{}, tab_rect_[2] = {};
     std::vector<std::pair<RECT, GameItem*>> nav_games_;   // the side menu: one entry per game in the library, then This PC
     RECT prog_rect_{}, steps_rect_{}, details_rect_{};
@@ -510,48 +515,132 @@ void App::select(const std::string& id) {
 
 // The NVIDIA RTX SDKs LICENSE does not fit a GPL package, so the DLL is never shipped: the player sees the licence, then
 // fetch_dlss.py downloads it from NVIDIA's repository (sha256 checked) into <exe dir>\upscalers\streamline.
+// Every way out of a click shows something: the licence dialog, then the progress under the button and a message with the result, or a
+// message saying why nothing can be downloaded. Test switch: RECOMP_LIBRARY_DLSS_SCRIPT=<script> runs that script instead of
+// fetch_dlss.py and skips the licence dialog (nothing is downloaded from NVIDIA then); used to test the progress and error paths.
 void App::download_dlss() {
-    if (dlss_child_.running()) return;
-    if (tools_.python.empty() || tools_.fetch_dlss.empty()) { MessageBoxW(wnd_, L"Python or fetch_dlss.py is missing (This PC page).", kAppName, MB_ICONWARNING); return; }
-    TASKDIALOGCONFIG c{sizeof c};
-    c.hwndParent = wnd_;
-    c.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
-    c.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
-    c.pszWindowTitle = kAppName;
-    c.pszMainInstruction = L"Download NVIDIA DLSS?";
-    c.pszContent = L"The DLSS file (nvngx_dlss.dll, about 56 MB) comes from NVIDIA's own repository and is under the "
-                   L"<a href=\"https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt\">NVIDIA RTX SDKs LICENSE</a>. "
-                   L"By pressing OK you accept that licence.";
-    c.pfCallback = [](HWND, UINT n, WPARAM, LPARAM l, LONG_PTR) -> HRESULT {
-        if (n == TDN_HYPERLINK_CLICKED) ShellExecuteW(nullptr, L"open", reinterpret_cast<const wchar_t*>(l), nullptr, nullptr, SW_SHOWNORMAL);
-        return S_OK;
-    };
-    int pick = 0;
-    if (FAILED(TaskDialogIndirect(&c, &pick, nullptr, nullptr)) || pick != IDOK) return;
+    if (dlss_child_.running()) {
+        MessageBoxW(wnd_, L"DLSS is being downloaded already: its progress shows under the button.", kAppName, MB_ICONINFORMATION);
+        return;
+    }
+    const int state = dlss_state(tools_);
+    if (state == kDlssNoRtx) {
+        MessageBoxW(wnd_, L"DLSS needs an NVIDIA RTX graphics card, and none was found on this PC.", kAppName, MB_ICONINFORMATION);
+        return;
+    }
+    if (state == kDlssReady) {
+        MessageBoxW(wnd_, (L"DLSS is ready: every file is in\r\n" + dlss_dir(tools_)).c_str(), kAppName, MB_ICONINFORMATION);
+        update_settings();
+        return;
+    }
+    if (state == kDlssNoStreamline) {
+        MessageBoxW(wnd_, (L"nvngx_dlss.dll is downloaded, but DLSS also needs NVIDIA's Streamline DLLs, and these are missing:\r\n\r\n  " +
+                           dlss_missing_files(tools_) + L"\r\n\r\nin\r\n  " + dlss_dir(tools_) +
+                           L"\r\n\r\nStreamline (MIT licence) comes with release packages built with it; the library cannot download it. Copy "
+                           L"sl.interposer.dll, sl.common.dll and sl.dlss.dll from NVIDIA's Streamline SDK v2.14.16 (bin\\x64) into that folder, "
+                           L"then press Check again on This PC.").c_str(),
+                    kAppName, MB_ICONINFORMATION);
+        return;
+    }
+    wchar_t test_script[MAX_PATH] = {};
+    const bool test = GetEnvironmentVariableW(L"RECOMP_LIBRARY_DLSS_SCRIPT", test_script, MAX_PATH) > 0;
+    const std::wstring script = test ? std::wstring(test_script) : tools_.fetch_dlss;
+    if (tools_.python.empty() || script.empty()) {
+        const std::wstring why = std::wstring(L"The DLSS download needs ") + (tools_.python.empty() ? L"Python" : L"the script fetch_dlss.py") +
+                                 L", and the library did not find it next to recomp_library.exe (tools\\python, tools\\scripts). "
+                                 L"Reinstall the library package; This PC lists what is missing.";
+        dlss_show(L"Not downloaded: " + std::wstring(tools_.python.empty() ? L"Python" : L"fetch_dlss.py") + L" is missing.", false);
+        MessageBoxW(wnd_, why.c_str(), kAppName, MB_ICONWARNING);
+        return;
+    }
+    if (!test) {
+        TASKDIALOGCONFIG c{sizeof c};
+        c.hwndParent = wnd_;
+        c.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+        c.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
+        c.pszWindowTitle = kAppName;
+        c.pszMainInstruction = L"Download NVIDIA DLSS?";
+        c.pszContent = L"The DLSS file (nvngx_dlss.dll, about 56 MB) comes from NVIDIA's own repository and is under the "
+                       L"<a href=\"https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt\">NVIDIA RTX SDKs LICENSE</a>. "
+                       L"By pressing OK you accept that licence.";
+        c.pfCallback = [](HWND, UINT n, WPARAM, LPARAM l, LONG_PTR) -> HRESULT {
+            if (n == TDN_HYPERLINK_CLICKED) ShellExecuteW(nullptr, L"open", reinterpret_cast<const wchar_t*>(l), nullptr, nullptr, SW_SHOWNORMAL);
+            return S_OK;
+        };
+        int pick = 0;
+        const HRESULT hr = TaskDialogIndirect(&c, &pick, nullptr, nullptr);
+        if (FAILED(hr)) {
+            // no task dialog (an old common controls library): ask with a plain message box, the licence named as text
+            wchar_t hx[16];
+            swprintf_s(hx, L"0x%08lX", static_cast<unsigned long>(hr));
+            pick = MessageBoxW(wnd_,
+                               (std::wstring(L"Download NVIDIA DLSS?\r\n\r\nThe DLSS file (nvngx_dlss.dll, about 56 MB) comes from NVIDIA's own "
+                                             L"repository and is under the NVIDIA RTX SDKs LICENSE:\r\nhttps://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt"
+                                             L"\r\n\r\nBy pressing OK you accept that licence.\r\n\r\n(The usual dialog could not open: ") + hx + L")").c_str(),
+                               kAppName, MB_OKCANCEL | MB_ICONQUESTION);
+        }
+        if (pick != IDOK) {
+            dlss_show(L"Not downloaded: the licence was not accepted.", false);
+            return;
+        }
+    }
+    dlss_show(test ? L"Test run: " + script : L"Starting the download...", true);
     HWND w = wnd_;
-    auto err = std::make_shared<std::wstring>();
+    struct Out { std::wstring error, last; };   // the script's @error line; else the last other line (Python's own message, a traceback's end)
+    auto out = std::make_shared<Out>();
     std::wstring e;
-    if (!dlss_child_.start(tools_.python, py_args(tools_.fetch_dlss, L"--accept-license --out " + quote(dlss_dir(tools_))), tools_.exe_dir, false,
-            [err](const std::string& l) { if (l.rfind("@error ", 0) == 0) *err = widen(l.substr(7)); },
-            [w, err](DWORD code) {
-                if (code != 0 && err->empty()) *err = L"The download ended with code " + std::to_wstring(code) + L".";
-                PostMessageW(w, kMsgDlss, 0, reinterpret_cast<LPARAM>(new std::wstring(code == 0 ? L"" : *err)));
-            }, &e))
-        MessageBoxW(wnd_, e.c_str(), kAppName, MB_ICONWARNING);
+    if (!dlss_child_.start(tools_.python, py_args(script, L"--accept-license --out " + quote(dlss_dir(tools_))), tools_.exe_dir, false,
+            [w, out](const std::string& l) {
+                if (l.rfind("@error ", 0) == 0) out->error = widen(l.substr(7));
+                else if (l.rfind("@progress ", 0) == 0) PostMessageW(w, kMsgDlssLine, 0, reinterpret_cast<LPARAM>(new std::wstring(widen(l.substr(10)))));
+                else if (!l.empty()) out->last = widen(l);
+            },
+            [w, out](DWORD code) {
+                std::wstring msg;
+                if (code != 0) {
+                    msg = !out->error.empty() ? out->error : L"The download ended with code " + std::to_wstring(code) + L".";
+                    if (out->error.empty() && !out->last.empty()) msg += L"\r\n\r\n" + out->last;
+                }
+                PostMessageW(w, kMsgDlss, code, reinterpret_cast<LPARAM>(new std::wstring(msg)));
+            }, &e)) {
+        dlss_show(L"Not downloaded: the download could not start.", false);
+        MessageBoxW(wnd_, (L"The DLSS download could not start:\r\n" + e).c_str(), kAppName, MB_ICONWARNING);
+    }
+}
+
+void App::dlss_show(const std::wstring& status, bool busy) {
+    dlss_status_ = status;
+    dlss_busy_ = busy;
+    std::wstring s = status;
+    if (s.empty()) {
+        const int d = dlss_state(tools_);
+        s = d == kDlssDownload ? L"Not downloaded yet." : d == kDlssNoStreamline ? L"Streamline DLLs missing: " + dlss_missing_files(tools_) : L"";
+    }
+    settings::set_dlss_status(settings_, s, busy);
+    if (b_dlss_) {
+        const int d = dlss_state(tools_);
+        SetWindowTextW(b_dlss_, busy ? L"Downloading..." : d == kDlssNoStreamline ? L"What is missing?" : L"Download DLSS");
+        EnableWindow(b_dlss_, !busy);
+        ShowWindow(b_dlss_, page_ == P_PC && (busy || d == kDlssDownload || d == kDlssNoStreamline) ? SW_SHOW : SW_HIDE);
+        InvalidateRect(b_dlss_, nullptr, FALSE);
+    }
+    if (page_ == P_PC) InvalidateRect(wnd_, nullptr, FALSE);
 }
 
 void App::update_settings() {
     settings::set_dlss(settings_, dlss_state(tools_), [this] { download_dlss(); });
     GameItem* g = sel();
-    if (!g) { settings::set_game(settings_, L"", L"", L"Add a game to the library first."); return; }
-    evaluate(*g);
-    std::wstring why;
-    if (!g->def) why = L"No port of this game yet.";
-    else if (!g->in_library()) why = L"Add your dump first.";
-    else if (g->lay.game.empty()) why = L"Available once the game is set up.";
-    settings::set_game(settings_, g->title, why.empty() ? join(g->lay.game, L"controls.ini") : L"", why);
+    if (!g) settings::set_game(settings_, L"", L"", L"Add a game to the library first. (DLSS: This PC has the Download DLSS button.)");
+    else {
+        evaluate(*g);
+        std::wstring why;
+        if (!g->def) why = L"No port of this game yet.";
+        else if (!g->in_library()) why = L"Add your dump first.";
+        else if (g->lay.game.empty()) why = L"Available once the game is set up.";
+        settings::set_game(settings_, g->title, why.empty() ? join(g->lay.game, L"controls.ini") : L"", why);
+    }
+    dlss_show(dlss_status_, dlss_busy_);
 }
-
 void App::save_lib() {
     // the library holds the games with a dump; keep the order the player added them in
     Library out;
@@ -1512,6 +1601,7 @@ void App::create_controls() {
     // this PC: the checks are painted (paint_pc); the two buttons below them
     b_recheck_ = button(L"Check again", ID_RECHECK, Btn::normal);
     b_copy_ = button(L"Copy report", ID_COPY, Btn::normal);
+    b_dlss_ = button(L"Download DLSS", ID_DLSS, Btn::normal);   // shown by dlss_show while DLSS can be downloaded (needs no game)
     for (HWND h : {b_recheck_, b_copy_}) ctls_.push_back({h, P_PC});
     apply_theme(log_);
     for (auto& [h, k] : btns_) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(bold_), TRUE);
@@ -1548,6 +1638,7 @@ void App::layout() {
     pc_rect_area_ = {x, S(104), x + w, bottom - S(72)};
     put(b_recheck_, x, bottom - S(56), S(150), bh);
     put(b_copy_, x + S(162), bottom - S(56), S(150), bh);
+    put(b_dlss_, x + S(324), bottom - S(56), S(170), bh);
     InvalidateRect(wnd_, nullptr, TRUE);
 }
 
@@ -1557,6 +1648,7 @@ void App::show_page(int p) {
     if ((page_ == P_GAME || page_ == P_SET) && !sel()) page_ = P_LIB;
     if (page_ == P_SET && before != P_SET) update_settings();
     for (auto& [h, pg] : ctls_) ShowWindow(h, pg == page_ ? SW_SHOW : SW_HIDE);
+    dlss_show(dlss_status_, dlss_busy_);
     refresh();
     // the keyboard starts where the page's main thing is
     HWND f = page_ == P_LIB ? cards_ : page_ == P_GAME ? (IsWindowEnabled(b_play_) ? b_play_ : b_more_) : page_ == P_SET ? settings_ : b_recheck_;
@@ -2234,6 +2326,7 @@ void App::command(int id, int code) {
                                  kAppName, MB_OK | MB_ICONINFORMATION);
             }
             break;
+        case ID_DLSS: download_dlss(); break;
         case ID_RECHECK: case IDM_RECHECK:
             sys_checks_.clear();
             for (auto& gi : games_) { gi->prep_check.clear(); evaluate(*gi); }
@@ -2579,12 +2672,49 @@ LRESULT App::on(UINT m, WPARAM w, LPARAM l) {
             InvalidateRect(cards_, nullptr, FALSE);
             return 0;
         }
+        case kMsgDlssLine: {   // "download <done> <total> <text>" from fetch_dlss.py
+            std::unique_ptr<std::wstring> s(reinterpret_cast<std::wstring*>(l));
+            std::wistringstream in(*s);
+            std::wstring kind, text;
+            unsigned long long done = 0, total = 0;
+            in >> kind >> done >> total;
+            if (in.fail()) text = *s;
+            else {
+                std::getline(in, text);
+                if (!text.empty() && text[0] == L' ') text.erase(0, 1);
+                if (total > 0 && done < total) text += L" (" + std::to_wstring(done >> 20) + L" of " + std::to_wstring(total >> 20) + L" MB)";
+            }
+            if (dlss_busy_) dlss_show(text, true);
+            return 0;
+        }
         case kMsgDlss: {
             std::unique_ptr<std::wstring> s(reinterpret_cast<std::wstring*>(l));
             dlss_child_.wait();
-            if (!s->empty()) MessageBoxW(wnd_, s->c_str(), kAppName, MB_ICONWARNING);
-            update_settings();
-            start_requirements();
+            const int d = dlss_state(tools_);
+            if (w == 0) {
+                dlss_show(d == kDlssReady ? L"Downloaded and verified."
+                          : d == kDlssNoStreamline ? L"nvngx_dlss.dll downloaded and verified; Streamline DLLs missing: " + dlss_missing_files(tools_)
+                                                   : L"", false);
+                update_settings();
+                start_requirements();
+                if (d == kDlssReady)
+                    MessageBoxW(wnd_, L"DLSS is downloaded and verified. Choose NVIDIA DLSS or DLAA under Settings > Graphics > Upscaler.", kAppName,
+                                MB_ICONINFORMATION);
+                else if (d == kDlssNoStreamline)
+                    MessageBoxW(wnd_, (L"nvngx_dlss.dll is downloaded and verified (" + dlss_dir(tools_) + L").\r\n\r\nDLSS also needs NVIDIA's "
+                                       L"Streamline DLLs, which are missing: " + dlss_missing_files(tools_) + L". Streamline (MIT licence) comes with "
+                                       L"release packages built with it; the library cannot download it. Copy sl.interposer.dll, sl.common.dll and "
+                                       L"sl.dlss.dll from NVIDIA's Streamline SDK v2.14.16 (bin\\x64) into that folder.").c_str(),
+                                kAppName, MB_ICONINFORMATION);
+                else
+                    MessageBoxW(wnd_, (L"The download said it finished, but nvngx_dlss.dll is not in\r\n" + dlss_dir(tools_)).c_str(), kAppName,
+                                MB_ICONWARNING);
+            } else {
+                const std::wstring first = s->substr(0, s->find_first_of(L"\r\n"));
+                dlss_show(L"Not downloaded: " + first, false);
+                update_settings();
+                MessageBoxW(wnd_, (L"DLSS could not be downloaded.\r\n\r\n" + *s).c_str(), kAppName, MB_ICONWARNING);
+            }
             return 0;
         }
         case kMsgReqs: {
