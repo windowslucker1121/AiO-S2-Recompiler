@@ -31,10 +31,10 @@ struct WinMenuHooks {
     bool upscaler_configured = false;
 };
 
-// Puts the bar on the window (hwnd: the HWND, sdl_window: the SDL_Window*) and starts handling its commands. Main thread (the one that pumps
-// the window). False when there is no window or the bar could not be made; the game runs on without it.
+// Puts the bar on the window (hwnd: the HWND, sdl_window: the SDL_Window*) and starts handling its commands. Any thread: it runs on the window's
+// own thread (platform.h), where the commands and the hooks then run. False when there is no window or the bar could not be made; the game runs on without it.
 bool win_menu_install(void* hwnd, void* sdl_window, UiHost* host, const WinMenuHooks& hooks);
-// Main thread, every frame boundary: the bar is shown in windowed mode and taken off in fullscreen.
+// Every frame boundary: the bar is shown in windowed mode and taken off in fullscreen (the change runs on the window thread).
 void win_menu_frame();
 bool win_menu_installed();
 bool win_menu_attached();                        // the bar is on the window now

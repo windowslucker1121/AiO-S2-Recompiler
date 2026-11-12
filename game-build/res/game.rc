@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Resources of the game exe: the manifest (UTF-8 code page, long paths, asInvoker) and the version information.
+// Resources of the game exe: the manifest (UTF-8 code page, long paths, asInvoker), the icon and the version information.
 // GAME_VER_MAJOR / MINOR / PATCH and GAME_VER_TEXT come from the build (game-build/CMakeLists.txt, -DGAME_VERSION=0.1.0; the package
 // build prepends them). Names come from the game manifest through game_manifest.h; game.manifest is game.manifest.in with the product name filled in.
 #include <winres.h>
@@ -15,6 +15,10 @@
 #endif
 
 1 24 "game.manifest"
+
+// The exe's icon (the first icon group: Explorer, the window and taskbar through SDL's INTRESOURCE hint, the Windows volume mixer).
+// Neutral art drawn by make_icon.py.
+1 ICON "game.ico"
 
 1 VERSIONINFO
 FILEVERSION     GAME_VER_MAJOR, GAME_VER_MINOR, GAME_VER_PATCH, 0

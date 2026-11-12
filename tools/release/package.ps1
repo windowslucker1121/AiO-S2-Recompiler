@@ -8,7 +8,7 @@
 #   tools\spirv_harness\            the shader translator, self-contained (.NET runtime included)
 #   tools\python\                   python.org's embeddable Python with zstandard, lz4 and capstone
 #   tools\build\                    the player-side game build: game_build.py, the lifter (recomp\), Zig (zig\), nx_plain_nso.exe
-#   games\<id>\sdk\                 per game with a runtime module: stub.cpp, rt_api.h, game.rc, game.manifest.in, <id>_rt.lib
+#   games\<id>\sdk\                 per game with a runtime module: stub.cpp, rt_api.h, game.rc, game.ico, game.manifest.in, <id>_rt.lib
 #   games\<id>\runtime\             <id>_rt.dll, the ASTC decoder DLLs, fonts\ (copied next to the exe the player builds)
 #   upscalers\streamline\          with -Streamline: sl.interposer.dll, sl.common.dll, sl.dlss.dll (MIT); nvngx_dlss.dll is never shipped (fetch_dlss.py)
 #   LICENSE, LEGAL.md, README.md, THIRD_PARTY_NOTICES.md, licenses\
@@ -161,7 +161,7 @@ if (-not $SkipRuntime) {
         $gr = Join-Path $pkg "games\$id\runtime"
         New-Item -ItemType Directory -Force $gs, (Join-Path $gr 'fonts') | Out-Null
         Copy-Item (Join-Path $repo 'game-build\src\stub.cpp'), (Join-Path $repo 'game-build\src\rt_api.h'),
-                  (Join-Path $repo 'game-build\res\game.rc'), (Join-Path $repo 'game-build\res\game.manifest.in') $gs
+                  (Join-Path $repo 'game-build\res\game.rc'), (Join-Path $repo 'game-build\res\game.ico'), (Join-Path $repo 'game-build\res\game.manifest.in') $gs
         Copy-Item (Join-Path $rb "$stem.lib") $gs
         Copy-Item (Join-Path $rb "$stem.dll") $gr
         Get-ChildItem $rb -Filter 'astcdec-*-shared.dll' | Copy-Item -Destination $gr
