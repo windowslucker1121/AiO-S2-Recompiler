@@ -973,6 +973,9 @@ struct Mirror {
     std::vector<uint64_t> chunk_dev;      // device address of each chunk of the copy (0: not asked yet)
     std::vector<uint64_t> pt_pending;     // pages copied in (or found valid) that may point at the copy once settled
     bool pt_scan = false;                 // look at every page once (just made a target, or pt_copy switched on again)
+    uint64_t pt_scan_pos = UINT64_MAX;    // [nvn] pt_scan_pages: the next page of a scan in slices (UINT64_MAX: no scan running)
+    bool pt_dropped = false;              // [nvn] pt_storm_presents: no longer a target after an arming storm (never again)
+    int64_t pt_copied_mark = 0;           // st_copied when the current storm count began
 };
 
 // Bits [first, last] of Mirror::back (any thread).
@@ -1177,9 +1180,48 @@ constexpr uint32_t kPtSettle = 4;
 constexpr uint64_t kSpanBytes = uint64_t{1} << 21, kSpanPages = kSpanBytes / 4096;
 int g_pt_on = -1;
 uint64_t g_pt_redirects = 0, g_pt_restores = 0, g_pt_targets = 0, g_pt_spans = 0, g_pt_span_back = 0;
+uint64_t g_pt_refused = 0, g_pt_dropped = 0;   // pools refused by [nvn] pt_copy_max_mb, targets dropped by pt_storm_presents (render thread)
+std::vector<uint64_t> g_pt_refused_addr;        // a pointer into each refused pool ([nvn] exp_pt_force_present)
 bool pt_mode() {
     static const bool on = config_get_bool("nvn", "pt_copy", true) && device().features().buffer_device_address;
     return on;
+}
+// [nvn] pt_copy_max_mb (default 256; 0 = no cap): a pool larger than this never becomes a pt_copy target. A word of a scanned uniform block
+// that points into the game's 2.4 GiB heap pool made that whole pool a target: the copy-in used up the pool-copy budget, write tracking armed
+// ~600k pages and the first scene ran at 1% low 9 fps. Such a pool's pointer loads read the pool import, as without pt_copy.
+uint64_t pt_max_bytes() {
+    const uint64_t b = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "pt_copy_max_mb", 256))) << 20);
+    return b;
+}
+// [nvn] pt_present_mb (0 = off): pages of pt_copy targets copied in per present at most (on top of the 64 MiB per submission of all copies);
+// the rest waits, its draws and pointer loads read the pool meanwhile. [nvn] mirror_present_mb (0 = off): the same for every copy-in.
+uint64_t pt_present_bytes() {
+    const uint64_t b = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "pt_present_mb", 0))) << 20);
+    return b;
+}
+uint64_t mirror_present_bytes() {
+    const uint64_t b = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "mirror_present_mb", 0))) << 20);
+    return b;
+}
+// [nvn] pt_scan_pages (0 = whole pool at once): a new target's pages are looked at in slices of this many per present.
+uint64_t pt_scan_slice() {
+    const uint64_t n = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "pt_scan_pages", 0))));
+    return n;
+}
+// [nvn] pt_reserve_mb (0 = off): chunks of a pt_copy target's copy are not made into the last this many MiB of the pool-copy cap.
+uint64_t pt_reserve_bytes() {
+    const uint64_t b = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "pt_reserve_mb", 0))) << 20);
+    return b;
+}
+// A pool becomes a target: copied whole (in slices with pt_scan_pages), its pages pointed at the copy once settled.
+void pt_make_target(Mirror& m) {
+    m.pt_target = true;
+    m.pt_scan = true;
+    ++g_pt_targets;
+    if (!pt_scan_slice()) {
+        bits_put(m.want, 0, m.npages - 1, true);
+        m.any_want = true;
+    }
 }
 bool pt_active() { return pt_mode() && g_pt_on != 0; }
 bool new_get(const Mirror& m, uint64_t p);
@@ -1248,12 +1290,89 @@ uint64_t pt_copy_addr(Mirror& m, uint64_t p) {   // the device address of page p
     if (!m.chunk_dev[ci]) m.chunk_dev[ci] = device().buffer_address(m.chunks[ci].buffer);
     return m.chunk_dev[ci] ? m.chunk_dev[ci] + (p - ci * chunk_pages) * kPageBytes : 0;
 }
+// [nvn] exp_pt_force_present = N (measurement only, 0 = off): at present N, the pools pt_copy_max_mb refused become targets anyway (or, if
+// none was refused, the largest pool with a copy): the PT-g2 test of the pt_copy storm in a scene of choice. Logs one line as the mark.
+void pt_force(uint32_t now) {
+    static const uint32_t at = static_cast<uint32_t>(std::max<int64_t>(0, config_get_int("nvn", "exp_pt_force_present", 0)));
+    static bool done = false;
+    if (!at || done || now < at) return;
+    done = true;
+    int n = 0;
+    std::vector<uint64_t> addrs = g_pt_refused_addr;
+    const std::string fa = config_get_str("nvn", "exp_pt_force_addr", "");   // a guest address in the pool to force (hex), instead
+    if (!fa.empty()) addrs.assign(1, std::strtoull(fa.c_str(), nullptr, 16));
+    for (uint64_t v : addrs) {
+        const PoolHit hit = pool_lookup(v);
+        if (!hit.pool || !hit.pool->gpu) continue;
+        Mirror* m = mirror_for(hit.pool->gpu, hit.pool);
+        if (!m || m->pt_target) continue;
+        pt_make_target(*m);
+        ++n;
+        NXLOG_I(kTag, "pt_copy: exp_pt_force_present: pool %p (%llu KiB) made a target at present %u", static_cast<void*>(m->pg->base),
+                static_cast<unsigned long long>(m->pool_bytes >> 10), now);
+    }
+    if (n) return;
+    Mirror* big = nullptr;
+    for (Mirror* m : g_mirrors)
+        if (!m->pt_target && (!big || m->pool_bytes > big->pool_bytes)) big = m;
+    if (big) {
+        pt_make_target(*big);
+        NXLOG_I(kTag, "pt_copy: exp_pt_force_present: pool %p (%llu KiB, the largest with a copy) made a target at present %u",
+                static_cast<void*>(big->pg->base), static_cast<unsigned long long>(big->pool_bytes >> 10), now);
+    } else {
+        NXLOG_I(kTag, "pt_copy: exp_pt_force_present: no pool to make a target at present %u", now);
+    }
+}
+// [nvn] pt_storm_presents = N (0 = off) with pt_storm_arms (default 64): when the copies deferred that many arms in each of N presents in a
+// row (the arming budget is spent every submission), the pt_copy target that copied the most pages meanwhile stops being one: its pages go
+// back to the pool import, its wanted pages are dropped, and its pointers never make it a target again. Its write tracking stays (each
+// armed page faults once and is then plain memory again until a draw wants it).
+void pt_drop(Mirror& m, uint32_t now, uint64_t arms) {
+    if (m.redir_n) pt_restore_range(m, 0, m.npages - 1);
+    m.pt_target = false;
+    m.pt_dropped = true;
+    m.pt_scan = false;
+    m.pt_scan_pos = UINT64_MAX;
+    m.pt_pending.clear();
+    m.pt_pending.shrink_to_fit();
+    bits_put(m.want, 0, m.npages - 1, false);   // a draw that needs a page asks again
+    ++g_pt_dropped;
+    NXLOG_I(kTag, "pt_copy: pool %p (%llu KiB) is no longer a target (present %u): copies deferred %llu arms per present for %d presents",
+            static_cast<void*>(m.pg->base), static_cast<unsigned long long>(m.pool_bytes >> 10), now, static_cast<unsigned long long>(arms),
+            static_cast<int>(config_get_int("nvn", "pt_storm_presents", 0)));
+}
+void pt_storm(uint32_t now) {
+    static const int64_t need = std::max<int64_t>(0, config_get_int("nvn", "pt_storm_presents", 0));
+    static const uint64_t arms = static_cast<uint64_t>(std::max<int64_t>(1, config_get_int("nvn", "pt_storm_arms", 64)));
+    if (!need) return;
+    static uint64_t last = 0;
+    static int64_t run = 0;
+    const uint64_t cur = g_st_arm_deferred.load(std::memory_order_relaxed);
+    const uint64_t d = cur - last;
+    last = cur;
+    if (d < arms) {
+        if (run) for (Mirror* m : g_mirrors) m->pt_copied_mark = m->st_copied;
+        run = 0;
+        return;
+    }
+    if (run == 0)
+        for (Mirror* m : g_mirrors) m->pt_copied_mark = m->st_copied;
+    if (++run < need) return;
+    run = 0;
+    Mirror* worst = nullptr;
+    for (Mirror* m : g_mirrors)
+        if (m->pt_target && (!worst || m->st_copied - m->pt_copied_mark > worst->st_copied - worst->pt_copied_mark)) worst = m;
+    if (worst && worst->st_copied - worst->pt_copied_mark > 0) pt_drop(*worst, now, d);
+    for (Mirror* m : g_mirrors) m->pt_copied_mark = m->st_copied;
+}
 // Once per present, at the first submission: pages and spans that may point at the copy do, the others go back.
 void pt_pass(uint32_t now) {
     static uint32_t last = ~0u;
     if (now == last) return;
     last = now;
     const bool on = pt_active();
+    pt_force(now);
+    pt_storm(now);
     static std::vector<uint64_t> todo, keep, spans;
     for (Mirror* mp : g_mirrors) {
         Mirror& m = *mp;
@@ -1270,10 +1389,20 @@ void pt_pass(uint32_t now) {
         spans.clear();
         if (m.pt_scan) {   // every page once
             m.pt_scan = false;
-            for (uint64_t p = 0; p < m.npages; ++p) todo.push_back(p);
+            m.pt_scan_pos = 0;
             m.pt_pending.clear();
-        } else {
-            todo.swap(m.pt_pending);
+        }
+        todo.swap(m.pt_pending);
+        if (m.pt_scan_pos < m.npages) {   // [nvn] pt_scan_pages: a slice per present (0: all of it now)
+            const uint64_t slice = pt_scan_slice();
+            const uint64_t end = slice ? std::min(m.npages, m.pt_scan_pos + slice) : m.npages;
+            const bool dedupe = !todo.empty();
+            for (uint64_t p = m.pt_scan_pos; p < end; ++p) todo.push_back(p);
+            m.pt_scan_pos = end >= m.npages ? UINT64_MAX : end;
+            if (dedupe) {
+                std::sort(todo.begin(), todo.end());
+                todo.erase(std::unique(todo.begin(), todo.end()), todo.end());
+            }
         }
         std::lock_guard<std::mutex> lk(g_addr_mu);
         const uint64_t base = mirror_base(m);
@@ -1333,9 +1462,9 @@ void pt_pass(uint32_t now) {
         last_log = now;
         uint64_t n = 0, pages = 0;
         for (Mirror* mp : g_mirrors) if (mp->pt_target) { ++n; pages += mp->redir_n; }
-        NXLOG_I(kTag, "pt_copy: %llu pools, %llu MiB read from the copy now; %llu page and %llu 2 MiB redirects, %llu back (%llu spans)",
+        NXLOG_I(kTag, "pt_copy: %llu pools, %llu MiB read from the copy now; %llu page and %llu 2 MiB redirects, %llu back (%llu spans); %llu pools over the size cap, %llu dropped after arming storms",
                 (unsigned long long)n, (unsigned long long)(pages * kPageBytes >> 20), (unsigned long long)g_pt_redirects,
-                (unsigned long long)g_pt_spans, (unsigned long long)g_pt_restores, (unsigned long long)g_pt_span_back);
+                (unsigned long long)g_pt_spans, (unsigned long long)g_pt_restores, (unsigned long long)g_pt_span_back, (unsigned long long)g_pt_refused, (unsigned long long)g_pt_dropped);
     }
 }
 
@@ -1451,6 +1580,15 @@ VkBuffer mirror_chunk(Mirror& m, uint64_t page) {
     if (g_mirror_bytes + bytes > budget) {
         static bool logged = false;
         if (!logged) { logged = true; NXLOG_I(kTag, "pool copies: the budget is used up (%llu MiB): further chunks stay in the pools", static_cast<unsigned long long>(g_mirror_bytes >> 20)); }
+        return VK_NULL_HANDLE;
+    }
+    if (m.pt_target && pt_reserve_bytes() && g_mirror_bytes + bytes + pt_reserve_bytes() > budget) {   // [nvn] pt_reserve_mb
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            NXLOG_I(kTag, "pool copies: pt_copy targets reached the reserve (%llu of %llu MiB): their further chunks stay in the pools",
+                    static_cast<unsigned long long>(g_mirror_bytes >> 20), static_cast<unsigned long long>(budget >> 20));
+        }
         return VK_NULL_HANDLE;
     }
     // texel buffer and transfer source usage: compute dispatches bind the copy directly as storage and texel buffers, and their results go
@@ -1693,13 +1831,22 @@ void pt_note_pointer(uint64_t v) {
     if (!pt_mode() || v < (uint64_t{1} << 32) || v >= (uint64_t{1} << 47)) return;
     const PoolHit hit = pool_lookup(v);
     if (!hit.pool || !hit.pool->gpu) return;
+    if (const uint64_t cap = pt_max_bytes(); cap && hit.pool->gpu->size > cap) {   // [nvn] pt_copy_max_mb
+        static std::vector<uint64_t> logged;   // pool bases already logged (a few)
+        const uint64_t base = reinterpret_cast<uint64_t>(hit.pool->gpu->base);
+        if (std::find(logged.begin(), logged.end(), base) == logged.end() && logged.size() < 64) {
+            logged.push_back(base);
+            g_pt_refused_addr.push_back(v);
+            ++g_pt_refused;
+            NXLOG_I(kTag, "pt_copy: pool %p (%llu KiB) is read through pointers but larger than pt_copy_max_mb (%llu MiB): not copied",
+                    static_cast<void*>(hit.pool->gpu->base), static_cast<unsigned long long>(hit.pool->gpu->size >> 10),
+                    static_cast<unsigned long long>(cap >> 20));
+        }
+        return;
+    }
     Mirror* m = mirror_for(hit.pool->gpu, hit.pool);
-    if (!m || m->pt_target) return;
-    m->pt_target = true;
-    m->pt_scan = true;
-    ++g_pt_targets;
-    bits_put(m->want, 0, m->npages - 1, true);
-    m->any_want = true;
+    if (!m || m->pt_target || m->pt_dropped) return;
+    pt_make_target(*m);
     NXLOG_I(kTag, "pt_copy: pool %p (%llu KiB) is read through pointers: copied whole, the page table points at the copy",
             static_cast<void*>(hit.pool->gpu->base), static_cast<unsigned long long>(hit.pool->gpu->size >> 10));
 }
@@ -2075,6 +2222,14 @@ void mirror_begin_submit(Frame& f, bool on) {
     log_summary(now);
     pt_pass(now);   // [nvn] pt_copy
     uint64_t budget = kCopyBudget;
+    // [nvn] pt_present_mb / mirror_present_mb: per-present copy-in allowances (UINT64_MAX: off)
+    static uint32_t allow_at = ~0u;
+    static uint64_t pt_allow = UINT64_MAX, all_allow = UINT64_MAX;
+    if (allow_at != now) {
+        allow_at = now;
+        pt_allow = pt_present_bytes() ? pt_present_bytes() : UINT64_MAX;
+        all_allow = mirror_present_bytes() ? mirror_present_bytes() : UINT64_MAX;
+    }
     bool barrier_done = false;
     g_arm_spent_ns = 0;          // the arming budget is per submission (mirror_fill and mirror_span_written during recording count too)
     for (Mirror* mp : g_mirrors) {
@@ -2082,21 +2237,24 @@ void mirror_begin_submit(Frame& f, bool on) {
         absorb_writes(m, now);
         if (!m.any_want) continue;
         if (!arm_in_budget()) continue;   // the wanted pages wait (any_want stays set)
+        uint64_t* const pt_left = m.pt_target ? &pt_allow : nullptr;
+        if (all_allow < kPageBytes || (pt_left && *pt_left < kPageBytes)) continue;   // this present's allowance is spent: the pages wait
         m.any_want = false;
         g_copy_tmp.clear();
         uint64_t p = 0;
         while (p < m.npages) {
+            const uint64_t room = std::min({budget, all_allow, pt_left ? *pt_left : UINT64_MAX});
             if (!m.want[static_cast<size_t>(p >> 6)]) { p = (p | 63) + 1; continue; }     // a word with nothing wanted
             if (!bit_get(m.want, p)) { ++p; continue; }
             if (!copyable(m, p, now)) { bit_put(m.want, p, false); ++p; continue; }     // valid already, hot or banned: the next draw asks again
-            if (budget < kPageBytes) { m.any_want = true; break; }                      // the rest waits for the next submission
+            if (room < kPageBytes) { m.any_want = true; break; }                        // the rest waits for the next submission (or present)
             if (!arm_in_budget()) { m.any_want = true; break; }                         // arming took its time for this submission: the same
             const uint64_t chunk_pages = kChunkBytes / kPageBytes;
             const uint64_t chunk_end = (p / chunk_pages + 1) * chunk_pages;
             uint64_t src_base = 0;
             if (!mirror_chunk(m, p) || !mirror_src(m, p, &src_base)) { bit_put(m.want, p, false); ++p; continue; }
             uint64_t q = p + 1;
-            while (q < m.npages && q < chunk_end && copyable(m, q, now) && (q - p + 1) * kPageBytes <= budget) ++q;
+            while (q < m.npages && q < chunk_end && copyable(m, q, now) && (q - p + 1) * kPageBytes <= room) ++q;
             const bool armed = arm_timed(m, p, q - p);
             for (uint64_t i = p; i < q; ++i) {
                 bit_put(m.want, i, false);
@@ -2112,6 +2270,8 @@ void mirror_begin_submit(Frame& f, bool on) {
                 const uint64_t base = (p / chunk_pages) * kChunkBytes;
                 g_copy_tmp.push_back(VkBufferCopy{p * kPageBytes, p * kPageBytes - base, (q - p) * kPageBytes});
                 budget -= (q - p) * kPageBytes;
+                if (all_allow != UINT64_MAX) all_allow -= (q - p) * kPageBytes;
+                if (pt_left && *pt_left != UINT64_MAX) *pt_left -= (q - p) * kPageBytes;
                 m.st_copied += static_cast<int64_t>(q - p);
                 g_st_copied.fetch_add(static_cast<int64_t>((q - p) * kPageBytes), std::memory_order_relaxed);
             }
