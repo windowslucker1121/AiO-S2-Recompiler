@@ -53,6 +53,11 @@ void release_texture_gpu(Texture* t);
 bool tex_park(const Texture& t, TexGpu* g);
 bool tex_release_shared(TexGpu* g);   // render thread: drops a finalized object's share of an image others still use (true: done, nothing to destroy)
 void parked_cpu_wrote(uint64_t lo, uint64_t hi);
+// [nvn] tex_prep_image (B2): the background preparation makes the image of a texture it prepared (any thread; null: not made, the render thread
+// makes it as before). entry: the format of the cache entry the job found (VK_FORMAT_UNDEFINED: none, or BC7). Statistics: made, taken over.
+bool tex_prep_image_on();
+TexGpu* prebuild_texture_image(Texture* t, VkFormat entry);
+void prebuilt_stats(uint64_t* made, uint64_t* taken);
 // A pool was created: import it into Vulkan on a background thread so the first draw that uses it does not wait for the driver (the import
 // pins the pages; it takes 10 to 80 ms). A no-op without a back end and for virtual pools.
 void prefetch_pool(MemoryPool* p);

@@ -55,6 +55,14 @@ bool peek_entry_format(Texture* t, VkFormat& entry);
 // hand it to Frame::adopt_staging. Without `staged` big results are not staged.
 // src_hash, when set: the content hash the result was checked against (the storage as the upload uses it).
 bool take(Texture* t, PreparedTexture& out, gfx::Buffer* staged = nullptr, uint64_t* src_hash = nullptr);
+// [nvn] upload_ahead (render thread, no wait): Ready: a finished result for the texture's current content waits (take will use it, after its
+// content check); Pending: a job is queued or running; None: no job (take returns false and the upload prepares it on the render thread).
+enum class Readiness { None, Pending, Ready };
+Readiness ready(Texture* t);
+uint64_t done_count();   // results finished so far (any thread)
+// [nvn] tex_prep_image (B2), render thread, while tex_or_null makes t's image: the image a finished job made with t's current content (waits for
+// a job still running on it, as peek_entry_format does); null: none, make it as before. The caller owns the image afterwards.
+TexGpu* take_image(Texture* t);
 // Render thread. wants_provisional: t may get a quick stand-in now (texprep is on, t is a job candidate, and no stand-in was made for its current
 // content). provisional_uploaded: a stand-in went into the image; the real data follows (a job is queued unless one exists). final_uploaded: real data went in.
 bool wants_provisional(Texture* t);
