@@ -770,7 +770,7 @@ instance `lowsa`. Many runs had the outside recorder stalls (35-51 drain waits o
   walk, 22.4 on the balcony (1 frame over 20 each), 30.1 in a camera turn (the turns' own worst is 32); the copy stops at the reserve
   (1,527 MiB). **PT-g2 passed.** With the cap off and PT2 on, the first scene's heap target is harmless too: 25 frames over 20 ms (quiet),
   75 (disturbed). Bench with PT1+PT2 vs PT1 only (both disturbed): balcony 100.5 / 102.1 fps, walk 105.7 / 106.9, turns 84.9 / 86.3:
-  neutral. `set_reuse` + `odb_incremental` = verify on the bench: 0 differences, 0 missed.
+  neutral. `set_reuse` + `odb_incremental` = verify on the bench: 0 differences, 0 missed. Capture replays PT keys on vs off: village SSIM 0.9998, nb3 0.99995, no changed pixels; runtime tests 169/170 (memguard passes alone).
 - **PT3 `pt_storm_presents` (failed, stays off).** Dropping a target after 60 presents of deferred arms: the first metric (pages copied)
   dropped the small culling-chain targets instead of the heap; with pages rewritten by the CPU it drops the heap (cap 0, PT2 off) 13 s in,
   but the storm goes on (deferred arms ~400 per frame, region lock held 50-90 ms, first scene 53 fps / 1% low 9.5): the dropped pool's
