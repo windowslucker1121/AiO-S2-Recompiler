@@ -786,7 +786,14 @@ TexGpu* tex_unpark(Texture* t) {
         share_add_locked(*t, p.g);
         g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
         if (!p.dirty && park_sample(*t) == p.sample) t->cpu_dirty.store(false);   // the image holds what the GPU wrote there last, as the memory would on the console
-        else { p.g->gpu_written = false; g_park_stale.fetch_add(1, std::memory_order_relaxed); }
+        else {
+            p.g->gpu_written = false;
+            const uint64_t ns = g_park_stale.fetch_add(1, std::memory_order_relaxed);
+            if (ns < 40 || ns % 100 == 0)
+                NXLOG_I(kTag, "tex_park: t%u %ux%ux%u %s taken back stale (%s): uploaded again from %s+0x%llx (present %llu)", t->id, static_cast<unsigned>(t->b.width),
+                        static_cast<unsigned>(t->b.height), static_cast<unsigned>(t->b.depth), t->fmt ? t->fmt->name : "?", p.dirty ? "CPU wrote" : "storage sample changed",
+                        t->vpool ? "vpool" : "mem", static_cast<unsigned long long>(k.voff), static_cast<unsigned long long>(counters().presents.load(std::memory_order_relaxed)));
+        }
         g_park_taken.fetch_add(1, std::memory_order_relaxed);
         return p.g;
     }

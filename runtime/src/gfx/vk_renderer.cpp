@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <thread>
 
 #include "nxrt/config.h"
@@ -575,9 +576,110 @@ struct Renderer::Impl {
         return true;
     }
 
+    // [gfx] flash_watch (diagnostic, 0 = off): every presented picture is read back (one buffer per slot) and compared with the
+    // pictures before and after it; a frame in which more than this share of a sample grid is much brighter than both neighbours
+    // (a short flash) is logged and written as PNGs with its neighbours (<flash_dir>/flash_<frame>_{a,b,c}.png).
+    struct FlashSlot { Buffer buf; uint64_t frame = 0; bool valid = false; };
+    std::vector<FlashSlot> flash;
+    struct FlashFrame { std::vector<uint8_t> px; std::vector<uint8_t> luma; uint64_t frame = ~0ull; };
+    FlashFrame flash_ring[4];
+    uint32_t flash_n = 0;        // frames in the ring (consecutive)
+    uint32_t flash_w = 0, flash_h = 0;
+    uint32_t flash_saved = 0;
+    void flash_reset() { flash_n = 0; for (auto& f : flash_ring) f.frame = ~0ull; }
+    double flash_max = 0.0;
+    uint64_t flash_max_frame = 0, flash_window = 0;
+    // the read-back picture at a quarter of its width and height as 8-bit RGBA (HDR10 formats keep their encoded top 8 bits: enough
+    // to look at), plus its luma
+    void flash_small(const uint8_t* src, FlashFrame& f) const {
+        const uint32_t gw = flash_w / 4, gh = flash_h / 4;
+        f.px.resize(static_cast<size_t>(gw) * gh * 4);
+        f.luma.resize(static_cast<size_t>(gw) * gh);
+        for (uint32_t y = 0; y < gh; ++y)
+            for (uint32_t x = 0; x < gw; ++x) {
+                const uint8_t* q = src + (static_cast<size_t>(y) * 4 * flash_w + x * 4) * 4;
+                uint32_t v;
+                std::memcpy(&v, q, 4);
+                uint8_t r, g, b;
+                if (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB) { b = q[0]; g = q[1]; r = q[2]; }
+                else if (format == VK_FORMAT_A2B10G10R10_UNORM_PACK32) { r = (v >> 2) & 0xff; g = (v >> 12) & 0xff; b = (v >> 22) & 0xff; }
+                else if (format == VK_FORMAT_A2R10G10B10_UNORM_PACK32) { b = (v >> 2) & 0xff; g = (v >> 12) & 0xff; r = (v >> 22) & 0xff; }
+                else { r = q[0]; g = q[1]; b = q[2]; }
+                const size_t i = static_cast<size_t>(y) * gw + x;
+                f.px[i * 4] = r; f.px[i * 4 + 1] = g; f.px[i * 4 + 2] = b; f.px[i * 4 + 3] = 255;
+                f.luma[i] = static_cast<uint8_t>((r * 2 + g * 5 + b) >> 3);
+            }
+    }
+    // A flash: a sample at least 30 levels brighter than in both neighbours, which agree with each other (within 12): camera motion
+    // and cuts change the neighbours too, a frame that misses or adds one pass does not.
+    void flash_take(FlashSlot& fs) {
+        static const double th = config_get_double("gfx", "flash_watch", 0.0);
+        static const std::string dir = config_get_str("gfx", "flash_dir", "flashes");
+        dev->invalidate_buffer(fs.buf);
+        const uint64_t fr = fs.frame;
+        FlashFrame& f = flash_ring[fr & 3];
+        flash_small(static_cast<const uint8_t*>(fs.buf.mapped), f);
+        f.frame = fr;
+        auto have = [&](uint64_t k) { return fr >= k && flash_ring[(fr - k) & 3].frame == fr - k; };
+        if (!have(1) || !have(2)) return;
+        const FlashFrame& c = f;
+        const FlashFrame& b = flash_ring[(fr - 1) & 3];
+        const FlashFrame& a = flash_ring[(fr - 2) & 3];
+        const size_t n = c.luma.size();
+        size_t s1 = 0, s2 = 0;
+        const bool z_ok = have(3);
+        const FlashFrame& z = flash_ring[(fr - 3) & 3];
+        for (size_t i = 0; i < n; ++i) {
+            const int lb = b.luma[i], la = a.luma[i], lc = c.luma[i];
+            if (lb - std::max(la, lc) > 30 && std::abs(la - lc) < 12) ++s1;
+            if (z_ok) {
+                const int lz = z.luma[i];
+                const int lo = std::min(la, lb), hi = std::max(lz, lc);
+                if (lo - hi > 30 && std::abs(lz - lc) < 12) ++s2;
+            }
+        }
+        const double sh1 = static_cast<double>(s1) / static_cast<double>(n), sh2 = static_cast<double>(s2) / static_cast<double>(n);
+        const double sh = std::max(sh1, sh2);
+        if (sh > flash_max) { flash_max = sh; flash_max_frame = sh1 >= sh2 ? fr - 1 : fr - 2; }
+        if (++flash_window >= 600) {
+            NXLOG_I(kTag, "flash watch: largest flash share over the last %llu frames %.5f (frame %llu)", static_cast<unsigned long long>(flash_window),
+                    flash_max, static_cast<unsigned long long>(flash_max_frame));
+            flash_window = 0;
+            flash_max = 0.0;
+            flash_max_frame = 0;
+        }
+        if (sh <= th) return;
+        const uint64_t at = sh1 >= sh2 ? fr - 1 : fr - 2;
+        NXLOG_W(kTag, "flash watch: frame %llu %s brighter than the frames around it in %.3f%% of the picture", static_cast<unsigned long long>(at),
+                sh1 >= sh2 ? "is" : "and the next are", sh * 100.0);
+        if (flash_saved >= 300) return;
+        ++flash_saved;
+        std::vector<std::vector<uint8_t>> pics;
+        std::vector<std::string> names;
+        const uint64_t first = sh1 >= sh2 ? fr - 2 : fr - 3;
+        for (uint64_t k = first; k <= fr; ++k) {
+            char name[96];
+            std::snprintf(name, sizeof name, "/flash_%06llu_%llu.png", static_cast<unsigned long long>(at), static_cast<unsigned long long>(k));
+            pics.push_back(flash_ring[k & 3].px);
+            names.push_back(instance_file(dir + name));
+        }
+        g_png_writes.fetch_add(1);
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(names[0]).parent_path(), ec);
+        std::thread([pics = std::move(pics), names = std::move(names), w = flash_w / 4, h = flash_h / 4]() {
+            for (size_t i = 0; i < pics.size(); ++i) save_png_rgba(names[i], pics[i].data(), w, h);
+            g_png_writes.fetch_sub(1);
+        }).detach();
+    }    void flash_free() {
+        for (auto& f : flash) if (f.buf) dev->destroy_buffer(f.buf);
+        flash.clear();
+        flash_n = 0;
+    }
+
     void destroy_all() {
         dev->wait_idle();
         probe_stop_join();
+        flash_free();
         for (auto& s : slots) {
             if (s.queries) { vkDestroyQueryPool(vk(), s.queries, nullptr); vk_gauge_query_pools().sub(1); }
             if (s.acquire) { vkDestroySemaphore(vk(), s.acquire, nullptr); vk_gauge_semaphores().sub(1); }
@@ -721,6 +823,52 @@ void Renderer::end_frame() {
             NXLOG_E(kTag, "screenshot buffer allocation failed");
             if (!s.cap_path.empty()) g_png_writes.fetch_sub(1);
         }
+    }
+    {   // [gfx] exp_present_delay_us (measurement only, default 0): the presenting thread spins this long per frame (reproduces timing
+        // that only shows when the present path is slow)
+        static const int64_t delay_us = config_get_int("gfx", "exp_present_delay_us", 0);
+        if (delay_us > 0) {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_us);
+            while (std::chrono::steady_clock::now() < until) {}
+        }
+    }
+    // [gfx] flash_watch: take the slot's previous picture (its fence was waited in begin_frame), then copy this one
+    static const double flash_th = config_get_double("gfx", "flash_watch", 0.0);
+    bool flash_copy = false;
+    if (flash_th > 0.0 && !s.headless && bpp == 4) {
+        if (s.flash.size() != s.slots.size()) { s.flash_free(); s.flash.resize(s.slots.size()); }
+        Impl::FlashSlot& fs = s.flash[s.cur_slot];
+        if (fs.buf && fs.valid) s.flash_take(fs);
+        fs.valid = false;
+        if (fs.buf && (s.flash_w != w || s.flash_h != h)) { s.dev->destroy_buffer(fs.buf); fs.buf = Buffer{}; }
+        if (s.flash_w != w || s.flash_h != h) { s.flash_w = w; s.flash_h = h; s.flash_reset(); }
+        if (!fs.buf) s.dev->create_buffer(static_cast<VkDeviceSize>(w) * h * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, MemoryUse::Readback, &fs.buf, "flash watch");
+        if (fs.buf && !cap) { flash_copy = true; fs.valid = true; fs.frame = s.frame_number; }
+        if (cap) s.flash_reset();
+    }
+    if (flash_copy) {
+        Impl::FlashSlot& fs = s.flash[s.cur_slot];
+        barrier(slot.cmd, t.image, kColorAtt, kTransferSrc);
+        VkBufferImageCopy2 region = {VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {w, h, 1};
+        VkCopyImageToBufferInfo2 ci = {VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2};
+        ci.srcImage = t.image;
+        ci.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        ci.dstBuffer = fs.buf.buffer;
+        ci.regionCount = 1;
+        ci.pRegions = &region;
+        vkCmdCopyImageToBuffer2(slot.cmd, &ci);
+        VkMemoryBarrier2 mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+        mb.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+        VkDependencyInfo di = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.memoryBarrierCount = 1;
+        di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(slot.cmd, &di);
+        barrier(slot.cmd, t.image, kTransferSrc, kColorAtt);
     }
     if (cap) {
         barrier(slot.cmd, t.image, kColorAtt, kTransferSrc);
