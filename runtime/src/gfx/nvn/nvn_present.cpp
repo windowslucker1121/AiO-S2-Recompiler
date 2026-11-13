@@ -185,6 +185,8 @@ void present_on_render_thread(Window* w, int index) {
         pp->record(fi.cmd, fi.view, fi.extent, src, VkExtent2D{e.width, e.height}, crop, keep_aspect());
     }
     { NXFT("present.end"); nxrt::HitchTimer ht(nxrt::kHpRenderPresentEnd); rend->end_frame(); }
+    nxrt::hitch_note_present();   // M1: [diag] frame_csv's ms is the interval between these (after the pace wait), ms_tick the old one
+    cmdq::stall_frame_check();    // N-g0: render-thread stall attribution, the stall summary line, [nvn] exp_stall_spin
 }
 
 }  // namespace nxrt::nvn::be::gpu

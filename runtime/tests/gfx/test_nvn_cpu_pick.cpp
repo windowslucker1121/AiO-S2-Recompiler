@@ -39,11 +39,23 @@ CpuGuest guest(std::initializer_list<int> ideal, uint64_t pool) {
 
 }  // namespace
 
-NXTEST(eight_cores_smt_take_the_free_core_and_core0s_second_thread) {
-    // the development machine: guest ideals on cores 1..6 (12, 10, 8, 6, 4, 2), core 7 free
+NXTEST(eight_cores_smt_take_the_free_core_and_the_main_cores_second_thread) {
+    // the development machine: guest ideals on cores 1..6 (12, 10, 8, 6, 4, 2), core 7 free; N1: the recorder off core 0
     const CpuPick p = pick_render_cpus(cores_of(8, 2), guest({12, 10, 8, 6, 4, 2}, 0xfffc));
     CHECK(p.render == 14);
-    CHECK(p.recorder == 1);
+    CHECK(p.recorder == 13);
+    const CpuPick old = pick_render_cpus(cores_of(8, 2), guest({12, 10, 8, 6, 4, 2}, 0xfffc), true);
+    CHECK(old.render == 14);
+    CHECK(old.recorder == 1);
+}
+
+NXTEST(recorder_sibling_follows_the_least_busy_core) {
+    uint64_t busy[64] = {};
+    for (int b = 0; b < 16; ++b) busy[b] = 900;
+    busy[4] = 100;   // console core 4's ideal processor (core 2) idles most
+    busy[5] = 50;
+    CHECK(pick_recorder_sibling(cores_of(8, 2), guest({12, 10, 8, 6, 4, 2}, 0xfffc), busy) == 5);
+    CHECK(pick_recorder_sibling(cores_of(8, 1), guest({7, 6, 5, 4, 3, 2}, 0xfe), busy) == -1);   // no second hardware threads
 }
 
 NXTEST(never_a_guest_ideal_core) {
@@ -86,7 +98,7 @@ NXTEST(hybrid_never_takes_an_efficiency_core) {
     c.insert(c.end(), e.begin(), e.end());
     const CpuPick p = pick_render_cpus(c, guest({12, 10, 8, 6, 4, 2}, 0xfffffffc));
     CHECK(p.render == 14);
-    CHECK(p.recorder == 1);
+    CHECK(p.recorder == 13);
 }
 
 NXTEST(hybrid_with_every_performance_core_taken_does_not_pin) {

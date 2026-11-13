@@ -64,6 +64,9 @@ void hitch_add_csv_counter(const char* label, uint64_t (*fn)());
 // phase's ms inside it (the hitch line's data for all frames, for classifying 1%-low frames offline). Written by the hitch monitor thread.
 void hitch_start();
 void hitch_stop();
+// The presenting thread after the frame's actual present (the pace wait and the queue present done): the frame_csv row of the latest
+// tick gets the interval between actual presents as its column ms (M1; the tick interval stays as ms_tick).
+void hitch_note_present();
 
 // Phase timers of the hitch line: time spent in each phase is summed (any thread) and the slow frame's line shows how many ms of it fell
 // inside that frame, so a slow frame names where the time went: the render thread idle (waiting for the game) or busy (replay, GPU waits,
