@@ -654,6 +654,27 @@ HLE call with two clock reads and inflates the game side ~15%). Builds cannot be
   untraced (paired windows, not runs); PGO of the lifted code (-3% G measured earlier, opt-in); a narrower register localisation
   (SP only) measured against the same exe; lift-time inlining of tiny leaves.
 
+## Burst gates (agent B, 2026-11-13, branch `perf/gate-b`; PLAN_100 B0-B5, M2)
+
+Walk (ench_village_walk), 1920x1080 uncapped, alone, warm private pipeline cache (B5: `[instance] keep_pipeline_cache = 1` with two
+warm-up runs, `pipeline_cache_save_new = 100000` in the measured runs: pipelines created in the burst 0.1-0.2 per frame). "Burst" = 0.25-0.68 s
+after `bench: village_walk start`. All new keys stay **default off**: only B-g0 passed.
+- **B0 (gate passed):** frame_csv replay columns (CONFIG.md `[diag] frame_csv`). With `exp_op_cost` the draw / dispatch / other-op columns
+  hold 78-84% of the replay. The burst is not uploads: it is the view with ~3,000 draws (open view 1,400-1,800): replay 19.6 ms = draw ops 11.9
+  (bind_sets 4.4, prepare_textures 2.1 of which uploads 0.9, out_before_op 1.1), dispatches 0.9, other ops 3.6; image creation 0.6-1.4 ms per
+  frame, mostly render targets made every second frame (13 images, 1.5-2 ms, also on the balcony: `tex_park ... not parked: refs 250` of the
+  960x540 / 1920x1080 targets shared by hundreds of objects). Upload pass breaks were 1.1-3.5 per burst frame, not ~9.
+- **B1 `[nvn] upload_ahead` (gate failed):** upload pass breaks in the burst 3.0 -> 0.3 per frame (pass), but burst frames over 14.3 ms
+  18/21/12-21 (on) vs 19/21/12 (off), and frames over 20 ms in every walk (on 3-10, off 1-9). First form (also textures without a prepared result)
+  uploaded ~36 textures per frame that the draws never uploaded (+0.6 ms): now only prepared results.
+- **B2 `[nvn] tex_prep_image` (gate failed):** jobs make ~8 images per burst frame, render-thread image creation stays 0.8-1.1 ms per frame
+  (gate: <= 0.2): the remaining images are render targets.
+- **B4 `[nvn] fetch_queue2` (gate failed):** guard-fault fetches over 2 ms, 4-15 per walk, are the copy submission queued behind the frame
+  on the queue (`copy submission and its wait` 3-8 ms in the slow fetch lines; the writer was done). On the second queue (`[gfx] second_queue
+  = same`) the copies still took 3-4 ms (the driver runs the second queue behind the busy one); 4-6 slow fetches per walk remain. The batch
+  ran while other agents built: fps not comparable.
+- **M2 `[diag] replay_anatomy = 1.4`:** works (one `slow replay:` line per second with every moved source and phase).
+- Next by these columns: per-draw cost in 3,000-draw frames (bind_sets, draw ops: agents A/C), the render targets made every second frame.
 ## What is open, by expected gain
 
 **After R6:** replay ~9.7-10 ms; ~88-90 fps. The render thread, the GPU (~93% busy) and the game's CPU frame are co-limits; a replay cut now
