@@ -261,7 +261,7 @@ uint64_t ab_mask_compute() {
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"hot_skip", kAbHotSkip}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"p1", kAbP1}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"r6", kAbR6}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"sync_lead", kAbSyncLead}, {"occ_batch", kAbOccBatch}, {"r6t", kAbR6t}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"p1", kAbP1}, {"ssbo_ro_copy", kAbP1}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"keep_recycle", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"r6", kAbR6}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"sync_lead", kAbSyncLead}, {"occ_batch", kAbOccBatch}, {"r6t", kAbR6t}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -3997,6 +3997,9 @@ struct KDep {
     uint64_t stamp = 0, vh = 0, sh = 0;       // view stamp of the image, hashes of the view info and the sampler info
     uint64_t rq = 0;                          // kind 3 image: tex_key (sig_tex), 0 when the image had no views yet
     uint8_t has_view = 0, has_sampler = 0;
+    bool ro_mode = false;      // kind 2: ssbo_ro_copy was on when it was resolved (g_ssbo_ro)
+    bool ro_dep = false;       // kind 2: ssbo_ro_copy decided copy or pool for it (rd holds the decision, checked like a uniform block's)
+    uint32_t fill = 0;         // kind 2: 1 + its entry in the ssbo_ro_fill list (a kept set found valid keeps the entry in use)
 };
 struct BVal { uint64_t binding, a, b, c; };   // set_reuse = verify: what build_set wrote for each binding (keep verify names the one that differs)
 std::vector<BVal> g_bvals;
@@ -4046,6 +4049,87 @@ VkBuffer support_keep_buffer() {
         std::memcpy(g_support_keep.mapped, &sb, sizeof sb);
     }
     return g_support_keep.buffer;
+}
+
+// [nvn] ssbo_ro_copy (off | on | ab; ab = the "on" windows of [nvn] cpuperf_ab, or on + cpuperf_ab_what ssbo_ro_copy): a storage buffer a
+// graphics shader only reads is bound from the device-local pool copy when every page of its range is current there, with the same
+// decision uniform blocks take (resolve_read_dep; kept sets check it again with read_dep_check). A held compute result over the range still
+// wins (that path comes first). Before, such buffers (light lists, the cluster grid, material tables) were read from host memory by every
+// draw. Set per submission (render thread).
+bool g_ssbo_ro = false;
+uint64_t g_ro_stat[3] = {};
+uint64_t g_ro_pool[3] = {};   // statistics: pool decisions of ssbo_ro_copy: no copy span (state 0), not current (state 2) never filled / filled this submission
+std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> g_ro_pool_top;   // [nvn] ssbo_ro_diag: (addr << 0) -> (size, count)   // statistics: read-only storage bindings resolved with ssbo_ro_copy: from the copy, from the pool, copy unaligned
+// [nvn] ssbo_ro_fill (off | on | ab; needs ssbo_ro_copy): read-only storage ranges of draws that ssbo_ro_copy had to leave in the pool (pages
+// the CPU rewrites every few frames: not tracked, never current in the copy) are copied into the copy at the start of each submission that
+// bound them in the frame before (mirror_fill: such pages count as current for that submission only, "fresh"; a GPU write to them in the
+// submission ends that), with one barrier pair for all of them, so the draws bind the copy. [nvn] ssbo_ro_fill_mb caps the bytes per submission.
+bool g_ro_fill = false;
+struct RoFill { uint64_t addr = 0, size = 0; uint32_t last = 0; uint8_t ords = 0; };
+std::vector<RoFill> g_ro_fills;
+std::unordered_map<uint64_t, uint32_t> g_ro_fill_idx;
+uint32_t g_sub_ord = 0;          // submissions since the last present (0..7)
+uint64_t g_ro_fill_presents = ~0ull;
+uint64_t g_ro_fill_st[4] = {};   // statistics: submissions filled, ranges filled, bytes copied, ranges over the byte cap
+int ssbo_ro_fill_mode() {
+    static const int m = [] {
+        const std::string v = config_get_str("nvn", "ssbo_ro_fill", "off");
+        return v == "on" || v == "1" || v == "true" ? 1 : v == "ab" ? 2 : 0;
+    }();
+    return m;
+}
+uint32_t ro_fill_note(uint64_t addr, uint64_t size, bool pool) {   // 1 + the entry (0: none)
+    const uint64_t key = addr * 0x9E3779B97F4A7C15ull ^ size;
+    auto it = g_ro_fill_idx.find(key);
+    uint32_t i;
+    if (it == g_ro_fill_idx.end()) {
+        if (!pool || g_ro_fills.size() >= 65536) return 0;
+        i = static_cast<uint32_t>(g_ro_fills.size());
+        g_ro_fills.push_back(RoFill{addr, size, 0, 0});
+        g_ro_fill_idx.emplace(key, i);
+    } else {
+        i = it->second;
+    }
+    RoFill& f = g_ro_fills[i];
+    f.last = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
+    f.ords |= static_cast<uint8_t>(1u << g_sub_ord);
+    return i + 1;
+}
+void ro_fill_touch(uint32_t slot) {
+    if (!slot || slot > g_ro_fills.size()) return;
+    RoFill& f = g_ro_fills[slot - 1];
+    f.last = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
+    f.ords |= static_cast<uint8_t>(1u << g_sub_ord);
+}
+// At the start of a submission (no pass open): the ranges this submission's ordinal bound in the last presents.
+void ro_fill_submit() {
+    const uint64_t pr = counters().presents.load(std::memory_order_relaxed);
+    if (pr != g_ro_fill_presents) { g_ro_fill_presents = pr; g_sub_ord = 0; } else if (g_sub_ord < 7) ++g_sub_ord;
+    if (!g_ro_fill || g_ro_fills.empty()) return;
+    static const uint64_t cap = static_cast<uint64_t>(std::max<int64_t>(1, nxrt::config_get_int("nvn", "ssbo_ro_fill_mb", 64))) << 20;
+    const uint32_t now = static_cast<uint32_t>(pr);
+    const uint8_t bit = static_cast<uint8_t>(1u << g_sub_ord);
+    uint64_t bytes = 0;
+    bool barrier = false;
+    for (RoFill& f : g_ro_fills) {
+        if (!(f.ords & bit) || now - f.last > 8) continue;
+        if (bytes >= cap) { ++g_ro_fill_st[3]; continue; }
+        if (!barrier) { memory_barrier(F->cb); barrier = true; }   // earlier writes to the pools before the copies read them
+        uint64_t b = 0;
+        mirror_fill(F->cb, f.addr, f.size, &b, true);   // pages newer in the copy that the CPU wrote since come in too (no pass to break here)
+        bytes += b;
+        ++g_ro_fill_st[1];
+    }
+    if (bytes) memory_barrier(F->cb);   // the copies before the draws read them
+    if (barrier) ++g_ro_fill_st[0];
+    g_ro_fill_st[2] += bytes;
+}
+int ssbo_ro_copy_mode() {
+    static const int m = [] {
+        const std::string v = config_get_str("nvn", "ssbo_ro_copy", "off");
+        return v == "on" || v == "1" || v == "true" ? 1 : v == "ab" ? 2 : 0;
+    }();
+    return m;
 }
 
 VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
@@ -4229,6 +4313,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             kd->rd.cf = g_coh_win;
                             if (g_shadowing) kbad("storage buffer of a shadowed dispatch");
                             if (!br.ok) kbad("storage buffer outside a pool");   // a pool registered later may cover it
+                            kd->ro_mode = g_ssbo_ro;
                         }
                         if (g_coh_ssbo && !g_shadowing && br.ok && !writes && d.nvn_stage != kCompute) {   // exp_coh_free (gate): read-only storage from the copy
                             ReadDep cd;
@@ -4252,6 +4337,43 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                                 }
                                 break;
                             }
+                        }
+                        if (g_ssbo_ro && !g_shadowing && br.ok && !writes && d.nvn_stage != kCompute) {   // ssbo_ro_copy: the copy when current there
+                            ReadDep cd;
+                            ReadDep& rd = kd ? kd->rd : cd;
+                            const BufRef cr = resolve_read_dep(bind.addr, bi.range, kReadUniform, &rd);
+                            rd.cf = static_cast<uint8_t>(g_coh_win);
+                            static const VkDeviceSize sa = std::max<VkDeviceSize>(1, device().properties().limits.minStorageBufferOffsetAlignment);
+                            if (rd.state == 1 && cr.ok && cr.buffer != br.buffer && (cr.offset % sa) != 0) {
+                                ++g_ro_stat[2];   // stays in the pool; the decision is static for the address, nothing to check later
+                            } else {
+                                if (kd) {
+                                    kd->ro_dep = true;
+                                    if (!rd.keep) kbad("storage buffer without a copy chunk");
+                                }
+                                if (g_ro_fill) {
+                                    const uint32_t fs = ro_fill_note(bind.addr, bi.range, rd.state == 2);
+                                    if (kd) kd->fill = fs;
+                                }
+                                if (rd.state != 1) {
+                                    ++g_ro_pool[rd.state == 0 ? 0 : g_ro_fill_idx.count(bind.addr * 0x9E3779B97F4A7C15ull ^ bi.range) ? 2 : 1];
+                                    static const bool diag = nxrt::config_get_bool("nvn", "ssbo_ro_diag", false);
+                                    if (diag && g_ro_pool_top.size() < 100000) { auto& e = g_ro_pool_top[bind.addr ^ (static_cast<uint64_t>(rd.state) << 62)]; e.first = bi.range; ++e.second; }
+                                    static uint64_t dn = 0;
+                                    if (diag && rd.state == 2 && (++dn & 0xffff) < 3)
+                                        NXLOG_I(kTag, "ssbo_ro_diag: %llx +%llx not current (submission %u of the frame, draw %u): %s", (unsigned long long)bind.addr,
+                                                (unsigned long long)bi.range, g_sub_ord, static_cast<unsigned>(g_draw_idx), mirror_page_diag(bind.addr).c_str());
+                                }
+                                if (rd.state == 1 && cr.ok && cr.buffer != br.buffer) {
+                                    bi.buffer = cr.buffer;
+                                    bi.offset = cr.offset;
+                                    bi.range = std::min<VkDeviceSize>(bi.range, cr.avail);
+                                    ++g_ro_stat[0];
+                                } else {
+                                    ++g_ro_stat[1];
+                                }
+                            }
+                            break;
                         }
                         if (g_shadowing && br.ok) {                                  // before gpu_wrote: the shadow reads the pool copy while valid
                             const BufRef sh = shadow_of(bind.addr, bi.range, br, writes);
@@ -4850,6 +4972,31 @@ bool keep_writes_on() {
     return on;
 }
 
+// [nvn] keep_recycle (default on: gate K-g passed; cpuperf_ab_what keep_recycle: the off windows retire nothing): sets of the persistent pools
+// that no table holds any more (kept-set entries dropped by age, rebuilt after a failed check or retried after "dead"; image-keyed texture
+// sets and ubo_dynamic set-0 sets unused for kKeepAge presents or dropped when a pool unregisters) go to a free list per layout once the GPU
+// is past the submission that was current when they were dropped (nothing binds them after that), and keep_alloc hands them out again.
+// Before, those sets stayed allocated until the pools (6 x 16k sets) were full and everything was dropped at once (a "new era": two frames
+// of 17-22 ms replay every ~85 s on the static balcony view, ~12 new persistent sets per frame).
+bool keep_recycle_on() {
+    const bool on = NX_CFG_BOOL("nvn", "keep_recycle", true);
+    return on && ab_on(kAbSkipGpt);
+}
+struct KeepRetired { uint64_t serial; VkDescriptorSetLayout layout; VkDescriptorSet ds; };
+std::deque<KeepRetired> g_keep_pending;
+std::unordered_map<VkDescriptorSetLayout, std::vector<VkDescriptorSet>> g_keep_free;
+size_t g_keep_free_n = 0;
+// statistics: sets allocated from the pools / handed out again, by source (kept-set table, image-keyed texture sets, ubo_dynamic set 0, other),
+// sets retired (by the same sources)
+enum KeepSrc { kKsKeep = 0, kKsImg = 1, kKsDyn0 = 2, kKsOther = 3 };
+int g_keep_src = kKsOther;
+uint64_t g_keep_alloc_n[4] = {}, g_keep_reuse_n[4] = {}, g_keep_retire_n[4] = {};
+void keep_retire(VkDescriptorSetLayout layout, VkDescriptorSet ds, int src) {
+    if (!ds || !layout || !keep_recycle_on()) return;
+    g_keep_pending.push_back({F ? F->serial : last_serial(), layout, ds});
+    ++g_keep_retire_n[src & 3];
+}
+
 void keep_reset(bool release) {
     ++g_keep_gen;
     g_keep.clear();
@@ -4857,9 +5004,30 @@ void keep_reset(bool release) {
     if (release) for (VkDescriptorPool p : g_keep_pools) keep_dpool_release(p);
     g_keep_pools.clear();
     g_keep_sets_era = 0;
+    g_keep_pending.clear();   // their pools are released with the rest
+    g_keep_free.clear();
+    g_keep_free_n = 0;
 }
 
 VkDescriptorSet keep_alloc(VkDescriptorSetLayout layout) {
+    const int src = g_keep_src & 3;
+    while (!g_keep_pending.empty() && serial_settled(g_keep_pending.front().serial)) {   // keep_recycle: retired sets the GPU is done with
+        const KeepRetired& r = g_keep_pending.front();
+        g_keep_free[r.layout].push_back(r.ds);
+        ++g_keep_free_n;
+        g_keep_pending.pop_front();
+    }
+    if (g_keep_free_n) {
+        auto f = g_keep_free.find(layout);
+        if (f != g_keep_free.end() && !f->second.empty()) {
+            const VkDescriptorSet s = f->second.back();
+            f->second.pop_back();
+            --g_keep_free_n;
+            ++g_keep_reuse_n[src];
+            return s;
+        }
+    }
+    ++g_keep_alloc_n[src];
     for (int attempt = 0; attempt < 2; ++attempt) {
         if (g_keep_pools.empty()) {
             const VkDescriptorPool p = keep_dpool_new();
@@ -4880,6 +5048,7 @@ VkDescriptorSet keep_alloc(VkDescriptorSetLayout layout) {
     return VK_NULL_HANDLE;
 }
 
+void keep_sweep_tables(uint32_t now);   // below: the image-keyed and ubo_dynamic set tables (keep_recycle)
 // Once per submission: a new era when the pools are full, the sweep of old entries every few hundred presents.
 void keep_begin_submit() {
     const bool diag = NX_CFG_BOOL("nvn", "set_keep_diag", false);
@@ -4894,9 +5063,13 @@ void keep_begin_submit() {
     if (now >= g_keep_sweep_at) {
         g_keep_sweep_at = now + 300;
         for (auto it = g_keep.begin(); it != g_keep.end();) {
-            if (now > it->second.last_used + kKeepAge) { it = g_keep.erase(it); ++g_keep_evicted; ++g_keep_gen; }
+            if (now > it->second.last_used + kKeepAge) {
+                if (it->second.pl) keep_retire(it->second.pl->sets[it->second.set], it->second.ds, kKsKeep);
+                it = g_keep.erase(it); ++g_keep_evicted; ++g_keep_gen;
+            }
             else ++it;
         }
+        if (keep_recycle_on()) keep_sweep_tables(static_cast<uint32_t>(now));
     }
 }
 
@@ -4974,6 +5147,9 @@ __declspec(noinline) int keep_valid(KeepEntry& e) {   // noinline: its own line 
                 break;
             case 2:
                 if (k.rd.cf != static_cast<uint8_t>(g_coh_win)) return 3;   // exp_coh_free (gate): bound otherwise in the other mode
+                if (k.ro_mode != g_ssbo_ro) return 3;                       // ssbo_ro_copy: bound otherwise in the other mode (ab windows)
+                if (k.ro_dep && !read_dep_check(k.rd, kReadUniform)) return 2;   // ssbo_ro_copy: the copy-or-pool decision changed
+                if (k.fill && g_ro_fill) ro_fill_touch(k.fill);
                 if (!g_coh_free && ask_held && out_overlaps_window(k.addr, k.range)) return 3;
                 upd_note_read(k.addr, k.note);
                 break;
@@ -5058,7 +5234,7 @@ VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_
     if (pe) {
         KeepEntry& e = (*pe);
         if (e.dead && now < e.retry_at) { e.last_used = now; return VK_NULL_HANDLE; }
-        if (e.dead) { g_keep.erase(sig); pe = nullptr; ++g_keep_gen; }   // time to try again
+        if (e.dead) { keep_retire(e.pl ? e.pl->sets[e.set] : VK_NULL_HANDLE, e.ds, kKsKeep); g_keep.erase(sig); pe = nullptr; ++g_keep_gen; }   // time to try again
     }
     if (pe) {
         KeepEntry& e = (*pe);
@@ -5114,7 +5290,9 @@ VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_
     }
     KeepRec rec;
     g_krec = &rec;
+    g_keep_src = kKsKeep;
     VkDescriptorSet ds = build_set(pl, set);
+    g_keep_src = kKsOther;
     g_krec = nullptr;
     if (rec.bad || !rec.ds) {
         ++g_keep_bad_n;
@@ -5133,6 +5311,7 @@ VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_
     KeepEntry& e = pe ? (*pe) : g_keep[sig];
     e.sig = sig;   // keep_chain compares it
     if (pe) ++g_keep_rebuilt; else ++g_keep_new;
+    if (pe && e.ds && e.ds != rec.ds && e.pl) keep_retire(e.pl->sets[e.set], e.ds, kKsKeep);   // keep_recycle: the old set is no one's now
     e.ds = rec.ds;
     e.pl = &pl;
     e.set = set;
@@ -5260,14 +5439,19 @@ struct Dyn0Last {
     uint8_t nslots = 0xff; Dyn0Slot slots[16];   // the program's dynamic blocks (stage, uniform slot, offset index); 0xff: not listed yet
 };
 FlatMap64<Dyn0Last> g_dyn0_last;             // per program layout: the set of its last draw (or bad: its set 0 cannot be kept)
-FlatMap64<VkDescriptorSet> g_dyn0_sets;      // by content: program layout, buffers, ranges
+struct KeptSet { VkDescriptorSet ds = VK_NULL_HANDLE; VkDescriptorSetLayout layout = VK_NULL_HANDLE; uint32_t last = 0; };
+FlatMap64<KeptSet> g_dyn0_sets;              // by content: program layout, buffers, ranges
 uint64_t g_dyn0_gen = 1, g_dyn0_src[3] = {};
 uint64_t g_dyn_stat[10] = {};   // draws on the path; fallbacks: update range, unresolved, unaligned, not keepable, support/lazy; last-set hits, content hits, built; memo re-resolves
 uint64_t g_dyn_verify_n = 0, g_dyn_verify_bad = 0, g_dyn_verify_raced = 0;
 uint64_t dyn0_gen_now() {
     const uint64_t a = pool_unregister_generation(), b = pool_registry_generation(), c = g_keep_eras;
     if (a != g_dyn0_src[0] || b != g_dyn0_src[1] || c != g_dyn0_src[2]) {
-        if (a != g_dyn0_src[0] || c != g_dyn0_src[2]) { g_dyn0_sets.clear(); g_dyn0_last.clear(); }   // buffers may be gone, pools released
+        if (a != g_dyn0_src[0] || c != g_dyn0_src[2]) {   // buffers may be gone, pools released
+            if (c == g_dyn0_src[2])   // keep_recycle: the sets go back (not after a new era: their pools went with it)
+                for (const auto& x : g_dyn0_sets.s) if (x.gen == g_dyn0_sets.gen) keep_retire(x.val.layout, x.val.ds, kKsDyn0);
+            g_dyn0_sets.clear(); g_dyn0_last.clear();
+        }
         g_dyn0_src[0] = a; g_dyn0_src[1] = b; g_dyn0_src[2] = c;
         ++g_dyn0_gen;   // the memo's decisions are resolved again (a pool registered later may own an address now)
     }
@@ -5349,13 +5533,15 @@ VkDescriptorSet dyn0_set(const ProgLayout& pl, uint32_t* offs) {
     uint64_t ck = 0xcbf29ce484222325ull ^ reinterpret_cast<uint64_t>(&pl);
     for (uint32_t i = 0; i < n; ++i) ck = ((ck ^ reinterpret_cast<uint64_t>(bufs[i])) * 1099511628211ull ^ ranges[i]) * 1099511628211ull;
     VkDescriptorSet ds = VK_NULL_HANDLE;
-    if (VkDescriptorSet* h = g_dyn0_sets.find(ck)) { ds = *h; ++g_dyn_stat[7]; }
+    if (KeptSet* h = g_dyn0_sets.find(ck)) { ds = h->ds; h->last = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed)); ++g_dyn_stat[7]; }
     else {
         KeepRec rec;
         g_krec = &rec;
         g_dyn0_bufs = bufs;
         g_dyn0_ranges = ranges;
+        g_keep_src = kKsDyn0;
         build_set(pl, 0);
+        g_keep_src = kKsOther;
         g_krec = nullptr;
         g_dyn0_bufs = nullptr;
         g_dyn0_ranges = nullptr;
@@ -5365,7 +5551,7 @@ VkDescriptorSet dyn0_set(const ProgLayout& pl, uint32_t* offs) {
             return VK_NULL_HANDLE;
         }
         ds = rec.ds;
-        g_dyn0_sets.put(ck, ds);
+        g_dyn0_sets.put(ck, KeptSet{ds, pl.sets[0], static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed))});
         ++g_dyn_stat[8];
     }
     L->ds = ds;
@@ -5387,7 +5573,7 @@ bool tex_img_sets_on() {
     const bool on = NX_CFG_BOOL("nvn", "tex_img_sets", true);
     return on && ab_on(kAbR6t);
 }
-FlatMap64<VkDescriptorSet> g_img_sets;
+FlatMap64<KeptSet> g_img_sets;
 // [nvn] tex_img_early (default on; cpuperf_ab_what r6b; paired replay -0.13 ms 39/45, fps +0.45 33/45, 1% low +0.65): eligible texture sets go to the image-keyed table before the kept-set table (no
 // kept-set check, no first-sighting bookkeeping); off: only after a kept-set miss.
 bool tex_img_early_on() {
@@ -5440,7 +5626,9 @@ VkDescriptorSet img_set(const ProgLayout& pl, uint32_t set, SetReuse mode) {
     const uint64_t k = img_set_key(pl, set);
     if (!k) return VK_NULL_HANDLE;
     ++g_img_stat[0];
-    if (VkDescriptorSet* h = g_img_sets.find(k)) {
+    if (KeptSet* hs = g_img_sets.find(k)) {
+        hs->last = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
+        const VkDescriptorSet* h = &hs->ds;
         ++g_img_stat[1];
         if (mode == SetReuse::Verify) {
             const VkDescriptorSet fresh = build_set(pl, set);
@@ -5455,14 +5643,43 @@ VkDescriptorSet img_set(const ProgLayout& pl, uint32_t set, SetReuse mode) {
     }
     KeepRec rec;
     g_krec = &rec;
+    g_keep_src = kKsImg;
     build_set(pl, set);
+    g_keep_src = kKsOther;
     g_krec = nullptr;
     if (rec.bad || !rec.ds) { ++g_img_stat[3]; return VK_NULL_HANDLE; }
     ++g_img_stat[2];
-    if (g_img_sets.size() > 200000) g_img_sets.clear();
-    g_img_sets.put(k, rec.ds);
+    if (g_img_sets.size() > 200000) {
+        for (const auto& x : g_img_sets.s) if (x.gen == g_img_sets.gen) keep_retire(x.val.layout, x.val.ds, kKsImg);
+        g_img_sets.clear();
+    }
+    g_img_sets.put(k, KeptSet{rec.ds, pl.sets[set], static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed))});
     if (mode == SetReuse::Verify) g_img_content[rec.ds] = rec.content;
     return rec.ds;
+}
+
+// keep_recycle: entries of the image-keyed and ubo_dynamic tables unused for kKeepAge presents go (their sets back to keep_alloc). A set-0 set a
+// program's last draw used stays (g_dyn0_last points at it).
+void keep_sweep_tables(uint32_t now) {
+    auto sweep = [&](FlatMap64<KeptSet>& m, int src, const std::unordered_set<VkDescriptorSet>* pinned) {
+        bool any = false;
+        for (const auto& x : m.s)
+            if (x.gen == m.gen && now > x.val.last + kKeepAge && !(pinned && pinned->count(x.val.ds))) { any = true; break; }
+        if (!any) return;
+        std::vector<std::pair<uint64_t, KeptSet>> live;
+        live.reserve(m.size());
+        for (const auto& x : m.s) {
+            if (x.gen != m.gen) continue;
+            if (now > x.val.last + kKeepAge && !(pinned && pinned->count(x.val.ds))) keep_retire(x.val.layout, x.val.ds, src);
+            else live.emplace_back(x.key, x.val);
+        }
+        m.clear();
+        for (const auto& [k, v] : live) m.put(k, v);
+    };
+    sweep(g_img_sets, kKsImg, nullptr);
+    std::unordered_set<VkDescriptorSet> pinned;
+    for (const auto& x : g_dyn0_last.s) if (x.gen == g_dyn0_last.gen && x.val.ds) pinned.insert(x.val.ds);
+    sweep(g_dyn0_sets, kKsDyn0, &pinned);
 }
 
 // [nvn] exp_set0_free (measurement only, R6; cpuperf_ab_what r6): the ceiling of the set-0 work. A graphics set 0 the memo or set_keep may
@@ -9757,6 +9974,10 @@ void replay_begin_submit(Frame& f) {
             g_coh_gmem = g_coh_win && (parts & (1 | 16));   // 16: the graphics pointer-window flushes alone
             g_coh_mask0 = g_coh_win && (parts & 2);
             g_coh_ssbo = g_coh_win && (parts & 4);
+            const int rom = ssbo_ro_copy_mode();   // [nvn] ssbo_ro_copy
+            g_ssbo_ro = rom == 1 ? ab_on(kAbP1) : rom == 2 ? (cab > 0 && g_cpu_ab_on) : false;
+            const int rfm = ssbo_ro_fill_mode();   // [nvn] ssbo_ro_fill
+            g_ro_fill = g_ssbo_ro && (rfm == 1 || (rfm == 2 && cab > 0 && g_cpu_ab_on));
         }
         mirror_begin_submit(f, on);
     }
@@ -9768,6 +9989,7 @@ void replay_begin_submit(Frame& f) {
     g_chunk_work = 0;
     desc_epoch_bump(kBumpSubmit);     // the sets of earlier submissions came from other slots' pools
     keep_begin_submit();
+    ro_fill_submit();   // [nvn] ssbo_ro_fill
     g_odb_all_dirty = true;   // odb_incremental: a full check first in every submission
     g_chunk_t0 = ft::now_ns();
     P = Pass();
@@ -9904,6 +10126,30 @@ void replay_begin_submit(Frame& f) {
                         (unsigned long long)g_keep_sets_era, g_keep_pools.size(), (unsigned long long)g_keep_eras, (unsigned long long)g_keep_evicted, (unsigned long long)g_keep_chain_hits, (unsigned long long)g_keep_chain_tries);
                 NXLOG_I(kTag, "sets built outside the memo and set_keep: compute %llu, reuse off for the draw %llu, a set with written storage or a per-draw c[0] %llu, reusable (first sightings, not keepable) %llu",
                         (unsigned long long)g_set_paths[0], (unsigned long long)g_set_paths[1], (unsigned long long)g_set_paths[2], (unsigned long long)g_set_paths[3]);
+                if (ssbo_ro_copy_mode())
+                    NXLOG_I(kTag, "ssbo_ro_copy: read-only storage bindings resolved %llu from the copy, %llu from the pool, %llu unaligned in the copy (pool)",
+                            (unsigned long long)g_ro_stat[0], (unsigned long long)g_ro_stat[1], (unsigned long long)g_ro_stat[2]);
+                if (ssbo_ro_copy_mode()) NXLOG_I(kTag, "ssbo_ro_copy pool decisions: %llu no copy span, %llu not current and not listed for filling, %llu not current although listed",
+                        (unsigned long long)g_ro_pool[0], (unsigned long long)g_ro_pool[1], (unsigned long long)g_ro_pool[2]);
+                if (!g_ro_pool_top.empty()) {
+                    std::vector<std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> v(g_ro_pool_top.begin(), g_ro_pool_top.end());
+                    std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second.second > b.second.second; });
+                    for (size_t i = 0; i < v.size() && i < 10; ++i)
+                        NXLOG_I(kTag, "  ssbo_ro_diag: %llx state %llu size %llx: %llu", (unsigned long long)(v[i].first & ((1ull << 62) - 1)), (unsigned long long)(v[i].first >> 62),
+                                (unsigned long long)v[i].second.first, (unsigned long long)v[i].second.second);
+                }
+                if (ssbo_ro_fill_mode())
+                    NXLOG_I(kTag, "ssbo_ro_fill: %llu submissions filled, %llu ranges filled, %llu MiB copied, %llu ranges over the cap; %zu ranges listed",
+                            (unsigned long long)g_ro_fill_st[0], (unsigned long long)g_ro_fill_st[1], (unsigned long long)(g_ro_fill_st[2] >> 20),
+                            (unsigned long long)g_ro_fill_st[3], g_ro_fills.size());
+                NXLOG_I(kTag, "persistent sets (keep_recycle %s): allocated / handed out again / retired: kept sets %llu / %llu / %llu, image-keyed %llu / %llu / %llu, "
+                        "ubo_dynamic set 0 %llu / %llu / %llu, other %llu / %llu / %llu; %zu waiting for the GPU, %zu free",
+                        keep_recycle_on() ? "on" : "off",
+                        (unsigned long long)g_keep_alloc_n[0], (unsigned long long)g_keep_reuse_n[0], (unsigned long long)g_keep_retire_n[0],
+                        (unsigned long long)g_keep_alloc_n[1], (unsigned long long)g_keep_reuse_n[1], (unsigned long long)g_keep_retire_n[1],
+                        (unsigned long long)g_keep_alloc_n[2], (unsigned long long)g_keep_reuse_n[2], (unsigned long long)g_keep_retire_n[2],
+                        (unsigned long long)g_keep_alloc_n[3], (unsigned long long)g_keep_reuse_n[3], (unsigned long long)g_keep_retire_n[3],
+                        g_keep_pending.size(), g_keep_free_n);
                 NXLOG_I(kTag, "memo_storage_check: %llu memo look-ups of storage sets over a held result", (unsigned long long)g_memo_storage_held);
                 NXLOG_I(kTag, "sets that may not be reused, why: per-draw c[0] only %llu, written storage only %llu, both %llu, other %llu", (unsigned long long)g_set_why[0],
                         (unsigned long long)g_set_why[1], (unsigned long long)g_set_why[2], (unsigned long long)g_set_why[3]);
