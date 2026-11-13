@@ -102,6 +102,7 @@ struct MemoryPool : Obj {
     bool is_virtual = false;
     bool is_shader_code = false;
     std::atomic<bool> dead{false};
+    uint64_t reg_serial = 0;        // unique per registration (pool_register): a kept descriptor set's pool identity ([nvn] keep_pool_check)
     // Virtual (sparse) pools: which 64 KiB tiles of the range are backed by which physical memory (nvnMemoryPoolMapVirtual). The textures
     // living in the pool read their texels from there.
     struct VirtualMap {
@@ -129,6 +130,10 @@ PoolHit pool_lookup(uint64_t gpu_address);          // pool is null when the add
 void pool_collect(std::vector<Ref<MemoryPool>>& out);   // every registered pool, referenced (frame capture)
 uint64_t pool_registry_generation();                  // changes with every pool registered or unregistered
 uint64_t pool_unregister_generation();                // changes with every pool unregistered
+// Statistics of the registry: pools unregistered, and of the pools registered, how many cover the same range (base, size, flags) as a pool
+// unregistered at most 10 s before (the game re-creating a pool over the same storage), at the same base, or overlapping one.
+struct PoolRegStats { uint64_t unregistered = 0, registered = 0, same_range = 0, same_base = 0, overlap = 0; };
+PoolRegStats pool_registry_stats();
 inline uint8_t* host_ptr(uint64_t gpu_address) { return reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(gpu_address)); }
 
 // The data of an NVNbuffer (0x30 bytes in the game's memory).

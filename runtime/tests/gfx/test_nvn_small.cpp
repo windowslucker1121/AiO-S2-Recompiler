@@ -628,3 +628,41 @@ NXTEST(dirty_tile_map_reports_every_tile_dirty) {
         if (list) CHECK_EQ(list->record_count, 0u);
     }
 }
+
+// ---- pool registry: registration serials and re-registration statistics ([nvn] keep_pool_check, K1/K2 of the 1% lows round) ---------
+NXTEST(pool_registered_again_over_the_same_range_is_another_registration) {
+    setup();
+    alignas(64) static uint8_t mem[4096];
+    const uint64_t base = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(mem));
+    auto make = [&](uint64_t off, uint64_t size) {
+        MemoryPool* p = new MemoryPool();
+        p->base = mem + off;
+        p->size = size;
+        p->gpu_base = base + off;
+        return p;
+    };
+    const PoolRegStats s0 = pool_registry_stats();
+    MemoryPool* a = make(0, 2048);
+    pool_register(a);
+    const uint64_t sa = a->reg_serial;
+    CHECK(sa != 0);
+    CHECK(pool_lookup(base + 100).pool == a);
+    const uint64_t ug = pool_unregister_generation();
+    pool_unregister(a);
+    CHECK(pool_unregister_generation() != ug);
+    CHECK(pool_lookup(base + 100).pool == nullptr);
+    MemoryPool* b = make(0, 2048);   // the same range again: a new registration (a kept set bound to `a` must not pass as bound to `b`)
+    pool_register(b);
+    CHECK(b->reg_serial != sa);
+    CHECK(pool_lookup(base + 100).pool == b);
+    MemoryPool* c = make(2048, 1024);   // a new range: counted as neither
+    pool_register(c);
+    const PoolRegStats s1 = pool_registry_stats();
+    CHECK_EQ(s1.registered - s0.registered, 3u);
+    CHECK_EQ(s1.unregistered - s0.unregistered, 1u);
+    CHECK_EQ(s1.same_range - s0.same_range, 1u);
+    CHECK_EQ(s1.same_base - s0.same_base, 1u);
+    CHECK_EQ(s1.overlap - s0.overlap, 1u);
+    pool_unregister(b);
+    pool_unregister(c);
+}

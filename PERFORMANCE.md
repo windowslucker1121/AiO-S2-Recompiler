@@ -836,6 +836,38 @@ scripts in the worktree's git-ignored `work\lb` (`rtg.py` gate numbers, `flc.py`
   halved the misses (2,242 -> 1,056) at 504 us per spare on the worker and a full 2 GiB park; its frame numbers were taken by another
   agent's build. Not gated.
 
+## 1% lows round, agent C: kept-set rebuild storms and set-build storms (K1-K3 of PLAN_LOWS, 2026-11-13, branch `lows/c`)
+
+Village outside at 1920x1080 uncapped, private exe of `lows/c` (after the RT merge, cd95b96), route balcony (30 s) + `bench/village_walk.nxs`
++ the three `turn_village.nxs` windows, `frame_csv`; scripts in the worktree's git-ignored `work\lowsc` (`runs_c.py`, `kg.py` gate numbers and
+stall count, `k3.py` set-build storms, `rep.py` capture replays). All runs counted were quiet (0-2 drain waits over 8 ms per minute).
+- **K1 `[nvn] keep_pool_check` (default on now):** a pool unregister no longer invalidates every kept set: each set's buffer dependencies are
+  looked up again and the set stays valid when each resolves in the same registration of the same pool (`MemoryPool::reg_serial`); the
+  `ubo_dynamic` set-0 sets drop only those whose pools went (`dyn0_sweep`). Off: up to 217-281 kept sets rebuilt in one frame (walk, run),
+  18 "rebuild" frames over 14.3 ms in 3 runs. On (5 runs): **0 rebuilt in any frame, rebuild class 0**, ~4,000 kept sets re-validated per run,
+  0 failed; ubo_dynamic sweeps kept ~62k sets, dropped 0. Frames with an unregister: replay 6.12 -> 5.65 us per draw, the rest unchanged.
+  Moving windows pooled (3 off / 5 on runs): fps 102.5 / 102.3, 1% low 46.7 / 45.0, frames over 20 ms 19.6 / 34.5 per minute; the on side
+  holds one run with a 3 s burst of 20 ms replays at ~3,000 draws (no rebuild, no stall line; without it 6-9 per run against 3-8 off): within
+  the run-to-run spread, no gain in the lows to claim. **Gate K-g1 passed** on its criteria (`keep_rebuilt` <= 10 in every frame, rebuild
+  class 0). `set_reuse = verify` + `odb_incremental = verify` (two runs, before and after the RT merge): 0 kept-set, 0 memo, 0 image-set,
+  0 ubo_dynamic differences, 0 missed draw checks. Capture replays on vs off: village SSIM 0.99982, nb3 0.99994, 0 changed pixels.
+  New: `PoolRegStats` (registered / unregistered / over a range unregistered in the last 10 s: same range, same base, overlapping), `frame_csv`
+  columns `keep_pool_kept`, `pools_registered`, `pools_unregistered`, `pools_reg_overlap`; test `gfx_nvn_small.pool_registered_again_...`.
+- **K2 (GPU-side pool objects kept across a re-register) not built:** of ~4,690 pools registered per run only 50-59 cover a pool unregistered
+  in the last 10 s; in the moving windows walk 12 of 58 registrations, run 30 of 31, turns 0; every import of the route together takes ~9 ms
+  (~0.1 ms each). The -80% import criterion cannot be reached by reusing re-registered ranges, and the time is not a hitch source.
+- **K3 (set-build storms), measured:** frames with over 1.6x the median sets built (`frame_csv` columns `sets_img_made`, `sets_dyn0_built`,
+  `sets_path_compute|noreuse|written|first`): walk median 445 sets (img 18, first sightings 127, compute 246), storms ~880 (img ~330, first
+  ~200, compute ~305) at 2,600 draws against 1,100; balcony / turns the same shape at 2,900-3,100 against 2,150-2,450 draws. So the storms
+  are new image-keyed texture sets and set-1 first sightings of objects coming into view, i.e. real new combinations, scaling with the extra
+  draws (~0.6-0.8 ms per storm frame at ~1.6 us per set); 23-33% of storm frames pass 14.3 ms. `r6_diag`: of the set-1 first sightings 75-99%
+  per program would be found again keyed by what they resolve to (the material fragment shaders 0f3f9223, a6d374cb, ddcf096b, ee7452d2,
+  62d8124c, abe5538f, ...): a content-keyed table for set 1 (as `tex_img_sets` does for set 2) is the next candidate. Tried and dropped:
+  `tex_rt_pool` taking the newest parked image instead of the oldest (to stop the targets cycling through ~65 parked images per layout):
+  image sets made unchanged (33 vs 36 per frame on the balcony, storms the same), removed.
+- Pitfalls: a run's `continue` route fails now and then (title movie): check `load.json`; two runners with the same lock name both "hold"
+  the lock (lock.py is reentrant per name) and fight over one instance: one runner at a time.
+
 ## What is open, by expected gain
 
 **After R6:** replay ~9.7-10 ms; ~88-90 fps. The render thread, the GPU (~93% busy) and the game's CPU frame are co-limits; a replay cut now
