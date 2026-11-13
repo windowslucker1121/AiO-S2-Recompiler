@@ -40,6 +40,26 @@ Last update: 2026-11-12 evening, branch `feat/perf-generic-runtime` (orchestrato
 
 ## Where we are (2026-11-12, RTX 4080, Ryzen 7 5800X3D, 1920x1080, uncapped)
 
+**2026-11-13 (`perf/steady100`): the benchmark walk's spikes.** Runs alone, balcony + walk in one run, `frame_csv` (+ `frame_csv_threads`).
+**`tools/perf/bench_window.py` took its windows 0.6 s late** (the CSV clock starts at the hitch monitor, not the log): fixed; walk numbers
+below use the fixed window (baseline walk 1% low 31.7 / 40.0, worst 41.8 / 29.3 ms instead of the 42 / 30-33 read before).
+- Kept, default on: (1) `[gfx] screenshot_async`: the walk's five `@shot`s each drained the queue on the render thread (13-32 ms frames,
+  a measurement artifact); now a worker waits on a timeline semaphore. (2) Memory pool finalize drops its command lists via the ordered
+  region map (`nvn_cmd_handles.cpp`; was a walk over every handle under the exclusive lock: one 25-30 ms game-side frame ~4.7 s into the
+  walk, found with `[prof] sample_raw`; `[nvn] handles_pool_walk = 1` = old). (3) `[nvn] tex_compressible_no_upload`: COMPRESSIBLE render
+  targets are never uploaded from storage (the game re-creates nine post-process targets at the ladder: 22 MB untiled on the render thread,
+  26-28 ms frame).
+- Result (2-3 runs each): walk 1% low 31.7 / 40.0 -> 43.8 / 45.7 / 47.4, worst 41.8 / 29.3 -> 23.8 / 25.8 / 22.3 ms, fps ~99 -> ~100;
+  balcony unchanged (~92, 1% low ~63-65). Screenshots match the baseline within run-to-run noise.
+- What is left in the walk: its start and the open village are 3,000-3,700-draw frames where the render thread (18-20 ms CPU) and the
+  recorder (16-18 ms) both limit: no single hot spot (begin_draw ~55%, spread). Balcony: no loop at 100% (replay ~9.1 ms, GPU busy ~7.8,
+  main busy ~2.8 + worker waits ~3.4 + sync wait ~4.6 of a 10.9 ms frame), the slowest 1% are frames where render, guest and main CPU all
+  run ~45% longer (contention, not one function).
+- Dropped (measured): `sync_lead = 1` paired on the balcony (10 pairs: fps -0.23, sync wait unchanged); guest pool without the render
+  core (`[sched] host_cpus = 3ffc`, one run: neutral).
+- Noise: two of eleven runs were disturbed by other load (31 fps; one with system memory pressure, 1.3 GB free: a 105 ms frame). Look for
+  `memory pressure` lines before trusting a run.
+
 **2026-11-12 (P1, `perf/p1-pipeline`): pipeline and placement. No fps win; every new switch is off (or the old behaviour).**
 Village outside 1080 uncapped, paired `cpuperf_ab = 300` windows; three of the five runs had other agents' builds beside them
 (clang-cl x3-4, lld-link up to ~10 cores: game ~57-68 fps instead of ~85, render-thread bound), the last two were quiet (78 / 84 fps).
