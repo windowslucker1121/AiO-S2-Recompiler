@@ -13,6 +13,7 @@
 // falls through to kStubService. Two services have no table in the sources read, so their commands do fall through: pcm, and the IUser
 // that nfc:mf:u hands out. "banana" is a StubService by design.
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <algorithm>
 #include <cstdint>
@@ -24,6 +25,7 @@
 #include <vector>
 
 #include "nxrt/log.h"
+#include "nxrt/timestep.h"
 #include "nxrt/tt.h"
 #include "services_internal.h"
 
@@ -271,6 +273,8 @@ uint32_t opus_packet_samples(const uint8_t* p, size_t n, uint32_t rate) {
 // One libopus decoder per session (a session is used by one guest thread at a time; the lock is for safety only).
 struct HostOpus {
     std::mutex mu;
+    double last_decode = -1.0;   // [time] av_trace: host seconds of the last decode (a gap or a reset = a new stream)
+    uint32_t id = 0;
 #if NXRT_HAVE_OPUS
     OpusDecoder* dec = nullptr;
     ~HostOpus() { if (dec) opus_decoder_destroy(dec); }
@@ -281,6 +285,8 @@ std::shared_ptr<Service> make_hwopus_decoder(uint32_t rate, uint32_t channels) {
     if (rate == 0) rate = 48000;
     if (channels == 0 || channels > 8) channels = 2;
     auto host = std::make_shared<HostOpus>();
+    static std::atomic<uint32_t> ids{0};
+    host->id = ++ids;
 #if NXRT_HAVE_OPUS
     int err = 0;
     if (channels <= 2) host->dec = opus_decoder_create(static_cast<opus_int32>(rate), static_cast<int>(channels), &err);
@@ -299,6 +305,13 @@ std::shared_ptr<Service> make_hwopus_decoder(uint32_t rate, uint32_t channels) {
                     if (size <= in.size - 8) {
                         consumed = 8 + size;
                         samples = opus_packet_samples(src + 8, size, rate);
+                        if (timestep::av_trace_on()) {   // a stream starts: a reset, the first packet or one after a gap
+                            const bool reset = has_reset && req.arg<uint8_t>(0);
+                            const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                            std::lock_guard<std::mutex> lk(host->mu);
+                            if (reset || host->last_decode < 0 || now - host->last_decode > 0.25) timestep::av_note_sound("opus", host->id, reset, size);
+                            host->last_decode = now;
+                        }
 #if NXRT_HAVE_OPUS
                         std::lock_guard<std::mutex> lk(host->mu);
                         if (host->dec && out.addr && out.size >= channels * 2) {

@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -80,6 +81,8 @@ constexpr size_t kPacketBacklog = 32;                     // packets not decoded
 bool g_log = false;
 uint64_t g_max_pictures = 0;   // [media] video_max_pictures (tests): a stream ends after this many pictures (0 = never)
 int g_threads = 4;
+size_t g_ahead = 8;           // [media] video_decode_ahead: pictures a decoder's own thread decodes ahead of the game (0 = decode on demand)
+int g_frame_delay = 0;         // [media] video_frame_delay: dav1d's max_frame_delay (0 = dav1d's choice from the thread count)
 std::atomic<bool> g_enabled{false};
 std::atomic<uint64_t> s_created{0}, s_destroyed{0}, s_packets{0}, s_decoded{0}, s_delivered{0}, s_read{0}, s_errors{0};
 std::mutex g_err_mu;
@@ -214,6 +217,21 @@ struct Decoder {
     std::vector<uint8_t> last;                            // last decoded picture (NV12) for the end-of-stream buffer
     uint16_t last_w = 0, last_h = 0;
     uint64_t pictures = 0;
+    // [media] video_decode_ahead: a host thread owns the codec and keeps up to g_ahead pictures decoded before the game asks; codec_mu
+    // guards the codec library state, gen drops pictures of packets taken before a flush.
+    std::mutex codec_mu;
+    std::condition_variable cv;
+    std::thread worker;
+    bool quit = false;
+    uint64_t gen = 0;
+    std::deque<Picture>* sink = nullptr;                  // the worker's output while it decodes (codec_mu held)
+    ~Decoder() {   // a decoder the game never finalized (process exit): let its worker go
+        if (worker.joinable()) {
+            { std::lock_guard<std::mutex> lk(mu); quit = true; }
+            cv.notify_all();
+            worker.detach();
+        }
+    }
 };
 
 std::mutex g_reg_mu;
@@ -240,6 +258,7 @@ bool vpx_open(Decoder& d) {
         Dav1dSettings s;
         dav1d_default_settings(&s);
         s.n_threads = g_threads;
+        s.max_frame_delay = g_frame_delay;
         // max_frame_delay stays 0 (dav1d picks it from the thread count): frame threading needs several pictures in flight, and the
         // player submits packets well ahead of the pictures it reads (kPacketBacklog), so pump() always has the next ones. With 1, dav1d
         // only had tile threads and made ~21 pictures/s of the game's 1080p intro on the Core Ultra 5.
@@ -390,7 +409,7 @@ void after_change(::Ctx* c, Decoder& d, bool fences) {
     bool signal = false;
     {
         std::lock_guard<std::mutex> lk(d.mu);
-        if (d.submit_event_made && d.started && d.ready.size() < kBacklog && d.packets.size() < kPacketBacklog) {
+        if (d.submit_event_made && d.started && d.ready.size() < kBacklog + g_ahead && d.packets.size() < kPacketBacklog) {
             signal = d.want_submit_signal;
             d.want_submit_signal = false;
         }
@@ -399,8 +418,12 @@ void after_change(::Ctx* c, Decoder& d, bool fences) {
 }
 
 void keep_picture(Decoder& d, Picture&& p, unsigned w, unsigned h) {
+    if (d.sink) {   // decode-ahead worker: d.mu is not held, the worker files the picture under it
+        d.sink->push_back(std::move(p));
+        return;
+    }
     if (d.pictures++ == 0)
-        NXLOG_I("vcodec", "decoder %u: first picture %ux%u (%s, %d threads)", d.id, w, h, d.codec == 1 ? "AV1" : d.codec == 8 ? "VP8" : "VP9", g_threads);
+        NXLOG_I("vcodec", "decoder %u: first picture %ux%u (%s, %d threads, frame delay %d)", d.id, w, h, d.codec == 1 ? "AV1" : d.codec == 8 ? "VP8" : "VP9", g_threads, g_frame_delay);
     d.last = p.nv12;
     d.last_w = p.w;
     d.last_h = p.h;
@@ -474,6 +497,10 @@ void decode_into(Decoder& d, const uint8_t* data, size_t size, int64_t pts) {
 // Decodes queued packets while an output buffer waits and no picture is ready, then pairs pictures with buffers. Caller holds d.mu.
 // Returns true when a fence completed.
 bool pump(Decoder& d) {
+    if (d.worker.joinable()) {   // decode ahead: the worker decodes, the guest calls only pair pictures with buffers
+        d.cv.notify_one();
+        return assign(d);
+    }
     while (!d.waiting.empty() && d.ready.empty() && !d.packets.empty()) {
         Packet p = std::move(d.packets.front());
         d.packets.pop_front();
@@ -496,6 +523,73 @@ bool pump(Decoder& d) {
         }
     }
     return assign(d);
+}
+
+// [media] video_decode_ahead: the decoder's own thread. It takes the next packet while fewer than g_ahead pictures wait, decodes it with
+// d.mu free (codec_mu held), then files its pictures under d.mu, so a picture is usually ready when the game acquires a buffer instead of
+// being decoded then (the game shows the previous picture again when it is not ready in time). The guest calls pair pictures with buffers
+// (assign) and signal the fences; polls of a fence pair too (poll_decoder).
+void ahead_worker(Decoder* d) {
+    for (;;) {
+        Packet p;
+        uint64_t gen = 0;
+        {
+            std::unique_lock<std::mutex> lk(d->mu);
+            d->cv.wait(lk, [d] { return d->quit || (!d->packets.empty() && d->ready.size() < g_ahead); });
+            if (d->quit) return;
+            p = std::move(d->packets.front());
+            d->packets.pop_front();
+            if (g_max_pictures && d->pictures >= g_max_pictures) {
+                d->packets.clear();
+                p.data.clear();
+                p.eos = true;
+            }
+            gen = d->gen;
+        }
+        std::deque<Picture> out;
+        {
+            std::lock_guard<std::mutex> ck(d->codec_mu);
+            d->sink = &out;
+            if (!p.data.empty()) decode_into(*d, p.data.data(), p.data.size(), p.pts);
+            if (p.eos && d->vpx_ok) decode_into(*d, nullptr, 0, p.pts);
+            d->sink = nullptr;
+        }
+        std::lock_guard<std::mutex> lk(d->mu);
+        if (gen != d->gen) continue;   // flushed meanwhile
+        for (Picture& q : out) {
+            const unsigned w = q.w, h = q.h;
+            keep_picture(*d, std::move(q), w, h);
+        }
+        if (p.eos) {
+            Picture e;
+            e.nv12 = d->last;
+            e.w = d->last_w;
+            e.h = d->last_h;
+            e.pts = p.pts;
+            e.eos = true;
+            d->ready.push_back(std::move(e));
+            NXLOG_I("vcodec", "decoder %u: end of stream after %llu pictures", d->id, (unsigned long long)d->pictures);
+        }
+    }
+}
+
+// A poll of a decoder fence (TryWait / RequestSyncPointEvent): pictures the worker decoded since the last guest call go to the buffers
+// waiting for them now.
+void poll_decoder(::Ctx* c, uint64_t w0) {
+    if ((w0 & 0xffffffff00000000ull) != kSyncMarker) return;
+    std::shared_ptr<Decoder> d;
+    {
+        std::lock_guard<std::mutex> lk(g_reg_mu);
+        auto it = g_decoders.find(static_cast<uint32_t>(w0));
+        if (it != g_decoders.end()) d = it->second;
+    }
+    if (!d || !d->worker.joinable()) return;
+    bool fences;
+    {
+        std::lock_guard<std::mutex> lk(d->mu);
+        fences = assign(*d);
+    }
+    if (fences) after_change(c, *d, true);
 }
 
 // ---- nn::codec handlers -----------------------------------------------------------------------------------------------------------
@@ -610,6 +704,7 @@ void create_decoder(::Ctx* c, int codec, uint32_t w, uint32_t h) {
         g_decoders[d->id] = d;
     }
     vpx_open(*d);
+    if (g_ahead) d->worker = std::thread(ahead_worker, d.get());
     wr64(g, d->id);
     wr64(g + 8, kDecMarker);
     s_created++;
@@ -640,6 +735,14 @@ void finalize_decoder(::Ctx* c) {
         // fences of a finalized decoder count as reached: wake whoever still waits
         for (uint64_t evt : take_reached(d->id, ~0ull)) gcall(c, os().signal_event, evt);
         if (d->submit_event_made && os().destroy_sysevent) gcall(c, os().destroy_sysevent, reinterpret_cast<uint64_t>(d->submit_event));
+        if (d->worker.joinable()) {
+            {
+                std::lock_guard<std::mutex> lk(d->mu);
+                d->quit = true;
+            }
+            d->cv.notify_all();
+            d->worker.join();
+        }
         {
             std::lock_guard<std::mutex> lk(d->mu);
             vpx_close(*d);
@@ -696,7 +799,11 @@ void flush_decoder(::Ctx* c) {
         d->waiting.clear();
         d->ready.clear();
         d->packets.clear();
-        vpx_close(*d);
+        d->gen++;
+        {
+            std::lock_guard<std::mutex> ck(d->codec_mu);   // a picture the worker is decoding now is dropped (gen)
+            vpx_close(*d);
+        }
         d->want_submit_signal = true;
     }
     if (g_log) NXLOG_I("vcodec", "decoder %u flushed", d->id);
@@ -868,6 +975,7 @@ void sp_cancel(::Ctx* c) {
 void sp_request(::Ctx* c) {   // (evt, const SyncPointHandle&)
     const uint64_t evt = A(0), h = A(1);
     const uint64_t w0 = h ? rd64(h) : 0, seq = h ? rd64(h + 8) : 0;
+    poll_decoder(c, w0);
     gcall(c, os().clear_event, evt);
     bool reached;
     {
@@ -886,6 +994,7 @@ void sp_holder(::Ctx* c) {   // (MultiWaitHolderType*, evt)
 void sp_trywait(::Ctx* c) { RET(gcall(c, os().trywait_event, A(0)) & 1); }
 void gs_trywait(::Ctx* c) {   // (const NativeSyncHandle&) -> bool
     const uint64_t h = A(0);
+    if (h) poll_decoder(c, rd64(h));
     RET(h ? fence_done(rd64(h), rd64(h + 8)) : 1);
 }
 
@@ -1094,6 +1203,8 @@ bool install_video_codec_hle() {
         g_max_pictures = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("media", "video_max_pictures", 0)));
         const int64_t hw = std::max(1u, std::thread::hardware_concurrency());
         g_threads = static_cast<int>(std::clamp<int64_t>(config_get_int("media", "video_decoder_threads", std::clamp<int64_t>(hw / 2, 4, 8)), 1, 16));
+        g_ahead = static_cast<size_t>(std::clamp<int64_t>(config_get_int("media", "video_decode_ahead", 8), 0, 32));
+        g_frame_delay = static_cast<int>(std::clamp<int64_t>(config_get_int("media", "video_frame_delay", 0), 0, 8));
         for (const Import& im : kImports) {
             hle_register(im.name, im.fn);
             module_override_symbol(im.name);

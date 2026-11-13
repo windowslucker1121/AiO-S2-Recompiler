@@ -1416,6 +1416,13 @@ bool exp_op_cost_on();
 struct OcPhase { int i; uint64_t t0; explicit OcPhase(int k) : i(k), t0(exp_op_cost_on() ? __rdtsc() : 0) {} ~OcPhase() { if (t0) g_oc_ph[i] += __rdtsc() - t0; } };
 void pass_lookahead();   // below: settles the reads of the coming draws before the pass begins
 void mesh_copies_ahead();   // below (do_draw_mesh): the {count, 1, 1} records of the pass's mesh draws, before it begins
+// [nvn] no_target_pass: see ensure_pass
+bool nvn_cfg_no_target_pass() {
+    static const bool v = nxrt::config_get_bool("nvn", "no_target_pass", false);
+    return v;
+}
+uint64_t g_no_target_passes = 0;   // render thread
+
 bool ensure_pass(bool depth_ro = false) {
     if (P.open && targets_match() && P.depth_ro == depth_ro) return true;
     end_pass(true);
@@ -1494,6 +1501,32 @@ bool ensure_pass(bool depth_ro = false) {
     if (!any && g_xfb_active && device().features().transform_feedback) {   // a stream-out pass without attachments
         extent = {1, 1};
         any = true;
+    }
+    // [nvn] no_target_pass (default off, experimental): draws with no colour or depth target bound at all rasterize in a pass without
+    // attachments as large as the viewports instead of being left out. The game draws such draws with an empty fragment shader (e66bea55,
+    // ~35 per second in the intro, viewport 1x1); what they are for is not known yet. Turning this on did not change the intro's door (A23).
+    if (!any && !dt && nvn_cfg_no_target_pass()) {
+        bool bound = false;
+        for (uint32_t i = 0; i < S.ncolor; ++i) bound |= S.color_tex[i].get() != nullptr;
+        if (!bound) {
+            float w = 0.0f, h = 0.0f;
+            for (uint32_t i = 0; i < S.nvp && i < 16; ++i) {
+                w = std::max(w, S.vp[i][0] + std::fabs(S.vp[i][2]));
+                h = std::max(h, S.vp[i][1] + std::fabs(S.vp[i][3]));
+            }
+            for (uint32_t i = 0; i < S.nsc && i < 16; ++i) {   // a scissor wider than the viewport bounds nothing more
+                if (w <= 0.0f) w = static_cast<float>(S.sc[i][0] + S.sc[i][2]);
+                if (h <= 0.0f) h = static_cast<float>(S.sc[i][1] + S.sc[i][3]);
+            }
+            const uint32_t maxd = 16384;
+            if (w >= 1.0f && h >= 1.0f) {
+                extent = {std::min(maxd, static_cast<uint32_t>(std::ceil(w))), std::min(maxd, static_cast<uint32_t>(std::ceil(h)))};
+                any = true;
+                if (g_no_target_passes++ == 0)
+                    NXLOG_I(kTag, "no_target_pass: a draw without render targets rasterizes in a %ux%u pass without attachments (fs %s)", extent.width,
+                            extent.height, S.stage[kFragment] ? S.stage[kFragment]->hash.c_str() : "-");
+            }
+        }
     }
     if (!any || extent.width == UINT32_MAX) return false;
     P.extent = extent;
@@ -6226,7 +6259,15 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (g_fb_seen || (g_dirty & (kDesc | kPipe))) feedback_prepare(*pl);
     bool ep_ok;
     { OcPhase ph(3); ep_ok = ensure_pass(g_want_depth_ro); }
-    if (!ep_ok) { log_once("draw-no-target", "draw without a usable render target skipped"); return false; }
+    if (!ep_ok) {
+        log_once("draw-no-target", "draw without a usable render target skipped");
+        // gaps.tsv names the fragment shader and why: no colour/depth target bound at all, or bound ones without an image
+        bool bound = S.depth_tex.get() != nullptr;
+        for (uint32_t i = 0; i < S.ncolor; ++i) bound |= S.color_tex[i].get() != nullptr;
+        nxrt::gap("draw", bound ? "skipped: render targets without an image" : "skipped: no render target bound",
+                  S.stage[kFragment] ? std::string_view(S.stage[kFragment]->hash) : std::string_view("no fs"));
+        return false;
+    }
     if (g_prog_writes || g_xfb_active) g_pass_unsafe = true;
     const VkPrimitiveTopology topo = mesh ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : vk_topology(mode);
     if ((g_dirty & kPipe) || topo != g_pipe_topo || !g_pipe) {
@@ -9682,6 +9723,7 @@ void replay_begin_submit(Frame& f) {
                 cmdq::set_recorder_spin_ab(!off("rec_spin"));
                 nxrt::kernel::short_sleep_ab(!off("sleep_pause"));
                 cmdq::helper_pin_ab(!off("helper_pin"));
+                delta_redispatch_ab(!off("redispatch"));   // out_delta_redispatch: "keep" in the off windows
             }
             cmdq::set_chunk_async(ab_on(kAbChunkAsync));
             cmdq::set_pds(ab_on(kAbPdsQ));
