@@ -754,6 +754,37 @@ Balcony and walk benches at 1920x1080 uncapped, private shader caches only (tool
   28010d0bb53e5b57 5c53165dae866546 731a498096475249 97de564fe1a2ec09 c6f3f11edb6ed86d ece836278b723289 fd8debac8c87401a (only these
   rows; no runtime rows involved); their pipelines rebuild on demand.
 
+## 1% lows round, agent D (2026-11-13, branch `lows/d`; PLAN_LOWS N-g0, N1, N2, N3, M1)
+
+Exe of `lows/d` (base 35f02bc), 1920x1080 uncapped, instance `lowsd`, route bench_balcony_far (60 s window) + village walk + village
+turns (`turn_village.nxs`), one run at a time under the game lock, quiet check (no builds or translators) before each run. Scripts in the
+worktree's git-ignored `work/lows_d` (`runs_d.py`, `cmp.py`, `ad.py`). The machine had an outside source of 5-13 ms processor
+thefts during the whole session (the research's "disturbed" state); the busiest foreign processes were a GPU overclocking/monitoring
+tool and the agent clients. Run-to-run spread is large (two machine states: guest CPU 22.4-23.1 vs 24-25 ms per frame): compare sets.
+- **N-g0 (kept, default on): stall attribution.** `[diag] stall_attrib`: a drain that waited 300 us probes the recorder (its cycle time)
+  and its processor (NtQuerySystemInformation: DPC / interrupt / idle / kernel / user time, context switches, DPC and interrupt counts);
+  `stall:` lines for drains >= 5 ms, a `stalls over 10 s` summary. Finding: **every recorder stall was "another thread had the
+  processor"** (the recorder ran 0.01-1.3 ms of a 5-13 ms window, 1-6 context switches, DPC time 0, 1-2 DPCs and 3-10 interrupts), on
+  logical 13 and on logical 1 alike, 40-140 drains >= 2 ms per run; DPC / interrupt time named none. The processor time counters move in
+  15.6 ms clock ticks (the timer resolution is not raised), so the context switch count decides. `full` adds a rough render-thread check
+  per present (two system calls per frame). Tool `[nvn] exp_stall_spin` (a thread at the recorder's priority spins N ms on its processor
+  every 5 s): every spin shows as an "another thread" drain stall.
+- **N1 failed (stays off, `render_cpus = auto_sibling`):** recorder on the main guest core's second hardware thread (13) vs core 0's
+  (1), 3 runs each: balcony replay 8.92 vs 9.01 ms (-1%, gate -3%), drain waits 2-8 ms 12-22 vs 24-39 per minute, 1% lows 58 / 64 / 58
+  vs 54 / 59 / 71. Logical 13 is in the guest threads' pool (soft affinity), and guest threads preempt the recorder there too.
+- **N2 failed (stays off, `[nvn] stall_widen`):** a drain whose pinned recorder ran under 30% since the probe widens its affinity to
+  all processors, pins again after. With the spinner: "another thread" stalls 70 -> 0-2 per run, balcony 88 fps / 1% low 43 (on 13,
+  no widening) -> 108-109 / 72-73 (on 1, widening). Quiet runs: 250-740 widenings per run (100-300 a minute; gate: 0) at 0.6 ms and 1 ms
+  thresholds, replay and lows within the spread (balcony lows 39 / 58 / 45 / 66 vs 54 / 59 / 71). Long drains left after a widening are
+  the recorder running 7-10 ms of backlog (on another processor), not stalls.
+- **N3 not made default (`submit_async` + `cmd_nodrain_begin`; the latter now works outside cpuperf_ab):** drains 94k -> 16k per run;
+  4 runs vs 3: balcony replay 8.37 vs 9.01 ms (-7%), fps 108 vs 104, 1% low 42 / 73 / 75 / 68 vs 54 / 59 / 71, frames over 20 ms 8 / 0 /
+  0 / 0 vs 18 / 3 / 1 per minute; but the walk had more frames over 20 ms (41-80 vs 39-42 per minute) and lows 43-46 vs 47-48, turns
+  41-45 vs 43-47. Mixed: off, as before. A paired-window test (cpuperf_ab) would settle it.
+- **M1 (kept): `[diag] frame_csv` column `ms` is the interval between actual presents** (after the pace wait and the queue present);
+  `ms_tick` is the old one. Capped balcony (cap 100, real-time route): `ms` never under 9.41 ms (`ms_tick`: 1,448 frames under 9.4),
+  stdev 0.93 vs 1.09 (gate 0.9: missed by the run's 3 frames per minute over 20 ms; the research's 0.84 was a run with 1).
+
 ## What is open, by expected gain
 
 **After R6:** replay ~9.7-10 ms; ~88-90 fps. The render thread, the GPU (~93% busy) and the game's CPU frame are co-limits; a replay cut now

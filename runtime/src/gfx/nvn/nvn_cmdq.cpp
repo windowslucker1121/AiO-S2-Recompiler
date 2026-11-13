@@ -305,18 +305,22 @@ Verdict attribute(const CpuSnap& a, const CpuSnap& b, double wall_us, double ran
                   user / 1000, idle / 1000, cs, dpcs, ints);
     return v;
 }
-bool stall_attrib_on() {
-    static const bool on = config_get_bool("diag", "stall_attrib", true);
-    return on;
+int stall_attrib_mode() {   // 0 off, 1 drains (default), 2 full: also the render thread's own check once per present (two system calls per frame)
+    static const int m = [] {
+        const std::string v = config_get_str("diag", "stall_attrib", "on");
+        return v == "full" ? 2 : (v == "off" || v == "0" || v == "false") ? 0 : 1;
+    }();
+    return m;
 }
+bool stall_attrib_on() { return stall_attrib_mode() > 0; }
 uint64_t stall_probe_tsc() {
     static const uint64_t t = static_cast<uint64_t>(std::clamp<int64_t>(config_get_int("diag", "stall_probe_us", 300), 50, 100000) * tsc_per_us());
     return t;
 }
 uint64_t g_st_drain[kVCount] = {}, g_st_drain_big[kVCount] = {}, g_st_render[kVCount] = {};   // render thread: stalls by verdict (drain >= 2 ms, >= 5 ms; render)
 uint64_t g_st_lines = 0;                 // stall lines in this 10 s window
-// N2 ([nvn] stall_widen, default off; cpu ms threshold [nvn] stall_widen_us 300): a drain whose recorder did not run for most of the
-// last `stall_widen_us` widens the recorder's affinity to the process's processors (a ready thread then moves at once to an idle one) and
+// N2 ([nvn] stall_widen, default off): a drain that has waited [nvn] stall_widen_us (1000) on a recorder that ran under 30% of the time
+// since the probe began widens the recorder's affinity to the process's processors (a ready thread then moves at once to an idle one) and
 // pins it again when it has caught up. Counted: widenings, and widenings in drains that ended under 1 ms after it (cheap ones).
 std::atomic<int> g_widen_cfg{-1};
 uint64_t g_widen_n = 0, g_widen_fast = 0;
@@ -324,6 +328,10 @@ int widen_cfg() {
     int v = g_widen_cfg.load(std::memory_order_relaxed);
     if (v < 0) { v = config_get_bool("nvn", "stall_widen", false) ? 1 : 0; g_widen_cfg.store(v, std::memory_order_relaxed); }
     return v;
+}
+uint64_t widen_tsc() {
+    static const uint64_t t = static_cast<uint64_t>(std::clamp<int64_t>(config_get_int("nvn", "stall_widen_us", 1000), 100, 100000) * tsc_per_us());
+    return t;
 }
 std::atomic<int> g_pin_rec_now{-1};      // the recorder's pinned processor while pinned (apply_render_pin), -1 otherwise
 struct DrainProbe {
@@ -346,14 +354,13 @@ struct DrainProbe {
             return;
         }
         if (widened || !widen_cfg() || g_pin_rec_now.load(std::memory_order_relaxed) < 0) return;
-        if (now - t_check < stall_probe_tsc()) return;
+        if (now - t0 < widen_tsc() || now - t_check < stall_probe_tsc() / 4) return;   // checked every ~75 us once the wait passed stall_widen_us
         ULONG64 c = 0;
         HANDLE h = th();
         if (!h) return;
         QueryThreadCycleTime(h, &c);
-        const bool stuck = (c - cyc_check) * 10 < (now - t_check) * 3;   // ran under 30% of the last period
         t_check = now;
-        cyc_check = c;
+        const bool stuck = (c - cyc_arm) * 10 < (now - t_arm) * 3;   // the recorder ran under 30% of the time since the probe began
         if (!stuck) return;
         DWORD_PTR proc = 0, sys = 0;
         GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys);
@@ -1252,7 +1259,7 @@ void apply_render_pin(bool on) {
     if (!parsed) {
         parsed = true;
         const char* why = "explicit";
-        if (cfg == "auto" || cfg == "auto_legacy") {
+        if (cfg == "auto" || cfg == "auto_legacy" || cfg == "auto_sibling") {
             const std::vector<CpuCore> cores = machine_cores();
             const ::nxrt::kernel::SchedInfo si = ::nxrt::kernel::sched_info();
             CpuGuest g;
@@ -1260,7 +1267,9 @@ void apply_render_pin(bool on) {
             for (int i = 0; i < si.cores && i < 6; ++i) g.ideal |= si.host_masks[i];
             g.main = si.host_masks[0];
             g.pool = si.pool;
-            const CpuPick pk = pick_render_cpus(cores, g, cfg == "auto_legacy");   // auto_legacy: the recorder on core 0's second thread (before N1)
+            // auto_sibling (N1, PLAN_LOWS; failed its gate N-g1: replay -1% instead of -3%): the recorder on the main guest core's second
+            // hardware thread; auto (and auto_legacy): core 0's second hardware thread when only one fast core is free
+            const CpuPick pk = pick_render_cpus(cores, g, cfg != "auto_sibling");
             r = pk.render;
             c = pk.recorder;
             why = pk.why;
@@ -1315,6 +1324,7 @@ void stall_frame_check() {
     }
     if (!stall_attrib_on()) return;
     static uint64_t q_prev = 0, q_sum = 0;
+    const bool render_check = stall_attrib_mode() == 2;
     static ULONG64 cyc_prev = 0;
     static double blk_prev = 0;
     static int cpu_prev = -1;
@@ -1323,13 +1333,13 @@ void stall_frame_check() {
     QueryPerformanceCounter(&q);
     QueryPerformanceFrequency(&f);
     ULONG64 cyc = 0;
-    QueryThreadCycleTime(GetCurrentThread(), &cyc);
+    if (render_check) QueryThreadCycleTime(GetCurrentThread(), &cyc);
     const double blk = hitch_phase_seconds(kHpRenderIdle) + hitch_phase_seconds(kHpRenderLimiter) + hitch_phase_seconds(kHpRenderAcquire) +
                        hitch_phase_seconds(kHpRenderGpuWait) + hitch_phase_seconds(kHpRenderLockWait) + hitch_phase_seconds(kHpRenderPresentEnd);
     const int cpu = static_cast<int>(GetCurrentProcessorNumber());
-    const CpuSnap s = cpu_snap(cpu);
+    const CpuSnap s = render_check ? cpu_snap(cpu) : CpuSnap{};
     const uint64_t qn = static_cast<uint64_t>(q.QuadPart);
-    if (q_prev && cpu == cpu_prev) {
+    if (q_prev && render_check && cpu == cpu_prev) {
         const double tpu = tsc_per_us();
         const double wall = static_cast<double>(qn - q_prev) * 1e6 / static_cast<double>(f.QuadPart);
         const double busy = wall - (blk - blk_prev) * 1e6, ran = static_cast<double>(cyc - cyc_prev) / tpu;
@@ -1342,8 +1352,8 @@ void stall_frame_check() {
                 NXLOG_I(kTag, "stall: render thread short of CPU by %.1f ms in a %.1f ms frame (processor %d; the processor's counters cover the whole frame, its waits included): %s",
                         (busy - ran) / 1000, wall / 1000, cpu, b);
         }
-        q_sum += qn - q_prev;
     }
+    if (q_prev) q_sum += qn - q_prev;
     q_prev = qn;
     cyc_prev = cyc;
     blk_prev = blk;
