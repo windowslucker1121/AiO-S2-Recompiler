@@ -208,8 +208,16 @@ void handles_release_pool(const MemoryPool* pool) {
     const uint64_t lo = pool->gpu_base, hi = pool->gpu_base + pool->size;
     std::lock_guard<std::shared_mutex> lk(g_mu);
     std::vector<uint64_t> drop;
-    for (auto& [h, e] : g_handles)
-        if (e.end > e.start && e.start >= lo && e.start < hi) drop.push_back(h);
+    // Every live list with a region is in g_regions under its start (regions of live lists never overlap: handle_register drops the
+    // overlapped ones), so the lists of the pool are a range of that ordered map. The old walk over every handle under the exclusive lock
+    // took 20-30 ms when the game released a pool (the benchmark walk's longest frame: the game's thread and every handle look-up waited).
+    // [nvn] handles_pool_walk = 1: the old walk.
+    if (NX_CFG_BOOL("nvn", "handles_pool_walk", false)) {
+        for (auto& [h, e] : g_handles)
+            if (e.end > e.start && e.start >= lo && e.start < hi) drop.push_back(h);
+    } else {
+        for (auto it = g_regions.lower_bound(lo); it != g_regions.end() && it->first < hi; ++it) drop.push_back(it->second);
+    }
     for (uint64_t h : drop) drop_locked(h, "pool released");
 }
 

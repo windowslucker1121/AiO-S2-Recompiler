@@ -242,6 +242,26 @@ struct Renderer::Impl {
         if (probe_sem) { vkDestroySemaphore(vk(), probe_sem, nullptr); vk_gauge_semaphores().sub(1); probe_sem = VK_NULL_HANDLE; }
     }
 
+    // [gfx] screenshot_async (default on): a PNG screenshot no longer waits on the render thread for the GPU to finish the frame (a full
+    // queue drain, 10-30 ms frames in the benchmark scenes' @shot frames). The present submission also signals a timeline semaphore and a
+    // worker waits for it, reads the copy back and writes the file.
+    VkSemaphore shot_sem = VK_NULL_HANDLE;
+    uint64_t shot_next = 0;
+    std::atomic<int> shot_inflight{0};
+    bool shot_sem_ready() {
+        if (shot_sem) return true;
+        VkSemaphoreTypeCreateInfo tci = {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+        tci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        VkSemaphoreCreateInfo ci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &tci};
+        if (vkCreateSemaphore(vk(), &ci, nullptr, &shot_sem) != VK_SUCCESS) { shot_sem = VK_NULL_HANDLE; return false; }
+        vk_gauge_semaphores().add(1);
+        return true;
+    }
+    void shot_stop() {
+        for (int i = 0; i < 1000 && shot_inflight.load() > 0; i++) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (shot_sem && shot_inflight.load() == 0) { vkDestroySemaphore(vk(), shot_sem, nullptr); vk_gauge_semaphores().sub(1); shot_sem = VK_NULL_HANDLE; }
+    }
+
     VkDevice vk() const { return dev->device(); }
 
     // -- present mode resolution
@@ -679,6 +699,7 @@ struct Renderer::Impl {
     void destroy_all() {
         dev->wait_idle();
         probe_stop_join();
+        shot_stop();
         flash_free();
         for (auto& s : slots) {
             if (s.queries) { vkDestroyQueryPool(vk(), s.queries, nullptr); vk_gauge_query_pools().sub(1); }
@@ -806,6 +827,39 @@ bool Renderer::begin_frame(FrameInfo* out) {
     return true;
 }
 
+namespace {
+// The read-back swapchain bytes as RGBA8 for the PNG. HDR: the picture clipped to SDR (paper white = 1.0); next to the PNG (when it has a
+// path) a false-colour map of the brightness above paper white and a PFM with the scene-linear values (1.0 = paper white), and the log stats.
+std::vector<uint8_t> capture_to_rgba(std::vector<uint8_t> raw, uint32_t w, uint32_t h, VkFormat format, extras::OutputKind kind, const std::string& cap_path) {
+    std::vector<uint8_t> px;
+    if (kind != extras::OutputKind::Sdr8) {
+        const extras::HdrState hs = extras::hdr_state();
+        const extras::CaptureFormat cf = format == VK_FORMAT_R16G16B16A16_SFLOAT ? extras::CaptureFormat::Rgba16F
+                                       : format == VK_FORMAT_A2R10G10B10_UNORM_PACK32 ? extras::CaptureFormat::A2R10G10B10 : extras::CaptureFormat::A2B10G10R10;
+        std::vector<float> lin;
+        std::vector<uint8_t> map;
+        extras::HdrCaptureStats cs;
+        if (extras::decode_hdr_capture(cf, raw.data(), w, h, hs.paper_white_nits, &lin, &px, &map, &cs)) {
+            if (!cap_path.empty()) {
+                std::string base = cap_path;
+                if (base.size() > 4 && base.compare(base.size() - 4, 4, ".png") == 0) base.resize(base.size() - 4);
+                save_png_rgba(base + ".hdrmap.png", map.data(), w, h);
+                extras::write_pfm(base + ".pfm", lin, w, h, hs.paper_white_nits / 100.0f);
+                NXLOG_I(kTag, "HDR screenshot: %s (paper white %.0f nits, peak %.0f)", extras::capture_stats_line(cs).c_str(), hs.paper_white_nits, hs.peak_nits);
+            }
+        } else {
+            px.assign(static_cast<size_t>(w) * h * 4, 0);
+        }
+    } else {
+        px = std::move(raw);
+        if (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB)
+            for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);
+        for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
+    }
+    return px;
+}
+}  // namespace
+
 void Renderer::end_frame() {
     Impl& s = *impl_;
     if (!s.in_frame) return;
@@ -912,13 +966,16 @@ void Renderer::end_frame() {
     VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
     si.commandBufferInfoCount = 1;
     si.pCommandBufferInfos = &cb;
-    VkSemaphoreSubmitInfo signals[2] = {signal, {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}};
+    VkSemaphoreSubmitInfo signals[3] = {signal, {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}, {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}};
     if (!s.headless) {
         si.waitSemaphoreInfoCount = 1;
         si.pWaitSemaphoreInfos = &wait;
         si.signalSemaphoreInfoCount = 1;
         si.pSignalSemaphoreInfos = signals;
     }
+    uint64_t shot_value = 0;   // [gfx] screenshot_async: a PNG screenshot is read back on a worker once the frame is done on the GPU
+    if (cap && !s.headless && !s.cap_out && !s.cap_path.empty() && config_get_bool("gfx", "screenshot_async", true) && s.shot_sem_ready())
+        shot_value = ++s.shot_next;
     // low latency markers go outside the queue lock (they take it themselves: the validation layer wants calls on one swapchain from different threads apart)
     uint64_t present_id = 0;
     uint64_t probe_value = 0;
@@ -934,6 +991,13 @@ void Renderer::end_frame() {
             signals[1].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
             si.signalSemaphoreInfoCount = 2;
         }
+    }
+    if (shot_value) {
+        VkSemaphoreSubmitInfo& sv = signals[si.signalSemaphoreInfoCount];
+        sv.semaphore = s.shot_sem;
+        sv.value = shot_value;
+        sv.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        si.signalSemaphoreInfoCount++;
     }
     {
         std::lock_guard<std::mutex> lk(s.dev->queue_mutex());
@@ -981,39 +1045,41 @@ void Renderer::end_frame() {
     }
     s.cur_slot = (s.cur_slot + 1) % static_cast<uint32_t>(s.slots.size());
 
-    if (cap) {
+    if (cap && shot_value) {   // [gfx] screenshot_async: a worker waits for the frame on the GPU, reads it back and writes the PNG
+        s.shot_inflight.fetch_add(1);
+        std::thread([dev = s.dev, sem = s.shot_sem, value = shot_value, buf = cap, w, h, bpp, fmt = s.format, kind = s.kind, path = s.cap_path,
+                     inflight = &s.shot_inflight]() mutable {
+            VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+            wi.semaphoreCount = 1;
+            wi.pSemaphores = &sem;
+            wi.pValues = &value;
+            const VkResult wr = vkWaitSemaphores(dev->device(), &wi, 5ull * 1000 * 1000 * 1000);
+            std::vector<uint8_t> raw;
+            if (wr == VK_SUCCESS) {
+                raw.resize(static_cast<size_t>(w) * h * bpp);
+                dev->invalidate_buffer(buf);
+                std::memcpy(raw.data(), buf.mapped, raw.size());
+            }
+            dev->destroy_buffer(buf);
+            inflight->fetch_sub(1);
+            if (wr == VK_SUCCESS) {
+                std::vector<uint8_t> px = capture_to_rgba(std::move(raw), w, h, fmt, kind, path);
+                if (save_png_rgba(path, px.data(), w, h)) NXLOG_I(kTag, "screenshot %ux%u written to %s", w, h, path.c_str());
+            } else {
+                NXLOG_E(kTag, "screenshot %s: the frame did not finish on the GPU (%d)", path.c_str(), static_cast<int>(wr));
+            }
+            g_png_writes.fetch_sub(1);
+        }).detach();
+        s.cap_pending.store(false, std::memory_order_relaxed);
+        s.cap_path.clear();
+        s.st.screenshots++;
+    } else if (cap) {
         vkWaitForFences(s.vk(), 1, &slot.fence, VK_TRUE, UINT64_MAX);
         std::vector<uint8_t> raw(static_cast<size_t>(w) * h * bpp);
         s.dev->invalidate_buffer(cap);
         std::memcpy(raw.data(), cap.mapped, raw.size());
         s.dev->destroy_buffer(cap);
-        std::vector<uint8_t> px;
-        if (s.kind != extras::OutputKind::Sdr8) {
-            // HDR: the PNG is the picture clipped to SDR (paper white = 1.0); next to it a false-colour map of the brightness above paper white and a
-            // PFM with the scene-linear values (1.0 = paper white), and the statistics in the log.
-            const extras::HdrState hs = extras::hdr_state();
-            const extras::CaptureFormat cf = s.format == VK_FORMAT_R16G16B16A16_SFLOAT ? extras::CaptureFormat::Rgba16F
-                                           : s.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32 ? extras::CaptureFormat::A2R10G10B10 : extras::CaptureFormat::A2B10G10R10;
-            std::vector<float> lin;
-            std::vector<uint8_t> map;
-            extras::HdrCaptureStats cs;
-            if (extras::decode_hdr_capture(cf, raw.data(), w, h, hs.paper_white_nits, &lin, &px, &map, &cs)) {
-                if (!s.cap_path.empty()) {
-                    std::string base = s.cap_path;
-                    if (base.size() > 4 && base.compare(base.size() - 4, 4, ".png") == 0) base.resize(base.size() - 4);
-                    save_png_rgba(base + ".hdrmap.png", map.data(), w, h);
-                    extras::write_pfm(base + ".pfm", lin, w, h, hs.paper_white_nits / 100.0f);
-                    NXLOG_I(kTag, "HDR screenshot: %s (paper white %.0f nits, peak %.0f)", extras::capture_stats_line(cs).c_str(), hs.paper_white_nits, hs.peak_nits);
-                }
-            } else {
-                px.assign(static_cast<size_t>(w) * h * 4, 0);
-            }
-        } else {
-            px = std::move(raw);
-            if (s.format == VK_FORMAT_B8G8R8A8_UNORM || s.format == VK_FORMAT_B8G8R8A8_SRGB)
-                for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);
-            for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
-        }
+        std::vector<uint8_t> px = capture_to_rgba(std::move(raw), w, h, s.format, s.kind, s.cap_path);
         if (!s.cap_path.empty()) {
             // the PNG encode takes seconds: write it on a worker so the frame is not held up (wait_screenshot_writes before exit)
             std::thread([path = s.cap_path, data = s.cap_out ? px : std::move(px), w, h]() {
