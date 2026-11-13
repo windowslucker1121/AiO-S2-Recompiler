@@ -8591,11 +8591,11 @@ bool tq_prog_writes(const ShaderInfo* const* stage) {
     return w;
 }
 // The census (render thread).
-enum TqCause { kTqPt, kTqUpload, kTqImage, kTqFeedback, kTqCopyBack, kTqMeshCopy, kTqPassOther, kTqEpWrite, kTqEpOp, kTqHeldVer, kTqN };
-constexpr uint16_t kTqHard = (1u << kTqPassOther) - 1;   // the first six: an ordered effect a helper cannot do itself (PLAN_100 T, step 4)
+enum TqCause { kTqPt, kTqUpload, kTqImage, kTqFeedback, kTqCopyBack, kTqMeshCopy, kTqDrawFill, kTqPassOther, kTqEpWrite, kTqEpOp, kTqHeldVer, kTqN };
+constexpr uint16_t kTqHard = (1u << kTqPassOther) - 1;   // the first seven: an ordered effect a helper cannot do itself (PLAN_100 T, step 4)
 constexpr uint16_t kTqMasks[4] = {kTqHard, kTqHard & ~(1u << kTqMeshCopy), kTqHard | (1u << kTqPassOther), 0xffff};   // reach before: hard, hard but mesh copies, hard + other pass breaks, any
-const char* const kTqName[kTqN] = {"pt", "upload", "image", "feedback", "copyback", "meshcopy", "pass", "ep_write", "ep_op", "held_ver"};
-struct TqSnap { uint64_t pt, up, made, ob, mesh, passes, chunks, bw, bo, ov; };
+const char* const kTqName[kTqN] = {"pt", "upload", "image", "feedback", "copyback", "meshcopy", "drawfill", "pass", "ep_write", "ep_op", "held_ver"};
+struct TqSnap { uint64_t pt, up, made, ob, mesh, passes, chunks, bw, bo, ov, fill; };
 struct TqBig { uint32_t n; double ms; double reach; int cause; };
 struct TqCensus {
     bool open = false, prev_draw = false;
@@ -8622,7 +8622,7 @@ TqSnap tq_snap() {
     Counters& c = counters();
     return {c.pass_breaks.load(std::memory_order_relaxed), c.texture_uploads.load(std::memory_order_relaxed), c.textures_created.load(std::memory_order_relaxed),
             out_bytes_total(), g_mesh_inpass, c.passes.load(std::memory_order_relaxed), c.submit_chunks.load(std::memory_order_relaxed),
-            g_bump_n[kBumpWrite], g_bump_n[kBumpOp], out_version()};
+            g_bump_n[kBumpWrite], g_bump_n[kBumpOp], out_version(), g_draw_fills + g_dr_fail[0] + g_dr_fail[1] + g_dr_fail[2]};
 }
 void tq_close() {
     TqCensus& q = g_tqc;
@@ -8676,6 +8676,7 @@ void tq_census_op(const RecordReader& r) {
         if (q.prev_draw && g_fb_seen) m |= 1u << kTqFeedback;
         if (now.ob != a.ob) m |= 1u << kTqCopyBack;
         if (now.mesh != a.mesh) m |= 1u << kTqMeshCopy;
+        if (now.fill != a.fill) m |= 1u << kTqDrawFill;   // a draw read over held results the copy could not serve as it was (fill or guard)
         q.free_pass += static_cast<uint32_t>(now.chunks - a.chunks);
         uint64_t begun = now.passes - a.passes;
         begun -= std::min(begun, pt);
