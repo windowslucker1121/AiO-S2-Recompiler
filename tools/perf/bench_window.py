@@ -4,7 +4,8 @@ bench_window.py <log> <frames.csv> --from "bench: village_walk start" --to "benc
 bench_window.py <log> <frames.csv> --from "bench: balcony_far ready" --skip 30 --seconds 60
 
 Prints frames, mean fps (frames / summed intervals), 1% low (fps of the mean of the slowest 1% of frame intervals), median and worst
-frame. The log's leading "[ seconds" and the CSV's t_s use the same process clock (seconds since the log opened).
+frame. The CSV's t_s counts from the hitch monitor's start (the log line "diag: hitch log", ~0.6 s after the log opened): log times are moved
+onto that clock (before 2026-11-13 the window was taken 0.6 s late).
 """
 import argparse
 import csv
@@ -22,12 +23,15 @@ ap.add_argument('--seconds', type=float, help='window length (instead of --to)')
 a = ap.parse_args()
 
 t0 = t1 = None
-rx = re.compile(r'^\[\s*([\d.]+)')
+csv0 = 0.0
+rx =re.compile(r'^\[\s*([\d.]+)')
 with open(a.log, encoding='utf-8', errors='replace') as f:
     for ln in f:
         m = rx.match(ln)
         if not m:
             continue
+        if 'diag: hitch log' in ln and not csv0:
+            csv0 = float(m.group(1))
         if t0 is None and a.frm in ln:
             t0 = float(m.group(1))
         elif t0 is not None and a.to and a.to in ln:
@@ -35,7 +39,9 @@ with open(a.log, encoding='utf-8', errors='replace') as f:
             break
 if t0 is None:
     sys.exit(f'no log line with {a.frm!r}')
-t0 += a.skip
+t0 += a.skip - csv0
+if t1 is not None:
+    t1 -= csv0
 if a.seconds:
     t1 = t0 + a.seconds
 if t1 is None:
