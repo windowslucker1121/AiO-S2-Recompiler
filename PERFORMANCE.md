@@ -654,6 +654,43 @@ HLE call with two clock reads and inflates the game side ~15%). Builds cannot be
   untraced (paired windows, not runs); PGO of the lifted code (-3% G measured earlier, opt-in); a narrower register localisation
   (SP only) measured against the same exe; lift-time inlining of tiny leaves.
 
+## PLAN_100 agent D (2026-11-13, branch `perf/gate-d`): measurement fixes, runtime PGO gate, Z
+
+Exe of `feat/perf-generic-runtime` 4feaa21 + this branch, 1920x1080 uncapped, alone, bench route balcony (window 30-90 s after
+`bench: balcony_far ready`) + walk; lifted libraries of the main checkout (11-09) in every exe.
+- **M1 (fixed):** traced runs had a 20-40 ms frame once a second: the ftrace writer held the mutex every `ft::mark` / `zone_id` takes
+  (`main.update`, `q.sub`, ...) for its whole fprintf flush. Zone names are now an append-only lock-free array, the writer formats by
+  hand into 1 MiB blocks. Traced run (40 M events): balcony 92.4 fps, 1% low 69.2, 2 frames over 20 ms in 60 s (untraced 90-91 / 65).
+- **M3:** `tools/perf/bench_window.py --walk | --balcony <log> <csv> [...]`: frames over 14.3 / 20 ms, the walk's four phases
+  (0.25 / 0.68 / 5.0 s), several runs pooled.
+- **M4:** frame_csv column `cpu_recorder_spin_us` (the recorder's pause-spin); real recorder work = `cpu_recorder_us` minus it
+  (balcony: 9.9 - 3.8 = ~6.1 ms per frame).
+- **P (runtime PGO), gate P-g FAILED.** `game-build/scripts/build.ps1 -Pgo generate | use | <profdata>` (local opt-in; no `-Pgo`
+  clears it; profiles only in the git-ignored `work\pgo`). Profile: two instrumented runs of the bench route (balcony 60 s + walk).
+  Alternating exes, base 3 valid runs / PGO 3:
+
+  | | base | PGO | gate |
+  |---|---|---|---|
+  | balcony replay median | 10.44 ms | 8.98 (-14%) | <= -8%: pass |
+  | balcony slow-1% frame | 15.29 / 14.82 (29.6 once) | 16.35 / 16.53 / 16.19 | <= -1.0 ms: **fail (+1.1 ms)** |
+  | balcony fps / frames over 14.3 ms | 90.8-91.3 / 26-45 | 92.4-93.1 / 93-101 | |
+  | walk open view replay | 12.10 | 9.98 (-17.5%) | |
+  | walk fps / 1% low (3 runs each) | 97.4 / 41.7 | 99.5 / 45.1 | |
+
+  Why the low gets worse: with PGO the balcony has 583-1,016 frames per minute with guest-thread CPU over 32 ms (base 22-60; one
+  base run 260), guest CPU per frame sd 5.3-5.9 vs 1.7-2.4 ms, and process CPU 5.5 vs 5.0 cores (render and recorder ~-12% each, so
+  ~0.6 cores more elsewhere, not in the sampled registered threads). Those frames carry the slow 1%. Seen in 4 of 4 PGO runs
+  (a sampled pair too), not explained (sampler diff shows only inlining moves). Default build unchanged; the PGO exe stays a local
+  option. Lifted-code PGO was not redone (the 11-09 profile predates scratch locals; it targets G, which is not the limit).
+- **Z (diagnosis): the render thread is memory-traffic bound, not compute bound.** A load tool on logical CPUs 3/5/7/9 beside the
+  balcony (two 20 s windows each, idle windows between): streaming 64 MB copies -> replay 10.7 -> 32.8 ms per frame (+206%,
+  render-thread CPU rises the same: the work itself slows), fps 88 -> 29; arithmetic on cache-resident data -> replay +0.2 ms (+1.8%).
+  So the slow balcony frames under the game's worker bursts are cache / memory contention (96 MB L3 evicted), and only less
+  render-thread memory work (fewer per-draw lookups / touched objects) helps; core placement does not (h2). One valid run (the
+  first lost its route at `continue`); the effect is the same in both window pairs.
+- Tools (git-ignored, worktree `work\d`): `runs_d.py` (route per tag and exe under the game lock), `pg.py` (gate table),
+  `heavy.py` (frames by guest CPU), `zload.py` / `zan.py` (Z), `fold.py` (sampler diff).
+
 ## What is open, by expected gain
 
 **After R6:** replay ~9.7-10 ms; ~88-90 fps. The render thread, the GPU (~93% busy) and the game's CPU frame are co-limits; a replay cut now
