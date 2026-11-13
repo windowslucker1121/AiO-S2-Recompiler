@@ -1832,6 +1832,25 @@ BufRef resolve_read_dep(uint64_t gpu_address, uint64_t size, int use, ReadDep* d
     return out;
 }
 
+// [nvn] ssbo_ro_diag: the copy's state of the page holding gpu_address (valid, newer in the copy, fresh, armed, hot, banned, a held result
+// pending on it, the GPU's last write in the pool)
+bool out_pending_on_page(const Mirror* m, uint64_t page);   // below
+std::string mirror_page_diag(uint64_t gpu_address) {
+    MemoryPool* mp = nullptr;
+    PoolGpu* pg = nullptr;
+    uint64_t poff = 0;
+    const BufRef out = resolve_in_pool(gpu_address, 1, &mp, &pg, &poff);
+    if (!out.ok || !pg || !pg->mirror) return "no copy";
+    const Mirror& m = *pg->mirror;
+    const uint64_t p = poff / kPageBytes;
+    if (p >= m.npages) return "outside";
+    char b[200];
+    std::snprintf(b, sizeof b, "valid %d new %d fresh %d (any %d) armed %d hot %d banned %d pending %d want %d", page_valid(m, p) ? 1 : 0, new_get(m, p) ? 1 : 0,
+                  fresh_get(m, p) ? 1 : 0, m.any_fresh ? 1 : 0, mem::ww::all_armed(m.ww, p, 1) ? 1 : 0, m.hot_until[static_cast<size_t>(p)] > presents_now() ? 1 : 0,
+                  mem::ww::page_banned(m.ww, p) ? 1 : 0, out_pending_on_page(&m, p) ? 1 : 0, bit_get(m.want, p) ? 1 : 0);
+    return b;
+}
+
 MirrorSpan mirror_span(uint64_t gpu_address, uint64_t size) {
     MirrorSpan s;
     if (!g_mirror_on || !size) return s;
@@ -2021,7 +2040,13 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
     bool stale = mem::ww::any_valid(m.ww, first, last - first + 1);
     mem::ww::invalidate(m.ww, first, last - first + 1);
     if (m.any_fresh) {             // the pool there is written: what fill copied is old now
-        for (uint64_t p = first; p <= last; ++p) stale |= ((m.fresh[static_cast<size_t>(p >> 6)].fetch_and(~(uint64_t{1} << (p & 63)), std::memory_order_acq_rel) >> (p & 63)) & 1) != 0;
+        bool was = false;
+        for (uint64_t p = first; p <= last; ++p) was |= ((m.fresh[static_cast<size_t>(p >> 6)].fetch_and(~(uint64_t{1} << (p & 63)), std::memory_order_acq_rel) >> (p & 63)) & 1) != 0;
+        stale |= was;
+        static const bool diag = nxrt::config_get_bool("nvn", "ssbo_ro_diag", false);
+        static uint64_t dn = 0;
+        if (was && diag && (++dn & 0x3fff) < 4)
+            NXLOG_I(kTag, "ssbo_ro_diag: GPU write %llx +%llx (use %d) ended fresh pages", (unsigned long long)gpu_address, (unsigned long long)size, use);
     }
     bits_put(m.want, first, last, false);
     return stale || fc_stale;

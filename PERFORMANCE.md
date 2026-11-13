@@ -656,7 +656,7 @@ HLE call with two clock reads and inflates the game side ~15%). Builds cannot be
 
 ## Burst gates (agent B, 2026-11-13, branch `perf/gate-b`; PLAN_100 B0-B5, M2)
 
-Walk (ench_village_walk), 1920x1080 uncapped, alone, warm private pipeline cache (B5: `[instance] keep_pipeline_cache = 1` with two
+Walk (`bench_village_walk`), 1920x1080 uncapped, alone, warm private pipeline cache (B5: `[instance] keep_pipeline_cache = 1` with two
 warm-up runs, `pipeline_cache_save_new = 100000` in the measured runs: pipelines created in the burst 0.1-0.2 per frame). "Burst" = 0.25-0.68 s
 after `bench: village_walk start`. All new keys stay **default off**: only B-g0 passed.
 - **B0 (gate passed):** frame_csv replay columns (CONFIG.md `[diag] frame_csv`). With `exp_op_cost` the draw / dispatch / other-op columns
@@ -675,6 +675,29 @@ after `bench: village_walk start`. All new keys stay **default off**: only B-g0 
   ran while other agents built: fps not comparable.
 - **M2 `[diag] replay_anatomy = 1.4`:** works (one `slow replay:` line per second with every moved source and phase).
 - Next by these columns: per-draw cost in 3,000-draw frames (bind_sets, draw ops: agents A/C), the render targets made every second frame.
+## 100-fps round, agent A (2026-11-13, branch `perf/gate-a`): storage reads from the pool copy (S) and kept-set recycling (K)
+
+Gates of `work/fps100/PLAN_100.md` section 3; balcony bench (`bench_balcony_far`), 1920x1080 uncapped, paired `cpuperf_ab = 300` windows
+(medians of on minus the mean of the two off neighbours), frame trace on for GPU busy. The machine was shared with other agents' builds in
+some runs (absolute fps 79-93); only paired numbers count.
+
+| Gate | Build | Result | Verdict |
+|---|---|---|---|
+| S-g1 | S1 `[nvn] ssbo_ro_copy`: read-only graphics storage from the copy with the uniform blocks' valid-page decision (`resolve_read_dep`, kept sets re-check it) | 15 pairs: GPU busy -0.26 ms (15/15), fps +1.7 (12/15), replay +0.2; only ~20% of those bindings found their range current in the copy | **fail** (needs <= -0.6 ms and >= +5 fps): off |
+| S-g2 | S1 on in both windows, `exp_coh_free = ab`, parts 4 (unchecked) on top | 18 pairs: GPU busy -0.70 ms (18/18), fps +5.9 | **pass** (>= 0.4 ms left): S2 built |
+| S2 | `[nvn] ssbo_ro_fill`: ranges S1 left in the pool copied into the copy at the start of each submission that bound them a frame before (`mirror_fill`, fresh for that submission) | on top of S1, 18 pairs: GPU busy -0.17 ms (18/18), fps +1.4 (18/18), ~42 MB/s copied; copy share 20% -> 75% | gain small, not on its own a pass of S-g1: off |
+| S1 + S2 | both against neither | 20 pairs (keep_recycle on in both): GPU busy -0.72 ms (20/20), fps -0.40 (9/20), replay +0.19 ms (2/20); the run was render-thread bound (render idle 0.02 vs 0.17 ms per frame); capture replays on vs off differ (nb3: 32 pixels by more than 20, max 121; village: 2 pixels), each variant stable across loops | **fail** (fps, replay, captures): both stay off; the GPU cut converts to fps only once the render thread has room |
+| K-g | `[nvn] keep_recycle`: persistent descriptor sets no table holds any more go to a per-layout free list after the GPU and are handed out again | 10 min balcony + walk: 0 new eras after the load (before: every ~85-150 s, two 17-22 ms frames each); paired cost replay -0.08 ms (12/20), fps +0.05 | **pass**: default on |
+
+What S2 could not reach: 93% of the remaining pool bindings are one 192-byte storage buffer (the sky-lighting spherical harmonics) that a
+compute pass rewrites in the pool in the middle of the same submission (the GPU write ends the fill's "fresh" state of its page); serving it
+from the copy needs a pool-to-copy copy ordered after that dispatch (its data may still be on its way back from a held result there), not built.
+The rest are ranges of the MapPhysicalMemory pools outside a copy span (`ssbo_ro_copy pool decisions` line). The growth that filled the
+persistent pools was image-keyed texture sets (`tex_img_sets`, ~1,000 new per second on the balcony: new image stamps every frame); with
+recycling ~25k sets sit in the free lists and the pools stop growing (one era is left during the area load, before the bench starts). Runtime tests 170/170. Verify run with S1 + S2 + K on (`set_reuse = verify`,
+`odb_incremental = verify`, balcony + walk): 0 kept-set, 0 memo, 0 image-set differences, 0 draw checks missed. Diagnostics: `[nvn]
+ssbo_ro_diag`, statistics lines `ssbo_ro_copy`, `ssbo_ro_fill`, `persistent sets (keep_recycle ...)`.
+
 ## What is open, by expected gain
 
 **After R6:** replay ~9.7-10 ms; ~88-90 fps. The render thread, the GPU (~93% busy) and the game's CPU frame are co-limits; a replay cut now
