@@ -4057,7 +4057,9 @@ VkBuffer support_keep_buffer() {
 // wins (that path comes first). Before, such buffers (light lists, the cluster grid, material tables) were read from host memory by every
 // draw. Set per submission (render thread).
 bool g_ssbo_ro = false;
-uint64_t g_ro_stat[3] = {};   // statistics: read-only storage bindings resolved with ssbo_ro_copy: from the copy, from the pool, copy unaligned
+uint64_t g_ro_stat[3] = {};
+uint64_t g_ro_pool[3] = {};   // statistics: pool decisions of ssbo_ro_copy: no copy span (state 0), not current (state 2) never filled / filled this submission
+std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> g_ro_pool_top;   // [nvn] ssbo_ro_diag: (addr << 0) -> (size, count)   // statistics: read-only storage bindings resolved with ssbo_ro_copy: from the copy, from the pool, copy unaligned
 // [nvn] ssbo_ro_fill (off | on | ab; needs ssbo_ro_copy): read-only storage ranges of draws that ssbo_ro_copy had to leave in the pool (pages
 // the CPU rewrites every few frames: not tracked, never current in the copy) are copied into the copy at the start of each submission that
 // bound them in the frame before (mirror_fill: such pages count as current for that submission only, "fresh"; a GPU write to them in the
@@ -4114,7 +4116,7 @@ void ro_fill_submit() {
         if (bytes >= cap) { ++g_ro_fill_st[3]; continue; }
         if (!barrier) { memory_barrier(F->cb); barrier = true; }   // earlier writes to the pools before the copies read them
         uint64_t b = 0;
-        mirror_fill(F->cb, f.addr, f.size, &b);
+        mirror_fill(F->cb, f.addr, f.size, &b, true);   // pages newer in the copy that the CPU wrote since come in too (no pass to break here)
         bytes += b;
         ++g_ro_fill_st[1];
     }
@@ -4350,8 +4352,13 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                                     if (!rd.keep) kbad("storage buffer without a copy chunk");
                                 }
                                 if (g_ro_fill) {
-                                    const uint32_t fs = ro_fill_note(bind.addr, bi.range, rd.state != 1);
+                                    const uint32_t fs = ro_fill_note(bind.addr, bi.range, rd.state == 2);
                                     if (kd) kd->fill = fs;
+                                }
+                                if (rd.state != 1) {
+                                    ++g_ro_pool[rd.state == 0 ? 0 : g_ro_fill_idx.count(bind.addr * 0x9E3779B97F4A7C15ull ^ bi.range) ? 2 : 1];
+                                    static const bool diag = nxrt::config_get_bool("nvn", "ssbo_ro_diag", false);
+                                    if (diag && g_ro_pool_top.size() < 100000) { auto& e = g_ro_pool_top[bind.addr ^ (static_cast<uint64_t>(rd.state) << 62)]; e.first = bi.range; ++e.second; }
                                 }
                                 if (rd.state == 1 && cr.ok && cr.buffer != br.buffer) {
                                     bi.buffer = cr.buffer;
@@ -10118,6 +10125,15 @@ void replay_begin_submit(Frame& f) {
                 if (ssbo_ro_copy_mode())
                     NXLOG_I(kTag, "ssbo_ro_copy: read-only storage bindings resolved %llu from the copy, %llu from the pool, %llu unaligned in the copy (pool)",
                             (unsigned long long)g_ro_stat[0], (unsigned long long)g_ro_stat[1], (unsigned long long)g_ro_stat[2]);
+                if (ssbo_ro_copy_mode()) NXLOG_I(kTag, "ssbo_ro_copy pool decisions: %llu no copy span, %llu not current and not listed for filling, %llu not current although listed",
+                        (unsigned long long)g_ro_pool[0], (unsigned long long)g_ro_pool[1], (unsigned long long)g_ro_pool[2]);
+                if (!g_ro_pool_top.empty()) {
+                    std::vector<std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> v(g_ro_pool_top.begin(), g_ro_pool_top.end());
+                    std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second.second > b.second.second; });
+                    for (size_t i = 0; i < v.size() && i < 10; ++i)
+                        NXLOG_I(kTag, "  ssbo_ro_diag: %llx state %llu size %llx: %llu", (unsigned long long)(v[i].first & ((1ull << 62) - 1)), (unsigned long long)(v[i].first >> 62),
+                                (unsigned long long)v[i].second.first, (unsigned long long)v[i].second.second);
+                }
                 if (ssbo_ro_fill_mode())
                     NXLOG_I(kTag, "ssbo_ro_fill: %llu submissions filled, %llu ranges filled, %llu MiB copied, %llu ranges over the cap; %zu ranges listed",
                             (unsigned long long)g_ro_fill_st[0], (unsigned long long)g_ro_fill_st[1], (unsigned long long)(g_ro_fill_st[2] >> 20),
