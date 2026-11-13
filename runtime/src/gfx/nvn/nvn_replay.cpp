@@ -1148,6 +1148,7 @@ void flush_deferred_writes() {
 // Which call sites end passes (the 10 s line "passes ended by": source line and the draws the pass had). Render thread.
 uint64_t g_pass_end_line[8192] = {};
 uint64_t g_pass_end_draws[8192] = {};
+uint32_t g_pass_end_last = 0;   // the line of the last one (exp_quiet_census)
 uint64_t g_draw_ops = 0;   // draw commands reached by run_list (mesh_copy_ahead)
 void mesh_pre_clear();     // below (mesh_copy_ahead)
 bool mesh_ahead_pass_on();  // below
@@ -1156,6 +1157,7 @@ void end_pass(bool to_pass = false, std::source_location loc = std::source_locat
     if (P.open) {
         const uint32_t ln = loc.line() & 8191;
         ++g_pass_end_line[ln];
+        g_pass_end_last = ln;
         g_pass_end_draws[ln] += g_pass_draws;
         if (!mesh_ahead_pass_on()) mesh_pre_clear();   // else the copies stay for the later passes the look-ahead covered
     }
@@ -8590,7 +8592,8 @@ bool tq_prog_writes(const ShaderInfo* const* stage) {
 }
 // The census (render thread).
 enum TqCause { kTqPt, kTqUpload, kTqImage, kTqFeedback, kTqCopyBack, kTqMeshCopy, kTqPassOther, kTqEpWrite, kTqEpOp, kTqHeldVer, kTqN };
-constexpr uint16_t kTqHard = (1u << kTqEpWrite) - 1;   // the first seven: an ordered effect a helper cannot do itself
+constexpr uint16_t kTqHard = (1u << kTqPassOther) - 1;   // the first six: an ordered effect a helper cannot do itself (PLAN_100 T, step 4)
+constexpr uint16_t kTqMasks[4] = {kTqHard, kTqHard & ~(1u << kTqMeshCopy), kTqHard | (1u << kTqPassOther), 0xffff};   // reach before: hard, hard but mesh copies, hard + other pass breaks, any
 const char* const kTqName[kTqN] = {"pt", "upload", "image", "feedback", "copyback", "meshcopy", "pass", "ep_write", "ep_op", "held_ver"};
 struct TqSnap { uint64_t pt, up, made, ob, mesh, passes, chunks, bw, bo, ov; };
 struct TqBig { uint32_t n; double ms; double reach; int cause; };
@@ -8598,12 +8601,15 @@ struct TqCensus {
     bool open = false, prev_draw = false;
     uint64_t t0 = 0;
     uint32_t free_pass = 0;               // pass begins that are not breaks: the run's first draw, the restart after a submission chunk
-    uint16_t pend = 0;                    // events between draws: given to the next draw
+    uint16_t pend = 0, pend_line = 0;     // events between draws: given to the next draw
     std::vector<uint16_t> ev;             // per draw of the open run: the events it caused
     TqSnap last{};
     // interval statistics
     uint64_t replay_ticks = 0, quiet_ticks = 0, big_ticks = 0, runs = 0, big = 0, big_draws = 0, draws = 0, draw_ops0 = 0, pres0 = 0;
-    uint64_t ok_hard = 0, ok_all = 0, hist[6] = {}, first_half[kTqN] = {}, second_half[kTqN] = {}, runs_with[kTqN] = {};
+    uint64_t ok[4] = {}, hist[6] = {}, first_half[kTqN] = {}, second_half[kTqN] = {}, runs_with[kTqN] = {}, first_by[kTqN] = {};
+    double reach_by[kTqN] = {};
+    std::vector<uint16_t> evline;         // per draw: the end_pass line of an unexplained pass break there (0: none)
+    std::map<uint32_t, uint64_t> pass_sites[2];   // unexplained pass breaks by end_pass line, first / second half
     std::vector<TqBig> last_big;
     std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
     uint64_t tsc0 = __rdtsc();
@@ -8631,7 +8637,7 @@ void tq_close() {
     q.big_draws += n;
     q.big_ticks += ticks;
     const size_t mid = n / 2;
-    size_t first_h = n, first_a = n;
+    size_t first[4] = {n, n, n, n};
     int cause = -1;
     uint16_t seen = 0;
     for (size_t k = 0; k < n; ++k) {
@@ -8639,18 +8645,18 @@ void tq_close() {
         if (!m) continue;
         seen |= m;
         for (int c = 0; c < kTqN; ++c) if (m >> c & 1) ++(k < mid ? q.first_half : q.second_half)[c];
+        if (k < q.evline.size() && q.evline[k]) ++q.pass_sites[k < mid ? 0 : 1][q.evline[k]];
         if (k < mid) continue;
-        if (first_a == n) first_a = k;
-        if (first_h == n && (m & kTqHard)) {
-            first_h = k;
-            for (int c = 0; c < kTqN; ++c) if (m >> c & 1) { cause = c; break; }
-        }
+        for (int i = 0; i < 4; ++i) if (first[i] == n && (m & kTqMasks[i])) first[i] = k;
+        if (cause < 0 && (m & kTqHard))
+            for (int c = 0; c < kTqN; ++c) if ((m & kTqHard) >> c & 1) { cause = c; break; }
     }
     for (int c = 0; c < kTqN; ++c) if (seen >> c & 1) ++q.runs_with[c];
     const double half = static_cast<double>(n - mid);
-    const double reach_h = static_cast<double>(first_h - mid) / half, reach_a = static_cast<double>(first_a - mid) / half;
-    q.ok_hard += reach_h >= 0.8;
-    q.ok_all += reach_a >= 0.8;
+    const double reach_h = static_cast<double>(first[0] - mid) / half;
+    for (int i = 0; i < 4; ++i) q.ok[i] += static_cast<double>(first[i] - mid) / half >= 0.8;
+    if (cause >= 0) { ++q.first_by[cause]; q.reach_by[cause] += reach_h; }
+    const size_t first_h = first[0];
     ++q.hist[first_h == n ? 5 : std::min(4, static_cast<int>(reach_h * 5.0))];
     const double tpms = g_tq_tpms > 0 ? g_tq_tpms : 3.4e6;
     if (q.last_big.size() >= 8) q.last_big.erase(q.last_big.begin());
@@ -8675,7 +8681,14 @@ void tq_census_op(const RecordReader& r) {
         begun -= std::min(begun, pt);
         const uint64_t fr = std::min<uint64_t>(begun, q.free_pass);
         q.free_pass -= static_cast<uint32_t>(fr);
-        if (begun > fr) m |= 1u << kTqPassOther;
+        if (begun > fr) {
+            m |= 1u << kTqPassOther;
+            const uint32_t line = g_pass_end_last;   // the end_pass site of the last pass end
+            if (line) {
+                if (q.prev_draw && !q.ev.empty()) { q.evline.resize(q.ev.size()); q.evline.back() = static_cast<uint16_t>(line); }
+                else q.pend_line = static_cast<uint16_t>(line);
+            }
+        }
         if (now.bw != a.bw) m |= 1u << kTqEpWrite;
         if (now.bo != a.bo) m |= 1u << kTqEpOp;
         if (now.ov != a.ov) m |= 1u << kTqHeldVer;
@@ -8694,10 +8707,16 @@ void tq_census_op(const RecordReader& r) {
         q.open = true;
         q.t0 = __rdtsc();
         q.ev.clear();
-        q.pend = 0;
+        q.evline.clear();
+        q.pend = q.pend_line = 0;
         q.free_pass = 1;   // the first draw may begin a pass (new targets end the old one lazily)
     }
-    if (draw) { q.ev.push_back(q.pend); q.pend = 0; }
+    if (draw) {
+        q.ev.push_back(q.pend);
+        if (q.pend_line) { q.evline.resize(q.ev.size()); q.evline.back() = q.pend_line; }
+        q.pend = 0;
+        q.pend_line = 0;
+    }
     q.prev_draw = draw;
 }
 // Top-level list boundaries: replay ticks, the interval lines (census) and the draw_half window lines.
@@ -8737,6 +8756,20 @@ void tq_log_tick() {
         std::snprintf(t, sizeof t, " %s %llu/%llu in %llu runs;", kTqName[c], (unsigned long long)q.first_half[c], (unsigned long long)q.second_half[c], (unsigned long long)q.runs_with[c]);
         ev += t;
     }
+    std::string firsts, sites;
+    for (int c = 0; c < kTqN; ++c) {
+        if (!q.first_by[c]) continue;
+        char t[80];
+        std::snprintf(t, sizeof t, " %s %llu (reach %.2f);", kTqName[c], (unsigned long long)q.first_by[c], q.reach_by[c] / static_cast<double>(q.first_by[c]));
+        firsts += t;
+    }
+    for (int h = 0; h < 2; ++h) {
+        std::vector<std::pair<uint64_t, uint32_t>> v;
+        for (const auto& [l, n] : q.pass_sites[h]) v.push_back({n, l});
+        std::sort(v.rbegin(), v.rend());
+        sites += h ? " | second:" : " first:";
+        for (size_t i = 0; i < v.size() && i < 6; ++i) { char t[40]; std::snprintf(t, sizeof t, " L%u %llu", v[i].second, (unsigned long long)v[i].first); sites += t; }
+    }
     for (const TqBig& b : q.last_big) {
         char t[80];
         std::snprintf(t, sizeof t, " [%u d %.2f ms reach %.2f %s]", b.n, b.ms, b.reach, b.cause >= 0 ? kTqName[b.cause] : "-");
@@ -8744,21 +8777,23 @@ void tq_log_tick() {
     }
     NXLOG_I(kTag, "quiet census (presents %llu-%llu): per present replay phase %.2f ms, lists %.2f ms, quiet runs %.2f ms, runs >= %lld draws %.2f ms (%.1f%% of lists, %.1f%% of the phase), %.2f such runs "
                   "of %.0f draws, %.0f draws in all; runs whose second half reaches 80%% before a hard event %llu of %llu (%.1f%%), before any event %llu (%.1f%%); "
-                  "reach by fifths %llu/%llu/%llu/%llu/%llu, none %llu; events first/second half:%s last runs:%s",
+                  "reach by fifths %llu/%llu/%llu/%llu/%llu, none %llu; events first/second half:%s last runs:%s; ok without mesh copies %llu, with other pass breaks %llu; "
+                  "first hard event:%s pass break sites (end_pass line & 8191):%s",
             (unsigned long long)q.pres0, (unsigned long long)pres, ph, q.replay_ticks / tpms / fr, q.quiet_ticks / tpms / fr,
             (long long)NX_CFG_INT("nvn", "exp_quiet_census_min", 400), q.big_ticks / tpms / fr, q.replay_ticks ? 100.0 * static_cast<double>(q.big_ticks) / static_cast<double>(q.replay_ticks) : 0.0, ph > 0 ? 100.0 * (q.big_ticks / tpms / fr) / ph : 0.0,
-            q.big / fr, q.big_draws / bigs, q.draws / fr, (unsigned long long)q.ok_hard, (unsigned long long)q.big, 100.0 * static_cast<double>(q.ok_hard) / bigs,
-            (unsigned long long)q.ok_all, 100.0 * static_cast<double>(q.ok_all) / bigs, (unsigned long long)q.hist[0], (unsigned long long)q.hist[1],
-            (unsigned long long)q.hist[2], (unsigned long long)q.hist[3], (unsigned long long)q.hist[4], (unsigned long long)q.hist[5], ev.c_str(), runs.c_str());
+            q.big / fr, q.big_draws / bigs, q.draws / fr, (unsigned long long)q.ok[0], (unsigned long long)q.big, 100.0 * static_cast<double>(q.ok[0]) / bigs,
+            (unsigned long long)q.ok[3], 100.0 * static_cast<double>(q.ok[3]) / bigs, (unsigned long long)q.hist[0], (unsigned long long)q.hist[1],
+            (unsigned long long)q.hist[2], (unsigned long long)q.hist[3], (unsigned long long)q.hist[4], (unsigned long long)q.hist[5], ev.c_str(), runs.c_str(), (unsigned long long)q.ok[1], (unsigned long long)q.ok[2], firsts.c_str(), sites.c_str());
     const bool open = q.open;
     const uint64_t t0 = q.t0;
     const uint32_t fp = q.free_pass;
-    const uint16_t pend = q.pend;
+    const uint16_t pend = q.pend, pend_line = q.pend_line;
+    std::vector<uint16_t> evl = std::move(q.evline);
     const bool pd = q.prev_draw;
     std::vector<uint16_t> evv = std::move(q.ev);
     const TqSnap last = q.last;
     q = TqCensus{};
-    q.open = open; q.t0 = t0; q.free_pass = fp; q.pend = pend; q.prev_draw = pd; q.ev = std::move(evv); q.last = last;
+    q.open = open; q.t0 = t0; q.free_pass = fp; q.pend = pend; q.pend_line = pend_line; q.prev_draw = pd; q.ev = std::move(evv); q.evline = std::move(evl); q.last = last;
     q.pres0 = pres;
 }
 
