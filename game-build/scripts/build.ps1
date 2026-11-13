@@ -6,7 +6,9 @@
 #   committed or packaged). Empty (default): off, also clears an earlier setting of the build folder. "generate": instrumented runtime,
 #   clang's profile runtime linked (run it with LLVM_PROFILE_FILE and [prof] llvm_profile_at_s, then llvm-profdata merge). "use":
 #   work\pgo\nxrt.profdata of this checkout. Anything else: the path of a merged .profdata. Procedure: PERFORMANCE.md "PGO (local)".
-param([string]$Config = "Release", [switch]$Clean, [switch]$Release, [string]$Manifest = $env:GAME_MANIFEST, [string]$Runtime, [string]$Out, [string]$Version = "dev", [string]$LibDir, [string]$Pgo = "")
+# -PgoScope: which runtime sources -Pgo applies to. "nvn" (default): the render path only (src/gfx/nvn/, PLAN_LOWS D1); "all": the whole
+#   runtime (the form whose gate failed on 2026-11-13); anything else: a CMake regex over the source paths. Generate and use with one scope.
+param([string]$Config = "Release", [switch]$Clean, [switch]$Release, [string]$Manifest = $env:GAME_MANIFEST, [string]$Runtime, [string]$Out, [string]$Version = "dev", [string]$LibDir, [string]$Pgo = "", [string]$PgoScope = "nvn")
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $Runtime) { $Runtime = $env:GAME_RUNTIME }
@@ -31,6 +33,8 @@ $env_cmd = Join-Path $root "..\runtime\scripts\env.cmd"
 $cfg = "cmake -S `"$root`" -B `"$bd`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DGAME_VERSION=$Version -DGAME_MANIFEST=`"$Manifest`""
 if ($Runtime) { $cfg += " -DGAME_RUNTIME_DIR=`"$Runtime`"" }
 if ($LibDir) { $cfg += " -DGAME_LIB_DIR=`"$LibDir`"" }
+$scope = if (-not $Pgo -or $PgoScope -eq "all") { "" } elseif ($PgoScope -eq "nvn") { "/src/gfx/nvn/" } else { $PgoScope }
+$cfg += " -DNXRT_PGO_SCOPE=`"$scope`""
 if ($Pgo -eq "generate") {
     $prt = Get-ChildItem -Recurse -Filter "clang_rt.profile-x86_64.lib" (Join-Path $root "..\tools\llvm") -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $prt) { throw "-Pgo generate: clang_rt.profile-x86_64.lib not found under tools\llvm" }

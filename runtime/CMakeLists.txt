@@ -45,10 +45,21 @@ endif()
 # Profile-guided optimisation of the runtime (opt-in, like the lifted code's NX_PGO): "generate" instruments it (link the game exe with
 # GAME_LLVM_PROFILE_LIB and run it with [prof] llvm_profile_at_s and LLVM_PROFILE_FILE), a path uses that merged .profdata.
 set(NXRT_PGO "" CACHE STRING "runtime PGO: empty (off), generate, or the path of a merged .profdata")
+# NXRT_PGO_SCOPE: a regex over runtime source paths; only matching files are instrumented / use the profile (empty: every runtime source).
+# PLAN_LOWS D1 scopes it to the render path (src/gfx/nvn/): the rest of the runtime, which the game's own threads run, stays as built today.
+set(NXRT_PGO_SCOPE "" CACHE STRING "runtime PGO: regex of the source paths it applies to (empty: all)")
+set(NXRT_PGO_FLAGS "")
 if(NXRT_PGO STREQUAL "generate")
-    add_compile_options("/clang:-fprofile-instr-generate")
+    set(NXRT_PGO_FLAGS "/clang:-fprofile-instr-generate")
 elseif(NXRT_PGO)
-    add_compile_options("/clang:-fprofile-instr-use=${NXRT_PGO}" -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled -Wno-backend-plugin)
+    # The profile's hash goes into the flags: a profile rewritten at the same path then recompiles every source that uses it (with
+    # objects of two profiles in one link, ThinLTO stops at "linking module flags 'ProfileSummary': IDs have conflicting values").
+    file(MD5 "${NXRT_PGO}" _pgo_md5)
+    string(SUBSTRING "${_pgo_md5}" 0 12 _pgo_md5)
+    set(NXRT_PGO_FLAGS "/clang:-fprofile-instr-use=${NXRT_PGO}" "/DNXRT_PGO_ID=0x${_pgo_md5}" -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled -Wno-backend-plugin)
+endif()
+if(NXRT_PGO_FLAGS AND NOT NXRT_PGO_SCOPE)
+    add_compile_options(${NXRT_PGO_FLAGS})
 endif()
 
 option(NXRT_BUILD_GFX "Build the graphics shell (SDL3 + Vulkan + NVN front end, src/gfx, cmake/gfx.cmake)" ON)
@@ -116,6 +127,22 @@ endif()
 
 if(NXRT_BUILD_GFX)
     include(cmake/gfx.cmake)
+endif()
+# Scoped PGO (NXRT_PGO_SCOPE): per-source compile options on the runtime libraries' matching files.
+if(NXRT_PGO_FLAGS AND NXRT_PGO_SCOPE)
+    set(_pgo_n 0)
+    foreach(_t nxrt nxrt_gfx)
+        if(TARGET ${_t})
+            get_target_property(_srcs ${_t} SOURCES)
+            list(FILTER _srcs INCLUDE REGEX "${NXRT_PGO_SCOPE}")
+            if(_srcs)
+                set_source_files_properties(${_srcs} PROPERTIES COMPILE_OPTIONS "${NXRT_PGO_FLAGS}")
+                list(LENGTH _srcs _k)
+                math(EXPR _pgo_n "${_pgo_n} + ${_k}")
+            endif()
+        endif()
+    endforeach()
+    message(STATUS "nxrt: PGO (${NXRT_PGO}) on ${_pgo_n} sources matching '${NXRT_PGO_SCOPE}'")
 endif()
 
 if(NXRT_BUILD_GAMES)

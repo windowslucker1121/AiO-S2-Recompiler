@@ -1,0 +1,24 @@
+# Benchmark path "village turns" (tools/ai/README.md "Benchmark states"). Starts where village_walk.nxs ends (the open village). Fixed game
+# step (1/60 s per frame): two 300-frame camera turns, then a run with the camera swinging. Windows: the log lines "bench: village_turn1
+# start" ... "bench: village_run end" (tools/perf/bench_window.py --turns pools the three).
+@rate 60
+30
+@log bench: village_turn1 start
+stick right 1 0 for 300
+@log bench: village_turn1 end
+30
+@log bench: village_turn2 start
+stick right -1 0 for 300
+@log bench: village_turn2 end
+30
+@shot turns_mid
+@log bench: village_run start
+stick left 0 1
+stick right 1 0 for 150
+stick right -1 0 for 150
+stick left 0 0
+@log bench: village_run end
+30
+@shot turns_end
+@rate 0
+@log bench: village_turns done
