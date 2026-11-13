@@ -100,9 +100,32 @@ PoolHit lookup_snapshot(const PoolSnap* s, uint64_t a) {
 }  // namespace
 
 std::atomic<uint64_t> g_pool_gen{0};
+uint64_t g_reg_serial = 0;                                   // g_pool_mu held exclusive
+PoolRegStats g_reg_stats;                                    // g_pool_mu held exclusive (read under the shared lock)
+struct RecentUnreg { uint64_t size; int flags; ULONGLONG when; };
+std::map<uint64_t, RecentUnreg> g_recent_unreg;               // base -> pool unregistered at most 10 s ago (statistics; g_pool_mu exclusive)
 
 void pool_register(MemoryPool* p) {
     std::unique_lock<std::shared_mutex> lk(g_pool_mu);
+    p->reg_serial = ++g_reg_serial;
+    ++g_reg_stats.registered;
+    if (!g_recent_unreg.empty()) {   // the game re-creating a pool over storage it released shortly before (K2's question)
+        const ULONGLONG now = GetTickCount64();
+        const uint64_t lo = p->gpu_base, hi = p->gpu_base + p->size;
+        bool same = false, base = false, over = false;
+        auto it = g_recent_unreg.upper_bound(lo);
+        if (it != g_recent_unreg.begin()) --it;
+        while (it != g_recent_unreg.end() && it->first < hi) {
+            if (now - it->second.when <= 10000 && it->first + it->second.size > lo) {
+                over = true;
+                if (it->first == lo) { base = true; same = same || (it->second.size == p->size && it->second.flags == p->flags); }
+            }
+            it = it->first + it->second.size > lo ? g_recent_unreg.erase(it) : std::next(it);
+        }
+        g_reg_stats.same_range += same;
+        g_reg_stats.same_base += base;
+        g_reg_stats.overlap += over;
+    }
     g_pools[p->gpu_base] = p;
     publish_snapshot();
     g_pool_gen.fetch_add(1, std::memory_order_relaxed);
@@ -116,9 +139,21 @@ void pool_unregister(MemoryPool* p) {
     std::unique_lock<std::shared_mutex> lk(g_pool_mu);
     auto it = g_pools.find(p->gpu_base);
     if (it != g_pools.end() && it->second == p) g_pools.erase(it);
+    ++g_reg_stats.unregistered;
+    {
+        const ULONGLONG now = GetTickCount64();
+        if (g_recent_unreg.size() > 4096)
+            for (auto e = g_recent_unreg.begin(); e != g_recent_unreg.end();) e = now - e->second.when > 10000 ? g_recent_unreg.erase(e) : std::next(e);
+        if (g_recent_unreg.size() <= 4096) g_recent_unreg[p->gpu_base] = RecentUnreg{p->size, p->flags, now};
+    }
     publish_snapshot();
     g_pool_gen.fetch_add(1, std::memory_order_relaxed);
     g_pool_unreg_gen.fetch_add(1, std::memory_order_acq_rel);
+}
+
+PoolRegStats pool_registry_stats() {
+    std::shared_lock<std::shared_mutex> lk(g_pool_mu);
+    return g_reg_stats;
 }
 
 void pool_collect(std::vector<Ref<MemoryPool>>& out) {

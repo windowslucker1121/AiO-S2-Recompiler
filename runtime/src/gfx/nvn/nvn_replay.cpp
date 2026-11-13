@@ -262,7 +262,7 @@ uint64_t ab_mask_compute() {
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"hot_skip", kAbHotSkip}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"p1", kAbP1}, {"ssbo_ro_copy", kAbP1}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"keep_recycle", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"r6", kAbR6}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"sync_lead", kAbSyncLead}, {"tex_rt_pool", kAbSyncLead}, {"occ_batch", kAbOccBatch}, {"r6t", kAbR6t}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"upload_ahead", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"p1", kAbP1}, {"ssbo_ro_copy", kAbP1}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"keep_recycle", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"r6", kAbR6}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"sync_lead", kAbSyncLead}, {"tex_rt_pool", kAbSyncLead}, {"occ_batch", kAbOccBatch}, {"r6t", kAbR6t}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"upload_ahead", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}, {"keep_pool", kAbHazardPiggy}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -4098,6 +4098,7 @@ struct KDep {
     uint64_t addr = 0, range = 0, note = 0;   // kinds 2 and 3 (texel): the range bound (held-result check) and the bytes upd_note_read is told
     const BindingDesc* d = nullptr;           // kind 3
     const void* pool = nullptr;               // kinds 2 and 3 (texel): the pool the address resolved in (kind 1: rd.pool)
+    uint64_t pser = 0;                        // MemoryPool::reg_serial of that pool when the set was built (keep_pool_check)
     Texture* tex = nullptr;
     uint32_t tex_id = 0;
     uint64_t stamp = 0, vh = 0, sh = 0;       // view stamp of the image, hashes of the view info and the sampler info
@@ -5231,9 +5232,37 @@ uint64_t keep_sig_tex(const ProgLayout& pl, uint32_t set) {
     return ((((0x9e3779b97f4a7c15ull ^ (reinterpret_cast<uint64_t>(pl.layout) * 31 + set)) * 1099511628211ull ^ reinterpret_cast<uint64_t>(&pl)) * 1099511628211ull ^ bk) ^ 0x7465786bull);
 }
 
+// [nvn] keep_pool_check (K1 of the 1% lows round; cpuperf_ab_what keep_pool: the off windows take the old rule): when any pool was unregistered
+// since a kept set was checked, the set is not rebuilt at once: each of its buffer dependencies is looked up again, and the set stays valid when
+// every one still resolves in the same registered pool (pointer and MemoryPool::reg_serial: a pool registered again at a reused address is
+// another pool). A live, registered pool keeps its imports, spans and copy chunks (PoolGpu is made once and destroyed with the pool), so the
+// buffers the set binds are alive. Before, any unregister anywhere (the game streams pools) rebuilt every kept set the next frames used:
+// 55-272 sets in one frame (+4-7 ms of replay).
+bool keep_pool_check_on() {
+    const bool on = NX_CFG_BOOL("nvn", "keep_pool_check", true);
+    return on && ab_on(kAbHazardPiggy);   // cpuperf_ab_what keep_pool (shares the bit of hazard_piggyback, which acts only with [nvn] hazard on)
+}
+uint64_t g_kpc[4] = {};   // statistics: kept sets re-checked after an unregister and still valid / failed; failures after a registry change (aliasing)
+bool keep_deps_same_pools(const KeepEntry& e) {
+    for (const KDep& k : e.deps) {
+        const void* p = k.kind == 1 ? k.rd.pool : (k.kind == 2 || (k.kind == 3 && k.texel)) ? k.pool : nullptr;
+        if (!(k.kind == 1 || k.kind == 2 || (k.kind == 3 && k.texel)) || !k.addr) continue;
+        const PoolHit h = pool_lookup(k.addr);
+        if (h.pool != p || (h.pool && h.pool->reg_serial != k.pser)) return false;
+    }
+    return true;
+}
+
 // The check of a kept set (see above). 0: valid; else 1 + the kind of failure (g_keep_fail).
 __declspec(noinline) int keep_valid(KeepEntry& e) {   // noinline: its own line in the sampler's profile
-    if (e.pool_gen != pool_unregister_generation()) return 1;
+    if (const uint64_t ug = pool_unregister_generation(); e.pool_gen != ug) {
+        if (!keep_pool_check_on()) return 1;
+        const uint64_t rg = pool_registry_generation();   // read before the look-ups: a later registration is seen by the next check
+        if (!keep_deps_same_pools(e)) { ++g_kpc[1]; return 1; }
+        ++g_kpc[0];
+        e.pool_gen = ug;
+        e.reg_gen = rg;
+    }
     if (e.smp_tune != smp_tune_now()) return 5;
     if (const uint64_t rg = pool_registry_generation(); rg != e.reg_gen) {   // a pool registered over an address (aliasing pools): resolved elsewhere now
         for (const KDep& k : e.deps) {
@@ -5429,6 +5458,10 @@ VkDescriptorSet keep_lookup_or_build(const ProgLayout& pl, uint32_t set, uint64_
     e.tex_keyed = tex_keyed;
     e.last_used = now;
     e.deps = std::move(rec.deps);
+    for (KDep& k : e.deps) {   // keep_pool_check: the registration of each dependency's pool (live: resolved in this build)
+        const void* p = k.kind == 1 ? k.rd.pool : (k.kind == 2 || (k.kind == 3 && k.texel)) ? k.pool : nullptr;
+        k.pser = p ? static_cast<const MemoryPool*>(p)->reg_serial : 0;
+    }
     if (mode == SetReuse::Verify) e.bvals = g_bvals;
     return ds;
 }
@@ -5530,7 +5563,7 @@ std::unordered_map<uint64_t, R6Diag> g_r6diag;   // [nvn] r6_diag
 // only each block's copy-or-pool decision (a memo per address, checked with read_dep_check as a kept set checks it) and a look-up of the set
 // by its buffers: no signature, memo, kept-set table or build for the per-object constants (village outside: ~2,000 kept-set checks and
 // ~120 builds of set 0 per frame before). Sets come from the persistent pools (keep_alloc) and are forgotten when a pool unregisters (its
-// buffers may go) or the persistent pools start a new era. Falls back to the old path (zero offsets) for update ranges, unresolved or
+// buffers may go; with keep_pool_check only the sets whose pools went, dyn0_sweep) or the persistent pools start a new era. Falls back to the old path (zero offsets) for update ranges, unresolved or
 // unaligned blocks, render scales and !out_lazy. [nvn] ubo_dynamic_path = false (or the off windows of cpuperf_ab_what r6): the old path.
 bool ubo_dyn_path_on() {
     const bool on = NX_CFG_BOOL("nvn", "ubo_dynamic_path", true);
@@ -5550,13 +5583,46 @@ FlatMap64<KeptSet> g_dyn0_sets;              // by content: program layout, buff
 uint64_t g_dyn0_gen = 1, g_dyn0_src[3] = {};
 uint64_t g_dyn_stat[10] = {};   // draws on the path; fallbacks: update range, unresolved, unaligned, not keepable, support/lazy; last-set hits, content hits, built; memo re-resolves
 uint64_t g_dyn_verify_n = 0, g_dyn_verify_bad = 0, g_dyn_verify_raced = 0;
+// keep_pool_check for the ubo_dynamic sets: the pools each set's buffers resolved in (address, pool, MemoryPool::reg_serial), so a pool
+// unregister drops only the sets whose pools went instead of all of them.
+struct Dyn0Pool { uint64_t addr; const void* pool; uint64_t ser; };
+std::unordered_map<uint64_t, std::vector<Dyn0Pool>> g_dyn0_pools;
+uint64_t g_dyn0_kpc[3] = {};   // statistics: sweeps after an unregister, sets kept, sets dropped
+void dyn0_sweep() {
+    ++g_dyn0_kpc[0];
+    std::vector<std::pair<uint64_t, KeptSet>> keep;
+    keep.reserve(g_dyn0_sets.size());
+    for (const auto& x : g_dyn0_sets.s) {
+        if (x.gen != g_dyn0_sets.gen) continue;
+        bool ok = false;
+        if (auto it = g_dyn0_pools.find(x.key); it != g_dyn0_pools.end()) {
+            ok = true;
+            for (const Dyn0Pool& p : it->second) {
+                const PoolHit h = pool_lookup(p.addr);
+                if (h.pool != p.pool || (h.pool && h.pool->reg_serial != p.ser)) { ok = false; break; }
+            }
+        }
+        if (ok) { keep.emplace_back(x.key, x.val); ++g_dyn0_kpc[1]; continue; }
+        keep_retire(x.val.layout, x.val.ds, kKsDyn0);
+        g_dyn0_pools.erase(x.key);
+        ++g_dyn0_kpc[2];
+    }
+    g_dyn0_sets.clear();
+    for (const auto& [k, v] : keep) g_dyn0_sets.put(k, v);
+}
 uint64_t dyn0_gen_now() {
     const uint64_t a = pool_unregister_generation(), b = pool_registry_generation(), c = g_keep_eras;
     if (a != g_dyn0_src[0] || b != g_dyn0_src[1] || c != g_dyn0_src[2]) {
         if (a != g_dyn0_src[0] || c != g_dyn0_src[2]) {   // buffers may be gone, pools released
-            if (c == g_dyn0_src[2])   // keep_recycle: the sets go back (not after a new era: their pools went with it)
-                for (const auto& x : g_dyn0_sets.s) if (x.gen == g_dyn0_sets.gen) keep_retire(x.val.layout, x.val.ds, kKsDyn0);
-            g_dyn0_sets.clear(); g_dyn0_last.clear();
+            if (c == g_dyn0_src[2] && keep_pool_check_on()) {
+                dyn0_sweep();   // only the sets whose pools went (their buffers may be gone)
+            } else {
+                if (c == g_dyn0_src[2])   // keep_recycle: the sets go back (not after a new era: their pools went with it)
+                    for (const auto& x : g_dyn0_sets.s) if (x.gen == g_dyn0_sets.gen) keep_retire(x.val.layout, x.val.ds, kKsDyn0);
+                g_dyn0_sets.clear();
+                g_dyn0_pools.clear();
+            }
+            g_dyn0_last.clear();   // its sets may be gone; it is found again in g_dyn0_sets
         }
         g_dyn0_src[0] = a; g_dyn0_src[1] = b; g_dyn0_src[2] = c;
         ++g_dyn0_gen;   // the memo's decisions are resolved again (a pool registered later may own an address now)
@@ -5585,6 +5651,8 @@ VkDescriptorSet dyn0_set(const ProgLayout& pl, uint32_t* offs) {
     }
     VkBuffer bufs[16];
     uint32_t ranges[16];
+    Dyn0Pool pls[16];   // keep_pool_check: the pool of each block's buffer
+    uint32_t npl = 0;
     for (uint32_t si = 0; si < L->nslots; ++si) {
         const Dyn0Slot sl = L->slots[si];
         const GState::Bind* bind = sl.idx < 16 && sl.stage < kStages ? &S.ubo[sl.stage][sl.idx] : nullptr;
@@ -5612,6 +5680,7 @@ VkDescriptorSet dyn0_set(const ProgLayout& pl, uint32_t* offs) {
                 c.addr = 0;
                 e = &once;
                 if (once.br.offset & amask) { ++g_dyn_stat[3]; return VK_NULL_HANDLE; }
+                if (once.rd.pool && npl < 16) pls[npl++] = Dyn0Pool{bind->addr, once.rd.pool, static_cast<const MemoryPool*>(once.rd.pool)->reg_serial};
                 bufs[sl.dyn] = once.br.buffer;
                 ranges[sl.dyn] = static_cast<uint32_t>(std::min<uint64_t>(std::min<uint64_t>(size, once.br.avail), 65536));
                 offs[sl.dyn] = static_cast<uint32_t>(once.br.offset);
@@ -5630,6 +5699,7 @@ VkDescriptorSet dyn0_set(const ProgLayout& pl, uint32_t* offs) {
                                                      (unsigned long long)size, (void*)v.buffer, (unsigned long long)v.offset, (void*)br.buffer, (unsigned long long)br.offset);
             }
         }
+        if (e->rd.pool && npl < 16) pls[npl++] = Dyn0Pool{bind->addr, e->rd.pool, static_cast<const MemoryPool*>(e->rd.pool)->reg_serial};
         bufs[sl.dyn] = br.buffer;
         ranges[sl.dyn] = static_cast<uint32_t>(std::min<uint64_t>(std::min<uint64_t>(size, br.avail), 65536));
         offs[sl.dyn] = static_cast<uint32_t>(br.offset);
@@ -5658,6 +5728,12 @@ VkDescriptorSet dyn0_set(const ProgLayout& pl, uint32_t* offs) {
         }
         ds = rec.ds;
         g_dyn0_sets.put(ck, KeptSet{ds, pl.sets[0], static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed))});
+        std::vector<Dyn0Pool>& dp = g_dyn0_pools[ck];
+        dp.assign(pls, pls + npl);
+        for (const KDep& k : rec.deps) {   // any other pool-backed binding of set 0 (none expected: such a set is per draw)
+            const void* p = k.kind == 1 ? k.rd.pool : (k.kind == 2 || (k.kind == 3 && k.texel)) ? k.pool : nullptr;
+            if (p && k.addr) dp.push_back(Dyn0Pool{k.addr, p, static_cast<const MemoryPool*>(p)->reg_serial});
+        }
         ++g_dyn_stat[8];
     }
     L->ds = ds;
@@ -5786,6 +5862,7 @@ void keep_sweep_tables(uint32_t now) {
     std::unordered_set<VkDescriptorSet> pinned;
     for (const auto& x : g_dyn0_last.s) if (x.gen == g_dyn0_last.gen && x.val.ds) pinned.insert(x.val.ds);
     sweep(g_dyn0_sets, kKsDyn0, &pinned);
+    for (auto it = g_dyn0_pools.begin(); it != g_dyn0_pools.end();) it = g_dyn0_sets.find(it->first) ? std::next(it) : g_dyn0_pools.erase(it);
 }
 
 // [nvn] exp_set0_free (measurement only, R6; cpuperf_ab_what r6): the ceiling of the set-0 work. A graphics set 0 the memo or set_keep may
@@ -8823,6 +8900,16 @@ const bool g_b0_registered = [] {
     nxrt::hitch_add_csv_counter("sets_built", [] { return g_sets_built; });
     nxrt::hitch_add_csv_counter("keep_new", [] { return g_keep_new; });
     nxrt::hitch_add_csv_counter("keep_rebuilt", [] { return g_keep_rebuilt; });
+    nxrt::hitch_add_csv_counter("keep_pool_kept", [] { return g_kpc[0]; });
+    nxrt::hitch_add_csv_counter("pools_unregistered", [] { return pool_registry_stats().unregistered; });
+    nxrt::hitch_add_csv_counter("pools_registered", [] { return pool_registry_stats().registered; });
+    nxrt::hitch_add_csv_counter("pools_reg_overlap", [] { return pool_registry_stats().overlap; });
+    nxrt::hitch_add_csv_counter("sets_path_compute", [] { return g_set_paths[0]; });   // K3: sets built outside the memo and set_keep, by why
+    nxrt::hitch_add_csv_counter("sets_path_noreuse", [] { return g_set_paths[1]; });
+    nxrt::hitch_add_csv_counter("sets_path_written", [] { return g_set_paths[2]; });
+    nxrt::hitch_add_csv_counter("sets_path_first", [] { return g_set_paths[3]; });
+    nxrt::hitch_add_csv_counter("sets_img_made", [] { return g_img_stat[2]; });
+    nxrt::hitch_add_csv_counter("sets_dyn0_built", [] { return g_dyn_stat[8]; });
     nxrt::hitch_add_csv_counter("ring_drains", [] { return cmdq::drains(); });
     nxrt::hitch_add_csv_counter("ring_drain_us", [] { return b0_us(cmdq::drain_ticks()); });
     nxrt::hitch_add_csv_counter("images_prebuilt", [] { uint64_t m = 0, k = 0; prebuilt_stats(&m, &k); return k; });
@@ -10283,6 +10370,14 @@ void replay_begin_submit(Frame& f) {
                         (unsigned long long)g_keep_fail[1], (unsigned long long)g_keep_fail[2], (unsigned long long)g_keep_fail[3], (unsigned long long)g_keep_fail[4],
                         (unsigned long long)g_keep_dead_n, (unsigned long long)g_keep_bad_n, why.c_str(), (unsigned long long)g_keep_verify_bad, g_keep.size(), dead,
                         (unsigned long long)g_keep_sets_era, g_keep_pools.size(), (unsigned long long)g_keep_eras, (unsigned long long)g_keep_evicted, (unsigned long long)g_keep_chain_hits, (unsigned long long)g_keep_chain_tries);
+                {
+                    const PoolRegStats rs = pool_registry_stats();
+                    NXLOG_I(kTag, "keep_pool_check: %llu kept sets still valid after a pool unregister, %llu failed (a dependency's pool went); ubo_dynamic sets: "
+                            "%llu sweeps, %llu kept, %llu dropped; pools %llu registered (of them over a pool unregistered in the last 10 s: %llu the same range and flags, %llu the same base, %llu overlapping), %llu unregistered, %llu imported",
+                            (unsigned long long)g_kpc[0], (unsigned long long)g_kpc[1], (unsigned long long)g_dyn0_kpc[0], (unsigned long long)g_dyn0_kpc[1],
+                            (unsigned long long)g_dyn0_kpc[2], (unsigned long long)rs.registered, (unsigned long long)rs.same_range, (unsigned long long)rs.same_base, (unsigned long long)rs.overlap,
+                            (unsigned long long)rs.unregistered, (unsigned long long)counters().pools_imported.load());
+                }
                 NXLOG_I(kTag, "sets built outside the memo and set_keep: compute %llu, reuse off for the draw %llu, a set with written storage or a per-draw c[0] %llu, reusable (first sightings, not keepable) %llu",
                         (unsigned long long)g_set_paths[0], (unsigned long long)g_set_paths[1], (unsigned long long)g_set_paths[2], (unsigned long long)g_set_paths[3]);
                 if (ssbo_ro_copy_mode())
