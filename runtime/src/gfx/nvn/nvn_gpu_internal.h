@@ -207,6 +207,7 @@ void read_dep_prefetch(const ReadDep& dep);   // cache hints for a read_dep_chec
 // range spans two chunks), and whether the copy holds the pool's bytes right now. Call it before note_gpu_write invalidates the range.
 struct MirrorSpan { VkBuffer buf = VK_NULL_HANDLE; VkDeviceSize offset = 0; bool valid = false; VkDeviceSize avail = 0; };   // avail: bytes to the chunk's end
 MirrorSpan mirror_span(uint64_t gpu_address, uint64_t size);
+std::string mirror_page_diag(uint64_t gpu_address);   // [nvn] ssbo_ro_diag
 // The GPU wrote the same bytes of the range into the pool and into its copy (a shadow's result): the pages wholly inside the range hold the
 // pool's bytes again and are tracked again (unless hot or banned), so the next dispatch reads them from video memory.
 void mirror_span_written(uint64_t gpu_address, uint64_t size);

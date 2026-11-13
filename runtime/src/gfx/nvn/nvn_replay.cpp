@@ -4359,6 +4359,10 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                                     ++g_ro_pool[rd.state == 0 ? 0 : g_ro_fill_idx.count(bind.addr * 0x9E3779B97F4A7C15ull ^ bi.range) ? 2 : 1];
                                     static const bool diag = nxrt::config_get_bool("nvn", "ssbo_ro_diag", false);
                                     if (diag && g_ro_pool_top.size() < 100000) { auto& e = g_ro_pool_top[bind.addr ^ (static_cast<uint64_t>(rd.state) << 62)]; e.first = bi.range; ++e.second; }
+                                    static uint64_t dn = 0;
+                                    if (diag && rd.state == 2 && (++dn & 0xffff) < 3)
+                                        NXLOG_I(kTag, "ssbo_ro_diag: %llx +%llx not current (submission %u of the frame, draw %u): %s", (unsigned long long)bind.addr,
+                                                (unsigned long long)bi.range, g_sub_ord, static_cast<unsigned>(g_draw_idx), mirror_page_diag(bind.addr).c_str());
                                 }
                                 if (rd.state == 1 && cr.ok && cr.buffer != br.buffer) {
                                     bi.buffer = cr.buffer;
