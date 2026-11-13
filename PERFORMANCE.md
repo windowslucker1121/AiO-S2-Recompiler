@@ -836,6 +836,45 @@ scripts in the worktree's git-ignored `work\lb` (`rtg.py` gate numbers, `flc.py`
   halved the misses (2,242 -> 1,056) at 504 us per spare on the worker and a full 2 GiB park; its frame numbers were taken by another
   agent's build. Not gated.
 
+## 1% lows round, agent F: scoped runtime PGO gate and bench tooling (PLAN_LOWS D1, M2-M5, 2026-11-13, branch `lows/f`)
+
+Exe of `feat/perf-generic-runtime` cd95b96 + this branch, 1920x1080, default cap (auto = 100), bench route balcony (30-90 s after
+ready) + `bench/village_walk.nxs` + `bench/village_turns.nxs`, instance `lowsf`, lifted libraries of the main checkout.
+- **Tooling (M2-M5).** `bench/village_turns.nxs` + `bench_window.py --turns` (M2); routes `bench_first_scene` / `bench_house_turn`
+  with `bench/first_scene.nxs` / `house_turn.nxs` and `--first-scene` / `--house` (M3, written, not run here); `--causes` (M4: frames over
+  14.3 / 20 ms by PLAN_LOWS class); `--images` (M5: images made and image-creation ms per second per window, the run's `pt_copy`
+  line, pools refused by `pt_copy_max_mb`, the `tex_rt_pool` line). Images are not split into targets and assets: that needs a runtime
+  frame_csv column (left to the texture owners).
+- **Scoped PGO build:** `build.ps1 -Pgo <profdata> -PgoScope nvn` (CMake `NXRT_PGO_SCOPE`, regex over runtime sources; `all` = the old
+  whole-runtime form). One whole-runtime instrumented exe gives the profile for both scopes (per-function counts do not depend on what
+  else is instrumented); profile = two bench routes. The PGO flags now carry the profile's MD5 (`NXRT_PGO_ID`): a profile rewritten at
+  the same path left unchanged sources compiled with the old one and the ThinLTO link failed ("ProfileSummary IDs have conflicting values").
+- **The PLAN_100 D side effect is a frame-boundary effect, not more game work.** Balcony, guest CPU per frame mean: base 22.8-25.4 ms,
+  scoped PGO 22.4-25.1, whole-runtime PGO 24.7: unchanged; guest CPU per second only follows fps (2.2 -> 2.4-2.5 cores at 90 -> 100 fps:
+  PLAN_100 D's "0.6 cores more elsewhere"). The per-frame split changes: sd 1.1-4.0 ms (base) vs 3.7-5.8 (PGO), lag-1 autocorrelation
+  of guest CPU per frame -0.18..-0.27 in three of four PGO runs (base +0.08..+0.66): with the shorter replay the frame boundaries cut the
+  game's worker bursts differently, and the frames of 10.5-14.3 ms collect them (guest 29-34 ms there, 2.9 cores during the frame, vs
+  26-30 / 2.4-2.5 in base). The scoped exe shows it as much as the whole-runtime one (a1: sd 2.8, autocorrelation -0.24), so it is
+  not code the game threads run. It does not cost lows at cap 100 (balcony 1% low base 65.0-71.9, PGO 65.3-72.0).
+- **Gate D-g1 FAILED** (only on the guest-CPU criterion). Valid runs (drain waits over 8 ms <= 2 per minute in the bench windows): base
+  b1, b5; PGO p1, p2, p3 (p4 valid too; b3 / b6 2.3, b4 2.4 per minute, b2 6.3, left out; with them the numbers below hold within a few %):
+
+  | | base | scoped PGO | gate |
+  |---|---|---|---|
+  | replay median, walk + turn frames with >= 2,700 draws | 12.98 / 10.39 ms | 10.25 / 8.64 / 8.60 (-22%) | <= -10%: pass |
+  | turn frames over 14.3 ms (three turn windows) | 70 / 19 | 9 / 5 / 12 (-80%) | <= -30%: pass |
+  | guest CPU per frame, mean +- sd | 25.2+-1.1 / 23.9+-3.0 | 25.1+-3.7 / 22.9+-5.8 / 22.4+-4.0 | sd within 20%: **fail (+120%)** |
+  | balcony fps / 1% low / over 14.3 ms | 89.7 / 71.9 / 13; 99.0 / 65.0 / 52 | 100.0 / 72.0 / 18; 98.3 / 65.3 / 29; 99.9 / 68.8 / 29 | |
+  | turns fps / 1% low | 84.9 / 51.2; 95.3 / 58.5 | 97.1 / 61.1; 99.3 / 63.9; 98.2 / 54.9 | |
+  | walk 1% low / over 20 ms | 44.5 / 5; 32.2 / 5 | 43.4 / 3; 45.1 / 1; 48.0 / 2 | |
+
+  The default build stays as it is; the scoped PGO exe stays a local opt-in. If the guest-sd criterion is judged a measurement of frame
+  boundaries (above) rather than of game work, the other two criteria pass clearly. Base runs vary a lot (b2 / b4 had a 10-15 s block
+  in the balcony where the render thread's own CPU per frame rose 9.3 -> 14-15 ms: memory contention as in PLAN_100 Z, or a game event).
+- Scripts (git-ignored, worktree `work\lf`): `runs_f.py` (route per tag and exe under the lock), `gate.py` (D-g1 table), `side.py`
+  (guest CPU per frame / second, autocorrelation), `thrcpu.py` (per-thread CPU snapshots at the bench marks), `quiet.py`; numbers in
+  `gate_out.txt`.
+
 ## What is open, by expected gain
 
 **After R6:** replay ~9.7-10 ms; ~88-90 fps. The render thread, the GPU (~93% busy) and the game's CPU frame are co-limits; a replay cut now
