@@ -850,7 +850,9 @@ stall count, `k3.py` set-build storms, `rep.py` capture replays). All runs count
   holds one run with a 3 s burst of 20 ms replays at ~3,000 draws (no rebuild, no stall line; without it 6-9 per run against 3-8 off): within
   the run-to-run spread, no gain in the lows to claim. **Gate K-g1 passed** on its criteria (`keep_rebuilt` <= 10 in every frame, rebuild
   class 0). `set_reuse = verify` + `odb_incremental = verify` (two runs, before and after the RT merge): 0 kept-set, 0 memo, 0 image-set,
-  0 ubo_dynamic differences, 0 missed draw checks. Capture replays on vs off: village SSIM 0.99982, nb3 0.99994, 0 changed pixels.
+  0 ubo_dynamic differences, 0 missed draw checks. Capture replays on vs off: village SSIM 0.99982, nb3 0.99994, 0 changed pixels. Bench
+  screenshots (balcony, walk, turn) with it on: foliage, crowns, fog normal. Runtime tests 170/170 (the two timing groups that failed
+  beside another agent's game pass alone).
   New: `PoolRegStats` (registered / unregistered / over a range unregistered in the last 10 s: same range, same base, overlapping), `frame_csv`
   columns `keep_pool_kept`, `pools_registered`, `pools_unregistered`, `pools_reg_overlap`; test `gfx_nvn_small.pool_registered_again_...`.
 - **K2 (GPU-side pool objects kept across a re-register) not built:** of ~4,690 pools registered per run only 50-59 cover a pool unregistered
