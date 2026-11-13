@@ -146,6 +146,110 @@ namespace Ryujinx.Graphics.Shader.Translation
         }
 
         /// Registers m certainly writes when it executes (exact first register only).
+        // ---- batch loops with a clamped count (G1) -------------------------------------------------------------------------------------
+        // The game's GPU culling tasks (fd8debac, c6f3f11e, ... : one work group per cell) process a cell's items in batches of 32:
+        //     IMNMX.U32 Rn, Rcount, K, PT        n = min(count, K)          (K = 256)
+        //     IADD3 Rt, Rn, -0x1, RZ
+        //     SHF.R.U32.HI Rb, RZ, s, Rt         last = (n - 1) >> s        (s = 5)
+        //     loop: ... IADD3 Rc, Rc, 0x1 ... ISETP.GT.U32.AND Pd, PT, Rc, Rb, PT ... (exit when Pd)
+        // For count >= 1, last <= M = (K - 1) >> s, so "Rc > M" implies "Rc > last" and adding it to Pd changes nothing. For count 0
+        // last wraps to 2^(32-s) - 1: the console would run ~2^27 empty batches (it never meets such a cell), our translation ran into the
+        // loop cap (4096 back edges per invocation) - 1.15 ms of GPU per grass draw on the balcony. With the extra test such a loop ends
+        // after M + 1 batches, which do nothing when every item index is past the count.
+        // NXRT_HARNESS_BATCH_BOUND=0 turns it off.
+        internal static readonly bool BatchBound = Environment.GetEnvironmentVariable("NXRT_HARNESS_BATCH_BOUND") != "0";
+
+        static bool IsGpr(Operand o, out int r) { r = o.Reg; return o.Kind == OperandKind.Reg && o.Reg < 255 && !o.Neg && !o.Not && !o.Abs; }
+        static bool IsImm(Operand o, out long v) { v = o.Kind == OperandKind.Imm ? (long)(uint)o.ImmBits : 0; return o.Kind == OperandKind.Imm; }
+        static bool IsRz(Operand o) => o.Kind == OperandKind.Reg && o.Reg == 255;
+        static bool IsPt(Operand o) => o.Kind == OperandKind.Pred && o.Reg == 7 && !o.Not;
+        static bool Writes(SassInst m, int r)
+        {
+            for (int k = 0; k < Math.Min(m.DstCount, m.Operands.Count); k++)
+            {
+                Operand o = m.Operands[k];
+                if (o.Kind != OperandKind.Reg || o.Reg >= 255) continue;
+                // registers written from this operand: vector and texture forms up to four, 64-bit and wide forms two
+                int w = m.Opcode is "TEX" or "TLD" or "TLD4" or "TXD" or "TXQ" or "SULD" or "LDSM" or "HMMA" or "IMMA" or "SUATOM" ? 4
+                      : m.Mods.Any(x => x.Contains("128")) ? 4
+                      : m.Mods.Any(x => x.Contains("64") || x == "WIDE") || m.Opcode is "DADD" or "DMUL" or "DFMA" or "DMNMX" or "DSETP" ||
+                        (m.Opcode == "CS2R" && !m.Mods.Contains("32")) ? 2 : 1;
+                if (r >= o.Reg && r < o.Reg + w) return true;
+            }
+            return false;
+        }
+        static bool IsBranch(SassInst m) => m.Opcode is "BRA" or "BRX" or "BRXU" or "JMP" or "JMX" or "CALL" or "RET" or "BREAK" or "BSYNC" or "WARPSYNC";
+
+        /// Fills p.BatchBounds: ISETP address -> (counter register, M).
+        internal static void AnalyseBatchLoops(AmpereProgram p)
+        {
+            if (!BatchBound) return;
+            List<SassInst> s = p.Insts;
+            HashSet<int> targets = new();
+            foreach (SassInst i in s)
+                foreach (Operand o in i.Operands)
+                    if (o.Kind == OperandKind.Label) targets.Add((int)o.Offset);
+            foreach (int[] t in p.IndirectTargets.Values) foreach (int a in t) targets.Add(a);
+            foreach ((int start, _) in p.Subroutines.Values) targets.Add(start);
+            // every control transfer: (source address, target address)
+            List<(int From, int To)> edges = new();
+            foreach (SassInst i in s)
+            {
+                foreach (Operand o in i.Operands)
+                    if (o.Kind == OperandKind.Label) edges.Add((i.Address, (int)o.Offset));
+                if (p.IndirectTargets.TryGetValue(i.Address, out int[] it)) foreach (int a in it) edges.Add((i.Address, a));
+            }
+            for (int i2 = 0; i2 < s.Count; i2++)
+            {
+                SassInst shf = s[i2];
+                // SHF.R.U32.HI Rb, RZ, s, Rt
+                if (shf.Opcode != "SHF" || shf.Pred != 7 || shf.Operands.Count < 4 || !shf.Mods.SequenceEqual(new[] { "R", "U32", "HI" })) continue;
+                if (!IsGpr(shf.Operands[0], out int rb) || !IsRz(shf.Operands[1]) || !IsImm(shf.Operands[2], out long sh) || sh < 1 || sh > 31 ||
+                    !IsGpr(shf.Operands[3], out int rt)) continue;
+                // IADD3 Rt, Rn, -0x1, RZ: the latest write of Rt before i2
+                int i1 = i2 - 1;
+                while (i1 >= 0 && !Writes(s[i1], rt)) i1--;
+                if (i1 < 0) continue;
+                SassInst add = s[i1];
+                if (add.Opcode != "IADD3" || add.Pred != 7 || add.Mods.Count != 0 || add.Operands.Count != 4 || !IsGpr(add.Operands[0], out int rt2) || rt2 != rt ||
+                    !IsGpr(add.Operands[1], out int rn) || !IsImm(add.Operands[2], out long m1) || m1 != 0xffffffff || !IsRz(add.Operands[3])) continue;
+                // IMNMX.U32 Rn, Ra, K, PT: the latest write of Rn before i1
+                int i0 = i1 - 1;
+                while (i0 >= 0 && !Writes(s[i0], rn)) i0--;
+                if (i0 < 0) continue;
+                SassInst mn = s[i0];
+                if (mn.Opcode != "IMNMX" || mn.Pred != 7 || !mn.Mods.SequenceEqual(new[] { "U32" }) || mn.Operands.Count != 4 || !IsGpr(mn.Operands[0], out int rn2) || rn2 != rn ||
+                    !IsImm(mn.Operands[2], out long kk) || kk < 1 || !IsPt(mn.Operands[3])) continue;
+                // Rb never written again after i2
+                bool rewritten = false;
+                for (int k = i2 + 1; k < s.Count && !rewritten; k++) rewritten = Writes(s[k], rb);
+                if (rewritten) continue;
+                int a0 = s[i0].Address, a2 = shf.Address;
+                // the chain is straight-line code: no transfer into (a0, a2], none out of [a0, a2]
+                if (edges.Any(e => (e.To > a0 && e.To <= a2) || (e.From >= a0 && e.From <= a2)) || s.Skip(i0).Take(i2 - i0 + 1).Any(IsBranch)) continue;
+                // no loop around it: no transfer from after the chain back to it or before it
+                if (edges.Any(e => e.From > a2 && e.To <= a2)) continue;
+                uint m = (uint)((kk - 1) >> (int)sh);
+                List<SassInst> found = new();
+                for (int k = i2 + 1; k < s.Count; k++)
+                {
+                    SassInst c = s[k];
+                    // ISETP.GT.U32.AND Pd, PT, Rc, Rb, PT (unguarded)
+                    if (c.Opcode != "ISETP" || c.Pred != 7 || !c.Mods.SequenceEqual(new[] { "GT", "U32", "AND" }) || c.Operands.Count != 5) continue;
+                    if (c.Operands[0].Kind != OperandKind.Pred || c.Operands[0].Reg == 7 || !IsPt(c.Operands[1]) || !IsGpr(c.Operands[2], out int rc) ||
+                        !IsGpr(c.Operands[3], out int rb2) || rb2 != rb || !IsPt(c.Operands[4])) continue;
+                    found.Add(c);
+                }
+                if (found.Count == 0) continue;
+                // every path to a compare runs the chain: transfers from before the chain go to before it or past the last compare
+                int last = found.Max(c => c.Address);
+                if (edges.Any(e => e.From < a0 && e.To > a0 && e.To <= last)) continue;
+                foreach (SassInst c in found) p.BatchBounds[c.Address] = (c.Operands[2].Reg, m);
+            }
+            if (Debug && p.BatchBounds.Count > 0)
+                Console.Error.WriteLine($"batch bound: {string.Join(", ", p.BatchBounds.Select(kv => $"{kv.Key:x}: R{kv.Value.Counter} > {kv.Value.Max}"))}");
+        }
+
         static void DefiniteDests(SassInst m, List<(OperandKind, int)> d)
         {
             for (int k = 0; k < Math.Min(m.DstCount, m.Operands.Count); k++)

@@ -51,7 +51,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         /// NXRT_HARNESS_MESH_PAYLOAD_EXACT=1 (experiment, default off): the payload is declared at the block's own size (control +0x5a,
         /// rounded up to 16 bytes) instead of 4 KiB, so the driver reserves less on-chip memory per task work group.
         public static readonly bool PayloadExact = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_PAYLOAD_EXACT") == "1";
-        public int PayloadDeclWords => PayloadExact && PayloadBytes > 0 ? Math.Min(PayloadWords, (PayloadBytes + 15) / 16 * 4) : PayloadWords;
+        public int PayloadDeclWords => IsTask && AmpereMesh.TaskExp == "smallpay" ? 16 : PayloadExact && PayloadBytes > 0 ? Math.Min(PayloadWords, (PayloadBytes + 15) / 16 * 4) : PayloadWords;
 
         public int AttrWords => Math.Max(1, (MaxVertices + 31) / 32 * Math.Max(1, Lines.Count) * 32);
         public int MapWords => 2 + (3 * MaxPrimitives + 3) / 4;
@@ -128,6 +128,10 @@ namespace Ryujinx.Graphics.Shader.Translation
         static readonly bool SlowInline = Environment.GetEnvironmentVariable("NXRT_HARNESS_MESH_SLOW") != "call";
 
         [ThreadStatic] static State _cur;
+
+        /// NXRT_HARNESS_TASK_EXP (measurement only, G-g1): empty | nolaunch | smallpay (see the uses).
+        public static readonly string TaskExp = Environment.GetEnvironmentVariable("NXRT_HARNESS_TASK_EXP") ?? "";
+        public static bool IsTaskNow => _cur != null && _cur.Info.IsTask;
 
         public const string PayloadName = "isbe_payload", AttrName = "isbe_attr", MapName = "isbe_map";
         const StorageClass TaskPayloadWorkgroup = (StorageClass)5402;
@@ -538,6 +542,10 @@ namespace Ryujinx.Graphics.Shader.Translation
                     return true;
                 }
                 SpvInstruction cnt = ctx.Load(u32, ctx.AccessChain(ctx.TypePointer(TaskPayloadWorkgroup, u32), payload, C(1)));
+                // measurement only (G-g1): NXRT_HARNESS_TASK_EXP=nolaunch: the task runs as before but launches no mesh work group (a count
+                // the compiler cannot fold), so the time left is the task's own; =smallpay: also a 64-byte payload
+                if (TaskExp is "nolaunch" or "smallpay")
+                    cnt = ctx.Select(u32, ctx.IEqual(ctx.TypeBool(), cnt, C(unchecked((int)0xdeadbeef))), cnt, C(0));
                 SpvInstruction et = ctx.NewInstruction(EmitMeshTasks);
                 et.AddOperand(cnt); et.AddOperand(C(1)); et.AddOperand(C(1)); et.AddOperand(payload);
                 Emit(ctx, et);

@@ -75,6 +75,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     ctx.BranchIfFalse(skip, guard);
                 }
                 EmitAmpereOp(ctx, prog, i);
+                // a batch loop over min(count, K) items: also exit once the counter passes the most batches it can have work for (AmpereFuse)
+                if (prog.BatchBounds.TryGetValue(i.Address, out var bb))
+                {
+                    IrOperand pd = Register(i.Operands[0].Reg, RegisterType.Predicate);
+                    ctx.Copy(pd, ctx.Add(Instruction.LogicalOr, Local(), pd, ctx.ICompareGreaterUnsigned(Gpr(bb.Counter), Const(unchecked((int)bb.Max)))));
+                }
                 if (skip != null) ctx.MarkLabel(skip);
                 if (prog.Mesh != null) AmpereMesh.AfterInstruction(ctx, i.Opcode, Has(i, "ATTR"), Has(i, "32"));
             }
