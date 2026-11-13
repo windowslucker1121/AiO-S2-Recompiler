@@ -9723,6 +9723,7 @@ void replay_begin_submit(Frame& f) {
                 cmdq::set_recorder_spin_ab(!off("rec_spin"));
                 nxrt::kernel::short_sleep_ab(!off("sleep_pause"));
                 cmdq::helper_pin_ab(!off("helper_pin"));
+                delta_redispatch_ab(!off("redispatch"));   // out_delta_redispatch: "keep" in the off windows
             }
             cmdq::set_chunk_async(ab_on(kAbChunkAsync));
             cmdq::set_pds(ab_on(kAbPdsQ));

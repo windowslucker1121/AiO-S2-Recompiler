@@ -256,6 +256,7 @@ bool ab_tex_park_on();   // false in an off window of [nvn] cpuperf_ab with tex_
 bool ab_overlap_grow_on();   // false in an off window of [nvn] cpuperf_ab with overlap_grow
 bool ab_index_inc_on();      // false in an off window of [nvn] cpuperf_ab with index_inc
 bool ab_out_delta_on();  // ... with out_delta (delta copy-backs, nvn_gpu_pool.cpp)
+void delta_redispatch_ab(bool on);   // cpuperf_ab p1 windows with [nvn] p1_what redispatch: false = out_delta_redispatch keep
 void out_delta_block(bool on);   // render thread: true while a dispatch's compute pipeline and sets are bound (no delta copy-back then)
 void out_presnap_end();   // after the dispatch: snapshots no out_add took are dropped
 bool out_presnap(uint64_t addr, uint64_t size, VkBuffer mbuf, VkDeviceSize moff, VkCommandBuffer cb);   // a dispatch is about to write [addr, +size) in the copy (out_delta)

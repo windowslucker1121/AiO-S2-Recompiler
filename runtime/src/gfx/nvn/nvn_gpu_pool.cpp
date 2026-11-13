@@ -2176,6 +2176,8 @@ struct OutEntry {
     uint64_t gen = 0;                   // moves when a later write takes it over again (out_add): the result out_fetch copied is no longer the newest
     bool fetching = false;              // out_fetch copies it back with the lock free: other fetches wait (g_out_cv), retire and unregister leave it
     bool snapped = false;               // out_delta: the snapshot chunk holds the range as it was before its first write (delta copy-back)
+    std::vector<std::pair<uint64_t, uint64_t>> snap_stale;   // out_delta: page runs [first, last] sent back by out_split while held: the
+                                                             // pool may hold newer CPU data there than the snapshot, so they go back whole
 };
 
 std::mutex g_out_mu;                    // g_out, g_out_mirrors; never held while touching guest memory
@@ -2534,14 +2536,17 @@ bool delta_on() {
     const bool on = NX_CFG_BOOL("nvn", "out_delta", true);
     return on && ab_out_delta_on();
 }
-// [nvn] out_delta_redispatch = partial (default) | whole | keep: a held result that another dispatch writes again while it is still held keeps the
+// [nvn] out_delta_redispatch = keep (default) | partial | whole: a held result that another dispatch writes again while it is still held keeps the
 // snapshot of its first dispatch. Between the two, parts of the pool can change under it (a partial copy-back, the CPU's writes that a refill
 // put into the copy), and units the later dispatch sets back to their snapshot value were then never written to the pool: the pool kept what
 // it held in between. In the intro that showed as single frames without the volumetric fog (A19), every few frames while the presenting
 // thread was slow (flash watch, run flash11 vs flash13: 36 flashes in 6 windows -> 0). partial: a result re-dispatched after a partial copy-back
-// goes back whole; whole: every result re-dispatched while held; keep: the old behaviour.
+// goes back whole; whole: every result re-dispatched while held; keep (default): neither. partial cost ~12 fps on the village benches (the
+// culling buffers went back whole every frame); out_delta_stale_pages fixes the same frames per page and is the default now.
+std::atomic<bool> g_redispatch_ab{true};   // cpuperf_ab: false in the off windows of p1 with [nvn] p1_what redispatch (old behaviour)
 bool delta_redispatch_unsnap(bool partial) {
-    static const std::string v = config_get_str("nvn", "out_delta_redispatch", "partial");
+    static const std::string v = config_get_str("nvn", "out_delta_redispatch", "keep");
+    if (!g_redispatch_ab.load(std::memory_order_relaxed)) return false;
     return v == "partial" ? partial : v != "keep";
 }
 uint64_t delta_cap() {
@@ -2615,6 +2620,29 @@ VkBuffer snap_chunk_for(Mirror& m, uint64_t addr, uint64_t size, VkBuffer mbuf, 
     return sb.buffer;
 }
 
+std::atomic<uint64_t> g_dl_stale{0};   // bytes of out_split pages copied back whole inside delta copy-backs (statistics)
+// [nvn] out_delta_stale_pages (default on): pages out_split sent back while a snapped result stayed held go back whole at its next delta
+// copy-back (snap_stale). Their snapshot is older than what the pool held after that copy-back (the CPU rewrites such pages, e.g. counter
+// resets), so units a later dispatch set back to their snapshot value never reached the pool: single fog-less frames in the intro (A19).
+bool delta_stale_pages() {
+    static const bool on = config_get_bool("nvn", "out_delta_stale_pages", true);
+    return on && g_redispatch_ab.load(std::memory_order_relaxed);
+}
+// One delta dispatch over [off, +len) of e (the pipeline is bound). Lock held.
+void record_delta_range(VkCommandBuffer cb, const OutEntry& e, VkBuffer sb, uint64_t off, uint64_t len) {
+    const VkDescriptorBufferInfo bi[3] = {{e.mbuf, e.moff + off, len}, {e.hbuf, e.hoff + off, len}, {sb, e.moff + off, len}};
+    VkWriteDescriptorSet w[3] = {};
+    for (uint32_t k = 0; k < 3; ++k) {
+        w[k] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[k].dstBinding = k;
+        w[k].descriptorCount = 1;
+        w[k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[k].pBufferInfo = &bi[k];
+    }
+    vkCmdPushDescriptorSetKHR(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_delta.layout, 0, 3, w);
+    vkCmdDispatch(cb, static_cast<uint32_t>((len / 16 + 255) / 256), 1, 1);
+    g_dl_scanned.fetch_add(len, std::memory_order_relaxed);
+}
 // Lock held. Records the copy-back of e as a delta copy-back; false: not eligible (the caller copies it whole).
 bool record_delta(VkCommandBuffer cb, const OutEntry& e, uint64_t* bytes, bool* dispatched) {
     if (!e.snapped || !e.m || g_delta_blocked || !delta_on()) return false;
@@ -2627,6 +2655,34 @@ bool record_delta(VkCommandBuffer cb, const OutEntry& e, uint64_t* bytes, bool* 
         const bool take = !e.partial || newer(p);
         uint64_t q = p + 1;
         while (q <= e.last && (!e.partial || newer(q)) == take) ++q;
+        if (take && !e.snap_stale.empty() && delta_stale_pages()) {   // pages out_split sent back while held: whole, the rest of the run as a delta
+            uint64_t a = p;
+            while (a < q) {
+                bool st = false;
+                for (const auto& r : e.snap_stale) st |= a >= r.first && a <= r.second;
+                uint64_t b = a + 1;
+                for (; b < q; ++b) {
+                    bool sb2 = false;
+                    for (const auto& r : e.snap_stale) sb2 |= b >= r.first && b <= r.second;
+                    if (sb2 != st) break;
+                }
+                const uint64_t lo = std::max(e.addr, base + a * kPageBytes), hi = std::min(e.addr + e.size, base + b * kPageBytes);
+                const uint64_t off = lo - e.addr, len = hi - lo;
+                if (st) {
+                    const VkBufferCopy c = {e.moff + off, e.hoff + off, len};
+                    vkCmdCopyBuffer(cb, e.mbuf, e.hbuf, 1, &c);
+                    *bytes += len;
+                    g_dl_stale.fetch_add(len, std::memory_order_relaxed);
+                } else {
+                    if (!*dispatched) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_delta.pipe);
+                    *dispatched = true;
+                    record_delta_range(cb, e, sb, off, len);
+                }
+                a = b;
+            }
+            p = q;
+            continue;
+        }
         if (take) {
             const uint64_t lo = std::max(e.addr, base + p * kPageBytes), hi = std::min(e.addr + e.size, base + q * kPageBytes);
             const uint64_t off = lo - e.addr, len = hi - lo;
@@ -2680,6 +2736,10 @@ void delta_log(double secs) {
             secs, (unsigned long long)(v[0] - p[0]), (unsigned long long)((v[1] - p[1]) >> 20), (unsigned long long)((v[2] - p[2]) >> 20),
             (unsigned long long)(v[3] - p[3]), (unsigned long long)((v[4] - p[4]) >> 20), (unsigned long long)g_snap_n, (unsigned long long)(g_snap_bytes >> 20));
     std::copy(v, v + 5, p);
+    static uint64_t ps = 0;
+    const uint64_t st = g_dl_stale.load();
+    if (st != ps) NXLOG_I(kTag, "delta copy-backs: %llu KiB of pages sent back while held copied whole (out_delta_stale_pages)", (unsigned long long)((st - ps) >> 10));
+    ps = st;
 }
 
 uint64_t record_copies(VkCommandBuffer cb, const std::vector<size_t>& idx) {
@@ -2753,6 +2813,7 @@ void snaps_forget_locked(Mirror* m) {
     snaps_forget(m);
 }
 void out_delta_block(bool on) { g_delta_blocked = on; }
+void delta_redispatch_ab(bool on) { g_redispatch_ab.store(on, std::memory_order_relaxed); }
 
 void out_presnap_end() { OutLock ol; g_presnap.clear(); }
 
@@ -2803,7 +2864,7 @@ bool out_add(uint64_t addr, VkDeviceSize size, VkBuffer mbuf, VkDeviceSize moff,
             const uint64_t v0 = g_out_ver.load(std::memory_order_acquire);
             const bool was_live = live(e), was_pending = e.pending;
             const bool snap = presnap_take(addr, size);
-            if (!live(e)) e.snapped = snap;         // sent back already: the copy was the pool again when the new snapshot was taken
+            if (!live(e)) { e.snapped = snap; e.snap_stale.clear(); }   // sent back already: the copy was the pool again when the new snapshot was taken
             else if (delta_redispatch_unsnap(e.partial)) e.snapped = false;   // see delta_redispatch_unsnap
             if (!e.pending) out_changed();          // live and pending again
             if (e.flushed && !e.pending) g_out_grow.fetch_add(1, std::memory_order_acq_rel);   // was not live: its pages are live again
@@ -3093,6 +3154,7 @@ int out_split(size_t i, uint64_t serial, std::vector<VkBufferCopy>& parts, std::
             parts.push_back(VkBufferCopy{e.moff + (lo - e.addr), e.hoff + (lo - e.addr), hi - lo});
             bufs.emplace_back(e.mbuf, e.hbuf);
             rearm.emplace_back(lo, hi - lo);
+            if (e.snapped && delta_stale_pages()) e.snap_stale.emplace_back(p, q - 1);
             bits_set(m->gpu_new.get(), p, q - 1, false);   // current in the pool once the copy has run: a later copy-back leaves them alone
         }
         p = q;
