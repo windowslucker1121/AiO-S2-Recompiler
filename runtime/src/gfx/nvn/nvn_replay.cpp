@@ -211,6 +211,7 @@ uint32_t g_pass_draws = 0;      // draws recorded in the open pass (GPU pass pro
 // [nvn] exp_draw_cut = 3 (measurement only): every draw is recorded twice, the second time with no state change in between, so the GPU time it adds is
 // the draws' own work (shaders, raster) without the cost of the state changes before them
 bool g_draw_dup = false;
+bool g_tq_dup_now = false;  // [nvn] exp_draw_half (T-g2): this draw is emitted twice (set by run_list before the draw)
 #define NX_DRAW_DUP(call) do { call; if (g_draw_dup) call; } while (0)
 // Draws per render pass size since the last statistics line: the size with the most draws is the game's internal render size (dynamic
 // resolution; logged with the statistics so fps measurements can be compared at equal sizes).
@@ -261,7 +262,7 @@ uint64_t ab_mask_compute() {
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"hot_skip", kAbHotSkip}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"p1", kAbP1}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"r6", kAbR6}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"sync_lead", kAbSyncLead}, {"occ_batch", kAbOccBatch}, {"r6t", kAbR6t}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"p1", kAbP1}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"r6", kAbR6}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"sync_lead", kAbSyncLead}, {"occ_batch", kAbOccBatch}, {"r6t", kAbR6t}, {"draw_half", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -424,8 +425,12 @@ uint64_t fp_phys(const uint8_t* rec, uint32_t i, uint64_t addr, uint64_t size) {
 }
 // The work entry of the draw or dispatch at rec (run_list, before the command): its payload (null: none). Cleared at every other command.
 const uint64_t* g_fw = nullptr;
+// [nvn] exp_draw_half (T-g2, measurement only): the walk's mark of this draw (payload word 6 of its work entry; 0 = none): 1 in a quiet run of
+// >= exp_draw_half_min draws, 2 = skip it, 4 = emit it twice (the run's even draw before a skipped one). Written by the walk when the run ends.
+uint64_t g_tq_mark = 0;
 inline void fp_work_at(const uint8_t* rec) {
     g_fw = fp_take(rec, kFsWork);
+    g_tq_mark = g_fw ? __atomic_load_n(const_cast<uint64_t*>(g_fw) + 6, __ATOMIC_ACQUIRE) : 0;
     if (g_fw && !g_fw[0]) g_fw = nullptr;   // no layout planned
     if (g_fw) fp_count(kFpWorkHit);
 }
@@ -686,7 +691,7 @@ bool occ_defer_on();
 // The reports of the pass that just ended (outside any pass now): their {0, timestamp} words, then the query results over the counters.
 bool occ_batch_on();
 void occ_flush_batched();
-// [nvn] occ_mark_late (default on; cpuperf_ab_what occ_mark_late): with occ_defer, a samples-passed report's GPU write is noted when the
+// [nvn] occ_mark_late (default on; its cpuperf_ab_what bit is draw_half now): with occ_defer, a samples-passed report's GPU write is noted when the
 // reports are written (here), for runs of adjacent report words at once, instead of at each report (~1,450 gpu_wrote calls per frame in the
 // village scene, each a pool look-up and a page invalidation). Nothing reads those words on the GPU before this point: the GPU writes them only
 // in the commands recorded below.
@@ -6178,7 +6183,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     // [nvn] exp_draw_cut (measurement only, cpuperf_ab_what draw_cut): 1 = every draw runs without fragments (empty scissor: the cost of the
     // vertex / mesh stages and the per-draw state alone), 2 = every draw is left out (the frame without draw work)
     const int64_t draw_cut = NX_CFG_INT("nvn", "exp_draw_cut", 0);
-    g_draw_dup = draw_cut == 3;   // its paired-window bit went to r6b (R6)
+    g_draw_dup = draw_cut == 3 || g_tq_dup_now;   // its paired-window bit went to r6b (R6); exp_draw_half's dup draws
     if (draw_cut && draw_cut != 3) {
         if (draw_cut == 2) return false;
         g_skip_gpt_raster = true;
@@ -8526,8 +8531,244 @@ void op_cost_log() {
     g_oc_prog.clear();
 }
 
+// ---- T gates of the two-thread replay (PLAN_100 T-g1 / T-g2; measurement only, default off) ---------------------------------------------
+// A quiet run: a maximal stretch of commands that only bind, set state, draw, count samples or toggle rendering, between commands that write
+// coherence state (dispatches, copies, clears, uniform updates, target changes, discards, stream-out, memory reports) and draws of programs
+// that write memory (storage buffers or images, pointer stores). A second replay thread could take the second half of a long one.
+// [nvn] exp_quiet_census = true (T-g1): per interval ([nvn] exp_quiet_census_s, default 10 s) one line: replay ticks per present, the share
+// inside quiet runs of >= exp_quiet_census_min (400) draws, and for those runs the ordered events inside them (pass ended by texture work,
+// upload, image made, feedback binding, held-result copy-back, in-pass mesh copy, other pass break; soft: resolve-epoch moves by GPU write or
+// by command, held-result version moves) with how far into the run's second half the first one comes (what a helper replaying [mid, end)
+// would reach before it has to stop).
+// [nvn] exp_draw_half = 1 (T-g2, cpuperf_ab_what name draw_half): the front walk marks quiet runs of >= exp_draw_half_min (400) draws; in them
+// every odd draw is skipped before any work and the even draw before it is emitted twice (g_draw_dup): the render thread's ceiling if half
+// of such runs ran elsewhere, at about the same GPU load. The picture is wrong.
+int tq_half_mode() { return static_cast<int>(NX_CFG_INT("nvn", "exp_draw_half", 0)); }
+size_t tq_half_min() { return static_cast<size_t>(std::max<int64_t>(2, NX_CFG_INT("nvn", "exp_draw_half_min", 400))); }
+bool tq_census_on() { return NX_CFG_BOOL("nvn", "exp_quiet_census", false); }
+bool tq_quiet_op(const RecordReader& r) {
+    switch (r.op()) {
+        case Op::Nop: case Op::BindProgram: case Op::BindBuffers: case Op::BindTextures: case Op::BindImages: case Op::BindVertexAttribs:
+        case Op::BindVertexStreams: case Op::BindBlend: case Op::BindColor: case Op::BindChannelMask: case Op::BindDepthStencil: case Op::BindPolygon:
+        case Op::BindMultisample: case Op::SetTexturePool: case Op::SetSamplerPool: case Op::SetViewports: case Op::SetScissors: case Op::SetDepthRanges:
+        case Op::SetDepthBounds: case Op::SetStencil: case Op::SetBlendColor: case Op::SetPointSize: case Op::SetLineWidth: case Op::SetPolygonOffsetClamp:
+        case Op::SetAlphaRef: case Op::SetSampleMask: case Op::SetRasterizerDiscard: case Op::SetDepthClamp: case Op::SetPrimitiveRestart:
+        case Op::SetPatchSize: case Op::SetTessLevels: case Op::SetRenderEnable: case Op::SetCoverageModulationTable: case Op::SetConservativeRaster:
+        case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: case Op::DrawMeshTasks: case Op::PushDebugGroup: case Op::PopDebugGroup:
+        case Op::Small: case Op::CallCommands: case Op::Barrier: case Op::WaitEvent:
+            return true;
+        case Op::ReportCounter: case Op::ResetCounter:   // samples-passed counters only (the others write memory at replay)
+            return r.payload<P_Counter>().type == NVN_COUNTER_TYPE_SAMPLES_PASSED;
+        default:
+            return false;
+    }
+}
+// Whether a graphics stage of the bound program may write memory (storage buffers, storage images or texel buffers, pointer stores).
+// Cached per stage array (thread-local: the render thread and the front walk both ask).
+bool tq_prog_writes(const ShaderInfo* const* stage) {
+    struct C { const ShaderInfo* s[kStages]; bool w; bool ok; };
+    thread_local C cache[64];
+    uint64_t h = 0;
+    for (int st = 0; st < kStages; ++st) h = h * 31 + reinterpret_cast<uint64_t>(stage[st]);
+    C& c = cache[(h ^ (h >> 17) ^ (h >> 33)) & 63];
+    if (c.ok && std::memcmp(c.s, stage, sizeof c.s) == 0) return c.w;
+    bool w = false;
+    for (int st = 0; st < kStages && !w; ++st) {
+        const ShaderInfo* s = stage[st];
+        if (!s || st == kCompute) continue;
+        if (s->refl.global_fallback && s->refl.global_writes) w = true;
+        for (const DescriptorBinding& b : s->refl.bindings) {
+            if (b.type == DescriptorType::StorageImage || b.type == DescriptorType::StorageTexelBuffer) w = true;
+            else if (b.type == DescriptorType::StorageBuffer && storage_binding_writes(b, s)) w = true;
+            if (w) break;
+        }
+    }
+    std::memcpy(c.s, stage, sizeof c.s);
+    c.w = w;
+    c.ok = true;
+    return w;
+}
+// The census (render thread).
+enum TqCause { kTqPt, kTqUpload, kTqImage, kTqFeedback, kTqCopyBack, kTqMeshCopy, kTqPassOther, kTqEpWrite, kTqEpOp, kTqHeldVer, kTqN };
+constexpr uint16_t kTqHard = (1u << kTqEpWrite) - 1;   // the first seven: an ordered effect a helper cannot do itself
+const char* const kTqName[kTqN] = {"pt", "upload", "image", "feedback", "copyback", "meshcopy", "pass", "ep_write", "ep_op", "held_ver"};
+struct TqSnap { uint64_t pt, up, made, ob, mesh, passes, chunks, bw, bo, ov; };
+struct TqBig { uint32_t n; double ms; double reach; int cause; };
+struct TqCensus {
+    bool open = false, prev_draw = false;
+    uint64_t t0 = 0;
+    uint32_t free_pass = 0;               // pass begins that are not breaks: the run's first draw, the restart after a submission chunk
+    uint16_t pend = 0;                    // events between draws: given to the next draw
+    std::vector<uint16_t> ev;             // per draw of the open run: the events it caused
+    TqSnap last{};
+    // interval statistics
+    uint64_t replay_ticks = 0, quiet_ticks = 0, big_ticks = 0, runs = 0, big = 0, big_draws = 0, draws = 0, draw_ops0 = 0, pres0 = 0;
+    uint64_t ok_hard = 0, ok_all = 0, hist[6] = {}, first_half[kTqN] = {}, second_half[kTqN] = {}, runs_with[kTqN] = {};
+    std::vector<TqBig> last_big;
+    std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+    uint64_t tsc0 = __rdtsc();
+    double ph0 = nxrt::hitch_phase_seconds(nxrt::kHpRenderReplay);   // the render thread's replay phase (the ab window lines' replay)
+} g_tqc;
+double g_tq_tpms = 0;   // TSC ticks per ms (from the last census interval)
+struct TqHalf { uint64_t skipped = 0, dup = 0, marked = 0, ops0 = 0, pres0 = 0; bool win = true; } g_tqh;
+bool g_tq_on = false;       // census or draw_half (decided per top-level list)
+TqSnap tq_snap() {
+    Counters& c = counters();
+    return {c.pass_breaks.load(std::memory_order_relaxed), c.texture_uploads.load(std::memory_order_relaxed), c.textures_created.load(std::memory_order_relaxed),
+            out_bytes_total(), g_mesh_inpass, c.passes.load(std::memory_order_relaxed), c.submit_chunks.load(std::memory_order_relaxed),
+            g_bump_n[kBumpWrite], g_bump_n[kBumpOp], out_version()};
+}
+void tq_close() {
+    TqCensus& q = g_tqc;
+    if (!q.open) return;
+    q.open = false;
+    const uint64_t ticks = __rdtsc() - q.t0;
+    ++q.runs;
+    q.quiet_ticks += ticks;
+    const size_t n = q.ev.size();
+    if (n < static_cast<size_t>(std::max<int64_t>(2, NX_CFG_INT("nvn", "exp_quiet_census_min", 400)))) return;
+    ++q.big;
+    q.big_draws += n;
+    q.big_ticks += ticks;
+    const size_t mid = n / 2;
+    size_t first_h = n, first_a = n;
+    int cause = -1;
+    uint16_t seen = 0;
+    for (size_t k = 0; k < n; ++k) {
+        const uint16_t m = q.ev[k];
+        if (!m) continue;
+        seen |= m;
+        for (int c = 0; c < kTqN; ++c) if (m >> c & 1) ++(k < mid ? q.first_half : q.second_half)[c];
+        if (k < mid) continue;
+        if (first_a == n) first_a = k;
+        if (first_h == n && (m & kTqHard)) {
+            first_h = k;
+            for (int c = 0; c < kTqN; ++c) if (m >> c & 1) { cause = c; break; }
+        }
+    }
+    for (int c = 0; c < kTqN; ++c) if (seen >> c & 1) ++q.runs_with[c];
+    const double half = static_cast<double>(n - mid);
+    const double reach_h = static_cast<double>(first_h - mid) / half, reach_a = static_cast<double>(first_a - mid) / half;
+    q.ok_hard += reach_h >= 0.8;
+    q.ok_all += reach_a >= 0.8;
+    ++q.hist[first_h == n ? 5 : std::min(4, static_cast<int>(reach_h * 5.0))];
+    const double tpms = g_tq_tpms > 0 ? g_tq_tpms : 3.4e6;
+    if (q.last_big.size() >= 8) q.last_big.erase(q.last_big.begin());
+    q.last_big.push_back({static_cast<uint32_t>(n), static_cast<double>(ticks) / std::max(1.0, tpms), reach_h, cause});
+}
+// At the head of every command of the replay (before it runs): the events of the previous command, then whether this one continues the run.
+void tq_census_op(const RecordReader& r) {
+    TqCensus& q = g_tqc;
+    const TqSnap now = tq_snap();
+    if (q.open) {
+        const TqSnap& a = q.last;
+        uint16_t m = 0;
+        const uint64_t pt = now.pt - a.pt;
+        if (pt) m |= 1u << kTqPt;
+        if (now.up != a.up) m |= 1u << kTqUpload;
+        if (now.made != a.made) m |= 1u << kTqImage;
+        if (q.prev_draw && g_fb_seen) m |= 1u << kTqFeedback;
+        if (now.ob != a.ob) m |= 1u << kTqCopyBack;
+        if (now.mesh != a.mesh) m |= 1u << kTqMeshCopy;
+        q.free_pass += static_cast<uint32_t>(now.chunks - a.chunks);
+        uint64_t begun = now.passes - a.passes;
+        begun -= std::min(begun, pt);
+        const uint64_t fr = std::min<uint64_t>(begun, q.free_pass);
+        q.free_pass -= static_cast<uint32_t>(fr);
+        if (begun > fr) m |= 1u << kTqPassOther;
+        if (now.bw != a.bw) m |= 1u << kTqEpWrite;
+        if (now.bo != a.bo) m |= 1u << kTqEpOp;
+        if (now.ov != a.ov) m |= 1u << kTqHeldVer;
+        if (m) {
+            if (q.prev_draw && !q.ev.empty()) q.ev.back() |= m;
+            else q.pend |= m;
+        }
+    }
+    q.last = now;
+    const Op o = r.op();
+    const bool draw = o == Op::DrawArrays || o == Op::DrawElements || o == Op::DrawIndirect || o == Op::DrawMeshTasks;
+    if (draw) ++q.draws;
+    const bool quiet = tq_quiet_op(r) && !g_xfb_active && !(draw && tq_prog_writes(S.stage));
+    if (!quiet) { tq_close(); q.prev_draw = false; return; }
+    if (!q.open) {
+        q.open = true;
+        q.t0 = __rdtsc();
+        q.ev.clear();
+        q.pend = 0;
+        q.free_pass = 1;   // the first draw may begin a pass (new targets end the old one lazily)
+    }
+    if (draw) { q.ev.push_back(q.pend); q.pend = 0; }
+    q.prev_draw = draw;
+}
+// Top-level list boundaries: replay ticks, the interval lines (census) and the draw_half window lines.
+void tq_log_tick() {
+    const uint64_t pres = counters().presents.load(std::memory_order_relaxed);
+    if (tq_half_mode()) {
+        TqHalf& h = g_tqh;
+        const bool win = ab_on(kAbR3f);
+        static auto last = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        const bool ab = NX_CFG_INT("nvn", "cpuperf_ab", 0) > 0;
+        if ((ab && win != h.win) || (!ab && now - last >= std::chrono::seconds(10))) {
+            const double fr = static_cast<double>(std::max<uint64_t>(1, pres - h.pres0));
+            NXLOG_I(kTag, "draw_half window %s (presents %llu-%llu): per present %.0f draw commands reached, %.0f in marked runs, %.1f skipped, %.1f emitted twice",
+                    h.win ? "on" : "off", (unsigned long long)h.pres0, (unsigned long long)pres, static_cast<double>(g_draw_ops - h.ops0) / fr, static_cast<double>(h.marked) / fr,
+                    static_cast<double>(h.skipped) / fr, static_cast<double>(h.dup) / fr);
+            h = TqHalf{};
+            h.win = win;
+            h.ops0 = g_draw_ops;
+            h.pres0 = pres;
+            last = now;
+        }
+    }
+    if (!tq_census_on()) return;
+    TqCensus& q = g_tqc;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - q.since < std::chrono::seconds(std::max<int64_t>(1, NX_CFG_INT("nvn", "exp_quiet_census_s", 10)))) return;
+    const double tpms = static_cast<double>(__rdtsc() - q.tsc0) / std::max(1.0, std::chrono::duration<double, std::milli>(now - q.since).count());
+    g_tq_tpms = tpms;
+    const double fr = static_cast<double>(std::max<uint64_t>(1, pres - q.pres0));
+    const double ph = (nxrt::hitch_phase_seconds(nxrt::kHpRenderReplay) - q.ph0) * 1000.0 / fr;   // ms per present
+    const double bigs = static_cast<double>(std::max<uint64_t>(1, q.big));
+    std::string ev, runs;
+    for (int c = 0; c < kTqN; ++c) {
+        if (!q.first_half[c] && !q.second_half[c]) continue;
+        char t[96];
+        std::snprintf(t, sizeof t, " %s %llu/%llu in %llu runs;", kTqName[c], (unsigned long long)q.first_half[c], (unsigned long long)q.second_half[c], (unsigned long long)q.runs_with[c]);
+        ev += t;
+    }
+    for (const TqBig& b : q.last_big) {
+        char t[80];
+        std::snprintf(t, sizeof t, " [%u d %.2f ms reach %.2f %s]", b.n, b.ms, b.reach, b.cause >= 0 ? kTqName[b.cause] : "-");
+        runs += t;
+    }
+    NXLOG_I(kTag, "quiet census (presents %llu-%llu): per present replay phase %.2f ms, lists %.2f ms, quiet runs %.2f ms, runs >= %lld draws %.2f ms (%.1f%% of lists, %.1f%% of the phase), %.2f such runs "
+                  "of %.0f draws, %.0f draws in all; runs whose second half reaches 80%% before a hard event %llu of %llu (%.1f%%), before any event %llu (%.1f%%); "
+                  "reach by fifths %llu/%llu/%llu/%llu/%llu, none %llu; events first/second half:%s last runs:%s",
+            (unsigned long long)q.pres0, (unsigned long long)pres, ph, q.replay_ticks / tpms / fr, q.quiet_ticks / tpms / fr,
+            (long long)NX_CFG_INT("nvn", "exp_quiet_census_min", 400), q.big_ticks / tpms / fr, q.replay_ticks ? 100.0 * static_cast<double>(q.big_ticks) / static_cast<double>(q.replay_ticks) : 0.0, ph > 0 ? 100.0 * (q.big_ticks / tpms / fr) / ph : 0.0,
+            q.big / fr, q.big_draws / bigs, q.draws / fr, (unsigned long long)q.ok_hard, (unsigned long long)q.big, 100.0 * static_cast<double>(q.ok_hard) / bigs,
+            (unsigned long long)q.ok_all, 100.0 * static_cast<double>(q.ok_all) / bigs, (unsigned long long)q.hist[0], (unsigned long long)q.hist[1],
+            (unsigned long long)q.hist[2], (unsigned long long)q.hist[3], (unsigned long long)q.hist[4], (unsigned long long)q.hist[5], ev.c_str(), runs.c_str());
+    const bool open = q.open;
+    const uint64_t t0 = q.t0;
+    const uint32_t fp = q.free_pass;
+    const uint16_t pend = q.pend;
+    const bool pd = q.prev_draw;
+    std::vector<uint16_t> evv = std::move(q.ev);
+    const TqSnap last = q.last;
+    q = TqCensus{};
+    q.open = open; q.t0 = t0; q.free_pass = fp; q.pend = pend; q.prev_draw = pd; q.ev = std::move(evv); q.last = last;
+    q.pres0 = pres;
+}
+
 void run_list(const CmdList& list, int depth) {
     if (depth == 0 && exp_op_cost_on()) op_cost_log();
+    struct TqTicks { uint64_t t0 = 0; ~TqTicks() { if (t0) g_tqc.replay_ticks += __rdtsc() - t0; } } tq_ticks;   // T gates: the lists' replay ticks
+    if (depth == 0) {
+        g_tq_on = tq_census_on() || tq_half_mode() != 0;
+        if (g_tq_on) { tq_log_tick(); tq_ticks.t0 = __rdtsc(); }
+    }
     if (depth > kMaxDepth) { log_once("depth", "CallCommands nesting too deep"); return; }
     struct RdRestore { int d; ~RdRestore() { g_rd_depth = d - 1; } } rd_restore{depth};   // pass_lookahead: back to the caller's reader
     counters().lists_replayed.fetch_add(1, std::memory_order_relaxed);
@@ -8588,7 +8829,21 @@ void run_list(const CmdList& list, int depth) {
         switch (r.op()) {
             case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: case Op::DrawMeshTasks: ++g_draw_ops; fp_work_at(r.pos()); break;
             case Op::Dispatch: case Op::DispatchIndirect: fp_work_at(r.pos()); break;
-            default: g_fw = nullptr; break;
+            default: g_fw = nullptr; g_tq_mark = 0; break;
+        }
+        if (g_tq_on) {   // T gates (measurement only): the census sees every command; draw_half skips marked odd draws before any work
+            if (tq_census_on()) tq_census_op(r);
+            g_tq_dup_now = false;
+            if (g_tq_mark && tq_half_mode() == 1) {
+                const Op o = r.op();
+                if (o == Op::DrawArrays || o == Op::DrawElements || o == Op::DrawIndirect || o == Op::DrawMeshTasks) {
+                    ++g_tqh.marked;
+                    if (ab_on(kAbR3f)) {
+                        if (g_tq_mark & 2) { ++g_tqh.skipped; continue; }
+                        if (g_tq_mark & 4) { g_tq_dup_now = true; ++g_tqh.dup; }
+                    }
+                }
+            }
         }
         ++g_resolve_gen;   // resolve_cache: results hold for one command
         chunk_at_op();
@@ -9290,19 +9545,37 @@ struct FpSim {
     GState::Bind ubo[kStages][16], ssbo[kStages][16];
     uint64_t tex[kStages][64] = {};
     uint64_t img[kStages][16] = {};
+    // [nvn] exp_draw_half (T-g2): the open quiet run's work-entry payloads (null: not in the stream) and the stream-out state
+    std::vector<uint64_t*> tq_w;
+    bool tq_open = false, tq_xfb = false;
 };
+// T-g2: the walk's side of the quiet runs (tq_quiet_op / tq_prog_writes above run_list): a run of >= exp_draw_half_min draws gets its marks
+void tq_walk_close(FpSim& sim) {
+    if (sim.tq_open && sim.tq_w.size() >= tq_half_min()) {
+        const size_t n = sim.tq_w.size();
+        for (size_t i = 0; i < n; ++i) {
+            if (!sim.tq_w[i]) continue;
+            const uint64_t m = 1 | ((i & 1) ? 2 : (i + 1 < n ? 4 : 0));
+            __atomic_store_n(sim.tq_w[i] + 6, m, __ATOMIC_RELEASE);
+        }
+    }
+    sim.tq_w.clear();
+    sim.tq_open = false;
+}
 bool fp_expr_pure(const std::vector<HandleExprOp>& prog) {
     for (const HandleExprOp& op : prog) if (op.kind == HandleExprOp::Storage) return false;   // storage words may be GPU results: not planned
     return true;
 }
-// A work entry: the program layout the replay will use and set_signature's raw-input hash of each of its sets.
-void fp_work(FrontPlan& P, const FpSim& sim, const uint8_t* rec, bool dispatch, bool mesh) {
-    uint64_t* e = P.st.reserve(2 + 6);
-    if (!e) return;
+// A work entry: the program layout the replay will use and set_signature's raw-input hash of each of its sets. Word 6: the exp_draw_half mark
+// (written later by the walk, read by fp_work_at). Returns the payload (null: the stream is full).
+uint64_t* fp_work(FrontPlan& P, const FpSim& sim, const uint8_t* rec, bool dispatch, bool mesh) {
+    uint64_t* e = P.st.reserve(2 + 7);
+    if (!e) return nullptr;
     e[0] = reinterpret_cast<uint64_t>(rec);
-    e[1] = static_cast<uint64_t>(kFsWork) << 32 | 6;
+    e[1] = static_cast<uint64_t>(kFsWork) << 32 | 7;
     uint64_t* w = e + 2;
     w[0] = w[1] = 0;
+    w[6] = 0;
     const ShaderInfo* st[kStages] = {};
     if (dispatch) {
         st[kCompute] = sim.stage[kCompute];
@@ -9364,10 +9637,23 @@ void fp_work(FrontPlan& P, const FpSim& sim, const uint8_t* rec, bool dispatch, 
         for (uint32_t set = 0; set < 4; ++set) w[2 + set] = 0;
     }
     P.st.publish();
+    return w;
 }
 void fp_walk(FrontPlan& P, FpSim& sim, const CmdList& list, int depth) {
     if (depth > kMaxDepth) return;
+    const bool tq = tq_half_mode() != 0;
     for (RecordReader r(list); r.next();) {
+        uint64_t* tq_work = nullptr;   // the work entry of a draw (exp_draw_half)
+        bool tq_draw = false;
+        if (tq) {   // T-g2: is this command inside a quiet run? (the same rule as the census on the render thread)
+            const Op o = r.op();
+            tq_draw = o == Op::DrawArrays || o == Op::DrawElements || o == Op::DrawIndirect || o == Op::DrawMeshTasks;
+            if (o == Op::BeginXfb || o == Op::ResumeXfb) sim.tq_xfb = true;
+            if (o == Op::EndXfb || o == Op::PauseXfb) sim.tq_xfb = false;
+            const bool quiet = tq_quiet_op(r) && !sim.tq_xfb && !(tq_draw && tq_prog_writes(sim.stage));
+            if (!quiet) { tq_walk_close(sim); tq_draw = false; }
+            else sim.tq_open = true;
+        }
         switch (r.op()) {
             case Op::BindProgram: {
                 const auto& p = r.payload<P_BindProgram>();
@@ -9409,8 +9695,8 @@ void fp_walk(FrontPlan& P, FpSim& sim, const CmdList& list, int depth) {
                     if (p.stage < kStages && p.first + i < 16) sim.img[p.stage][p.first + i] = h[i];
                 break;
             }
-            case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: fp_work(P, sim, r.pos(), false, false); break;
-            case Op::DrawMeshTasks: fp_work(P, sim, r.pos(), false, true); break;
+            case Op::DrawArrays: case Op::DrawElements: case Op::DrawIndirect: tq_work = fp_work(P, sim, r.pos(), false, false); break;
+            case Op::DrawMeshTasks: tq_work = fp_work(P, sim, r.pos(), false, true); break;
             case Op::Dispatch: case Op::DispatchIndirect: fp_work(P, sim, r.pos(), true, false); break;
             case Op::CallCommands: {
                 const auto& p = r.payload<P_CallCommands>();
@@ -9441,6 +9727,7 @@ void fp_walk(FrontPlan& P, FpSim& sim, const CmdList& list, int depth) {
             }
             default: break;
         }
+        if (tq_draw) sim.tq_w.push_back(tq_work);
     }
 }
 // The walk reads guest memory (uniform words of texture handles) the game may unmap: a fault ends it (the plan holds what was done).
@@ -9483,6 +9770,7 @@ void fp_main() {
             if (!l) continue;
             if (!fp_walk_guarded(*P, sim, *l)) { ++Q.faults; break; }
         }
+        tq_walk_close(sim);   // exp_draw_half: a run ends with its submission
         P->phys_ok.store(P->pgen == pool_registry_generation() && P->vgen == virtual_maps_generation(), std::memory_order_relaxed);
         P->lists.clear();
         const uint64_t t1 = ft::now_ns();
@@ -9542,6 +9830,7 @@ void front_replay_begin(const std::shared_ptr<FrontPlan>& P) {
     g_fp = P.get();
 }
 void front_replay_end(const std::shared_ptr<FrontPlan>& P) {
+    if (g_tq_on) tq_close();   // T-g1: a quiet run ends with its submission
     if (P) {
         P->replayed.store(true, std::memory_order_release);
         if (P->done.load(std::memory_order_acquire) && g_fq) {   // the lists it holds go to the front thread to be released there
@@ -9654,7 +9943,7 @@ void replay_begin_submit(Frame& f) {
     if (g_tl) g_tl->replay_serial.store(f.serial, std::memory_order_relaxed);   // the texture look-ahead stops scanning this submission
     cmdq::begin_submission(ab_on(kAbCmdThread));   // [nvn] cmd_thread: a recorder thread makes the vkCmd* calls (nvn_cmdq.cpp)
     hazard::begin_submission(f.cb, ab_on(kAbHazard), ab_on(kAbHazardPiggy));   // [nvn] hazard: barriers where commands touch what others wrote (nvn_hazard.cpp)
-    g_occ_mark_late_on = occ_defer_on() && NX_CFG_BOOL("nvn", "occ_mark_late", true) && ab_on(kAbR3f);   // see occ_mark_pending
+    g_occ_mark_late_on = occ_defer_on() && NX_CFG_BOOL("nvn", "occ_mark_late", true);   // (its cpuperf_ab bit went to draw_half, T-g2)   // see occ_mark_pending
     tex_poll_cpu_writes();
     if (extras::LowLatency* ll = extras::lowlat()) ll->submit_begin();     // RENDERSUBMIT_START of the frame (S14)
     if (g_trace_frame == -2) {
