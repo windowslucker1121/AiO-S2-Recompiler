@@ -975,7 +975,7 @@ struct Mirror {
     bool pt_scan = false;                 // look at every page once (just made a target, or pt_copy switched on again)
     uint64_t pt_scan_pos = UINT64_MAX;    // [nvn] pt_scan_pages: the next page of a scan in slices (UINT64_MAX: no scan running)
     bool pt_dropped = false;              // [nvn] pt_storm_presents: no longer a target after an arming storm (never again)
-    int64_t pt_copied_mark = 0;           // st_copied when the current storm count began
+    int64_t pt_written_mark = 0;          // st_written when the current storm count began
 };
 
 // Bits [first, last] of Mirror::back (any thread).
@@ -1193,24 +1193,24 @@ uint64_t pt_max_bytes() {
     const uint64_t b = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "pt_copy_max_mb", 256))) << 20);
     return b;
 }
-// [nvn] pt_present_mb (0 = off): pages of pt_copy targets copied in per present at most (on top of the 64 MiB per submission of all copies);
+// [nvn] pt_present_mb (default 16; 0 = off): pages of pt_copy targets copied in per present at most (on top of the 64 MiB per submission of all copies);
 // the rest waits, its draws and pointer loads read the pool meanwhile. [nvn] mirror_present_mb (0 = off): the same for every copy-in.
 uint64_t pt_present_bytes() {
-    const uint64_t b = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "pt_present_mb", 0))) << 20);
+    const uint64_t b = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "pt_present_mb", 16))) << 20);
     return b;
 }
 uint64_t mirror_present_bytes() {
     const uint64_t b = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "mirror_present_mb", 0))) << 20);
     return b;
 }
-// [nvn] pt_scan_pages (0 = whole pool at once): a new target's pages are looked at in slices of this many per present.
+// [nvn] pt_scan_pages (default 4096; 0 = whole pool at once): a new target's pages are looked at in slices of this many per present.
 uint64_t pt_scan_slice() {
-    const uint64_t n = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "pt_scan_pages", 0))));
+    const uint64_t n = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "pt_scan_pages", 4096))));
     return n;
 }
-// [nvn] pt_reserve_mb (0 = off): chunks of a pt_copy target's copy are not made into the last this many MiB of the pool-copy cap.
+// [nvn] pt_reserve_mb (default 512; 0 = off): chunks of a pt_copy target's copy are not made into the last this many MiB of the pool-copy cap.
 uint64_t pt_reserve_bytes() {
-    const uint64_t b = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "pt_reserve_mb", 0))) << 20);
+    const uint64_t b = NX_ONCE(uint64_t, static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "pt_reserve_mb", 512))) << 20);
     return b;
 }
 // A pool becomes a target: copied whole (in slices with pt_scan_pages), its pages pointed at the copy once settled.
@@ -1294,8 +1294,18 @@ uint64_t pt_copy_addr(Mirror& m, uint64_t p) {   // the device address of page p
 // none was refused, the largest pool with a copy): the PT-g2 test of the pt_copy storm in a scene of choice. Logs one line as the mark.
 void pt_force(uint32_t now) {
     static const uint32_t at = static_cast<uint32_t>(std::max<int64_t>(0, config_get_int("nvn", "exp_pt_force_present", 0)));
+    static const int64_t at_s = std::max<int64_t>(0, config_get_int("nvn", "exp_pt_force_s", 0));   // or: seconds since the process started
     static bool done = false;
-    if (!at || done || now < at) return;
+    if (done || (!at && !at_s)) return;
+    bool due = at && now >= at;
+    if (!due && at_s) {
+        FILETIME c{}, e{}, k{}, u{}, n{};
+        GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
+        GetSystemTimeAsFileTime(&n);
+        const auto ft = [](const FILETIME& f) { return (static_cast<uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime; };
+        due = ft(n) > ft(c) && (ft(n) - ft(c)) / 10000000 >= static_cast<uint64_t>(at_s);
+    }
+    if (!due) return;
     done = true;
     int n = 0;
     std::vector<uint64_t> addrs = g_pt_refused_addr;
@@ -1324,7 +1334,7 @@ void pt_force(uint32_t now) {
     }
 }
 // [nvn] pt_storm_presents = N (0 = off) with pt_storm_arms (default 64): when the copies deferred that many arms in each of N presents in a
-// row (the arming budget is spent every submission), the pt_copy target that copied the most pages meanwhile stops being one: its pages go
+// row (the arming budget is spent every submission), the pt_copy target whose copied pages the CPU rewrote most meanwhile (each such page is a write fault, a copy-in and a new arm) stops being one: its pages go
 // back to the pool import, its wanted pages are dropped, and its pointers never make it a target again. Its write tracking stays (each
 // armed page faults once and is then plain memory again until a draw wants it).
 void pt_drop(Mirror& m, uint32_t now, uint64_t arms) {
@@ -1351,19 +1361,19 @@ void pt_storm(uint32_t now) {
     const uint64_t d = cur - last;
     last = cur;
     if (d < arms) {
-        if (run) for (Mirror* m : g_mirrors) m->pt_copied_mark = m->st_copied;
+        if (run) for (Mirror* m : g_mirrors) m->pt_written_mark = m->st_written;
         run = 0;
         return;
     }
     if (run == 0)
-        for (Mirror* m : g_mirrors) m->pt_copied_mark = m->st_copied;
+        for (Mirror* m : g_mirrors) m->pt_written_mark = m->st_written;
     if (++run < need) return;
     run = 0;
     Mirror* worst = nullptr;
     for (Mirror* m : g_mirrors)
-        if (m->pt_target && (!worst || m->st_copied - m->pt_copied_mark > worst->st_copied - worst->pt_copied_mark)) worst = m;
-    if (worst && worst->st_copied - worst->pt_copied_mark > 0) pt_drop(*worst, now, d);
-    for (Mirror* m : g_mirrors) m->pt_copied_mark = m->st_copied;
+        if (m->pt_target && (!worst || m->st_written - m->pt_written_mark > worst->st_written - worst->pt_written_mark)) worst = m;
+    if (worst && worst->st_written - worst->pt_written_mark > 0) pt_drop(*worst, now, d);
+    for (Mirror* m : g_mirrors) m->pt_written_mark = m->st_written;
 }
 // Once per present, at the first submission: pages and spans that may point at the copy do, the others go back.
 void pt_pass(uint32_t now) {

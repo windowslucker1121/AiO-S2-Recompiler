@@ -754,6 +754,29 @@ Balcony and walk benches at 1920x1080 uncapped, private shader caches only (tool
   28010d0bb53e5b57 5c53165dae866546 731a498096475249 97de564fe1a2ec09 c6f3f11edb6ed86d ece836278b723289 fd8debac8c87401a (only these
   rows; no runtime rows involved); their pipelines rebuild on demand.
 
+## 1% lows, agent A (2026-11-13, branch `lows/a`; PLAN_LOWS PT1-PT3)
+
+First scene route of PLAN_LOWS f1 (30-195 s after the start, uncapped, 1920x1080), village bench (balcony, walk, `turn_village.nxs`),
+instance `lowsa`. Many runs had the outside recorder stalls (35-51 drain waits over 8 ms per run); m3 / g3b / g2d were quiet.
+- **PT1 `[nvn] pt_copy_max_mb` = 256 (default on).** A pool over the cap never becomes a whole-pool pointer-copy target (log
+  `pt_copy: pool ... larger than pt_copy_max_mb`); its pointer loads read the pool import. First scene: the 2.4 GiB heap pool and a
+  294-305 MiB pool are refused, no "budget is used up". Quiet (m3): 124.6 fps, 1% low 56.9, **29 frames over 20 ms** (worst 117: a
+  stall), against 76 fps / 1% low 9 / 1,461 before. Disturbed: 100 / 128 frames over 20 ms against 90 with `pt_copy_ubo = false` in the
+  same conditions. Village: no pool over the cap, nothing changes (the targets there are 20 KiB..150 MiB). **PT-g1 passed.**
+- **PT2 (default on): `pt_present_mb` 16, `pt_scan_pages` 4096, `pt_reserve_mb` 512.** Copy-ins of pt targets limited per present, a new
+  target's pages looked at in slices, the last 512 MiB of the pool-copy cap kept for vertex/index/uniform copies. Test key
+  `exp_pt_force_present` / `exp_pt_force_s` + `exp_pt_force_addr` (measurement only) makes the heap a target at a mark. Without PT2: 4
+  frames of 165-185 ms right after the mark (walk and balcony), budget used up. With PT2: worst frame of the event 20.9 ms inside the
+  walk, 22.4 on the balcony (1 frame over 20 each), 30.1 in a camera turn (the turns' own worst is 32); the copy stops at the reserve
+  (1,527 MiB). **PT-g2 passed.** With the cap off and PT2 on, the first scene's heap target is harmless too: 25 frames over 20 ms (quiet),
+  75 (disturbed). Bench with PT1+PT2 vs PT1 only (both disturbed): balcony 100.5 / 102.1 fps, walk 105.7 / 106.9, turns 84.9 / 86.3:
+  neutral. `set_reuse` + `odb_incremental` = verify on the bench: 0 differences, 0 missed.
+- **PT3 `pt_storm_presents` (failed, stays off).** Dropping a target after 60 presents of deferred arms: the first metric (pages copied)
+  dropped the small culling-chain targets instead of the heap; with pages rewritten by the CPU it drops the heap (cap 0, PT2 off) 13 s in,
+  but the storm goes on (deferred arms ~400 per frame, region lock held 50-90 ms, first scene 53 fps / 1% low 9.5): the dropped pool's
+  copy and write tracking stay. Not needed with PT1 + PT2; undoing a target would have to free its copy and tracking.
+- Scripts: worktree `work\lowsa` (`runs_a.py` = research runner with a quiet-machine wait, `ev.ps1` event windows, `rep.py` capture
+  replays).
 ## What is open, by expected gain
 
 **After R6:** replay ~9.7-10 ms; ~88-90 fps. The render thread, the GPU (~93% busy) and the game's CPU frame are co-limits; a replay cut now
