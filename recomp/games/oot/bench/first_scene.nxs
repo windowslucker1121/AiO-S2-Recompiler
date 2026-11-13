@@ -1,0 +1,7 @@
+# Benchmark window "first scene" (PLAN_LOWS M3). Starts when the first scene's first 3D frame is in (state first_scene: New Game, the intro
+# movie cut short). No input: the intro's cutscene runs by itself at the configured (real-time) step; the window is 170 s of it, the log
+# lines "bench: first_scene start" / "bench: first_scene end" (tools/perf/bench_window.py --first-scene).
+@rate 0
+@log bench: first_scene start
+@sleep 170000
+@log bench: first_scene end

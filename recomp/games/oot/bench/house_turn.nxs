@@ -1,0 +1,16 @@
+# Benchmark path "house turn" (PLAN_LOWS M3). Starts in the state house (free control inside the hero's house after the intro). Fixed game
+# step: a 300-frame camera turn each way. Windows "bench: house_turn1/2 start/end" (tools/perf/bench_window.py --house).
+@rate 60
+30
+@shot house_start
+@log bench: house_turn1 start
+stick right 1 0 for 300
+@log bench: house_turn1 end
+30
+@log bench: house_turn2 start
+stick right -1 0 for 300
+@log bench: house_turn2 end
+30
+@shot house_end
+@rate 0
+@log bench: house_turns done

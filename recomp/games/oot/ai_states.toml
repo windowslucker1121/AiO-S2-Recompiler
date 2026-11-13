@@ -71,3 +71,22 @@ steps = [
   { script = "bench/balcony_far.nxs", timeout_s = 120 },
   { script = "bench/village_walk.nxs", timeout_s = 300 },
 ]
+
+[route.bench_village_turns]
+description = "after the walk: two 300-frame camera turns and a run with the camera swinging in the open village (fixed 1/60 s step)"
+steps = [
+  { script = "bench/village_turns.nxs", timeout_s = 300 },
+]
+# PLAN_LOWS M3: load_state("first_scene", route=["title", "new_game", "in_game", "bench_first_scene"]) and
+# load_state("house", route=["title", "continue", "in_game", "bench_house_turn"]).
+[route.bench_first_scene]
+description = "the first scene's cutscene from its first 3D frame: 170 s without input at the configured step"
+steps = [
+  { script = "bench/first_scene.nxs", timeout_s = 240 },
+]
+
+[route.bench_house_turn]
+description = "inside the hero's house (state house): a 300-frame camera turn each way (fixed 1/60 s step)"
+steps = [
+  { script = "bench/house_turn.nxs", timeout_s = 120 },
+]
