@@ -2521,7 +2521,9 @@ void ua_upload(bool force) {
         bool att = false;
         for (uint32_t c = 0; c < S.ncolor; ++c) att = att || shares_image(t, S.color_tex[c].get());
         if (att) continue;
-        if (texprep::ready(t) == texprep::Readiness::Pending) { mine[back++] = std::move(r); continue; }   // later (its job is not done)
+        const texprep::Readiness rd = texprep::ready(t);
+        if (rd == texprep::Readiness::Pending) { mine[back++] = std::move(r); continue; }   // later (its job is not done)
+        if (rd == texprep::Readiness::None) continue;   // no prepared data (streamed, untiled by the GPU, render targets): left to the draw
         if (!tex_gpu(t)) continue;
         out_texture_read(t);
         tex_ensure_current(t, *F);
@@ -8714,7 +8716,7 @@ void run_list(const CmdList& list, int depth) {
                 const bool dr = op == static_cast<int>(Op::DrawArrays) || op == static_cast<int>(Op::DrawElements) || op == static_cast<int>(Op::DrawIndirect) ||
                                 op == static_cast<int>(Op::DrawMeshTasks);
                 const bool cs = op == static_cast<int>(Op::Dispatch) || op == static_cast<int>(Op::DispatchIndirect);
-                g_b0_op[dr ? 0 : cs ? 1 : 2] += dt;                     // B0: the frame_csv columns
+                if (op != static_cast<int>(Op::CallCommands)) g_b0_op[dr ? 0 : cs ? 1 : 2] += dt;   // B0: the frame_csv columns (a call holds its list's ops)
                 for (int i = 0; i < 10; ++i) g_b0_ph[i] += g_oc_ph[i];
                 if (!dr && !cs) { for (uint64_t& x : g_oc_ph) x = 0; return; }
                 const ShaderInfo* a = cs ? S.stage[kCompute] : S.stage[kFragment];

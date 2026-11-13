@@ -1522,6 +1522,52 @@ bool Device::submit_once(const std::function<void(VkCommandBuffer)>& fn) {
     return ok;
 }
 
+bool Device::submit_once_q2(VkSemaphore wait, uint64_t wait_value, const std::function<void(VkCommandBuffer)>& fn) {
+    if (!queue2_ || queue2_family_ != queue_family_) return false;
+    static std::mutex mu;
+    static VkCommandPool pool = VK_NULL_HANDLE;
+    static VkFence fence = VK_NULL_HANDLE;
+    std::lock_guard<std::mutex> lk(mu);
+    if (!pool) {
+        VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        pci.queueFamilyIndex = queue2_family_;
+        if (vkCreateCommandPool(device_, &pci, nullptr, &pool) != VK_SUCCESS) { pool = VK_NULL_HANDLE; return false; }
+        VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (vkCreateFence(device_, &fci, nullptr, &fence) != VK_SUCCESS) { fence = VK_NULL_HANDLE; return false; }
+    }
+    VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ai.commandPool = pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(device_, &ai, &cmd) != VK_SUCCESS) return false;
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+    fn(cmd);
+    vkEndCommandBuffer(cmd);
+    VkTimelineSemaphoreSubmitInfo ts = {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    ts.waitSemaphoreValueCount = 1;
+    ts.pWaitSemaphoreValues = &wait_value;
+    const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, &ts};
+    si.waitSemaphoreCount = wait ? 1 : 0;
+    si.pWaitSemaphores = &wait;
+    si.pWaitDstStageMask = &stage;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    bool ok;
+    {
+        std::lock_guard<std::mutex> ql(queue2_mutex_);
+        ok = vkQueueSubmit(queue2_, 1, &si, fence) == VK_SUCCESS;
+    }
+    if (ok) ok = vkWaitForFences(device_, 1, &fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+    vkResetFences(device_, 1, &fence);
+    vkFreeCommandBuffers(device_, pool, 1, &cmd);
+    return ok;
+}
+
 void Device::wait_idle() {
     std::lock_guard<std::mutex> ql(queue_mutex_);
     vkDeviceWaitIdle(device_);

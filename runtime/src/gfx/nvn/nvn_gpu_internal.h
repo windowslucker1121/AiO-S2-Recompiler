@@ -104,6 +104,7 @@ void keep_dpool_release(VkDescriptorPool p);
 uint64_t completed_serial();      // cached timeline value; call poll_completed() for a fresh read
 uint64_t poll_completed();
 uint64_t current_serial();        // the serial of the submission being recorded (or the last one)
+VkSemaphore timeline_semaphore(); // the submissions' timeline (value = serial)
 
 // ---- GPU pass profiler ([prof] gpu_passes = true, needs the frame trace) --------------------------------------------------------------
 // Writes a GPU timestamp after everything recorded so far; the time since the previous stamp of the submission becomes a trace event

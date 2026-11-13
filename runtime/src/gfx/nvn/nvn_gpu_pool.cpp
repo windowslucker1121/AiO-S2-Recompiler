@@ -2305,7 +2305,7 @@ int64_t fetch_trace_lines() {
 }
 
 void fetch_note(int src, uint64_t addr, uint64_t size, uint64_t host_pc, uint64_t entry, uint64_t entry_size, uint64_t new_pages, uint64_t bytes,
-                uint64_t wait_ns, bool waited, uint64_t need, uint64_t done_before) {
+                uint64_t wait_ns, bool waited, uint64_t need, uint64_t done_before, uint64_t copy_ns) {
     FetchKey k;
     k.src = src;
     k.pc = host_pc;
@@ -2324,16 +2324,16 @@ void fetch_note(int src, uint64_t addr, uint64_t size, uint64_t host_pc, uint64_
     static std::atomic<int64_t> traced{0}, marked{0}, slow{0};
     const bool tr = traced.load(std::memory_order_relaxed) < fetch_trace_lines() && traced.fetch_add(1) < fetch_trace_lines();
     const bool mk = new_pages && marked.load(std::memory_order_relaxed) < 200 && marked.fetch_add(1) < 200;
-    const bool sl = wait_ns > 2000000 && slow.load(std::memory_order_relaxed) < 100 && slow.fetch_add(1) < 100;
+    const bool sl = wait_ns + copy_ns > 2000000 && slow.load(std::memory_order_relaxed) < 400 && slow.fetch_add(1) < 400;
     if (!tr && !mk && !sl)
         return;
     NXLOG_I(kTag, "compute out fetch: %s %llx +%llx tid %lu pc %llx (guest f_%llx) lr %llx: result %llx +%llx (page +%llx), %llu pages newly CPU-read, %llu KiB copied, "
-            "waited %.2f ms for submission %llu (done %llu)%s",
+            "waited %.2f ms for submission %llu (done %llu), copy submission and its wait %.2f ms%s",
             kFetchSrcName[src], (unsigned long long)addr, (unsigned long long)size, (unsigned long)GetCurrentThreadId(), (unsigned long long)host_pc,
             (unsigned long long)(host_pc ? guest_function_of(host_pc) : 0),
             (unsigned long long)k.lr, (unsigned long long)entry, (unsigned long long)entry_size,
             (unsigned long long)(entry && addr >= entry ? (addr - entry) & ~(kPageBytes - 1) : 0), (unsigned long long)new_pages,
-            (unsigned long long)(bytes >> 10), wait_ns / 1e6, (unsigned long long)need, (unsigned long long)done_before, sl ? " (slow)" : "");
+            (unsigned long long)(bytes >> 10), wait_ns / 1e6, (unsigned long long)need, (unsigned long long)done_before, copy_ns / 1e6, sl ? " (slow)" : "");
 }
 
 void out_register(Mirror* m) {
@@ -3314,6 +3314,11 @@ void out_retire() {
 // 2026-11-08): copies them back at once and marks the whole range CPU-read, so later results there go back at the end of every submission.
 // the game invalidates four 4.4 MB GPU culling buffers whole every other frame (generic buffer code, lr main+0x3433cc) and reads little of them:
 // that alone sent ~350 MB/s back over PCIe. "guard": nothing; the guard faults of the pages the CPU touches do the work.
+std::atomic<uint64_t> g_fetch_q2{0};   // statistics: fetches copied on the second queue
+bool fetch_queue2_on() {
+    const bool on = NX_CFG_BOOL("nvn", "fetch_queue2", false);
+    return on;
+}
 bool out_invalidate_by_guard() {
     const bool on = NX_ONCE(bool, config_get_str("nvn", "compute_out_invalidate", "guard") != "fetch");
     return on;
@@ -3353,13 +3358,13 @@ void out_fetch(uint64_t addr, uint64_t size, bool by_fault, int access, uint64_t
         }
     }
     // diagnostics: the largest held result the fetch touches, the time spent waiting for the GPU
-    uint64_t d_entry = 0, d_entry_size = 0, d_wait_ns = 0, d_need = 0, d_done = 0;
+    uint64_t d_entry = 0, d_entry_size = 0, d_wait_ns = 0, d_need = 0, d_done = 0, d_copy_ns = 0;
     bool d_waited = false;
     for (const OutEntry& e : g_out)
         if (overlaps(e, lo, hi) && e.size > d_entry_size) { d_entry = e.addr; d_entry_size = e.size; }
     uint64_t d_bytes = 0;
     auto finish = [&] {          // lock released
-        if (d_entry || new_pages) fetch_note(src, addr, size, host_pc, d_entry, d_entry_size, new_pages, d_bytes, d_wait_ns, d_waited, d_need, d_done);
+        if (d_entry || new_pages) fetch_note(src, addr, size, host_pc, d_entry, d_entry_size, new_pages, d_bytes, d_wait_ns, d_waited, d_need, d_done, d_copy_ns);
     };
     for (int waits = 0;; ) {
         // rebuilt after every wait: entries may have changed or gone while the lock was free
@@ -3411,10 +3416,43 @@ void out_fetch(uint64_t addr, uint64_t size, bool by_fault, int access, uint64_t
         took.reserve(idx.size());
         for (size_t i : idx) { g_out[i].fetching = true; took.push_back({g_out[i].id, g_out[i].gen}); }
         uint64_t bytes = 0;
-        const bool unlocked = fetch_unlocked_on();
+        bool unlocked = fetch_unlocked_on();
+        // B4 [nvn] fetch_queue2 (default off; needs [gfx] second_queue = same): when every result copied here was written by submissions the
+        // GPU has finished, nothing queued writes it again (no pending, newer or recorded copy-back of it or of a result over the same pages),
+        // the copy runs on the second queue after the timeline reaches its writer, so it does not wait behind the frame queued on the first
+        // one (3-8 ms per guard fault in the benchmark walk). The lock stays held meanwhile: no dispatch can be recorded over these results.
+        bool q2 = false;
+        uint64_t q2_after = 0;
+        if (!jobs.empty() && fetch_queue2_on() && !rt) {
+            const uint64_t done2 = poll_completed();
+            q2 = true;
+            for (size_t i : copy) {
+                const OutEntry& e = g_out[i];
+                if (e.pending || e.flushed || e.serial > done2) { q2 = false; break; }
+                q2_after = std::max(q2_after, e.serial);
+            }
+            for (size_t i = 0; q2 && i < g_out.size(); ++i) {
+                const OutEntry& e = g_out[i];
+                if (!overlaps(e, lo, hi) || std::find(copy.begin(), copy.end(), i) != copy.end()) continue;
+                if (e.pending || e.serial > done2 || (e.flushed && e.flushed > done2)) q2 = false;
+            }
+        }
+        if (q2) {
+            const auto c0 = std::chrono::steady_clock::now();
+            q2 = device().submit_once_q2(timeline_semaphore(), q2_after, [&](VkCommandBuffer cb) { bytes = record_jobs(cb, jobs); });
+            if (q2) {
+                d_copy_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - c0).count());
+                g_fetch_q2.fetch_add(1, std::memory_order_relaxed);
+                if (g_fetch_q2.load() == 1) NXLOG_I(kTag, "compute out: fetches copy on the second queue (fetch_queue2)");
+                jobs.clear();
+                unlocked = false;
+            }
+        }
         if (!jobs.empty()) {
             if (unlocked) lk.unlock();
+            const auto c0 = std::chrono::steady_clock::now();
             device().submit_once([&](VkCommandBuffer cb) { bytes = record_jobs(cb, jobs); });
+            d_copy_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - c0).count());
             if (unlocked) lk.lock();
         }
         (by_fault ? g_ob_fault : g_ob_inval).fetch_add(bytes, std::memory_order_relaxed);
