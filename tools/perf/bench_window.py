@@ -8,6 +8,7 @@ bench_window.py --turns <log> <frames.csv> [...]                         # the t
 bench_window.py --first-scene | --house <log> <frames.csv> [...]          # bench/first_scene.nxs (170 s), bench/house_turn.nxs (two turns)
 bench_window.py --walk --causes <log> <frames.csv> [...]                 # plus the slow frames by cause (PLAN_LOWS 1.1)
 bench_window.py --run DIR [DIR ...] --balcony                            # a run folder holding oot.log + frames.csv
+bench_window.py --turns --images --run DIR                               # plus image creation per window and the run's pt_copy lines
 
 Prints frames, mean fps (frames / summed intervals), 1% low (fps of the mean of the slowest 1% of frame intervals), median and worst
 frame, and the frames over 14.3 ms and over 20 ms (the walk's targets). `--phases a,b,...` (seconds after the window opens; `--walk`
@@ -22,6 +23,10 @@ one line per window and pools them per run.
   rt-churn  8 or more images made                               sets      sets built over 1.6x the window median
   draws     draws over 1.15x the window median                  other
 and prints, per cause, the frames over 14.3 ms, those over 20 ms and the share of the excess time (frame minus the window median).
+`--images` (PLAN_LOWS M5) adds per window the images made per second (`textures_created`), the render thread's image creation ms per
+second (`ms_r_tex_create`) and the frames with over 3 ms of it, and per run the last `pt_copy:` statistics line, the pools refused by
+`pt_copy_max_mb` (with their sizes) and the last `tex_rt_pool` statistics line. Images made are not split into targets and assets: that
+needs a frame_csv column in the runtime (not added by this tool).
 The CSV's t_s counts from the hitch monitor's start (the log line "diag: hitch log", ~0.6 s after the log opened): log times are moved
 onto that clock (before 2026-11-13 the window was taken 0.6 s late).
 """
@@ -58,6 +63,7 @@ ap.add_argument('--skip', type=float, help='seconds after --from before the wind
 ap.add_argument('--seconds', type=float, help='window length (instead of --to)')
 ap.add_argument('--phases', help='phase boundaries in seconds after the window opens, comma separated')
 ap.add_argument('--causes', action='store_true', help='slow frames by cause (PLAN_LOWS classes)')
+ap.add_argument('--images', action='store_true', help='image creation per window, pt_copy / tex_rt_pool lines of the run (M5)')
 a = ap.parse_args()
 
 pname = next((k for k in ('walk', 'balcony', 'turns', 'first_scene', 'house') if getattr(a, k)), None)
@@ -184,6 +190,35 @@ class Causes:
             f'{c} {self.n[c]}/{self.n20[c]}/{100 * self.exc[c] / tot:.0f}%' for c in CAUSES if self.n[c]) if self.n else '  causes: none over 14.3 ms'
 
 
+def image_line(sel, t0, t1):
+    s = max(t1 - t0, 1e-6)
+    made = sum(fv(r, 'textures_created') for r in sel)
+    ms = sum(fv(r, 'ms_r_tex_create') for r in sel)
+    return (f'  images: {made / s:.0f} made per second, image creation {ms / s:.1f} ms per second, '
+            f'{sum(fv(r, "ms_r_tex_create") > 3 for r in sel)} frames over 3 ms of it')
+
+
+def run_image_lines(log):
+    last_pt = last_rt = None
+    refused = collections.OrderedDict()
+    rxr = re.compile(r'pt_copy: pool (\S+) \((\d+) KiB\) is read through pointers but larger than pt_copy_max_mb')
+    with open(log, encoding='utf-8', errors='replace') as f:
+        for ln in f:
+            if 'pt_copy: ' in ln and ' pools, ' in ln and 'read from the copy' in ln:
+                last_pt = ln.split('] ', 1)[-1].strip()
+            elif 'render targets from parked images of the same layout' in ln:
+                last_rt = ln.split('] ', 1)[-1].strip()
+            m = rxr.search(ln)
+            if m:
+                refused[m.group(1)] = int(m.group(2)) >> 10
+    out = [f'  {last_pt or "pt_copy: no statistics line"}']
+    if refused:
+        out.append('  pt_copy refused (over pt_copy_max_mb): ' + ', '.join(f'{k} {v} MiB' for k, v in refused.items()))
+    if last_rt:
+        out.append(f'  {last_rt}')
+    return out
+
+
 def phase_lines(rows, acc=None):
     edges = [0.0] + phases + [float('inf')]
     for k in range(len(edges) - 1):
@@ -216,6 +251,8 @@ for log, csvf in pairs:
         print(f'{tag}window {t0:.1f}..{t1:.1f} s: {stats(ms)}')
         if phases:
             phase_lines(rows, allph)
+        if a.images:
+            print(image_line(sel, t0, t1))
         if a.causes:
             runc.add(sel)
             allc.add(sel)
@@ -224,6 +261,9 @@ for log, csvf in pairs:
         print(f'run {log}: {len(ws)} windows: {stats(runms)}')
     if a.causes:
         print(runc.line())
+    if a.images:
+        for ln in run_image_lines(log):
+            print(ln)
 if len(pairs) > 1 or len(wins) > 1:
     if len(wins) > 1 and len(pairs) > 1:
         for name, ms in perwin.items():

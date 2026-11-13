@@ -52,7 +52,11 @@ set(NXRT_PGO_FLAGS "")
 if(NXRT_PGO STREQUAL "generate")
     set(NXRT_PGO_FLAGS "/clang:-fprofile-instr-generate")
 elseif(NXRT_PGO)
-    set(NXRT_PGO_FLAGS "/clang:-fprofile-instr-use=${NXRT_PGO}" -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled -Wno-backend-plugin)
+    # The profile's hash goes into the flags: a profile rewritten at the same path then recompiles every source that uses it (with
+    # objects of two profiles in one link, ThinLTO stops at "linking module flags 'ProfileSummary': IDs have conflicting values").
+    file(MD5 "${NXRT_PGO}" _pgo_md5)
+    string(SUBSTRING "${_pgo_md5}" 0 12 _pgo_md5)
+    set(NXRT_PGO_FLAGS "/clang:-fprofile-instr-use=${NXRT_PGO}" "/DNXRT_PGO_ID=0x${_pgo_md5}" -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled -Wno-backend-plugin)
 endif()
 if(NXRT_PGO_FLAGS AND NOT NXRT_PGO_SCOPE)
     add_compile_options(${NXRT_PGO_FLAGS})
