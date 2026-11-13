@@ -4972,14 +4972,14 @@ bool keep_writes_on() {
     return on;
 }
 
-// [nvn] keep_recycle (default off until gated; cpuperf_ab_what keep_recycle: the off windows retire nothing): sets of the persistent pools
+// [nvn] keep_recycle (default on: gate K-g passed; cpuperf_ab_what keep_recycle: the off windows retire nothing): sets of the persistent pools
 // that no table holds any more (kept-set entries dropped by age, rebuilt after a failed check or retried after "dead"; image-keyed texture
 // sets and ubo_dynamic set-0 sets unused for kKeepAge presents or dropped when a pool unregisters) go to a free list per layout once the GPU
 // is past the submission that was current when they were dropped (nothing binds them after that), and keep_alloc hands them out again.
 // Before, those sets stayed allocated until the pools (6 x 16k sets) were full and everything was dropped at once (a "new era": two frames
 // of 17-22 ms replay every ~85 s on the static balcony view, ~12 new persistent sets per frame).
 bool keep_recycle_on() {
-    const bool on = NX_CFG_BOOL("nvn", "keep_recycle", false);
+    const bool on = NX_CFG_BOOL("nvn", "keep_recycle", true);
     return on && ab_on(kAbSkipGpt);
 }
 struct KeepRetired { uint64_t serial; VkDescriptorSetLayout layout; VkDescriptorSet ds; };
