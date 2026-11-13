@@ -1332,6 +1332,58 @@ NXTEST(parked_image_of_shared_storage) {
     teardown(r);
 }
 
+// ---- render targets from parked images of the same layout ([nvn] tex_rt_pool, default 2) -------------------------------------------------
+// A render target (COMPRESSIBLE) the game makes at new storage takes the parked image of a finalized target of the same layout instead of a
+// new image; a texture without the flag does not. Mode 2: the taken image starts cleared, as a new one would.
+NXTEST(render_target_takes_parked_image_of_same_layout) {
+    Rig r;
+    if (!bring_up(r)) {
+        CHECK(false);
+        return;
+    }
+    if (nxrt::config_get_int("nvn", "tex_rt_pool", 2) == 0) return;   // switched off by the configuration
+    {
+        namespace be = nxrt::nvn::be;
+        const TextureBuilderInfo rt = info(NVN_TEXTURE_TARGET_2D, 64, 64, 1, 1, NVN_FORMAT_RGBA8, NVN_TEXTURE_FLAGS_COMPRESSIBLE);
+        Tex a, c, d;
+        CHECK(make_tex(a, rt));
+        CHECK(make_tex(c, rt));
+        CHECK(make_tex(d, info(NVN_TEXTURE_TARGET_2D, 64, 64, 1, 1, NVN_FORMAT_RGBA8)));
+        be::texture_registry_add(a.t.get());
+        gpu::run_frame_sync([&](Frame& f) {
+            gpu::tex_ensure_current(a.t.get(), f);
+            gpu::tex_mark_gpu_written(a.t.get());
+        });
+        const VkImage img_a = gpu::tex_image(a.t.get());
+        CHECK(img_a != VK_NULL_HANDLE);
+        a.t->destroyed.store(true);
+        gpu::release_texture_gpu(a.t.get());
+        be::texture_registry_remove(a.t.get());
+        gpu::finish();
+        // another target at other storage: a's image, no new image, no upload
+        be::texture_registry_add(c.t.get());
+        const uint64_t made0 = gpu::counters().textures_created.load(), up0 = gpu::counters().texture_uploads.load();
+        gpu::run_frame_sync([&](Frame& f) { gpu::tex_ensure_current(c.t.get(), f); });
+        CHECK(gpu::tex_image(c.t.get()) == img_a);
+        CHECK_EQ(gpu::counters().textures_created.load() - made0, 0ull);
+        CHECK_EQ(gpu::counters().texture_uploads.load() - up0, 0ull);
+        gpu::run_frame_sync([&](Frame& f) { gpu::tex_mark_gpu_written(c.t.get()); (void)f; });
+        c.t->destroyed.store(true);
+        gpu::release_texture_gpu(c.t.get());
+        be::texture_registry_remove(c.t.get());
+        gpu::finish();
+        // a texture that is not a render target makes its own image
+        be::texture_registry_add(d.t.get());
+        gpu::run_frame_sync([&](Frame& f) { gpu::tex_ensure_current(d.t.get(), f); });
+        CHECK(gpu::tex_image(d.t.get()) != img_a);
+        d.t->destroyed.store(true);
+        gpu::release_texture_gpu(d.t.get());
+        be::texture_registry_remove(d.t.get());
+        gpu::finish();
+    }
+    teardown(r);
+}
+
 // ---- sparse texture helpers used by the background preparation (nvn_texture_registry.cpp) ----------------------------------------------
 // gather copies the mapped tiles (unmapped bytes are zero), direct hands out a pointer when the range is one piece of one physical pool, and
 // the hash follows both the bytes and where they sit.
