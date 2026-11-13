@@ -24,6 +24,9 @@ void set_copies(bool on);             // [nvn] cmd_thread_copies under cpuperf_a
 bool queue_submit_end(VkDevice dev, VkCommandBuffer cb, VkQueue q, std::mutex* mu, VkSemaphore sem, uint64_t value);
 void set_submit_async(bool on);       // under cpuperf_ab (submit_async): with it, cmd_nodrain_begin
 void apply_render_pin(bool on);       // [nvn] render_cpus under cpuperf_ab (render_pin)
+// N-g0 (PLAN_LOWS): render thread, once per present after the queue present: the render thread's own stall check, the 10 s stall summary
+// ([diag] stall_attrib) and [nvn] exp_stall_spin (measurement only).
+void stall_frame_check();
 // [nvn] recorder_spin (P1): pauses the idle recorder spins before it sleeps (default 4000). set_recorder_spin_ab: off windows of the p1
 // feature rec_spin use 4000.
 void set_recorder_spin_ab(bool on);

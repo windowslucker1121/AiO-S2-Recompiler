@@ -44,6 +44,8 @@
 #include "nxrt/kernel.h"
 #include "nvn_cpu_pick.h"
 #include "nxrt/log.h"
+#include "nxrt/ftrace.h"
+#include "nxrt/gauge.h"
 
 namespace nxrt::nvn::be::cmdq {
 namespace {
@@ -91,6 +93,7 @@ inline bool is_haz(ExecFn f) {
     return false;
 }
 
+std::atomic<int> g_rec_cpu{-1};    // N-g0: the processor the recorder ran on last (it writes it after each batch)
 std::atomic<int> g_rec_spin{-1};   // [nvn] recorder_spin (P1); -1: not read yet
 int rec_spin_cfg() {
     static const int v = static_cast<int>(std::clamp<int64_t>(config_get_int("nvn", "recorder_spin", 4000), 0, 1000000));
@@ -153,6 +156,7 @@ void recorder_loop() {
             if (tail > head) head = g_head.load(std::memory_order_acquire);
         }
         g_tail.store(tail, std::memory_order_release);
+        g_rec_cpu.store(static_cast<int>(GetCurrentProcessorNumber()), std::memory_order_relaxed);   // N-g0: where it ran
     }
 }
 
@@ -234,6 +238,156 @@ void commit() {
     if (++g_unpub >= g_pub_batch || g_wr - g_pub >= 4096) publish();
 }
 
+// ---- N-g0 (PLAN_LOWS): stall attribution --------------------------------------------------------------------------------------
+// A "stall" is a drain wait of the render thread on a recorder that is not running (9-13 ms on pinned threads in the research runs), or a
+// render-thread frame whose busy time (the frame minus its known waits) is far over the thread's own CPU time. For each, the thread's cycle
+// time over the window and the processor's counters (NtQuerySystemInformation: DPC / interrupt / idle / kernel / user time, context
+// switches, DPC and interrupt counts; no rights needed) say who had the processor: the thread itself (slow work), DPC / interrupt time (only
+// a placement off that processor helps: N1), another thread (a migration helps: N2), or nobody (the processor idled: wake latency).
+// [diag] stall_attrib (default on): the probes, one line per stall of at least 5 ms (`stall: ...`, at most 20 per 10 s) and a summary line
+// every 10 s with stalls. A drain is only probed once it has waited `[diag] stall_probe_us` (300) microseconds: cheap otherwise.
+struct ProcPerf { LARGE_INTEGER idle, kernel, user, dpc, intr; ULONG icount; };   // SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION (class 8)
+struct ProcIntr { ULONG cswitch, dpc_count, dpc_rate, time_incr, dpc_bypass, apc_bypass; };   // SYSTEM_INTERRUPT_INFORMATION (class 23)
+static_assert(sizeof(ProcPerf) == 48 && sizeof(ProcIntr) == 24, "NtQuerySystemInformation layouts");
+using NtQsiFn = LONG(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
+NtQsiFn nt_qsi() {
+    static const NtQsiFn f = reinterpret_cast<NtQsiFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation"));
+    return f;
+}
+struct CpuSnap { ProcPerf p{}; ProcIntr i{}; bool ok = false; };
+CpuSnap cpu_snap(int cpu) {   // one processor's counters (every processor is read; at most 64)
+    CpuSnap s;
+    const NtQsiFn f = nt_qsi();
+    if (!f || cpu < 0 || cpu >= 64) return s;
+    ProcPerf pp[64];
+    ProcIntr pi[64];
+    ULONG got = 0;
+    if (f(8, pp, sizeof pp, &got) < 0 || got < (static_cast<ULONG>(cpu) + 1) * sizeof(ProcPerf)) return s;
+    if (f(23, pi, sizeof pi, &got) < 0 || got < (static_cast<ULONG>(cpu) + 1) * sizeof(ProcIntr)) return s;
+    s.p = pp[cpu];
+    s.i = pi[cpu];
+    s.ok = true;
+    return s;
+}
+double tsc_per_us() {   // from install on (g_spin_qpc0 / g_spin_tsc0); a fixed guess before 0.1 s
+    LARGE_INTEGER q, f;
+    QueryPerformanceCounter(&q);
+    QueryPerformanceFrequency(&f);
+    const uint64_t tsc = __rdtsc();
+    const double us = static_cast<double>(static_cast<uint64_t>(q.QuadPart) - g_spin_qpc0) * 1e6 / static_cast<double>(f.QuadPart);
+    static double cached = 0;
+    if (us > 1e5 && g_spin_tsc0) cached = static_cast<double>(tsc - g_spin_tsc0) / us;
+    return cached > 0 ? cached : 3400.0;
+}
+enum Verdict { kVRan, kVDpc, kVOther, kVIdle, kVUnk, kVCount };
+constexpr const char* kVerdictName[kVCount] = {"the thread ran (slow work)", "DPC / interrupt time", "another thread had the processor",
+                                               "the processor idled", "unattributed"};
+constexpr const char* kVerdictShort[kVCount] = {"ran", "dpc", "other", "idle", "unattributed"};
+// a, b: the processor's counters at the window's ends; wall_us the window; ran_us the thread's own CPU time in it.
+Verdict attribute(const CpuSnap& a, const CpuSnap& b, double wall_us, double ran_us, char* out, size_t n) {
+    if (!a.ok || !b.ok) { std::snprintf(out, n, "no processor counters"); return kVUnk; }
+    auto d = [](const LARGE_INTEGER& x, const LARGE_INTEGER& y) { return static_cast<double>(y.QuadPart - x.QuadPart) / 10.0; };   // 100 ns -> us
+    const double idle = d(a.p.idle, b.p.idle), dpc = d(a.p.dpc, b.p.dpc), intr = d(a.p.intr, b.p.intr), user = d(a.p.user, b.p.user);
+    const double kern = std::max(0.0, d(a.p.kernel, b.p.kernel) - idle - dpc - intr);
+    const uint32_t cs = b.i.cswitch - a.i.cswitch, dpcs = b.i.dpc_count - a.i.dpc_count, ints = b.p.icount - a.p.icount;
+    const double missing = std::max(0.0, wall_us - ran_us);
+    const double others = std::max(0.0, user + kern - ran_us);
+    Verdict v;
+    if (ran_us >= 0.6 * wall_us) v = kVRan;
+    else if (dpc + intr >= 0.4 * missing) v = kVDpc;
+    // one context switch is enough: a thread that was not running when the window began and gets the processor at its end (the time
+    // counters are charged per clock tick, 15.6 ms by default, so they often read 0 over a 5-13 ms window)
+    else if (cs >= 1 && (others >= 0.4 * missing || idle < 0.5 * missing)) v = kVOther;
+    else if (idle >= 0.5 * missing) v = kVIdle;
+    else v = kVUnk;
+    std::snprintf(out, n, "%s (window %.2f ms, the thread ran %.2f ms; processor: dpc %.2f ms, interrupt %.2f ms, kernel %.2f ms, user %.2f ms, idle %.2f ms, "
+                  "%u context switches, %u DPCs, %u interrupts)", kVerdictName[v], wall_us / 1000, ran_us / 1000, dpc / 1000, intr / 1000, kern / 1000,
+                  user / 1000, idle / 1000, cs, dpcs, ints);
+    return v;
+}
+bool stall_attrib_on() {
+    static const bool on = config_get_bool("diag", "stall_attrib", true);
+    return on;
+}
+uint64_t stall_probe_tsc() {
+    static const uint64_t t = static_cast<uint64_t>(std::clamp<int64_t>(config_get_int("diag", "stall_probe_us", 300), 50, 100000) * tsc_per_us());
+    return t;
+}
+uint64_t g_st_drain[kVCount] = {}, g_st_drain_big[kVCount] = {}, g_st_render[kVCount] = {};   // render thread: stalls by verdict (drain >= 2 ms, >= 5 ms; render)
+uint64_t g_st_lines = 0;                 // stall lines in this 10 s window
+// N2 ([nvn] stall_widen, default off; cpu ms threshold [nvn] stall_widen_us 300): a drain whose recorder did not run for most of the
+// last `stall_widen_us` widens the recorder's affinity to the process's processors (a ready thread then moves at once to an idle one) and
+// pins it again when it has caught up. Counted: widenings, and widenings in drains that ended under 1 ms after it (cheap ones).
+std::atomic<int> g_widen_cfg{-1};
+uint64_t g_widen_n = 0, g_widen_fast = 0;
+int widen_cfg() {
+    int v = g_widen_cfg.load(std::memory_order_relaxed);
+    if (v < 0) { v = config_get_bool("nvn", "stall_widen", false) ? 1 : 0; g_widen_cfg.store(v, std::memory_order_relaxed); }
+    return v;
+}
+std::atomic<int> g_pin_rec_now{-1};      // the recorder's pinned processor while pinned (apply_render_pin), -1 otherwise
+struct DrainProbe {
+    bool armed = false, widened = false;
+    uint64_t t_arm = 0, cyc_arm = 0, t_check = 0, cyc_check = 0;
+    int cpu = -1;
+    CpuSnap s0;
+    HANDLE th() const { return g_thread.joinable() ? const_cast<std::thread&>(g_thread).native_handle() : nullptr; }
+    void poll(uint64_t t0) {
+        const uint64_t now = __rdtsc();
+        if (!armed) {
+            if (now - t0 < stall_probe_tsc()) return;
+            armed = true;
+            t_arm = t_check = now;
+            ULONG64 c = 0;
+            if (HANDLE h = th()) QueryThreadCycleTime(h, &c);
+            cyc_arm = cyc_check = c;
+            cpu = g_rec_cpu.load(std::memory_order_relaxed);
+            if (stall_attrib_on()) s0 = cpu_snap(cpu);
+            return;
+        }
+        if (widened || !widen_cfg() || g_pin_rec_now.load(std::memory_order_relaxed) < 0) return;
+        if (now - t_check < stall_probe_tsc()) return;
+        ULONG64 c = 0;
+        HANDLE h = th();
+        if (!h) return;
+        QueryThreadCycleTime(h, &c);
+        const bool stuck = (c - cyc_check) * 10 < (now - t_check) * 3;   // ran under 30% of the last period
+        t_check = now;
+        cyc_check = c;
+        if (!stuck) return;
+        DWORD_PTR proc = 0, sys = 0;
+        GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys);
+        SetThreadAffinityMask(h, proc);
+        widened = true;
+        ++g_widen_n;
+        ft::mark("stall.widen", static_cast<uint32_t>(cpu));
+    }
+    void finish(uint64_t t0, uint64_t t_end) {
+        if (widened) {
+            const int c = g_pin_rec_now.load(std::memory_order_relaxed);
+            if (HANDLE h = th(); h && c >= 0) SetThreadAffinityMask(h, DWORD_PTR{1} << c);
+            if ((t_end - t_check) < static_cast<uint64_t>(1000 * tsc_per_us())) ++g_widen_fast;
+        }
+        if (!armed || !stall_attrib_on()) return;
+        const double tpu = tsc_per_us();
+        const double total_us = static_cast<double>(t_end - t0) / tpu;
+        if (total_us < 2000) return;
+        ULONG64 c = 0;
+        if (HANDLE h = th()) QueryThreadCycleTime(h, &c);
+        const CpuSnap s1 = cpu_snap(cpu);
+        const double wall = static_cast<double>(t_end - t_arm) / tpu, ran = static_cast<double>(c - cyc_arm) / tpu;
+        char b[512];
+        const Verdict v = attribute(s0, s1, wall, ran, b, sizeof b);
+        ++g_st_drain[v];
+        if (total_us >= 5000) {
+            ++g_st_drain_big[v];
+            ft::mark("stall.drain", static_cast<uint32_t>(total_us));
+            if (g_st_lines++ < 20)
+                NXLOG_I(kTag, "stall: drain wait %.1f ms on the recorder (processor %d%s): %s", total_us / 1000, cpu, widened ? ", widened" : "", b);
+        }
+    }
+};
+
 void drain_now() {
     publish();
     if (g_ph) { ++g_ph_forced; ph_set(1); }
@@ -242,8 +396,16 @@ void drain_now() {
     g_need.store(1, std::memory_order_seq_cst);   // a look-ahead through a pass stops (its end may not be queued yet)
     if (g_sleeping.load(std::memory_order_seq_cst)) WakeByAddressSingle(&g_head);
     const uint64_t t0 = __rdtsc();
-    while (g_tail.load(std::memory_order_acquire) != g_wr) { _mm_pause(); ++g_drain_spins; }
-    g_drain_ticks += __rdtsc() - t0;
+    DrainProbe pr;
+    uint32_t k = 0;
+    while (g_tail.load(std::memory_order_acquire) != g_wr) {
+        _mm_pause();
+        ++g_drain_spins;
+        if ((++k & 127) == 0) pr.poll(t0);
+    }
+    const uint64_t t1 = __rdtsc();
+    g_drain_ticks += t1 - t0;
+    if (pr.armed || pr.widened) pr.finish(t0, t1);
     g_need.store(0, std::memory_order_relaxed);
 }
 
@@ -894,6 +1056,7 @@ void begin_submission(bool on) {
         }
         g_pub_batch_cfg = static_cast<uint32_t>(std::clamp<int64_t>(config_get_int("nvn", "cmd_publish_batch", 32), 1, 4096));
         g_pub_batch = g_pub_batch_cfg;
+        g_nodrain.store(config_get_bool("nvn", "cmd_nodrain_begin", false), std::memory_order_relaxed);   // N3: also outside cpuperf_ab
         NXLOG_I(kTag, "cmd_thread: vkCmd* calls of the render thread are recorded by the nvn-recorder thread (16 MiB ring)");
     }
     if (!g_ring) return;
@@ -1089,7 +1252,7 @@ void apply_render_pin(bool on) {
     if (!parsed) {
         parsed = true;
         const char* why = "explicit";
-        if (cfg == "auto") {
+        if (cfg == "auto" || cfg == "auto_legacy") {
             const std::vector<CpuCore> cores = machine_cores();
             const ::nxrt::kernel::SchedInfo si = ::nxrt::kernel::sched_info();
             CpuGuest g;
@@ -1097,7 +1260,7 @@ void apply_render_pin(bool on) {
             for (int i = 0; i < si.cores && i < 6; ++i) g.ideal |= si.host_masks[i];
             g.main = si.host_masks[0];
             g.pool = si.pool;
-            const CpuPick pk = pick_render_cpus(cores, g);
+            const CpuPick pk = pick_render_cpus(cores, g, cfg == "auto_legacy");   // auto_legacy: the recorder on core 0's second thread (before N1)
             r = pk.render;
             c = pk.recorder;
             why = pk.why;
@@ -1114,6 +1277,97 @@ void apply_render_pin(bool on) {
     if (!(proc >> r & 1) || !(proc >> c & 1)) return;   // outside the process's affinity
     SetThreadAffinityMask(GetCurrentThread(), on ? (DWORD_PTR{1} << r) : proc);
     if (g_thread.joinable()) SetThreadAffinityMask(g_thread.native_handle(), on ? (DWORD_PTR{1} << c) : proc);
+    g_pin_rec_now.store(on && g_thread.joinable() ? c : -1, std::memory_order_relaxed);   // N2 pins it here again after a widening
+}
+
+// N-g0: the render thread's own stalls (once per present), the stall summary, and [nvn] exp_stall_spin (measurement only, default 0): a
+// thread at the recorder's priority (`exp_stall_spin_prio = above`: time critical) moves onto the recorder's processor every
+// `exp_stall_spin_period_s` (5) seconds and spins there for that many milliseconds: a stand-in for the outside source that took pinned
+// processors for 9-13 ms in the research runs (stall attribution and N2's gate).
+void stall_spin_thread(int ms, int period_ms, bool above) {
+    log_set_thread_name("nvn-stallspin");
+    uint64_t n = 0;
+    for (;;) {
+        Sleep(static_cast<DWORD>(period_ms));
+        const int pin = g_pin_rec_now.load(std::memory_order_relaxed);
+        const int cpu = pin >= 0 ? pin : g_rec_cpu.load(std::memory_order_relaxed);
+        if (cpu < 0 || cpu > 63 || !g_thread.joinable()) continue;
+        const int prio = above ? THREAD_PRIORITY_TIME_CRITICAL : GetThreadPriority(g_thread.native_handle());
+        SetThreadPriority(GetCurrentThread(), prio == THREAD_PRIORITY_ERROR_RETURN ? THREAD_PRIORITY_HIGHEST : prio);
+        SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR{1} << cpu);
+        LARGE_INTEGER q, f, e;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&q);
+        ft::mark("stall.spin", static_cast<uint32_t>(cpu));
+        e.QuadPart = q.QuadPart + f.QuadPart * ms / 1000;
+        do { _mm_pause(); QueryPerformanceCounter(&q); } while (q.QuadPart < e.QuadPart);
+        if (++n <= 3 || n % 60 == 0) NXLOG_I(kTag, "exp_stall_spin: spun %d ms on processor %d (%llu times)", ms, cpu, (unsigned long long)n);
+    }
+}
+void stall_frame_check() {
+    static const int64_t spin_ms = std::clamp<int64_t>(config_get_int("nvn", "exp_stall_spin", 0), 0, 1000);
+    static bool spin_started = false;
+    if (spin_ms > 0 && !spin_started && g_thread.joinable()) {
+        spin_started = true;
+        const int period = static_cast<int>(std::clamp(config_get_double("nvn", "exp_stall_spin_period_s", 5.0), 0.05, 600.0) * 1000);
+        std::thread(stall_spin_thread, static_cast<int>(spin_ms), period, config_get_str("nvn", "exp_stall_spin_prio", "same") == "above").detach();
+        NXLOG_I(kTag, "exp_stall_spin: %lld ms every %d ms on the recorder's processor (measurement only)", static_cast<long long>(spin_ms), period);
+    }
+    if (!stall_attrib_on()) return;
+    static uint64_t q_prev = 0, q_sum = 0;
+    static ULONG64 cyc_prev = 0;
+    static double blk_prev = 0;
+    static int cpu_prev = -1;
+    static CpuSnap s_prev;
+    LARGE_INTEGER q, f;
+    QueryPerformanceCounter(&q);
+    QueryPerformanceFrequency(&f);
+    ULONG64 cyc = 0;
+    QueryThreadCycleTime(GetCurrentThread(), &cyc);
+    const double blk = hitch_phase_seconds(kHpRenderIdle) + hitch_phase_seconds(kHpRenderLimiter) + hitch_phase_seconds(kHpRenderAcquire) +
+                       hitch_phase_seconds(kHpRenderGpuWait) + hitch_phase_seconds(kHpRenderLockWait) + hitch_phase_seconds(kHpRenderPresentEnd);
+    const int cpu = static_cast<int>(GetCurrentProcessorNumber());
+    const CpuSnap s = cpu_snap(cpu);
+    const uint64_t qn = static_cast<uint64_t>(q.QuadPart);
+    if (q_prev && cpu == cpu_prev) {
+        const double tpu = tsc_per_us();
+        const double wall = static_cast<double>(qn - q_prev) * 1e6 / static_cast<double>(f.QuadPart);
+        const double busy = wall - (blk - blk_prev) * 1e6, ran = static_cast<double>(cyc - cyc_prev) / tpu;
+        if (busy - ran >= 5000 && ran < 0.6 * busy) {   // (a frame that ran most of its busy time has waits the phases do not name)
+            char b[512];
+            const Verdict v = attribute(s_prev, s, busy, ran, b, sizeof b);
+            ++g_st_render[v];
+            ft::mark("stall.render", static_cast<uint32_t>(busy - ran));
+            if (g_st_lines++ < 20)
+                NXLOG_I(kTag, "stall: render thread short of CPU by %.1f ms in a %.1f ms frame (processor %d; the processor's counters cover the whole frame, its waits included): %s",
+                        (busy - ran) / 1000, wall / 1000, cpu, b);
+        }
+        q_sum += qn - q_prev;
+    }
+    q_prev = qn;
+    cyc_prev = cyc;
+    blk_prev = blk;
+    cpu_prev = cpu;
+    s_prev = s;
+    if (q_sum >= static_cast<uint64_t>(f.QuadPart) * 10) {   // the summary of 10 s
+        q_sum = 0;
+        uint64_t any = g_widen_n;
+        for (int i = 0; i < kVCount; ++i) any += g_st_drain[i] + g_st_render[i];
+        if (any) {
+            std::string d, d5, r;
+            char b[64];
+            for (int i = 0; i < kVCount; ++i) {
+                std::snprintf(b, sizeof b, "%s%s %llu", i ? ", " : "", kVerdictShort[i], (unsigned long long)g_st_drain[i]); d += b;
+                std::snprintf(b, sizeof b, "%s%s %llu", i ? ", " : "", kVerdictShort[i], (unsigned long long)g_st_drain_big[i]); d5 += b;
+                std::snprintf(b, sizeof b, "%s%s %llu", i ? ", " : "", kVerdictShort[i], (unsigned long long)g_st_render[i]); r += b;
+            }
+            NXLOG_I(kTag, "stalls over 10 s: drain waits >= 2 ms by cause: %s; of them >= 5 ms: %s; render thread short >= 5 ms: %s; N2 widenings %llu (%llu ended within 1 ms)",
+                    d.c_str(), d5.c_str(), r.c_str(), (unsigned long long)g_widen_n, (unsigned long long)g_widen_fast);
+        }
+        for (int i = 0; i < kVCount; ++i) g_st_drain[i] = g_st_drain_big[i] = g_st_render[i] = 0;
+        g_widen_n = g_widen_fast = 0;
+        g_st_lines = 0;
+    }
 }
 void set_publish_batch(bool on) { g_pub_batch = on ? g_pub_batch_cfg : 1; }
 void desc_stats(uint64_t* queued, uint64_t* direct) { *queued = g_uds_queued; *direct = g_uds_direct; }

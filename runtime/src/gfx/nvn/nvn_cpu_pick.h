@@ -29,11 +29,40 @@ inline int cpu_lowest(uint64_t m) {
     return -1;
 }
 
+// N1 (PLAN_LOWS): a place for the recorder when only one fast core is free: the second hardware thread of a guest core (a fast core, not
+// core 0, that holds an ideal processor of the console core model, with a hardware thread that is no ideal processor). With `busy` (non-idle
+// microseconds per logical processor over a recent window, 64 entries) the core with the least busy pair; without it the main guest
+// thread's core (its thread waits for the GPU and its workers for much of a frame; logical 13 on the development machine). -1: none.
+inline int pick_recorder_sibling(const std::vector<CpuCore>& cores, const CpuGuest& g, const uint64_t* busy = nullptr) {
+    if (!g.model || !g.ideal) return -1;
+    int best = cores.empty() ? 0 : cores[0].eff;
+    for (const CpuCore& c : cores) if (c.eff > best) best = c.eff;
+    int pick = -1;
+    uint64_t pick_score = ~uint64_t{0};
+    for (const CpuCore& c : cores) {
+        if (c.eff != best || (c.mask & 1) || !(c.mask & g.ideal)) continue;
+        const uint64_t sib = c.mask & ~g.ideal;
+        if (!sib) continue;
+        const int s = cpu_lowest(sib);
+        uint64_t score;
+        if (busy) {
+            score = 0;
+            for (int b = 0; b < 64; ++b) if (c.mask >> b & 1) score += busy[b];
+        } else {
+            score = (g.main && (c.mask & g.main)) ? 0 : 1;
+        }
+        if (score < pick_score) { pick_score = score; pick = s; }
+    }
+    return pick;
+}
+
 // Rules: only the fastest cores (never efficiency cores of a hybrid CPU); never core 0 (interrupts) for the render thread; never a core
 // the guest threads prefer (an ideal processor of the console core model); with a shared last-level cache of the main guest thread's
 // core known, cores that share it first (X3D / several CCDs: the render thread works on the game's data). The recorder gets a second such
-// core, or else the second hardware thread of core 0 when the guest pool leaves it out. Anything else: no pinning.
-inline CpuPick pick_render_cpus(const std::vector<CpuCore>& cores, const CpuGuest& g) {
+// core, or else (N1) the second hardware thread of a guest core (pick_recorder_sibling; core 0 runs most interrupts and DPCs of the
+// machine: 9,200 interrupts and 6,800 DPCs a second on the development machine), or else the second hardware thread of core 0 when the
+// guest pool leaves it out. Anything else: no pinning. `legacy`: the rule before N1 (core 0's second hardware thread first).
+inline CpuPick pick_render_cpus(const std::vector<CpuCore>& cores, const CpuGuest& g, bool legacy = false) {
     CpuPick p;
     if (cores.size() < 4) { p.why = "fewer than 4 cores"; return p; }
     int best = cores[0].eff;
@@ -57,6 +86,9 @@ inline CpuPick pick_render_cpus(const std::vector<CpuCore>& cores, const CpuGues
     if (free.size() >= 2) {
         p.recorder = cpu_lowest(free[1]->mask);
         p.why = "two free fast cores";
+    } else if (const int sib = legacy ? -1 : pick_recorder_sibling(cores, g); sib >= 0) {
+        p.recorder = sib;
+        p.why = "one free fast core, recorder on the second hardware thread of the main guest thread's core";
     } else if ((core0 & 2) && !(g.pool & 2) && (!g.model || !(g.ideal & 2))) {
         p.recorder = 1;   // the second hardware thread of core 0
         p.why = "one free fast core, recorder on core 0's second hardware thread";

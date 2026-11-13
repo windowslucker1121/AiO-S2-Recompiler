@@ -91,6 +91,7 @@ constexpr size_t kRecentMax = 64;
 struct CsvRow {
     uint64_t frame = 0;
     double at_s = 0, ms = 0;
+    double ms_tick = 0;                           // M1: the interval between the two ticks (diag_frame_tick, before the pace wait)
     int64_t val[kMaxSources] = {};
     uint64_t phase[kHpCount] = {};
     uint64_t game_gap = 0;
@@ -101,6 +102,16 @@ std::vector<CsvRow> g_csv_rows;
 FILE* g_csv_f = nullptr;
 std::string g_csv_path;
 size_t g_csv_cols = 0;                            // sources when the header was written (later ones are left out)
+// M1 (PLAN_LOWS): the row of a frame waits for its actual present (hitch_note_present, after the pace wait and the queue present), so the
+// column ms is the interval between two actual presents; ms_tick keeps the interval between the ticks (taken before the pace wait, it
+// overstates the jitter at a frame cap). A frame whose present never comes (an early return) keeps its tick interval. Presenting thread only.
+CsvRow g_csv_pend;
+bool g_csv_pend_on = false;
+uint64_t g_present_last = 0;
+void csv_push(const CsvRow& r) {
+    std::lock_guard<std::mutex> lk(g_csv_mu);
+    if (g_csv_rows.size() < 100000) g_csv_rows.push_back(r);
+}
 
 // [diag] frame_csv_threads (P1, W10 hitch census): CPU time per frame by thread group, from QueryThreadCycleTime of every registered thread
 // (the registry is re-read every second; cycles are converted with the TSC rate measured against QPC). Columns cpu_<group>_us, plus
@@ -214,12 +225,14 @@ void hitch_on_frame(uint64_t t, uint64_t prev_t, uint64_t n) {
         CsvRow r;
         r.frame = n;
         r.ms = (double)(t - prev_t) * 1000.0 / qpc_freq();
+        r.ms_tick = r.ms;
         r.at_s = (double)(t - g_t0_ticks.load(std::memory_order_relaxed)) / qpc_freq();
         for (size_t i = 0; i < ns; i++) r.val[i] = g_src[i].counter ? (int64_t)(cur[i] - g_prev_val[i]) : (int64_t)cur[i];
         for (int i = 0; i < kHpCount; i++) r.phase[i] = curp[i] - g_prev_phase[i];
         r.game_gap = gap;
-        std::lock_guard<std::mutex> lk(g_csv_mu);
-        if (g_csv_rows.size() < 100000) g_csv_rows.push_back(r);
+        if (g_csv_pend_on) { csv_push(g_csv_pend); g_present_last = 0; }   // the previous frame was not presented: its tick interval stays
+        g_csv_pend = r;
+        g_csv_pend_on = true;
     }
     if (g_anat_factor > 0 && prev_t && t > prev_t) {   // M2 (presenting thread only)
         const double rep = (double)(curp[kHpRenderReplay] - g_prev_phase[kHpRenderReplay]) * 1000.0 / qpc_freq();
@@ -405,7 +418,7 @@ void csv_flush() {
             return;
         }
         g_csv_cols = g_nsrc.load(std::memory_order_acquire);
-        std::string h = "frame,t_s,ms";
+        std::string h = "frame,t_s,ms,ms_tick";
         for (size_t i = 0; i < g_csv_cols; i++) { h += ","; h += g_src[i].label; }
         for (int i = 0; i < kHpCount; i++) { h += ",ms_"; h += kPhaseNames[i]; }
         h += ",ms_game_gap\n";
@@ -416,7 +429,7 @@ void csv_flush() {
     std::string line;
     char b[64];
     for (const CsvRow& r : rows) {
-        snprintf(b, sizeof b, "%llu,%.3f,%.3f", (unsigned long long)r.frame, r.at_s, r.ms);
+        snprintf(b, sizeof b, "%llu,%.3f,%.3f,%.3f", (unsigned long long)r.frame, r.at_s, r.ms, r.ms_tick);
         line = b;
         for (size_t i = 0; i < g_csv_cols; i++) { snprintf(b, sizeof b, ",%lld", (long long)r.val[i]); line += b; }
         for (int i = 0; i < kHpCount; i++) { snprintf(b, sizeof b, ",%.3f", (double)r.phase[i] * f); line += b; }
@@ -621,6 +634,16 @@ void soak_note_frame() {
 }
 
 uint64_t hitch_ticks() { return qpc(); }
+void hitch_note_present() {
+    if (!g_csv_on.load(std::memory_order_relaxed)) return;
+    const uint64_t t = qpc();
+    if (g_csv_pend_on) {
+        if (g_present_last && t > g_present_last) g_csv_pend.ms = (double)(t - g_present_last) * 1000.0 / qpc_freq();
+        csv_push(g_csv_pend);
+        g_csv_pend_on = false;
+    }
+    g_present_last = t;
+}
 double hitch_phase_seconds(int phase) {
     return phase >= 0 && phase < kHpCount ? static_cast<double>(g_phase[phase].load(std::memory_order_relaxed)) / qpc_freq() : 0.0;
 }
