@@ -1964,6 +1964,20 @@ void tex_ensure_current(Texture* t, Frame& f) {
         g->uploaded = true;
         return;
     }
+    // [nvn] tex_compressible_no_upload (default on): a COMPRESSIBLE texture is a render target whose memory holds the GPU's compressed
+    // form; the CPU cannot write meaningful content there, so its storage is never uploaded (the image starts cleared, as a promoted target).
+    // The game makes new texture objects over its post-process targets now and then (in the benchmark walk: nine at once, 22 MB untiled on
+    // the render thread, a 26-28 ms frame); each upload read stale bytes the GPU then overwrote.
+    if ((t->b.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) && NX_CFG_BOOL("nvn", "tex_compressible_no_upload", true)) {
+        t->cpu_dirty.exchange(false);
+        if (!g->uploaded && !g->gpu_written) fill_zero(f, *g);
+        g->uploaded = true;
+        static std::atomic<uint32_t> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 5)
+            NXLOG_I(kTag, "texture %u (%ux%u, %llu KiB): compressible render target, storage not uploaded (tex_compressible_no_upload)", t->id,
+                    g->base.width, g->base.height, static_cast<unsigned long long>(t->storage_size >> 10));
+        return;
+    }
     t->cpu_dirty.exchange(false);
     // before the storage is read: a write from now on makes it dirty again. Off the render thread (tex_ww_arm_later): the content hash of what
     // the upload reads is taken here instead, and the worker compares it after arming.
