@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Frame trace recorder (include/nxrt/ftrace.h). Events go into a preallocated array claimed with one atomic add; a writer thread
-// appends them to the trace file once a second. File format, one record per line:
+// appends them to the trace file once a second. The writer formats into its own buffer and holds no lock a recording thread
+// takes (zone names are an append-only array read without a lock), so a flush never stalls the render thread. File format,
+// one record per line:
 //   # zone <id> <name>        # thread <index> <os tid> <name>        <t_ns> <dur_ns> <thread index> <zone id> <arg>
 #include "nxrt/ftrace.h"
 
@@ -35,12 +37,17 @@ struct Ev {
 };
 
 constexpr uint32_t kMaxThreads = 1024;
+constexpr uint32_t kMaxZones = 4096;
 
 Ev* g_ev = nullptr;
 size_t g_cap = 0;
 std::atomic<size_t> g_n{0};
-std::mutex g_mu;                                   // names and the file
-std::vector<std::string> g_zone_names;
+std::mutex g_mu;                                   // the file (writer thread and stop only)
+std::mutex g_names_mu;                             // zone registration only; never held while writing
+const char* g_zone_names[kMaxZones];               // append-only, published by g_zone_count (release)
+std::atomic<uint32_t> g_zone_count{0};
+std::mutex g_start_mu;
+std::vector<char> g_buf;                           // the writer's format buffer
 std::atomic<uint16_t> g_next_thread{0};
 std::string g_thread_names[kMaxThreads];
 uint32_t g_thread_tids[kMaxThreads];
@@ -68,20 +75,40 @@ int thread_index() {
     return t_index;
 }
 
+char* put_u64(char* p, uint64_t v) {
+    char tmp[24];
+    int n = 0;
+    do { tmp[n++] = static_cast<char>('0' + v % 10); v /= 10; } while (v);
+    while (n) *p++ = tmp[--n];
+    return p;
+}
+
 void flush_locked() {
     if (!g_file) return;
     // names first so the reader knows every id it meets
-    for (; g_zones_written < g_zone_names.size(); ++g_zones_written) std::fprintf(g_file, "# zone %zu %s\n", g_zones_written, g_zone_names[g_zones_written].c_str());
+    const size_t nz = g_zone_count.load(std::memory_order_acquire);
+    for (; g_zones_written < nz; ++g_zones_written) std::fprintf(g_file, "# zone %zu %s\n", g_zones_written, g_zone_names[g_zones_written]);
     const size_t n = std::min(g_n.load(std::memory_order_acquire), g_cap);
     const size_t nt = std::min<size_t>(g_next_thread.load(), kMaxThreads);
     for (; g_threads_written < nt; ++g_threads_written) {
         const char* nm = g_thread_names[g_threads_written].empty() ? "-" : g_thread_names[g_threads_written].c_str();
         std::fprintf(g_file, "# thread %zu %u %s\n", g_threads_written, g_thread_tids[g_threads_written], nm);
     }
+    // formatted by hand into big blocks: far less CPU than one fprintf per event
+    constexpr size_t kChunk = 1 << 20;
+    if (g_buf.size() < kChunk + 128) g_buf.resize(kChunk + 128);
+    char* const b0 = g_buf.data();
+    char* p = b0;
     for (; g_written < n; ++g_written) {
         const Ev& e = g_ev[g_written];
-        std::fprintf(g_file, "%llu %u %u %u %u\n", static_cast<unsigned long long>(e.t0), e.dur, e.thread, e.zone, e.arg);
+        p = put_u64(p, e.t0); *p++ = ' ';
+        p = put_u64(p, e.dur); *p++ = ' ';
+        p = put_u64(p, e.thread); *p++ = ' ';
+        p = put_u64(p, e.zone); *p++ = ' ';
+        p = put_u64(p, e.arg); *p++ = '\n';
+        if (static_cast<size_t>(p - b0) >= kChunk) { std::fwrite(b0, 1, static_cast<size_t>(p - b0), g_file); p = b0; }
     }
+    if (p != b0) std::fwrite(b0, 1, static_cast<size_t>(p - b0), g_file);
     std::fflush(g_file);
 }
 
@@ -103,11 +130,18 @@ uint64_t now_ns() {
 }
 
 uint16_t zone_id(const char* name) {
-    std::lock_guard<std::mutex> lk(g_mu);
-    for (size_t i = 0; i < g_zone_names.size(); ++i)
-        if (g_zone_names[i] == name) return static_cast<uint16_t>(i);
-    g_zone_names.emplace_back(name);
-    return static_cast<uint16_t>(g_zone_names.size() - 1);
+    // lock-free look-up of the published names; registration under its own small lock, which the writer never holds
+    const uint32_t n = g_zone_count.load(std::memory_order_acquire);
+    for (uint32_t i = 0; i < n; ++i)
+        if (std::strcmp(g_zone_names[i], name) == 0) return static_cast<uint16_t>(i);
+    std::lock_guard<std::mutex> lk(g_names_mu);
+    const uint32_t n2 = g_zone_count.load(std::memory_order_acquire);
+    for (uint32_t i = n; i < n2; ++i)
+        if (std::strcmp(g_zone_names[i], name) == 0) return static_cast<uint16_t>(i);
+    if (n2 >= kMaxZones) return static_cast<uint16_t>(kMaxZones - 1);
+    g_zone_names[n2] = _strdup(name);
+    g_zone_count.store(n2 + 1, std::memory_order_release);
+    return static_cast<uint16_t>(n2);
 }
 
 void event(uint16_t zone, uint64_t t0, uint64_t t1, uint32_t arg) {
@@ -222,7 +256,7 @@ void frame() {
 }
 
 void start_from_config() {
-    std::lock_guard<std::mutex> lk(g_mu);
+    std::lock_guard<std::mutex> lk(g_start_mu);
     if (g_started) return;
     const std::string path = config_get_str("prof", "trace", "");
     if (path.empty()) return;
@@ -242,6 +276,7 @@ void start_from_config() {
 }
 
 void stop() {
+    std::lock_guard<std::mutex> lk0(g_start_mu);
     if (!g_started) return;
     g_on.store(false);
     g_stop.store(true);

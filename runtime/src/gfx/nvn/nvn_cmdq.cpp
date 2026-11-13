@@ -40,6 +40,7 @@
 #include "nvn_hazard.h"
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
+#include "nxrt/gauge.h"
 #include "nxrt/kernel.h"
 #include "nvn_cpu_pick.h"
 #include "nxrt/log.h"
@@ -94,6 +95,21 @@ int rec_spin_cfg() {
     static const int v = static_cast<int>(std::clamp<int64_t>(config_get_int("nvn", "recorder_spin", 4000), 0, 1000000));
     return v;
 }
+// [diag] frame_csv column cpu_recorder_spin_us (M4): TSC cycles the recorder spent in its pause-spin waiting for packets. The thread's
+// cycle time (cpu_recorder_us) includes them; its real work is cpu_recorder_us - cpu_recorder_spin_us.
+std::atomic<uint64_t> g_spin_cyc{0};
+uint64_t g_spin_qpc0 = 0, g_spin_tsc0 = 0;
+uint64_t recorder_spin_us() {
+    LARGE_INTEGER q, f;
+    QueryPerformanceCounter(&q);
+    QueryPerformanceFrequency(&f);
+    const uint64_t tsc = __rdtsc();
+    const double us = static_cast<double>(static_cast<uint64_t>(q.QuadPart) - g_spin_qpc0) * 1e6 / static_cast<double>(f.QuadPart);
+    if (us < 1e5) return 0;
+    const double cyc_per_us = static_cast<double>(tsc - g_spin_tsc0) / us;
+    return cyc_per_us > 0 ? static_cast<uint64_t>(static_cast<double>(g_spin_cyc.load(std::memory_order_relaxed)) / cyc_per_us) : 0;
+}
+
 void recorder_loop() {
     tl_recorder = true;
     if (g_rec_spin.load(std::memory_order_relaxed) < 0) g_rec_spin.store(rec_spin_cfg(), std::memory_order_relaxed);
@@ -105,10 +121,12 @@ void recorder_loop() {
         uint64_t head = g_head.load(std::memory_order_acquire);
         if (head == tail) {
             const int spin = g_rec_spin.load(std::memory_order_relaxed);
+            const uint64_t s0 = __rdtsc();
             for (int i = 0; i < spin && head == tail; ++i) {
                 _mm_pause();
                 head = g_head.load(std::memory_order_acquire);
             }
+            g_spin_cyc.store(g_spin_cyc.load(std::memory_order_relaxed) + (__rdtsc() - s0), std::memory_order_relaxed);   // one writer
             if (head == tail) {
                 if (g_stop.load(std::memory_order_acquire)) return;
                 g_sleeping.store(1, std::memory_order_seq_cst);
@@ -864,6 +882,13 @@ void begin_submission(bool on) {
         g_ring = static_cast<uint8_t*>(VirtualAlloc(nullptr, kRingBytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
         if (!g_ring) { NXLOG_W(kTag, "no memory for the command ring: cmd_thread stays off"); return; }
         install_all();
+        {
+            LARGE_INTEGER q;
+            QueryPerformanceCounter(&q);
+            g_spin_qpc0 = static_cast<uint64_t>(q.QuadPart);
+            g_spin_tsc0 = __rdtsc();
+            nxrt::hitch_add_csv_counter("cpu_recorder_spin_us", recorder_spin_us);
+        }
         g_pub_batch_cfg = static_cast<uint32_t>(std::clamp<int64_t>(config_get_int("nvn", "cmd_publish_batch", 32), 1, 4096));
         g_pub_batch = g_pub_batch_cfg;
         NXLOG_I(kTag, "cmd_thread: vkCmd* calls of the render thread are recorded by the nvn-recorder thread (16 MiB ring)");
