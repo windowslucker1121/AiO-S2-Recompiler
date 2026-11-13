@@ -254,6 +254,8 @@ void servable_cache_enable(bool on);   // cpuperf_ab (servable_cache)
 uint64_t out_grow_version();   // moves only when held results may cover more pages ([nvn] overlap_grow)
 bool ab_hot_skip_on();    // false in an off window of [nvn] cpuperf_ab with hot_skip
 bool ab_tex_share_on();  // false in an off window of [nvn] cpuperf_ab with tex_share
+bool ab_tex_rt_pool_on();   // false in an off window of [nvn] cpuperf_ab with tex_rt_pool
+void tex_rt_pool_log();     // statistics line of [nvn] tex_rt_pool (nvn_gpu_texture.cpp)
 bool ab_tex_park_on();   // false in an off window of [nvn] cpuperf_ab with tex_park
 bool ab_overlap_grow_on();   // false in an off window of [nvn] cpuperf_ab with overlap_grow
 bool ab_index_inc_on();      // false in an off window of [nvn] cpuperf_ab with index_inc

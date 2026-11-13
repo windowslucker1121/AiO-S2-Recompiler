@@ -35,6 +35,7 @@
 #include "nxrt/memory.h"
 #include "nxrt/write_watch.h"
 #include "vk_gauges.h"
+#include <vk_mem_alloc.h>
 #include "nvn_enums.h"
 #include "nvn_cfg.h"
 #include "nvn_format.h"
@@ -514,6 +515,89 @@ bool create_sparse_texture(Texture* t, TexGpu* g, const Shape& s, std::string* w
 }
 
 
+// ---- render-target images from blocks ([nvn] tex_rt_block, RT2 of PLAN_LOWS) -------------------------------------------------
+// The driver prefers dedicated allocations for render targets, so every new target image was a kernel allocation (0.13 ms on average,
+// 6-10 ms when it blocked). With tex_rt_block = N (MiB, 0: off) a render target (COMPRESSIBLE, scale 1, not sparse) is sub-allocated from
+// device-local blocks of N MiB, one VMA pool per memory type: a creation is vkCreateImage + bind, a destruction returns the range
+// (Device::destroy_image's vmaDestroyImage frees pool allocations as any other).
+int64_t tex_rt_block_mb() {
+    static const int64_t n = std::clamp<int64_t>(nxrt::config_get_int("nvn", "tex_rt_block", 0), 0, 1024);
+    return n;
+}
+std::mutex g_rtb_mu;
+std::map<uint32_t, VmaPool> g_rtb_pools;   // by memory type (lock g_rtb_mu); never destroyed (the allocator outlives the textures)
+std::atomic<uint64_t> g_rtb_made{0}, g_rtb_failed{0}, g_rtb_ns{0};   // statistics: images made from blocks, fallbacks, ns spent
+// The image of d from the blocks. False: not made (the caller makes it as before).
+bool create_image_from_blocks(const gfx::ImageDesc& d, gfx::Image* out) {
+    const uint64_t t0 = static_cast<uint64_t>(ft::now_ns());
+    VmaAllocator vma = device().allocator();
+    VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.flags = d.flags;
+    ci.imageType = d.type;
+    ci.format = d.format;
+    ci.extent = {d.width, d.height, d.depth};
+    ci.mipLevels = d.mip_levels;
+    ci.arrayLayers = d.array_layers;
+    ci.samples = d.samples;
+    ci.tiling = d.tiling;
+    ci.usage = d.usage;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImage img = VK_NULL_HANDLE;
+    if (vkCreateImage(vkdev(), &ci, nullptr, &img) != VK_SUCCESS) { g_rtb_failed.fetch_add(1); return false; }
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(vkdev(), img, &mr);
+    VmaAllocationCreateInfo pi = {};
+    pi.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    pi.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    uint32_t type = 0;
+    if (vmaFindMemoryTypeIndexForImageInfo(vma, &ci, &pi, &type) != VK_SUCCESS || !(mr.memoryTypeBits & (1u << type))) {
+        vkDestroyImage(vkdev(), img, nullptr);
+        g_rtb_failed.fetch_add(1);
+        return false;
+    }
+    VmaPool pool = VK_NULL_HANDLE;
+    {
+        std::lock_guard<std::mutex> lk(g_rtb_mu);
+        auto it = g_rtb_pools.find(type);
+        if (it != g_rtb_pools.end()) {
+            pool = it->second;
+        } else {
+            VmaPoolCreateInfo pc = {};
+            pc.memoryTypeIndex = type;
+            pc.blockSize = static_cast<VkDeviceSize>(tex_rt_block_mb()) << 20;
+            if (vmaCreatePool(vma, &pc, &pool) != VK_SUCCESS) pool = VK_NULL_HANDLE;
+            g_rtb_pools[type] = pool;
+            NXLOG_I(kTag, "tex_rt_block: render-target block pool for memory type %u, blocks of %lld MiB%s", type, static_cast<long long>(tex_rt_block_mb()), pool ? "" : " (FAILED)");
+        }
+    }
+    VmaAllocation alloc = nullptr;
+    VmaAllocationCreateInfo ai = {};
+    ai.pool = pool;
+    if (!pool || mr.size > (static_cast<VkDeviceSize>(tex_rt_block_mb()) << 20) || vmaAllocateMemoryForImage(vma, img, &ai, &alloc, nullptr) != VK_SUCCESS) {
+        vkDestroyImage(vkdev(), img, nullptr);
+        g_rtb_failed.fetch_add(1);
+        return false;
+    }
+    if (vmaBindImageMemory(vma, alloc, img) != VK_SUCCESS) {
+        vmaFreeMemory(vma, alloc);
+        vkDestroyImage(vkdev(), img, nullptr);
+        g_rtb_failed.fetch_add(1);
+        return false;
+    }
+    vk_gauge_images().add(1);
+    out->image = img;
+    out->view = VK_NULL_HANDLE;
+    out->allocation = alloc;
+    out->format = d.format;
+    out->extent = ci.extent;
+    out->mip_levels = d.mip_levels;
+    out->array_layers = d.array_layers;
+    g_rtb_made.fetch_add(1, std::memory_order_relaxed);
+    g_rtb_ns.fetch_add(static_cast<uint64_t>(ft::now_ns()) - t0, std::memory_order_relaxed);
+    return true;
+}
+
 // ---- creation -------------------------------------------------------------------------------------------------------------
 // Makes the image of t (or the failed marker when no format works). Stores the result in t->gpu, which is never null afterwards.
 TexGpu* make_texture_image(Texture* t, TexGpu* g, float want_scale, const VkFormat* known_entry);
@@ -647,7 +731,10 @@ TexGpu* make_texture_image(Texture* t, TexGpu* g, float want_scale, const VkForm
         }
     }
     std::string why2;
-    if (device().create_image(make_desc(is, chosen, usage, flags), &g->img, &why2) != VK_SUCCESS)
+    const gfx::ImageDesc desc = make_desc(is, chosen, usage, flags);
+    const bool from_blocks = tex_rt_block_mb() && (t->b.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) && (t->mem || t->vpool) && !t->is_display &&
+                             g->scale == 1.0f && ab_tex_rt_pool_on() && device().image_supported(desc) && create_image_from_blocks(desc, &g->img);
+    if (!from_blocks && device().create_image(desc, &g->img, &why2) != VK_SUCCESS)
         return fail("create_image: " + why2);
     g_live_images.fetch_add(1);
     counters().textures_created.fetch_add(1);
@@ -688,9 +775,10 @@ uint64_t park_sample(const Texture& t) {
     for (size_t i = 0; i < k; ++i) h = (h ^ vals[i]) * 0x100000001b3ull;
     return h;
 }
-struct Parked { ParkKey key; TexGpu* g; uint64_t at; uint64_t sample; bool dirty; };
+struct Parked { ParkKey key; TexGpu* g; uint64_t at; uint64_t sample; bool dirty; uint32_t flags; bool vpool; };
 std::mutex g_park_mu;
 std::vector<Parked> g_parked;
+uint64_t g_parked_bytes = 0;   // sum of the parked images' storage sizes (lock g_park_mu): the byte cap of [nvn] tex_park_max_mb
 
 // ---- the images by storage and layout ([nvn] tex_share_index) ----------------------------------------------------------------------
 // texture_registry_find_alias finds only live (not finalized) objects, and a finalized object's image is parked only when the render
@@ -757,28 +845,51 @@ uint64_t park_presents() {
     static const uint64_t n = static_cast<uint64_t>(std::max<int64_t>(1, nxrt::config_get_int("nvn", "tex_park_presents", 240)));
     return n;
 }
+// [nvn] tex_rt_pool (RT1 of PLAN_LOWS; cpuperf_ab_what tex_rt_pool): a new render target (COMPRESSIBLE, pool or virtual-pool storage, scale 1)
+// that finds no image of its own storage takes a parked image of the same layout and flags over other storage. The game's transient
+// post-process targets sit in a virtual pool at offsets that move by 64 KiB from frame to frame while the camera moves; every image cache
+// was keyed by the offset, so 11-16 images of 1-8 MB were made and destroyed per frame (up to 970 per second, 6-10 ms blocked allocations).
+// 0: off; 1: the taken image keeps what it holds (undefined content, as fresh pool bytes are); 2: the taken image is cleared as a new one
+// would be (fill_zero). [nvn] tex_rt_pool_overlap (default on): only a parked image whose old storage the new texture's storage overlaps (the
+// same pool; its old content is being overwritten there anyway), so history targets that keep their offset are never taken away from it.
+int tex_rt_pool_mode() {
+    static const int m = static_cast<int>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "tex_rt_pool", 0), 0, 2));
+    return m;
+}
+bool tex_rt_pool_on() { return tex_rt_pool_mode() != 0 && ab_tex_rt_pool_on(); }
 size_t park_max() {
-    static const size_t n = static_cast<size_t>(std::max<int64_t>(1, nxrt::config_get_int("nvn", "tex_park_max", 128)));
+    static const size_t n = static_cast<size_t>(std::max<int64_t>(1, nxrt::config_get_int("nvn", "tex_park_max", tex_rt_pool_mode() ? 1024 : 128)));
+    return n;
+}
+// [nvn] tex_park_max_mb: the parked images' storage bytes at most (0: no cap; default 1024 with tex_rt_pool, else 0). The oldest go first.
+uint64_t park_max_bytes() {
+    static const uint64_t n = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "tex_park_max_mb", tex_rt_pool_mode() ? 1024 : 0))) << 20;
     return n;
 }
 bool tex_park_on() {
     const bool on = NX_CFG_BOOL("nvn", "tex_park", true);
     return on && ab_tex_park_on();
 }
-// Destroys parked images older than park_presents() (or the oldest over park_max()). Lock held.
+void park_erase_locked(size_t i) {
+    g_parked_bytes -= std::min(g_parked_bytes, g_parked[i].key.size);
+    g_parked.erase(g_parked.begin() + static_cast<std::ptrdiff_t>(i));
+}
+// Destroys parked images older than park_presents() (or the oldest over park_max() / park_max_bytes()). Lock held.
 void park_sweep_locked(uint64_t now) {
+    const uint64_t maxb = park_max_bytes();
     for (size_t i = 0; i < g_parked.size();) {
-        if (now - g_parked[i].at > park_presents() || g_parked.size() > park_max()) {
+        if (now - g_parked[i].at > park_presents() || g_parked.size() > park_max() || (maxb && g_parked_bytes > maxb)) {
             destroy_texture_gpu(g_parked[i].g);
             g_park_expired.fetch_add(1, std::memory_order_relaxed);
             g_expired_at[g_expired_n % 64] = now;
             g_expired_keys[g_expired_n++ % 64] = g_parked[i].key;
-            g_parked.erase(g_parked.begin() + static_cast<std::ptrdiff_t>(i));
+            park_erase_locked(i);
         } else {
             ++i;
         }
     }
 }
+std::atomic<uint64_t> g_rt_taken{0}, g_rt_no_overlap{0}, g_rt_miss{0};   // statistics: tex_rt_pool takes; misses with a layout match that did not overlap; misses
 // Takes back a parked image for t (render thread). Null: none.
 TexGpu* tex_unpark(Texture* t) {
     if ((!t->mem && !t->vpool) || t->is_display || !tex_park_on()) return nullptr;
@@ -788,7 +899,7 @@ TexGpu* tex_unpark(Texture* t) {
     for (size_t i = 0; i < g_parked.size(); ++i) {
         if (!(g_parked[i].key == k)) continue;
         Parked p = g_parked[i];
-        g_parked.erase(g_parked.begin() + static_cast<std::ptrdiff_t>(i));
+        park_erase_locked(i);
         t->gpu = p.g;
         share_add_locked(*t, p.g);
         g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
@@ -821,7 +932,78 @@ TexGpu* tex_unpark(Texture* t) {
     }
     return nullptr;
 }
+// [nvn] tex_rt_pool: a parked image of t's layout over other storage (render thread, after tex_unpark found none). Null: none.
+TexGpu* tex_rt_take(Texture* t) {
+    if (!(t->b.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) || (!t->mem && !t->vpool) || t->is_display || !tex_park_on() || !tex_rt_pool_on()) return nullptr;
+    static const bool need_overlap = NX_CFG_BOOL("nvn", "tex_rt_pool_overlap", true);
+    ParkKey k = park_key(*t);
+    const uint64_t kmem = k.mem, klo = k.voff, khi = k.voff + std::max<uint64_t>(k.size, 1);
+    k.mem = 0;
+    k.voff = 0;
+    const uint32_t flags = static_cast<uint32_t>(t->b.flags);
+    std::lock_guard<std::mutex> lk(g_park_mu);
+    size_t best = SIZE_MAX;
+    uint64_t best_ov = 0;
+    bool layout_seen = false;
+    for (size_t i = g_parked.size(); i-- > 0;) {   // newest first
+        const Parked& p = g_parked[i];
+        ParkKey pk = p.key;
+        const uint64_t pmem = pk.mem, plo = pk.voff, phi = pk.voff + std::max<uint64_t>(pk.size, 1);
+        pk.mem = 0;
+        pk.voff = 0;
+        if (!(pk == k) || p.flags != flags || p.vpool != static_cast<bool>(t->vpool) || p.g->failed || p.g->scale != 1.0f || p.g->sparse || p.g->streamed) continue;
+        layout_seen = true;
+        // overlap of the old and the new storage: for a virtual pool the same pool object and offset ranges; for plain storage host addresses
+        uint64_t ov = 0;
+        if (t->vpool) {
+            if (pmem == kmem) {
+                const uint64_t lo = std::max(plo, klo), hi = std::min(phi, khi);
+                ov = hi > lo ? hi - lo : 0;
+            }
+        } else {
+            const uint64_t lo = std::max(pmem, kmem), hi = std::min(pmem + std::max<uint64_t>(p.key.size, 1), kmem + std::max<uint64_t>(k.size, 1));
+            ov = hi > lo ? hi - lo : 0;
+        }
+        if (need_overlap && !ov) continue;
+        if (best == SIZE_MAX || ov > best_ov) { best = i; best_ov = ov; }
+    }
+    if (best == SIZE_MAX) {
+        (layout_seen ? g_rt_no_overlap : g_rt_miss).fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    Parked p = g_parked[best];
+    park_erase_locked(best);
+    t->gpu = p.g;
+    share_add_locked(*t, p.g);
+    g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
+    if (tex_rt_pool_mode() == 2) {   // as a new image: cleared by the first preparation (tex_compressible_no_upload's fill_zero)
+        p.g->uploaded = false;
+        p.g->gpu_written = false;
+        t->cpu_dirty.store(true);
+    } else {                         // the content stays what the GPU left in the image: no upload, no clear
+        p.g->uploaded = true;
+        p.g->gpu_written = true;
+        t->cpu_dirty.store(false);
+    }
+    g_rt_taken.fetch_add(1, std::memory_order_relaxed);
+    return p.g;
+}
 }  // namespace
+
+void tex_rt_pool_log() {
+    if (tex_rt_block_mb()) {
+        const uint64_t mk = g_rtb_made.load();
+        NXLOG_I(kTag, "render-target images from blocks (tex_rt_block %lld MiB): %llu made (%.1f us each), %llu fell back to their own allocation",
+                static_cast<long long>(tex_rt_block_mb()), (unsigned long long)mk, mk ? g_rtb_ns.load() / 1000.0 / mk : 0.0, (unsigned long long)g_rtb_failed.load());
+    }
+    if (!tex_rt_pool_mode()) return;
+    size_t n;
+    uint64_t b;
+    { std::lock_guard<std::mutex> lk(g_park_mu); n = g_parked.size(); b = g_parked_bytes; }
+    NXLOG_I(kTag, "render targets from parked images of the same layout (tex_rt_pool %d): %llu taken, %llu misses with a layout parked but no overlap, %llu misses; %zu parked, %llu MiB",
+            tex_rt_pool_mode(), (unsigned long long)g_rt_taken.load(), (unsigned long long)g_rt_no_overlap.load(), (unsigned long long)g_rt_miss.load(), n,
+            (unsigned long long)(b >> 20));
+}
 
 bool tex_park(const Texture& t, TexGpu* g) {
     if (!g || g->failed || !g->gpu_written || g->refs != 1 || g->sparse || g->streamed || (!t.mem && !t.vpool) || t.is_display || !tex_park_on()) {
@@ -834,17 +1016,17 @@ bool tex_park(const Texture& t, TexGpu* g) {
         }
         return false;
     }
-    Parked p{park_key(t), g, counters().presents.load(std::memory_order_relaxed), park_sample(t), false};
+    Parked p{park_key(t), g, counters().presents.load(std::memory_order_relaxed), park_sample(t), false, static_cast<uint32_t>(t.b.flags), static_cast<bool>(t.vpool)};
     std::lock_guard<std::mutex> lk(g_park_mu);
     share_remove_locked(g);   // a parked image has no owner: found by tex_unpark, not by the share index
-    for (Parked& o : g_parked)
-        if (o.key == p.key) {          // an older image of the same storage: the newer one wins
-            destroy_texture_gpu(o.g);
-            o = p;
-            g_park_n.fetch_add(1, std::memory_order_relaxed);
-            return true;
+    for (size_t i = 0; i < g_parked.size(); ++i)
+        if (g_parked[i].key == p.key) {   // an older image of the same storage: the newer one wins (moved to the end: newest last)
+            destroy_texture_gpu(g_parked[i].g);
+            park_erase_locked(i);
+            break;
         }
     g_parked.push_back(p);
+    g_parked_bytes += p.key.size;
     g_park_n.fetch_add(1, std::memory_order_relaxed);
     park_sweep_locked(p.at);
     return true;
@@ -937,6 +1119,7 @@ __declspec(noinline) TexGpu* tex_or_null_make(Texture* t, float want_scale) {
             g_prebuilt_taken.fetch_add(1, std::memory_order_relaxed);
             return bg;
         }
+        if (TexGpu* rg = tex_rt_take(t)) return rg;   // [nvn] tex_rt_pool: a parked image of the same layout over other storage
     }
     NXFT_MIN("tex.create", 30000);
     const uint64_t tc0 = nxrt::hitch_ticks();
