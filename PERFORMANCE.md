@@ -735,6 +735,25 @@ Exe of `feat/perf-generic-runtime` 4feaa21 + this branch, 1920x1080 uncapped, al
 - Tools (git-ignored, worktree `work\d`): `runs_d.py` (route per tag and exe under the game lock), `pg.py` (gate table),
   `heavy.py` (frames by guest CPU), `zload.py` / `zan.py` (Z), `fold.py` (sampler diff).
 
+## Grass task loop (E / G-g1 + G1, 2026-11-13, branch `perf/gate-e`)
+
+Balcony and walk benches at 1920x1080 uncapped, private shader caches only (tools/shaders/README.md "Batch loops with a clamped count").
+- **Gate:** both grass draws run task fd8debac. Stamped `gpu_draws`: 1.17 / 1.14 ms; empty task 0, empty mesh and no mesh launches
+  unchanged, so it is the task. Real clocks (`skip_fs_file` `v:` windows): main-submission GPU busy -2.35 / -3.1 ms without the two draws.
+- **Cause:** not the code. No slot search, fast path regardless of the mask, no predication, a hoisted loop-invariant load, the loop's
+  loads replaced by values, a 64-byte payload: all 1.17 / 1.14. One batch per work group: 0.016 ms. The batch bound
+  `(min(count, 256) - 1) >> 5` wraps for count 0, the loop then ran into the 4,096 loop cap. The console never meets such a cell (it would
+  run 2^27 batches), so why cells with 0 items reach the task here is open (the `{count, first}` record of the indirect mesh draw, or
+  stale cell data through pointers: runtime side).
+- **Fix (translator):** the exit compare also tests `counter > (K - 1) >> s` (exact for count >= 1). 8 task blocks change, nothing else in
+  the corpus. Stamped 0.034 / 0.015 ms. **Untraced, alternating caches (3 runs each way):** balcony 84.5 / 85.6 / 76.5 -> 101.5 / 105.8 /
+  105.6 fps, 1% low 41.8 / 46.7 / 28.7 -> 59.1 / 55.1 / 58.1; walk 85.4 / 92.6 / 76.6 -> 103.3 / 110.6 / 109.9 fps. Village capture
+  replay pixel-identical to the shared cache; screenshots of both benches normal.
+- **To merge into the shared cache:** build this branch's harness, then
+  `retranslate_subset.py --corpus work\shaders\oot\corpus --cache work\shaders\oot\spirv` with the 8 hashes 1aff15a8732de82f
+  28010d0bb53e5b57 5c53165dae866546 731a498096475249 97de564fe1a2ec09 c6f3f11edb6ed86d ece836278b723289 fd8debac8c87401a (only these
+  rows; no runtime rows involved); their pipelines rebuild on demand.
+
 ## What is open, by expected gain
 
 **After R6:** replay ~9.7-10 ms; ~88-90 fps. The render thread, the GPU (~93% busy) and the game's CPU frame are co-limits; a replay cut now

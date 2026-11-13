@@ -303,3 +303,21 @@ their code (PERFORMANCE.md, "GPU round 4"), and in game none moved the GPU time.
   `NXRT_HARNESS_EXP_EMPTY=1` (the program is only its EXIT): translate one block into a private cache and compare skip windows of its draw.
 - `NXRT_HARNESS_FUSE_DEBUG=1` prints the fused pairs and the speculated count.
 - `pipestat` now turns robustness off as the runtime does (`PIPESTAT_ROBUST=1` keeps it on).
+
+## Batch loops with a clamped count: the grass task's runaway loop (G1, 2026-11-13)
+
+The game's GPU culling tasks (fd8debac, c6f3f11e, 28010d0b, 1aff15a8, 5c53165d, 97de564f, 731a4980, ece83627: one task work group per
+cell) walk a cell's items in batches of 32: `IMNMX.U32 Rn, count, 0x100, PT; IADD3 Rt, Rn, -0x1, RZ; SHF.R.U32.HI Rb, RZ, 0x5, Rt`, then a
+loop that ends on `ISETP.GT.U32.AND Pd, PT, Rc, Rb, PT` with Rc the batch counter. For count 0 the bound wraps to 2^27 - 1, so the loop
+ran into the translator's loop cap (4,096 back edges per invocation, spirv-else-if.patch) for every such cell: **1.15-1.17 ms of GPU per
+grass draw** (both grass draws on the balcony bench use fd8debac). The console never meets such a cell (it would run 2^27 empty batches);
+here the culling hands the task cells with no items (why is open: launch count from the `{count, first}` record or stale cell data, a
+runtime question).
+`AmpereFuse.AnalyseBatchLoops` finds that chain (straight-line, Rb never written again, no loop around it, every path to the compare runs
+it) and the emitter adds `Rc > (K - 1) >> s` to the compare: for count >= 1 the bound is at most that, so nothing changes; for count 0 the
+loop ends after 8 empty batches instead of 4,096. `NXRT_HARNESS_BATCH_BOUND=0` turns it off. Whole corpus: only these 8 task blocks change
+(full batch against the shared cache), CFG check 2,000 walks ok.
+How it was found (stamped `gpu_draws`, balcony, private caches of fd8debac): an empty task 0 ms, an empty mesh or no mesh launches
+unchanged, then every change inside the loop body unchanged at 1.17 / 1.14 ms (no slot search, fast path regardless of the mask, no
+predication, the loop-invariant load hoisted, the loop's loads replaced by values, a 64-byte payload), while one batch per work group gave
+0.016 ms and ending after 8 batches 0.035 / 0.014 ms. Measurement switches kept: `NXRT_HARNESS_TASK_EXP=empty | nolaunch | smallpay`.
