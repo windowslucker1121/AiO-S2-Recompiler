@@ -43,6 +43,9 @@ void owe_stats(uint64_t* owed, uint64_t* paid);               // [nvn] cmd_threa
 void desc_stats(uint64_t* queued, uint64_t* direct);
 void drain();                        // render thread: waits until every queued call has been made
 void stats(uint64_t* packets, uint64_t* drains, uint64_t* direct, uint64_t* spins);
+// B0 ([diag] frame_csv): drains of the ring so far and the rdtsc ticks the render thread waited in them (render thread values)
+uint64_t drains();
+uint64_t drain_ticks();
 void shutdown();
 std::string direct_top();          // statistics: the calls that waited for the recorder most often
 

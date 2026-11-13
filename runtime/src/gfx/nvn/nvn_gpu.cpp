@@ -508,6 +508,7 @@ Counters* counters_if() { return g ? &g->ctr : nullptr; }
 uint64_t completed_serial() { return g ? g->completed.load() : 0; }
 uint64_t poll_completed() { return g ? read_completed() : 0; }
 uint64_t current_serial() { return g ? (g->recording ? g->recording : g->submitted) : 0; }
+VkSemaphore timeline_semaphore() { return g ? g->timeline : VK_NULL_HANDLE; }
 
 void note_unsupported(const char* what) {
     {   // the gap count without the gap store's mutex and map per call (WaitEvent, per op): a counter per text, found by address

@@ -212,6 +212,9 @@ public:
 
     // Runs fn on a command buffer of a transient pool, submits it and waits for it (uploads, tests).
     bool submit_once(const std::function<void(VkCommandBuffer)>& fn);
+    // The same on the second queue when it is of the main family ([gfx] second_queue = same), after wait (a timeline semaphore) reaches
+    // wait_value: work queued on the first queue does not delay it. False (nothing run): no such queue.
+    bool submit_once_q2(VkSemaphore wait, uint64_t wait_value, const std::function<void(VkCommandBuffer)>& fn);
     void wait_idle();
 
     void set_name(VkObjectType type, uint64_t handle, const char* name);     // VK_EXT_debug_utils, no-op without it

@@ -516,12 +516,18 @@ bool create_sparse_texture(Texture* t, TexGpu* g, const Shape& s, std::string* w
 
 // ---- creation -------------------------------------------------------------------------------------------------------------
 // Makes the image of t (or the failed marker when no format works). Stores the result in t->gpu, which is never null afterwards.
+TexGpu* make_texture_image(Texture* t, TexGpu* g, float want_scale, const VkFormat* known_entry);
 TexGpu* create_texture_gpu(Texture* t, float want_scale) {
     auto* g = new TexGpu();
     { std::lock_guard<std::mutex> lk(g_live_mu); g_live_set.insert(g); }
     g_gauge_textures_live.add(1);
     t->gpu = g;
     g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
+    return make_texture_image(t, g, want_scale, nullptr);
+}
+// The image of g for t (g->failed when none can be made). known_entry: the cache entry's format a background preparation found (B2: the
+// image is made by the job, off the render thread; t->gpu is then not g yet, and t has no virtual pool).
+TexGpu* make_texture_image(Texture* t, TexGpu* g, float want_scale, const VkFormat* known_entry) {
     const Shape s = shape_of(*t);
     g->fmt = t->fmt;
     g->type = s.type;
@@ -560,7 +566,8 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
     // A disk cache entry that is not BC7 (RGBA8 for a texture BC7 cannot reproduce, BC5 for a two-channel normal map) makes the image in the
     // entry's format; prepare_texture is then told the image's format and delivers the entry's data (docs/S4f.md).
     VkFormat entry = VK_FORMAT_UNDEFINED;
-    if (to_bc7 && !texprep::peek_entry_format(t, entry)) entry = cache_entry_format(*t);   // the background job already found the cache entry
+    if (known_entry) entry = *known_entry;
+    else if (to_bc7 && !texprep::peek_entry_format(t, entry)) entry = cache_entry_format(*t);   // the background job already found the cache entry
     const VkFormat want = to_bc7 ? (entry != VK_FORMAT_UNDEFINED ? entry : bc7_format) : g->fmt->vk;
     const VkFormat alt = to_bc7 ? (entry != VK_FORMAT_UNDEFINED ? bc7_format : VK_FORMAT_UNDEFINED) : g->fmt->vk_fallback;
 
@@ -867,6 +874,25 @@ void park_miss_stats(uint64_t* miss, uint64_t* miss_expired, uint64_t* miss_big)
     *miss = g_park_miss.load(); *miss_expired = g_park_miss_expired.load(); *miss_big = g_park_miss_big.load();
 }
 
+// [nvn] tex_prep_image (B2, default off): a background preparation job also makes the texture's image (any thread). Null: not made (a virtual
+// pool, a display texture, multisampled, the GPU layer not up, or no image possible); the job then leaves it to the render thread.
+std::atomic<uint64_t> g_prebuilt_made{0}, g_prebuilt_taken{0};   // statistics
+bool tex_prep_image_on() {
+    const bool on = NX_CFG_BOOL("nvn", "tex_prep_image", false);
+    return on;
+}
+TexGpu* prebuild_texture_image(Texture* t, VkFormat entry) {
+    if (!t || !active() || t->vpool || t->is_display || t->b.samples > 1 || target_is_multisample(t->b.target) || !t->fmt) return nullptr;
+    auto* g = new TexGpu();
+    { std::lock_guard<std::mutex> lk(g_live_mu); g_live_set.insert(g); }
+    g_gauge_textures_live.add(1);
+    make_texture_image(t, g, 1.0f, &entry);
+    if (g->failed || g->promoted || g->scale != 1.0f) { destroy_texture_gpu(g); return nullptr; }
+    g_prebuilt_made.fetch_add(1, std::memory_order_relaxed);
+    return g;
+}
+void prebuilt_stats(uint64_t* made, uint64_t* taken) { *made = g_prebuilt_made.load(); *taken = g_prebuilt_taken.load(); }
+
 namespace {
 // The texture's image, created on first use. Null when the texture has no usable image (the failure is counted and logged once).
 // The image of t, made when it has none. The look-up of an existing image is the hot path (several calls per draw); the making of one has
@@ -904,6 +930,13 @@ __declspec(noinline) TexGpu* tex_or_null_make(Texture* t, float want_scale) {
             return sg;
         }
         if (TexGpu* pg = tex_unpark(t)) return pg;   // a parked image of the same storage and layout
+        if (TexGpu* bg = texprep::take_image(t)) {   // [nvn] tex_prep_image (B2): the background job made the image with the data
+            t->gpu = bg;
+            g_tex_image_gen.fetch_add(1, std::memory_order_acq_rel);
+            if (tex_share_index_on()) { std::lock_guard<std::mutex> lk(g_park_mu); share_add_locked(*t, bg); }
+            g_prebuilt_taken.fetch_add(1, std::memory_order_relaxed);
+            return bg;
+        }
     }
     NXFT_MIN("tex.create", 30000);
     const uint64_t tc0 = nxrt::hitch_ticks();

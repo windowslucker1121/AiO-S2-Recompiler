@@ -51,6 +51,7 @@
 #include "nvn_arch_exp.h"
 #include "nvn_hazard.h"
 #include "nvn_cmdq.h"
+#include "nvn_texprep.h"
 #include "nxrt/kernel.h"
 #include "nvn_tess_gen.h"
 #include "nxrt/lowlat.h"
@@ -261,7 +262,7 @@ uint64_t ab_mask_compute() {
         static const std::pair<const char*, uint64_t> names[] = {{"chunks", kAbChunks}, {"pass_chunks", kAbPassChunks}, {"set_reuse", kAbSetReuse}, {"odb", kAbOdb},
                                                                  {"hot_skip", kAbHotSkip}, {"barrier_keep", kAbBarrierKeep}, {"epoch_keep", kAbEpochKeep},
                                                                  {"resolve_cache", kAbResolveCache}, {"overlap_cache", kAbOverlapCache},
-                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"p1", kAbP1}, {"ssbo_ro_copy", kAbP1}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"keep_recycle", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"r6", kAbR6}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"sync_lead", kAbSyncLead}, {"occ_batch", kAbOccBatch}, {"r6t", kAbR6t}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
+                                                                 {"epoch_dispatch", kAbEpochDispatch}, {"memo_pass", kAbMemoPass}, {"bind_skip", kAbBindSkip}, {"tex_park", kAbTexPark}, {"gmem_ro", kAbGmemRo}, {"overlap_grow", kAbOverlapGrow}, {"p1", kAbP1}, {"ssbo_ro_copy", kAbP1}, {"pool_sync", kAbPoolSync}, {"index_inc", kAbIndexInc}, {"out_delta", kAbOutDelta}, {"write_defer", kAbWriteDefer}, {"set_keep", kAbSetKeep}, {"odb_inc", kAbOdbInc}, {"dset_recycle", kAbR3b}, {"render_pin", kAbR3e}, {"cmd_thread", kAbCmdThread}, {"skip_gpt", kAbSkipGpt}, {"keep_recycle", kAbSkipGpt}, {"tex_lookahead", kAbTexLook}, {"mesh_mem", kAbMeshAhead2}, {"pool_depth_ids", kAbPoolDepthIds}, {"c0_persist", kAbC0Persist}, {"cs_gmem_held", kAbCsGmemHeld}, {"copy_image_q", kAbR3c}, {"refill_compute", kAbRefillCompute}, {"pre_layout", kAbPreLayout}, {"occ_defer", kAbOccDefer}, {"cmd_desc", kAbCmdDesc}, {"odb_prog", kAbOdbProg}, {"handle_cache", kAbHandleCache}, {"pool_fast", kAbPoolFast}, {"r3a", kAbR3a}, {"overlap_pos", kAbOverlapPos}, {"hazard", kAbHazard}, {"hazard_piggyback", kAbHazardPiggy}, {"front", kAbFront}, {"reflect_lit", kAbReflectLit}, {"r6", kAbR6}, {"fill_ahead", kAbFillAhead}, {"mesh_ahead", kAbMeshAhead}, {"tex_share", kAbTexShare}, {"sync_lead", kAbSyncLead}, {"occ_batch", kAbOccBatch}, {"r6t", kAbR6t}, {"occ_mark_late", kAbR3f}, {"cmd_batch", kAbCmdBatch}, {"flush_copy", kAbFlushCopy}, {"keep_chain", kAbKeepChain}, {"render_prio", kAbRenderPrio}, {"servable_cache", kAbSrvCache}, {"keep_memo", kAbKeepMemo}, {"handle_big", kAbHandleBig}, {"upload_ahead", kAbHandleBig}, {"chunk_async", kAbChunkAsync}, {"pds_q", kAbPdsQ}, {"fb_image", kAbFbImage}, {"pt_copy", kAbPtCopy}};
         uint64_t r = 0;
         size_t i = 0;
         while (i <= v.size()) {
@@ -1144,11 +1145,20 @@ void flush_deferred_writes() {
 uint64_t g_pass_end_line[8192] = {};
 uint64_t g_pass_end_draws[8192] = {};
 uint64_t g_draw_ops = 0;   // draw commands reached by run_list (mesh_copy_ahead)
+// B0 ([diag] frame_csv columns of the replay, render thread; read by the presenting thread once per frame): the counts always, the ticks
+// (rdtsc) only with [nvn] exp_op_cost. Phases 0..9 are exp_op_cost's (OcPhase), 10 the uploads prepare_textures makes (tex_ensure_current).
+uint64_t g_b0_op[3] = {};       // ticks of draws, dispatches, all other commands
+uint64_t g_b0_ph[11] = {};
+uint64_t g_b0_pass_ends = 0;    // open passes ended (any cause)
+uint64_t g_b0_pt_upload = 0;    // ... by prepare_textures for an upload (a texture the CPU wrote)
+uint64_t g_b0_pt_layout = 0;    // ... by prepare_textures for layout changes only
+uint64_t g_b0_up_ahead = 0;     // textures uploaded ahead of their pass ([nvn] upload_ahead)
 void mesh_pre_clear();     // below (mesh_copy_ahead)
 bool mesh_ahead_pass_on();  // below
 void end_pass(bool to_pass = false, std::source_location loc = std::source_location::current()) {
     if (gstats::active()) gstats::draw_end(F->cb);   // [prof] gpu_stats: a draw that returned without drawing
     if (P.open) {
+        ++g_b0_pass_ends;
         const uint32_t ln = loc.line() & 8191;
         ++g_pass_end_line[ln];
         g_pass_end_draws[ln] += g_pass_draws;
@@ -2445,8 +2455,98 @@ void pool_sets_reset() {
 }
 
 uint64_t g_pt_breaks = 0, g_pt_from[7] = {}, g_pt_dirty = 0, g_pt_storage = 0;   // statistics: prepare_textures ending an open pass
+
+// ---- [nvn] upload_ahead (B1; off | on | ab, default off) ----------------------------------------------------------------------------------
+// When the camera turns into new content, the textures the CPU wrote reach their first draw inside an open pass: prepare_textures ends the
+// pass for each upload (~9 breaks per frame in the benchmark walk's burst, each a pass end, the upload's copies and barriers and a new pass
+// begin with LOAD). The texture look-ahead (tl_*, below) already names the CPU-written textures of every submission when the game submits it;
+// here those names are kept per submission and uploaded where no pass is open (the first draw or dispatch of a pass, before it begins) and
+// together with an upload that ends a pass anyway, once the background preparation has their data (texprep::ready) or none will come (no
+// job: prepared here, as at the draw). The draw still checks the texture (cpu_dirty): a CPU write after the upload is uploaded again there.
+// "ab": switched by [nvn] cpuperf_ab_what upload_ahead (the handle_big bit; handle_big itself stays on then).
+struct UaItem { uint64_t serial; Ref<Texture> t; };
+std::mutex g_ua_mu;
+std::vector<UaItem> g_ua_q;                 // the look-ahead's names in submission order (texlook thread appends, render thread takes)
+std::atomic<uint32_t> g_ua_n{0};            // entries in g_ua_q
+uint64_t g_ua_seen_done = ~0ull, g_ua_seen_serial = 0;   // render thread: the last look (texprep results finished, serial)
+uint32_t g_ua_seen_n = 0;
+uint64_t g_ua_pending = 0, g_ua_dropped = 0, g_ua_tries = 0;   // statistics
+int upload_ahead_mode() {
+    static const int m = [] {
+        const std::string v = config_get_str("nvn", "upload_ahead", "off");
+        return v == "on" || v == "1" || v == "true" ? 1 : v == "ab" ? 2 : 0;
+    }();
+    return m;
+}
+bool upload_ahead_on() {
+    const int m = upload_ahead_mode();
+    return m == 1 || (m == 2 && ab_on(kAbHandleBig));
+}
+// Texlook thread: t was named for submission `serial`.
+void ua_note(uint64_t serial, Texture* t) {
+    std::lock_guard<std::mutex> lk(g_ua_mu);
+    if (g_ua_q.size() >= 8192) { g_ua_q.erase(g_ua_q.begin(), g_ua_q.begin() + 4096); g_ua_dropped += 4096; }
+    g_ua_q.push_back({serial, Ref<Texture>::share(t)});
+    g_ua_n.store(static_cast<uint32_t>(g_ua_q.size()), std::memory_order_release);
+}
+// Render thread, outside a pass (or right after prepare_textures ended one): the current submission's named textures whose data is ready.
+void ua_upload(bool force) {
+    const uint64_t ser = F->serial;
+    const uint64_t done = texprep::done_count();
+    const uint32_t n = g_ua_n.load(std::memory_order_acquire);
+    if (!force && done == g_ua_seen_done && ser == g_ua_seen_serial && n == g_ua_seen_n) return;   // nothing new since the last look
+    g_ua_seen_done = done;
+    g_ua_seen_serial = ser;
+    ++g_ua_tries;
+    static std::vector<Ref<Texture>> mine;
+    mine.clear();
+    {
+        std::lock_guard<std::mutex> lk(g_ua_mu);
+        size_t k = 0;
+        for (size_t i = 0; i < g_ua_q.size(); ++i) {
+            UaItem& it = g_ua_q[i];
+            if (it.serial < ser) continue;                                  // its submission was replayed: its draws uploaded what they used
+            if (it.serial == ser) { mine.push_back(std::move(it.t)); continue; }
+            if (k != i) g_ua_q[k] = std::move(it);
+            ++k;
+        }
+        g_ua_q.resize(k);
+        g_ua_n.store(static_cast<uint32_t>(k), std::memory_order_release);
+    }
+    size_t back = 0;
+    for (Ref<Texture>& r : mine) {
+        Texture* t = r.get();
+        if (!t || t->destroyed.load(std::memory_order_relaxed) || !t->cpu_dirty.load(std::memory_order_relaxed)) continue;   // done (or gone)
+        if (shares_image(t, S.depth_tex.get())) continue;
+        bool att = false;
+        for (uint32_t c = 0; c < S.ncolor; ++c) att = att || shares_image(t, S.color_tex[c].get());
+        if (att) continue;
+        const texprep::Readiness rd = texprep::ready(t);
+        if (rd == texprep::Readiness::Pending) { mine[back++] = std::move(r); continue; }   // later (its job is not done)
+        if (rd == texprep::Readiness::None) continue;   // no prepared data (streamed, untiled by the GPU, render targets): left to the draw
+        if (!tex_gpu(t)) continue;
+        out_texture_read(t);
+        tex_ensure_current(t, *F);
+        tex_transition(t, *F, tex_sampled_layout(t));
+        ++g_b0_up_ahead;
+    }
+    mine.resize(back);
+    g_ua_pending += back;
+    if (!mine.empty()) {                                                    // back to the queue for the next look
+        std::lock_guard<std::mutex> lk(g_ua_mu);
+        for (Ref<Texture>& r : mine) g_ua_q.push_back({ser, std::move(r)});
+        g_ua_n.store(static_cast<uint32_t>(g_ua_q.size()), std::memory_order_release);
+    }
+    g_ua_seen_n = g_ua_n.load(std::memory_order_acquire);
+}
+
 void prepare_textures(const ProgLayout& pl) {
     vol3d_prepare(pl);
+    if (!P.open && g_ua_n.load(std::memory_order_relaxed) && upload_ahead_on()) {   // [nvn] upload_ahead: no pass to break here
+        const uint64_t te0 = exp_op_cost_on() ? __rdtsc() : 0;
+        ua_upload(false);
+        if (te0) g_b0_ph[10] += __rdtsc() - te0;
+    }
     // kept with their capacity (render thread only; nothing below prepares textures again): a draw that needs work allocated them each time
     static std::vector<Texture*> need, need_storage;
     need.clear();
@@ -2533,6 +2633,9 @@ void prepare_textures(const ProgLayout& pl) {
     for (Texture* t : need_storage) out_texture_read(t);
     if (P.open) {   // statistics (the 10 s line): what ended an open pass here
         ++g_pt_breaks;
+        bool dirty = false;
+        for (Texture* t : need) dirty = dirty || t->cpu_dirty.load(std::memory_order_relaxed);
+        ++(dirty ? g_b0_pt_upload : g_b0_pt_layout);
         g_pt_storage += need_storage.size();
         for (Texture* t : need) {
             if (t->cpu_dirty.load()) { ++g_pt_dirty; continue; }
@@ -2550,10 +2653,13 @@ void prepare_textures(const ProgLayout& pl) {
     }
     end_pass(true);    // layout changes and uploads follow: each carries the dependency for its own image
     counters().pass_breaks.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t te0 = exp_op_cost_on() ? __rdtsc() : 0;
+    if (g_ua_n.load(std::memory_order_relaxed) && upload_ahead_on()) ua_upload(true);   // [nvn] upload_ahead: the others with this break
     for (Texture* t : need) {
         tex_ensure_current(t, *F);
         tex_transition(t, *F, tex_sampled_layout(t));
     }
+    if (te0) g_b0_ph[10] += __rdtsc() - te0;
     for (Texture* t : need_storage) {
         if (tex_scale(t) != 1.0f) tex_rescale(t, *F, 1.0f, "bound as a storage image");   // imageStore coordinates are not scaled (Ryujinx: ResScaleUnsupported)
         tex_ensure_current(t, *F);
@@ -8676,6 +8782,52 @@ bool exp_op_cost_on() {
     const bool on = NX_CFG_BOOL("nvn", "exp_op_cost", false);
     return on;
 }
+
+// B0: [diag] frame_csv columns of the render thread's replay (us per frame need [nvn] exp_op_cost; the counts are always kept). Read on the
+// presenting thread; rdtsc ticks are converted with a rate measured once against the steady clock (0 until then).
+double b0_tsc_per_us() {
+    static const uint64_t t0 = __rdtsc();
+    static const auto c0 = std::chrono::steady_clock::now();
+    static double rate = 0;
+    if (rate > 0) return rate;
+    const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - c0).count();
+    if (us < 500000.0) return 0;
+    rate = static_cast<double>(__rdtsc() - t0) / us;
+    return rate;
+}
+uint64_t b0_us(uint64_t ticks) {
+    const double r = b0_tsc_per_us();
+    return r > 0 ? static_cast<uint64_t>(static_cast<double>(ticks) / r) : 0;
+}
+template <int K> uint64_t b0_op_us() { return b0_us(g_b0_op[K]); }
+template <int K> uint64_t b0_ph_us() { return b0_us(g_b0_ph[K]); }
+const bool g_b0_registered = [] {
+    nxrt::hitch_add_csv_counter("r_draw_us", b0_op_us<0>);
+    nxrt::hitch_add_csv_counter("r_dispatch_us", b0_op_us<1>);
+    nxrt::hitch_add_csv_counter("r_otherop_us", b0_op_us<2>);
+    nxrt::hitch_add_csv_counter("r_preptex_us", b0_ph_us<0>);
+    nxrt::hitch_add_csv_counter("r_bindsets_us", b0_ph_us<1>);
+    nxrt::hitch_add_csv_counter("r_gmem_us", b0_ph_us<2>);
+    nxrt::hitch_add_csv_counter("r_ensurepass_us", b0_ph_us<3>);
+    nxrt::hitch_add_csv_counter("r_outbefore_us", b0_ph_us<4>);
+    nxrt::hitch_add_csv_counter("r_dynstate_us", b0_ph_us<5>);
+    nxrt::hitch_add_csv_counter("r_proglayout_us", b0_ph_us<6>);
+    nxrt::hitch_add_csv_counter("r_pipeline_us", b0_ph_us<7>);
+    nxrt::hitch_add_csv_counter("r_vbuf_us", b0_ph_us<8>);
+    nxrt::hitch_add_csv_counter("r_drawcall_us", b0_ph_us<9>);
+    nxrt::hitch_add_csv_counter("r_texensure_us", b0_ph_us<10>);
+    nxrt::hitch_add_csv_counter("pass_ends", [] { return g_b0_pass_ends; });
+    nxrt::hitch_add_csv_counter("pt_breaks_upload", [] { return g_b0_pt_upload; });
+    nxrt::hitch_add_csv_counter("pt_breaks_layout", [] { return g_b0_pt_layout; });
+    nxrt::hitch_add_csv_counter("uploads_ahead", [] { return g_b0_up_ahead; });
+    nxrt::hitch_add_csv_counter("sets_built", [] { return g_sets_built; });
+    nxrt::hitch_add_csv_counter("keep_new", [] { return g_keep_new; });
+    nxrt::hitch_add_csv_counter("keep_rebuilt", [] { return g_keep_rebuilt; });
+    nxrt::hitch_add_csv_counter("ring_drains", [] { return cmdq::drains(); });
+    nxrt::hitch_add_csv_counter("ring_drain_us", [] { return b0_us(cmdq::drain_ticks()); });
+    nxrt::hitch_add_csv_counter("images_prebuilt", [] { uint64_t m = 0, k = 0; prebuilt_stats(&m, &k); return k; });
+    return true;
+}();
 void op_cost_log() {
     static uint64_t last_pres = 0;
     static auto last = std::chrono::steady_clock::now();
@@ -8781,6 +8933,8 @@ void run_list(const CmdList& list, int depth) {
                 const bool dr = op == static_cast<int>(Op::DrawArrays) || op == static_cast<int>(Op::DrawElements) || op == static_cast<int>(Op::DrawIndirect) ||
                                 op == static_cast<int>(Op::DrawMeshTasks);
                 const bool cs = op == static_cast<int>(Op::Dispatch) || op == static_cast<int>(Op::DispatchIndirect);
+                if (op != static_cast<int>(Op::CallCommands)) g_b0_op[dr ? 0 : cs ? 1 : 2] += dt;   // B0: the frame_csv columns (a call holds its list's ops)
+                for (int i = 0; i < 10; ++i) g_b0_ph[i] += g_oc_ph[i];
                 if (!dr && !cs) { for (uint64_t& x : g_oc_ph) x = 0; return; }
                 const ShaderInfo* a = cs ? S.stage[kCompute] : S.stage[kFragment];
                 const ShaderInfo* b = cs ? nullptr : (S.stage[kMesh] ? S.stage[kMesh] : S.stage[kVertex]);
@@ -9286,6 +9440,7 @@ struct TexLook {
     uint64_t tex[kStages][64] = {};
     Ref<TexturePool> tpool;
     FlatMap64<uint8_t> seen;                   // per scan: (pool, texture id) looked at
+    uint64_t serial = 0;                       // the submission being scanned ([nvn] upload_ahead)
     // statistics
     uint64_t scans = 0, late = 0, cmds = 0, works = 0, resolved = 0, named = 0, unknown = 0, dropped = 0;
     uint64_t scan_ns = 0, last_log_ns = 0;
@@ -9338,6 +9493,7 @@ void tl_name_textures(TexLook& L, const uint32_t stage_bits) {
             if (t && t->cpu_dirty.load(std::memory_order_relaxed) && !t->destroyed.load(std::memory_order_relaxed)) {
                 ++L.named;
                 texture_bound(t.get());
+                if (upload_ahead_mode()) ua_note(L.serial, t.get());
             }
         }
     }
@@ -9431,6 +9587,7 @@ void tl_main() {
         static const uint16_t zid = ft::zone_id("tex.lookahead");
         ft::Scope zs(zid, 0, serial);
         L.seen.clear();
+        L.serial = serial;
         g_tl_pages.clear();
         ++L.scans;
         for (const Ref<CmdList>& l : lists) {
@@ -9445,11 +9602,12 @@ void tl_main() {
         if (t1 - L.last_log_ns > 10ull * 1000000000ull) {
             L.last_log_ns = t1;
             NXLOG_I(kTag, "texture look-ahead: %llu scans (%llu overtaken by the replay, %llu dropped), %.2f ms per scan, %llu commands, %llu draws/dispatches, "
-                          "%llu textures resolved, %llu named to the background preparation, %llu storage-held handles not followed",
+                          "%llu textures resolved, %llu named to the background preparation, %llu storage-held handles not followed; upload_ahead: %llu uploaded ahead, %llu looks, %llu left for a later look",
                     static_cast<unsigned long long>(L.scans), static_cast<unsigned long long>(L.late), static_cast<unsigned long long>(L.dropped),
                     L.scans ? static_cast<double>(L.scan_ns) / static_cast<double>(L.scans) * 1e-6 : 0.0, static_cast<unsigned long long>(L.cmds),
                     static_cast<unsigned long long>(L.works), static_cast<unsigned long long>(L.resolved), static_cast<unsigned long long>(L.named),
-                    static_cast<unsigned long long>(L.unknown));
+                    static_cast<unsigned long long>(L.unknown), static_cast<unsigned long long>(g_b0_up_ahead), static_cast<unsigned long long>(g_ua_tries),
+                    static_cast<unsigned long long>(g_ua_pending));
         }
     }
 }
@@ -9952,7 +10110,7 @@ void replay_begin_submit(Frame& f) {
             cmdq::apply_render_pin(ab_on(kAbR3e));
             servable_cache_enable(ab_on(kAbSrvCache));
             handle_cache_enable(ab_on(kAbHandleCache));
-            handle_cache_big(ab_on(kAbHandleBig));
+            handle_cache_big(ab_on(kAbHandleBig) || upload_ahead_mode() == 2);   // the bit is upload_ahead's in its ab mode
             alloc_batch_enable(true);   // (its cpuperf_ab bit is r3a now; alloc_batch stays a plain key)
             dset_recycle_enable(ab_on(kAbR3b));
             overlap_pos_enable(ab_on(kAbOverlapPos));

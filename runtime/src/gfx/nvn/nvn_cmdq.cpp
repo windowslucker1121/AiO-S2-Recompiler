@@ -61,6 +61,7 @@ std::atomic<bool> g_stop{false};
 std::thread g_thread;
 std::atomic<bool> g_active{false};              // hooks queue the render thread's calls (set at submission begin, when the ring is empty)
 uint64_t g_packets = 0, g_drains = 0, g_drain_spins = 0, g_direct = 0;   // statistics (render thread)
+uint64_t g_drain_ticks = 0;   // B0 ([diag] frame_csv): rdtsc ticks the render thread spent waiting in drains
 struct DirectName { const char* name; const uint64_t* n; };
 DirectName g_direct_names[64];
 int g_ndirect = 0;
@@ -222,7 +223,9 @@ void drain_now() {
     ++g_drains;
     g_need.store(1, std::memory_order_seq_cst);   // a look-ahead through a pass stops (its end may not be queued yet)
     if (g_sleeping.load(std::memory_order_seq_cst)) WakeByAddressSingle(&g_head);
+    const uint64_t t0 = __rdtsc();
     while (g_tail.load(std::memory_order_acquire) != g_wr) { _mm_pause(); ++g_drain_spins; }
+    g_drain_ticks += __rdtsc() - t0;
     g_need.store(0, std::memory_order_relaxed);
 }
 
@@ -1190,6 +1193,8 @@ void drain() {
     if (g_ring && g_active.load(std::memory_order_relaxed) && gpu::on_render_thread()) drain_now();
 }
 
+uint64_t drain_ticks() { return g_drain_ticks; }
+uint64_t drains() { return g_drains; }
 void stats(uint64_t* packets, uint64_t* drains, uint64_t* direct, uint64_t* spins) {
     *packets = g_packets; *drains = g_drains; *direct = g_direct; *spins = g_drain_spins;
 }

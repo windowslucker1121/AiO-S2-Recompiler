@@ -50,7 +50,7 @@ double qpc_freq() {
 }
 
 // ---- hitch log -------------------------------------------------------------------------------------------------------------
-constexpr size_t kMaxSources = 48;
+constexpr size_t kMaxSources = 96;
 struct Source {
     const char* label = nullptr;
     uint64_t (*counter)() = nullptr;     // cumulative; shown as growth during the frame
@@ -177,6 +177,17 @@ template <int G> uint64_t tc_counter() {
 }
 template <int G> int64_t tc_level() { return (int64_t)g_tc.sum[G]; }
 
+// M2: [diag] replay_anatomy = F (default 0: off): a frame whose render-thread replay is over F times the running median of the last 128 frames
+// (and over 3 ms) is logged with every source and phase that moved in it, the frame_csv-only columns included (the replay's B0 columns: ops
+// and phases of draws, pass breaks by cause, sets built, ring drains, ...). At most one line per second: the slowest of that second.
+struct AnatEvent { HitchEvent ev; double replay_ms = 0, median_ms = 0; };
+double g_anat_factor = 0;
+double g_anat_ring[128];
+size_t g_anat_n = 0;
+double g_anat_median = 0;
+std::mutex g_anat_mu;
+std::vector<AnatEvent> g_anat_pending;
+
 // Called for every presented frame at tick t (previous frame's tick prev_t, 0 for the first), frame number n.
 void hitch_on_frame(uint64_t t, uint64_t prev_t, uint64_t n) {
     if (!g_hitch_on.load(std::memory_order_relaxed)) return;
@@ -209,6 +220,29 @@ void hitch_on_frame(uint64_t t, uint64_t prev_t, uint64_t n) {
         r.game_gap = gap;
         std::lock_guard<std::mutex> lk(g_csv_mu);
         if (g_csv_rows.size() < 100000) g_csv_rows.push_back(r);
+    }
+    if (g_anat_factor > 0 && prev_t && t > prev_t) {   // M2 (presenting thread only)
+        const double rep = (double)(curp[kHpRenderReplay] - g_prev_phase[kHpRenderReplay]) * 1000.0 / qpc_freq();
+        g_anat_ring[g_anat_n++ % 128] = rep;
+        if (g_anat_n >= 64 && (g_anat_n & 31) == 0) {
+            const size_t k = std::min<size_t>(g_anat_n, 128);
+            double tmp[128];
+            std::copy(g_anat_ring, g_anat_ring + k, tmp);
+            std::nth_element(tmp, tmp + k / 2, tmp + k);
+            g_anat_median = tmp[k / 2];
+        }
+        if (g_anat_median > 0 && rep > 3.0 && rep > g_anat_factor * g_anat_median) {
+            AnatEvent a;
+            a.replay_ms = rep;
+            a.median_ms = g_anat_median;
+            a.ev.ms = (double)(t - prev_t) * 1000.0 / qpc_freq();
+            a.ev.frame = n;
+            a.ev.at_s = (double)(t - g_t0_ticks.load(std::memory_order_relaxed)) / qpc_freq();
+            for (size_t i = 0; i < ns; i++) a.ev.val[i] = g_src[i].counter ? (int64_t)(cur[i] - g_prev_val[i]) : (int64_t)cur[i];
+            for (int i = 0; i < kHpCount; i++) a.ev.phase[i] = curp[i] - g_prev_phase[i];
+            std::lock_guard<std::mutex> lk(g_anat_mu);
+            if (g_anat_pending.size() < 64) g_anat_pending.push_back(a);
+        }
     }
     for (size_t i = 0; i < ns; i++) g_prev_val[i] = cur[i];
     for (int i = 0; i < kHpCount; i++) g_prev_phase[i] = curp[i];
@@ -309,6 +343,33 @@ std::string format_event(const HitchEvent& ev, size_t others) {
     return out;
 }
 
+extern const char* const kPhaseNames[];
+std::string format_anatomy(const AnatEvent& a, size_t others) {
+    char b[256];
+    snprintf(b, sizeof b, "slow replay: frame %llu replay %.1f ms (median %.1f, frame %.1f ms, t=%.1f s)", (unsigned long long)a.ev.frame, a.replay_ms, a.median_ms, a.ev.ms,
+             a.ev.at_s);
+    std::string out = b;
+    const size_t ns = g_nsrc.load(std::memory_order_acquire);
+    out += "; sources:";
+    for (size_t i = 0; i < ns; i++) {
+        if (a.ev.val[i] == 0) continue;
+        snprintf(b, sizeof b, " %s %lld", g_src[i].label, (long long)a.ev.val[i]);
+        out += b;
+    }
+    out += "; phases ms:";
+    for (int p = 0; p < kHpCount; p++) {
+        const double v = (double)a.ev.phase[p] * 1000.0 / qpc_freq();
+        if (v < 0.05) continue;
+        snprintf(b, sizeof b, " %s %.2f", kPhaseNames[p], v);
+        out += b;
+    }
+    if (others) {
+        snprintf(b, sizeof b, " (+%zu more in the last second)", others);
+        out += b;
+    }
+    return out;
+}
+
 struct Monitor {
     std::mutex ctl;
     std::thread th;
@@ -321,7 +382,7 @@ Monitor& mon() {
     return *s;
 }
 
-const char* const kPhaseNames[] = {
+extern const char* const kPhaseNames[] = {
     "r_idle", "r_replay", "r_gpu_wait", "r_submit", "r_upload", "r_pipeline", "r_lock_wait", "ww_arm", "r_present", "r_limiter",
     "r_acquire", "r_present_end", "faults", "g_backpressure", "g_sync_wait", "pool_import", "g_svc", "g_ipc", "g_wait",
     "out_fetch", "out_fetch_fault", "pipeline_bg", "r_pipe_miss", "r_tex_create", "fault_guard", "ww_shared_wait", "ww_excl_hold", "any_ipc"};
@@ -398,6 +459,22 @@ void monitor_run(double summary_s) {
                 std::lock_guard<std::mutex> lk(g_recent_mu);
                 if (g_recent.size() >= kRecentMax) g_recent.erase(g_recent.begin());
                 g_recent.push_back(std::move(text));
+            }
+        }
+        {   // M2: at most one slow-replay line per second
+            static auto last_anat = Clock::now() - std::chrono::seconds(10);
+            if (g_anat_factor > 0 && now - last_anat >= std::chrono::seconds(1)) {
+                AnatEvent worst;
+                size_t cnt = 0;
+                {
+                    std::lock_guard<std::mutex> lk(g_anat_mu);
+                    for (const auto& e : g_anat_pending) if (cnt++ == 0 || e.replay_ms > worst.replay_ms) worst = e;
+                    g_anat_pending.clear();
+                }
+                if (cnt) {
+                    NXLOG_I("hitch", "%s", format_anatomy(worst, cnt - 1).c_str());
+                    last_anat = now;
+                }
             }
         }
         if (summary_s > 0 && now >= next_summary) {
@@ -593,6 +670,7 @@ void hitch_start() {
     const double summary_s = config_get_double("diag", "hitch_summary_s", 10.0);
     const double hitch_ms = config_get_double("diag", "hitch_ms", 50.0);
     g_t0_ticks.store(qpc());
+    g_anat_factor = config_get_double("diag", "replay_anatomy", 0.0);   // M2
     g_hitch_ticks.store(hitch_ms > 0 ? (uint64_t)(hitch_ms / 1000.0 * qpc_freq()) : 0);
     {
         std::lock_guard<std::mutex> lk(g_ev_mu);

@@ -42,6 +42,7 @@ struct Entry {
     uint64_t done_ns = 0;                    // Done: when the result was finished (eviction keeps recent results)
     std::unique_ptr<PreparedTexture> res;
     gfx::Buffer stage;                       // big results: the data already copied into a host-visible buffer for the upload (res->data is then empty)
+    TexGpu* img = nullptr;                   // [nvn] tex_prep_image: the image the job made (not published in Texture::gpu until take_image)
 };
 
 struct Job {
@@ -76,6 +77,7 @@ std::atomic<uint64_t> s_provisional{0};  // quick stand-ins the render thread up
 const bool g_hitch_tc_registered = (nxrt::hitch_add_counter("texprep_transcodes", []() -> uint64_t { return s_transcoded.load(std::memory_order_relaxed); }),
                                     nxrt::hitch_add_counter("texture_standins", []() -> uint64_t { return s_provisional.load(std::memory_order_relaxed); }), true);
 
+std::atomic<uint64_t> s_done{0};        // results finished (upload_ahead looks again only when this moved)
 State* g_state = nullptr;
 std::once_flag g_once;
 std::atomic<int> g_enabled{-1};
@@ -114,6 +116,7 @@ void drop_result(Entry& e) {
     S().held_bytes -= std::min(S().held_bytes, e.held);
     e.held = 0;
     e.res.reset();
+    if (e.img) { gpu::destroy_texture_gpu(e.img); e.img = nullptr; }
     if (e.stage) gpu::device().destroy_buffer(e.stage);
     e.stage = gfx::Buffer{};
 }
@@ -240,6 +243,8 @@ void debounce_locked(Texture* t) {
     s.cv_work.notify_all();
 }
 
+bool is_entry_format(VkFormat f);   // below
+
 void worker_main() {
     log_set_thread_name("nvn-texprep");
     State& s = S();
@@ -323,6 +328,14 @@ void worker_main() {
             }
         }
 
+        // [nvn] tex_prep_image (B2): the image too, while the render thread has made none (it is handed over by take_image)
+        TexGpu* img = nullptr;
+        if (ok && !t->gpu && !t->vpool && !t->destroyed.load() && !s.quiesced.load() && gpu::tex_prep_image_on()) {
+            const uint16_t zid = ft::zone_id("tex.prep.image");
+            ft::Scope zs(zid, 0, t->id);
+            img = gpu::prebuild_texture_image(t, is_entry_format(res->format) ? res->format : VK_FORMAT_UNDEFINED);
+        }
+
         const uint64_t job_ns = now_ns() - job_t0;
         if (job_ns > 200ull * 1000000ull) {
             static std::atomic<int> logged{0};
@@ -348,8 +361,12 @@ void worker_main() {
             e2.res = std::move(res);
             e2.stage = stage;
             stage = gfx::Buffer{};
+            if (e2.img) gpu::destroy_texture_gpu(e2.img);
+            e2.img = img;
+            img = nullptr;
             e2.st = Entry::Done;
             e2.done_ns = now_ns();
+            s_done.fetch_add(1, std::memory_order_release);
             // the image holds a quick stand-in of this content: the next use uploads this result (cpu_dirty without a new generation)
             if (t->prep_prov.load(std::memory_order_acquire) == (gen | 0x80000000u)) t->cpu_dirty.store(true);
         } else {
@@ -358,6 +375,7 @@ void worker_main() {
             e2.res.reset();
         }
         if (stage) gpu::device().destroy_buffer(stage);      // not used (the result is stale or the job failed)
+        if (img) gpu::destroy_texture_gpu(img);
         const bool again = e2.again;
         e2.again = false;
         s.cv_done.notify_all();
@@ -540,6 +558,42 @@ bool peek_entry_format(Texture* t, VkFormat& entry) {
     }
 }
 
+uint64_t done_count() { return s_done.load(std::memory_order_acquire); }
+
+TexGpu* take_image(Texture* t) {
+    if (!enabled() || !t) return nullptr;
+    State& s = S();
+    std::unique_lock<std::mutex> lk(s.mu);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    for (;;) {
+        auto it = s.map.find(t);
+        if (it == s.map.end()) return nullptr;
+        Entry& e = it->second;
+        if (e.st == Entry::Running && !e.slow && e.job_gen == t->prep_gen.load(std::memory_order_acquire)) {   // as peek_entry_format
+            const uint64_t w0 = now_ns();
+            const bool timed_out = s.cv_done.wait_until(lk, deadline) == std::cv_status::timeout;
+            s.st.peek_waits++;
+            s.st.peek_wait_ns += now_ns() - w0;
+            if (timed_out) return nullptr;
+            continue;
+        }
+        if (e.st != Entry::Done || !e.img || e.job_gen != t->prep_gen.load(std::memory_order_acquire)) return nullptr;
+        TexGpu* g = e.img;
+        e.img = nullptr;
+        return g;
+    }
+}
+
+Readiness ready(Texture* t) {
+    if (!enabled() || !t) return Readiness::None;
+    State& s = S();
+    std::lock_guard<std::mutex> lk(s.mu);
+    auto it = s.map.find(t);
+    if (it == s.map.end() || it->second.st == Entry::Idle) return Readiness::None;
+    const Entry& e = it->second;
+    if (e.st == Entry::Done) return e.res && e.job_gen == t->prep_gen.load(std::memory_order_acquire) ? Readiness::Ready : Readiness::None;
+    return Readiness::Pending;
+}
 bool take(Texture* t, PreparedTexture& out, gfx::Buffer* staged, uint64_t* src_hash) {
     if (!enabled() || !t) return false;
     State& s = S();
