@@ -754,6 +754,32 @@ Balcony and walk benches at 1920x1080 uncapped, private shader caches only (tool
   28010d0bb53e5b57 5c53165dae866546 731a498096475249 97de564fe1a2ec09 c6f3f11edb6ed86d ece836278b723289 fd8debac8c87401a (only these
   rows; no runtime rows involved); their pipelines rebuild on demand.
 
+## 1% lows round, agent B: render-target churn (RT1-RT3 of PLAN_LOWS, 2026-11-13, branch `lows/b`)
+
+Village outside at 1920x1080 uncapped, private exe of `lows/b`, route balcony (25 s) + `bench/village_walk.nxs` + the three
+`turn_village.nxs` windows ("moving" = walk + turns, ~15-17 s per run), `frame_csv` columns `textures_created` and `ms_r_tex_create`,
+scripts in the worktree's git-ignored `work\lb` (`rtg.py` gate numbers, `flc.py` flash shares). Runs where another agent's link or a
+16-way lifted build overlapped the moving windows (seen with a per-2-s process sampler) are left out of the numbers below.
+- **Cause, confirmed:** the transient post-process targets (960x540 RGBA16F / D32F, 1080 R11G11B10F / D32F, 640x360, 480x270, 384x384
+  D32F, all COMPRESSIBLE in a virtual pool) come back at offsets anywhere in their pool, not by 64 KiB steps: `tex_park` (keyed by
+  storage) took back 689 of 6,433 parked images. Off: 304-329 images made per second while moving, 43-49 ms of render thread per second.
+- **RT1 `[nvn] tex_rt_pool` (default 2 now):** a target that finds no image of its own storage takes a parked image of the same layout and
+  flags. Overlap with the old storage required: 172 images/s (the jumps defeat it); preferred (else the image parked longest): 103-127
+  images/s, 16-22 ms/s; with the park kept 1200 presents and up to heap/8 bytes (2 GiB here): **40-108 images/s per window (turns 36-84),
+  11-12 ms/s, at most 4 ms of image creation in a frame**; frames over 14.3 ms with image churn or a blocked creation 49-116 -> 10-27
+  per run. Mode 2 clears a taken image as a new one would be (mode 1 keeps the content: same numbers, no difference seen; 2 is the safe
+  one). What is still made: layouts with none parked at that moment (the game holds more targets alive while the camera moves) and the
+  shadow tiles of odd sizes (77..99 square D32F). **Gate RT-g1 passed** (images per second in the turns <= 100, `ms_r_tex_create` <= 20
+  ms/s, rt frames -75%); `set_reuse = verify` + `odb_incremental = verify`: 0 differences; capture replays off vs on: 32 / 2 pixels over
+  20 (nb3 / village; replay noise); `flash_watch 0.003` reports every moving frame in the baseline as well (1,541 vs 1,530-1,537, the same
+  share histogram): no flash it could tell apart.
+- **RT2 `[nvn] tex_rt_block` (off, gate failed):** targets sub-allocated from 256 MiB VMA pool blocks: 212-225 us per image, of which
+  vkCreateImage is 9 us; the dedicated allocation 178-188 us. The cost is the allocation + bind of a compressible image in the driver,
+  not the kernel allocation. Kept as a measurement key; next would be destruction timing, not allocation.
+- **RT3 `[nvn] tex_rt_spares` (off):** when a layout has nothing parked, a worker makes N images of it and parks them. One run (4 spares)
+  halved the misses (2,242 -> 1,056) at 504 us per spare on the worker and a full 2 GiB park; its frame numbers were taken by another
+  agent's build. Not gated.
+
 ## What is open, by expected gain
 
 **After R6:** replay ~9.7-10 ms; ~88-90 fps. The render thread, the GPU (~93% busy) and the game's CPU frame are co-limits; a replay cut now
