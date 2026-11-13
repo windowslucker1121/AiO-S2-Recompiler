@@ -3999,6 +3999,7 @@ struct KDep {
     uint8_t has_view = 0, has_sampler = 0;
     bool ro_mode = false;      // kind 2: ssbo_ro_copy was on when it was resolved (g_ssbo_ro)
     bool ro_dep = false;       // kind 2: ssbo_ro_copy decided copy or pool for it (rd holds the decision, checked like a uniform block's)
+    uint32_t fill = 0;         // kind 2: 1 + its entry in the ssbo_ro_fill list (a kept set found valid keeps the entry in use)
 };
 struct BVal { uint64_t binding, a, b, c; };   // set_reuse = verify: what build_set wrote for each binding (keep verify names the one that differs)
 std::vector<BVal> g_bvals;
@@ -4057,6 +4058,70 @@ VkBuffer support_keep_buffer() {
 // draw. Set per submission (render thread).
 bool g_ssbo_ro = false;
 uint64_t g_ro_stat[3] = {};   // statistics: read-only storage bindings resolved with ssbo_ro_copy: from the copy, from the pool, copy unaligned
+// [nvn] ssbo_ro_fill (off | on | ab; needs ssbo_ro_copy): read-only storage ranges of draws that ssbo_ro_copy had to leave in the pool (pages
+// the CPU rewrites every few frames: not tracked, never current in the copy) are copied into the copy at the start of each submission that
+// bound them in the frame before (mirror_fill: such pages count as current for that submission only, "fresh"; a GPU write to them in the
+// submission ends that), with one barrier pair for all of them, so the draws bind the copy. [nvn] ssbo_ro_fill_mb caps the bytes per submission.
+bool g_ro_fill = false;
+struct RoFill { uint64_t addr = 0, size = 0; uint32_t last = 0; uint8_t ords = 0; };
+std::vector<RoFill> g_ro_fills;
+std::unordered_map<uint64_t, uint32_t> g_ro_fill_idx;
+uint32_t g_sub_ord = 0;          // submissions since the last present (0..7)
+uint64_t g_ro_fill_presents = ~0ull;
+uint64_t g_ro_fill_st[4] = {};   // statistics: submissions filled, ranges filled, bytes copied, ranges over the byte cap
+int ssbo_ro_fill_mode() {
+    static const int m = [] {
+        const std::string v = config_get_str("nvn", "ssbo_ro_fill", "off");
+        return v == "on" || v == "1" || v == "true" ? 1 : v == "ab" ? 2 : 0;
+    }();
+    return m;
+}
+uint32_t ro_fill_note(uint64_t addr, uint64_t size, bool pool) {   // 1 + the entry (0: none)
+    const uint64_t key = addr * 0x9E3779B97F4A7C15ull ^ size;
+    auto it = g_ro_fill_idx.find(key);
+    uint32_t i;
+    if (it == g_ro_fill_idx.end()) {
+        if (!pool || g_ro_fills.size() >= 65536) return 0;
+        i = static_cast<uint32_t>(g_ro_fills.size());
+        g_ro_fills.push_back(RoFill{addr, size, 0, 0});
+        g_ro_fill_idx.emplace(key, i);
+    } else {
+        i = it->second;
+    }
+    RoFill& f = g_ro_fills[i];
+    f.last = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
+    f.ords |= static_cast<uint8_t>(1u << g_sub_ord);
+    return i + 1;
+}
+void ro_fill_touch(uint32_t slot) {
+    if (!slot || slot > g_ro_fills.size()) return;
+    RoFill& f = g_ro_fills[slot - 1];
+    f.last = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
+    f.ords |= static_cast<uint8_t>(1u << g_sub_ord);
+}
+// At the start of a submission (no pass open): the ranges this submission's ordinal bound in the last presents.
+void ro_fill_submit() {
+    const uint64_t pr = counters().presents.load(std::memory_order_relaxed);
+    if (pr != g_ro_fill_presents) { g_ro_fill_presents = pr; g_sub_ord = 0; } else if (g_sub_ord < 7) ++g_sub_ord;
+    if (!g_ro_fill || g_ro_fills.empty()) return;
+    static const uint64_t cap = static_cast<uint64_t>(std::max<int64_t>(1, nxrt::config_get_int("nvn", "ssbo_ro_fill_mb", 64))) << 20;
+    const uint32_t now = static_cast<uint32_t>(pr);
+    const uint8_t bit = static_cast<uint8_t>(1u << g_sub_ord);
+    uint64_t bytes = 0;
+    bool barrier = false;
+    for (RoFill& f : g_ro_fills) {
+        if (!(f.ords & bit) || now - f.last > 8) continue;
+        if (bytes >= cap) { ++g_ro_fill_st[3]; continue; }
+        if (!barrier) { memory_barrier(F->cb); barrier = true; }   // earlier writes to the pools before the copies read them
+        uint64_t b = 0;
+        mirror_fill(F->cb, f.addr, f.size, &b);
+        bytes += b;
+        ++g_ro_fill_st[1];
+    }
+    if (bytes) memory_barrier(F->cb);   // the copies before the draws read them
+    if (barrier) ++g_ro_fill_st[0];
+    g_ro_fill_st[2] += bytes;
+}
 int ssbo_ro_copy_mode() {
     static const int m = [] {
         const std::string v = config_get_str("nvn", "ssbo_ro_copy", "off");
@@ -4283,6 +4348,10 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                                 if (kd) {
                                     kd->ro_dep = true;
                                     if (!rd.keep) kbad("storage buffer without a copy chunk");
+                                }
+                                if (g_ro_fill) {
+                                    const uint32_t fs = ro_fill_note(bind.addr, bi.range, rd.state != 1);
+                                    if (kd) kd->fill = fs;
                                 }
                                 if (rd.state == 1 && cr.ok && cr.buffer != br.buffer) {
                                     bi.buffer = cr.buffer;
@@ -5069,6 +5138,7 @@ __declspec(noinline) int keep_valid(KeepEntry& e) {   // noinline: its own line 
                 if (k.rd.cf != static_cast<uint8_t>(g_coh_win)) return 3;   // exp_coh_free (gate): bound otherwise in the other mode
                 if (k.ro_mode != g_ssbo_ro) return 3;                       // ssbo_ro_copy: bound otherwise in the other mode (ab windows)
                 if (k.ro_dep && !read_dep_check(k.rd, kReadUniform)) return 2;   // ssbo_ro_copy: the copy-or-pool decision changed
+                if (k.fill && g_ro_fill) ro_fill_touch(k.fill);
                 if (!g_coh_free && ask_held && out_overlaps_window(k.addr, k.range)) return 3;
                 upd_note_read(k.addr, k.note);
                 break;
@@ -9895,6 +9965,8 @@ void replay_begin_submit(Frame& f) {
             g_coh_ssbo = g_coh_win && (parts & 4);
             const int rom = ssbo_ro_copy_mode();   // [nvn] ssbo_ro_copy
             g_ssbo_ro = rom == 1 ? ab_on(kAbP1) : rom == 2 ? (cab > 0 && g_cpu_ab_on) : false;
+            const int rfm = ssbo_ro_fill_mode();   // [nvn] ssbo_ro_fill
+            g_ro_fill = g_ssbo_ro && (rfm == 1 || (rfm == 2 && cab > 0 && g_cpu_ab_on));
         }
         mirror_begin_submit(f, on);
     }
@@ -9906,6 +9978,7 @@ void replay_begin_submit(Frame& f) {
     g_chunk_work = 0;
     desc_epoch_bump(kBumpSubmit);     // the sets of earlier submissions came from other slots' pools
     keep_begin_submit();
+    ro_fill_submit();   // [nvn] ssbo_ro_fill
     g_odb_all_dirty = true;   // odb_incremental: a full check first in every submission
     g_chunk_t0 = ft::now_ns();
     P = Pass();
@@ -10045,6 +10118,10 @@ void replay_begin_submit(Frame& f) {
                 if (ssbo_ro_copy_mode())
                     NXLOG_I(kTag, "ssbo_ro_copy: read-only storage bindings resolved %llu from the copy, %llu from the pool, %llu unaligned in the copy (pool)",
                             (unsigned long long)g_ro_stat[0], (unsigned long long)g_ro_stat[1], (unsigned long long)g_ro_stat[2]);
+                if (ssbo_ro_fill_mode())
+                    NXLOG_I(kTag, "ssbo_ro_fill: %llu submissions filled, %llu ranges filled, %llu MiB copied, %llu ranges over the cap; %zu ranges listed",
+                            (unsigned long long)g_ro_fill_st[0], (unsigned long long)g_ro_fill_st[1], (unsigned long long)(g_ro_fill_st[2] >> 20),
+                            (unsigned long long)g_ro_fill_st[3], g_ro_fills.size());
                 NXLOG_I(kTag, "persistent sets (keep_recycle %s): allocated / handed out again / retired: kept sets %llu / %llu / %llu, image-keyed %llu / %llu / %llu, "
                         "ubo_dynamic set 0 %llu / %llu / %llu, other %llu / %llu / %llu; %zu waiting for the GPU, %zu free",
                         keep_recycle_on() ? "on" : "off",
